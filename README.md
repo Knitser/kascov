@@ -13,7 +13,7 @@ Toccata lets UTXOs carry application state: outputs can be bound to a **covenant
 - **`kascov trace <covenant-id>`** — full lineage: genesis → every state transition → current tip
 - **`kascov watch`** — live feed of covenant events as they're accepted
 
-> **Status:** early days. Toccata is live on **mainnet** and **testnet-10** (both supported); Testnet 12 was the pre-fork covenant playground and ran a separate node branch — not supported. `scan` works; `sync`/`list`/`show`/`trace`/`watch` are in progress.
+> **Status:** all commands work against live networks. Toccata is live on **mainnet** and **testnet-10** (both supported); Testnet 12 was the pre-fork covenant playground on a separate node branch — not supported. Verified against real covenant traffic on testnet-10 (240+ covenants observed within minutes of scanning). Mainnet covenant traffic is still near zero days after activation — which is exactly why indexing from day one matters.
 
 ## Why an index matters
 
