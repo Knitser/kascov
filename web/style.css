@@ -1217,6 +1217,18 @@ a.btn:hover { text-decoration: none; }
 
 .reveal-label { margin: 0.7rem 0 0.35rem; font-size: 0.8rem; color: var(--burn); }
 .script-reveal { border-color: rgba(242, 165, 102, 0.35); }
+.spend-note { margin: 0.5rem 0 0; font-size: 0.8rem; }
+
+.flag-tpl { background: var(--accent-soft); color: var(--accent); text-transform: none; letter-spacing: 0.02em; }
+.tpl-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.45rem 0.9rem;
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+}
+.tpl-field { white-space: nowrap; }
 
 /* dev page */
 .dev-section { margin-bottom: 2.6rem; }

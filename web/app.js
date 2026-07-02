@@ -835,6 +835,12 @@ function nerdPanel(entry, network) {
     ['events indexed', `<span class="mono">${esc(fmtInt(c.event_count))}</span>${c.events_truncated ? ' <span class="flag flag-no">truncated</span>' : ''}`],
     ['live UTXOs', `<span class="mono">${esc(fmtInt(c.live_utxos))}</span> holding <span class="mono">${esc(fmtAmount(c.live_value, network))}</span>`],
   ];
+  const fieldRow = (f) =>
+    `<span class="tpl-field"><span class="dim">${esc(f.name)}</span> ` +
+    `<span class="mono" title="${esc(f.value)}">${esc(shortHex(f.value, 12, 8))}</span></span>`;
+  const templateLine = (name, fields) => name
+    ? `<p class="tpl-line"><span class="flag flag-tpl">${esc(name)}</span>${(fields || []).map(fieldRow).join('')}</p>`
+    : '';
   const utxos = (c.utxos || []).map((u) => {
     const badges = [
       u.live ? '<span class="flag flag-yes">live</span>' : '<span class="flag flag-off">spent</span>',
@@ -843,16 +849,30 @@ function nerdPanel(entry, network) {
       u.revealed_uses_covenant_ops ? '<span class="flag flag-ops">ran covenant ops</span>' : '',
       u.revealed_uses_zk_ops ? '<span class="flag flag-ops">ran zk ops</span>' : '',
     ].filter(Boolean).join(' ');
-    const reveal = u.revealed_asm
-      ? `<p class="reveal-label">revealed at spend — the program this state actually ran` +
+    let reveal = '';
+    if (u.revealed_asm) {
+      reveal = `<p class="reveal-label">revealed at spend — the program this state actually ran` +
         (u.spent_txid ? ` <a href="${esc(txUrl(network, u.spent_txid))}" target="_blank" rel="noopener noreferrer">(tx ↗)</a>` : '') +
         `:</p>` +
+        templateLine(u.revealed_template, u.revealed_fields) +
         `<pre class="script script-reveal">${esc(u.revealed_asm.join('\n'))}</pre>` +
-        (u.revealed_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.revealed_hex)}">open revealed program in decoder →</a>` : '')
-      : '';
+        (u.revealed_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.revealed_hex)}">open revealed program in decoder →</a>` : '');
+    } else if (u.sig_hex || u.spent_txid) {
+      const bits = [];
+      if (u.sig_hex) {
+        bits.push(`spend signature <span class="mono">${esc(shortHex(u.sig_hex, 10, 6))}</span> (${u.sig_hex.length / 2}B)`);
+      } else if (u.sig_len) {
+        bits.push(`spend script: ${esc(fmtInt(u.sig_len))}B (too large to inline)`);
+      }
+      if (u.spent_txid) {
+        bits.push(`spent by <a href="${esc(txUrl(network, u.spent_txid))}" target="_blank" rel="noopener noreferrer">tx ${esc(shortHex(u.spent_txid, 8, 6))} ↗</a>`);
+      }
+      if (bits.length) reveal = `<p class="spend-note dim">${bits.join(' · ')}</p>`;
+    }
     return `<div class="utxo">` +
       `<div class="utxo-head"><span class="mono break">${esc(u.outpoint)}</span><span class="utxo-flags">${badges}</span></div>` +
       `<div class="utxo-meta"><span>${esc(fmtAmount(u.value, network))}</span><span class="dim">created at DAA ${esc(fmtInt(u.created_daa))}</span></div>` +
+      templateLine(u.template, u.state_fields) +
       `<pre class="script">${esc((u.script_asm || []).join('\n'))}</pre>` +
       (u.script_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.script_hex)}">open in decoder →</a>` : '') +
       reveal +
@@ -882,6 +902,10 @@ function renderDetail(entry, covId, flashTx) {
   const c = rec.c;
   const alive = c.status === 'active';
   const watched = state.watch.has(c.covenant_id);
+  /* surface recognized contract templates (but not the ubiquitous p2pk/p2sh shapes) */
+  const namedTemplate = (c.utxos || [])
+    .map((u) => u.revealed_template || u.template)
+    .find((t) => t && !/^p2(pk|sh)/.test(t));
   document.title = `${rec.name} — kascov`;
 
   const summaryBits = [];
@@ -910,6 +934,7 @@ function renderDetail(entry, covId, flashTx) {
     `<p class="detail-tags"><span class="pill ${alive ? 'pill-alive' : 'pill-retired'}">${alive ? 'alive' : 'retired'}</span>` +
     `<button type="button" class="star${watched ? ' starred' : ''}" data-action="watch" data-id="${esc(c.covenant_id)}"` +
     ` aria-pressed="${watched}" aria-label="${watched ? 'stop watching' : 'watch'} this coin">★</button>` +
+    (namedTemplate ? `<span class="flag flag-tpl">${esc(namedTemplate)}</span>` : '') +
     `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span></p>` +
     `<p class="id-chip"><span class="mono">${esc(shortHex(c.covenant_id, 10, 8))}</span>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(c.covenant_id)}" aria-label="copy this coin’s full id">copy id</button></p>` +

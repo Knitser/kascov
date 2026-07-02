@@ -216,6 +216,10 @@ fn build_snapshot(store: &Store, network: kascov_core::Network, max_events: u64)
                     "uses_covenant_ops": decoded.uses_covenant_ops,
                     "uses_zk_ops": decoded.uses_zk_ops,
                 });
+                if let Some(template) = decoded.template {
+                    json["template"] = serde_json::json!(template);
+                    json["state_fields"] = serde_json::json!(decoded.fields);
+                }
                 if let Some(spent_txid) = utxo.spent_txid {
                     json["spent_txid"] = serde_json::json!(spent_txid);
                 }
@@ -229,6 +233,10 @@ fn build_snapshot(store: &Store, network: kascov_core::Network, max_events: u64)
                         );
                         json["revealed_uses_covenant_ops"] = serde_json::json!(d.uses_covenant_ops);
                         json["revealed_uses_zk_ops"] = serde_json::json!(d.uses_zk_ops);
+                        if let Some(template) = d.template {
+                            json["revealed_template"] = serde_json::json!(template);
+                            json["revealed_fields"] = serde_json::json!(d.fields);
+                        }
                     } else if sig.len() <= 520 {
                         json["sig_hex"] = serde_json::json!(hex::encode(sig));
                     } else {
