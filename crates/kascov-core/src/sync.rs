@@ -223,12 +223,40 @@ fn classify<'a>(
                 // An output claims an existing id without spending its UTXO
                 // here — record as a transition rather than a second genesis.
                 EventKind::Transition
-            } else {
+            } else if is_valid_genesis(tx, &covenant_id) {
                 EventKind::Genesis
+            } else {
+                // First sighting that doesn't prove genesis (KIP-20 hash
+                // mismatch): a covenant born before we started watching.
+                // Recording it as a transition leaves lineage_complete false.
+                EventKind::Transition
             };
             known_overlay.insert(covenant_id);
             block_events.events.push(NewEvent { covenant_id, kind, txid: tx.txid });
         }
     }
     Ok(block_events)
+}
+
+/// KIP-20 genesis proof: the id must recompute from the authorizing input's
+/// previous outpoint plus this transaction's outputs bound to the id.
+fn is_valid_genesis(tx: &Transaction, id: &CovenantId) -> bool {
+    let bound: Vec<(u32, &crate::model::Output)> = tx
+        .outputs
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.covenant.is_some_and(|b| b.covenant_id == *id))
+        .map(|(i, o)| (i as u32, o))
+        .collect();
+    let Some(&(_, first)) = bound.first() else { return false };
+    let auth = first.covenant.expect("filtered on Some").authorizing_input;
+    if bound.iter().any(|(_, o)| o.covenant.expect("filtered on Some").authorizing_input != auth) {
+        return false;
+    }
+    let Some(input) = tx.inputs.get(auth as usize) else { return false };
+    let fields: Vec<(u32, u64, u16, &[u8])> = bound
+        .iter()
+        .map(|&(i, o)| (i, o.value, o.spk_version, o.spk_script.as_slice()))
+        .collect();
+    crate::node::compute_covenant_id(&input.previous_outpoint, &fields) == *id
 }

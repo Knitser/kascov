@@ -1,6 +1,6 @@
 mod wrpc;
 
-pub use wrpc::NodeHandle;
+pub use wrpc::{compute_covenant_id, NodeHandle};
 
 use crate::model::*;
 use crate::Result;

@@ -175,3 +175,25 @@ fn map_tx(tx: RpcTransaction) -> Transaction {
             .collect(),
     }
 }
+
+/// Recompute a KIP-20 covenant id from its genesis outpoint and authorized
+/// outputs `(global index, value, spk version, spk script)` — the binding
+/// itself is excluded by construction. Calls the consensus implementation
+/// from the pinned rusty-kaspa rev, so it can never drift from the chain.
+pub fn compute_covenant_id(
+    genesis_outpoint: &Outpoint,
+    auth_outputs: &[(u32, u64, u16, &[u8])],
+) -> CovenantId {
+    use kaspa_consensus_core::hashing::covenant_id::covenant_id;
+    use kaspa_consensus_core::tx::{ScriptPublicKey, TransactionOutpoint, TransactionOutput};
+
+    let outpoint =
+        TransactionOutpoint::new(RpcHash::from_bytes(genesis_outpoint.txid.0), genesis_outpoint.index);
+    let outputs: Vec<(u32, TransactionOutput)> = auth_outputs
+        .iter()
+        .map(|&(index, value, version, script)| {
+            (index, TransactionOutput::new(value, ScriptPublicKey::from_vec(version, script.to_vec())))
+        })
+        .collect();
+    CovenantId(covenant_id(outpoint, outputs.iter().map(|(i, o)| (*i, o))).as_bytes())
+}
