@@ -156,7 +156,10 @@ function fmtAmount(sompi, network) {
    network actually moves again. */
 function makeAnchor(data, network) {
   if (data.tip_daa != null) {
-    return { daa: data.tip_daa, ms: data.generated_at_ms, exact: true };
+    /* tip_at_ms is when the indexer saw that tip — the precise pairing.
+       generated_at_ms (build time) is a close second for older exports. */
+    const ms = data.tip_at_ms != null ? data.tip_at_ms : data.generated_at_ms;
+    return { daa: data.tip_daa, ms, exact: true };
   }
   const daa = data.stats.last_activity_daa;
   let ms = data.generated_at_ms;
@@ -228,6 +231,11 @@ function shortHex(hex, head, tail) {
   return `${hex.slice(0, head)}…${hex.slice(-tail)}`;
 }
 
+/* exact UTC stamp for tooltips on relative times */
+function utcTitle(ms) {
+  return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+}
+
 function txUrl(network, txid) {
   return NETWORKS[network].txBase + txid;
 }
@@ -241,9 +249,30 @@ const state = {
   query: '',
   shown: PAGE_SIZE,
   nerd: false,
+  sort: 'activity',
+  live: {},           // network -> { supported, missedAt, data }
+  watch: new Set(),   // covenant ids starred on the current network
+  watchNet: null,
 };
 
 try { state.nerd = localStorage.getItem('kascov-nerd') === '1'; } catch (e) { /* private mode */ }
+
+/* ------------------------------------------------------------- watchlist */
+
+function watchKey(network) { return `kascov-watch-${network}`; }
+
+function loadWatch(network) {
+  try { return new Set(JSON.parse(localStorage.getItem(watchKey(network)) || '[]')); }
+  catch (e) { return new Set(); }
+}
+
+function saveWatch(network, set) {
+  try { localStorage.setItem(watchKey(network), JSON.stringify([...set])); }
+  catch (e) { /* private mode */ }
+}
+
+state.watch = loadWatch(state.network);
+state.watchNet = state.network;
 
 /* Balance held right after each event daa. A spent UTXO is assumed
    consumed by the first covenant event after its creation (covenant
@@ -294,7 +323,15 @@ function buildIndex(data) {
   });
   covs.sort((a, b) => (b.c.last_activity_daa || 0) - (a.c.last_activity_daa || 0));
   const byId = new Map(covs.map((e) => [e.c.covenant_id, e]));
-  return { covs, byId };
+  /* txid → covenant, so a pasted transaction id resolves straight to a coin */
+  const txToCov = new Map();
+  for (const e of covs) {
+    if (e.c.genesis_txid && !txToCov.has(e.c.genesis_txid)) txToCov.set(e.c.genesis_txid, e);
+    for (const ev of e.c.events) {
+      if (!txToCov.has(ev.txid)) txToCov.set(ev.txid, e);
+    }
+  }
+  return { covs, byId, txToCov };
 }
 
 async function loadNetwork(network) {
@@ -439,10 +476,10 @@ function buildFeed(entry) {
 
 function storyRow({ entry: e, ev }, data, network) {
   const meta = KIND_META[ev.kind] || KIND_META.transition;
-  const when = relTime(daaToMs(ev.accepting_daa, data));
+  const ms = daaToMs(ev.accepting_daa, data);
   return `<li><a class="story ${meta.cls}" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">` +
     avatarSvg(e.c.covenant_id, 34) +
-    `<span class="story-text">${eventSentence(e, ev, network)} <span class="story-when">— ${esc(when)}</span></span>` +
+    `<span class="story-text">${eventSentence(e, ev, network)} <span class="story-when" title="${esc(utcTitle(ms))}">— ${esc(relTime(ms))}</span></span>` +
     `<span class="story-kind" aria-hidden="true">${ICONS[meta.icon]}</span>` +
     `</a></li>`;
 }
@@ -457,13 +494,25 @@ function renderStories(entry, network) {
 /* ------------------------------------------------------------------- grid */
 
 function matchesFilter(entry) {
-  if (state.filter !== 'all' && entry.c.status !== state.filter) return false;
+  if (state.filter === 'watch') {
+    if (!state.watch.has(entry.c.covenant_id)) return false;
+  } else if (state.filter !== 'all' && entry.c.status !== state.filter) {
+    return false;
+  }
   if (state.query && !entry.blob.includes(state.query)) return false;
   return true;
 }
 
+const SORTS = {
+  activity: (a, b) => (b.c.last_activity_daa || 0) - (a.c.last_activity_daa || 0),
+  newest: (a, b) => b.bornMs - a.bornMs,
+  oldest: (a, b) => a.bornMs - b.bornMs,
+  richest: (a, b) => b.c.live_value - a.c.live_value,
+  moves: (a, b) => b.moves - a.moves,
+};
+
 function renderGrid(entry, network) {
-  const list = entry.index.covs.filter(matchesFilter);
+  const list = entry.index.covs.filter(matchesFilter).sort(SORTS[state.sort] || SORTS.activity);
   const total = entry.index.covs.length;
   $('#result-count').textContent = (state.query || state.filter !== 'all')
     ? `${list.length} of ${total} smart coin${total === 1 ? '' : 's'}`
@@ -472,24 +521,88 @@ function renderGrid(entry, network) {
   const grid = $('#coin-grid');
   const foot = $('#grid-foot');
   if (!list.length) {
-    const example = entry.index.covs[0] ? entry.index.covs[0].name : 'brave-teal-otter';
-    grid.innerHTML = `<div class="no-results"><p>No smart coins match${state.query ? ` <strong>“${esc(state.query)}”</strong>` : ' that filter'}.</p>` +
-      `<p class="dim">Try a friendly name like <em>${esc(example)}</em>, or paste a coin’s id or a transaction id.</p></div>`;
+    if (/^[0-9a-f]{64}$/.test(state.query)) {
+      /* a full id that resolved nowhere — answer the tester's real question */
+      grid.innerHTML = `<div class="no-results">` +
+        `<p>kascov hasn’t seen <strong class="mono">${esc(shortHex(state.query, 12, 10))}</strong> in any covenant on ${esc(NETWORKS[network].label)}.</p>` +
+        `<p class="dim">it may be a regular (non-covenant) transaction, still unconfirmed, or on the other network — ` +
+        `<a href="${esc(txUrl(network, state.query))}" target="_blank" rel="noopener noreferrer">check it on the block explorer ↗</a></p></div>`;
+    } else if (state.filter === 'watch' && !state.watch.size) {
+      grid.innerHTML = `<div class="no-results"><p>You’re not watching any coins yet.</p>` +
+        `<p class="dim">tap the ★ on any coin to pin it here — it survives reloads.</p></div>`;
+    } else {
+      const example = entry.index.covs[0] ? entry.index.covs[0].name : 'brave-teal-otter';
+      grid.innerHTML = `<div class="no-results"><p>No smart coins match${state.query ? ` <strong>“${esc(state.query)}”</strong>` : ' that filter'}.</p>` +
+        `<p class="dim">Try a friendly name like <em>${esc(example)}</em>, or paste a coin’s id or a transaction id.</p></div>`;
+    }
     foot.innerHTML = '';
     return;
   }
   grid.innerHTML = list.slice(0, state.shown).map((e) => {
     const alive = e.c.status === 'active';
-    return `<a class="card" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">` +
+    const watched = state.watch.has(e.c.covenant_id);
+    return `<article class="card">` +
       `<div class="card-head">${avatarSvg(e.c.covenant_id, 40)}` +
-      `<div class="card-id"><span class="card-name">${esc(e.name)}</span>` +
-      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}">${alive ? 'alive' : 'retired'}</span></div></div>` +
+      `<div class="card-id"><a class="card-link" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">${esc(e.name)}</a>` +
+      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}">${alive ? 'alive' : 'retired'}</span></div>` +
+      `<button type="button" class="star${watched ? ' starred' : ''}" data-action="watch" data-id="${esc(e.c.covenant_id)}"` +
+      ` aria-pressed="${watched}" aria-label="${watched ? 'stop watching' : 'watch'} ${esc(e.name)}">★</button></div>` +
       `<p class="card-story">${esc(cardStory(e, network))}</p>` +
-      `</a>`;
+      `</article>`;
   }).join('');
   foot.innerHTML = list.length > state.shown
     ? `<button type="button" class="btn" data-action="more">show more <span class="dim">(${list.length - state.shown} hidden)</span></button>`
     : '';
+}
+
+/* ------------------------------------------------- records + watch strip */
+
+function miniCard(e, network, label, sub) {
+  return `<div class="mini-card">${avatarSvg(e.c.covenant_id, 34)}` +
+    `<span class="mini-body">` +
+    (label ? `<span class="mini-label">${esc(label)}</span>` : '') +
+    `<a class="mini-name" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">${esc(e.name)}</a>` +
+    `<span class="mini-sub">${esc(sub)}</span></span></div>`;
+}
+
+function renderWatchStrip(entry, network) {
+  const strip = $('#watch-strip');
+  const watched = [...state.watch]
+    .map((id) => entry.index.byId.get(id))
+    .filter(Boolean)
+    .sort((a, b) => (b.c.last_activity_daa || 0) - (a.c.last_activity_daa || 0));
+  strip.hidden = watched.length === 0;
+  if (!watched.length) return;
+  $('#watch-row').innerHTML = watched.map((e) => {
+    const alive = e.c.status === 'active';
+    const sub = alive
+      ? `holds ${fmtAmount(e.c.live_value, network)} · active ${relTimeShort(e.lastMs)}`
+      : `retired ${relTimeShort(e.lastMs)}`;
+    return miniCard(e, network, null, sub);
+  }).join('');
+}
+
+function renderRecords(entry, network) {
+  const covs = entry.index.covs;
+  const alive = covs.filter((e) => e.c.status === 'active');
+  const retired = covs.filter((e) => e.c.status !== 'active');
+  const born = (list) => list.filter((e) => e.c.genesis_daa != null);
+  const recs = [];
+  const oldest = born(alive).sort((a, b) => a.bornMs - b.bornMs)[0];
+  if (oldest) recs.push({ e: oldest, label: 'oldest alive', sub: `born ${relTimeShort(oldest.bornMs)}` });
+  const traveled = [...covs].sort((a, b) => b.moves - a.moves)[0];
+  if (traveled && traveled.moves > 1) recs.push({ e: traveled, label: 'most traveled', sub: `moved ${traveled.moves} times` });
+  const richest = [...alive].sort((a, b) => b.c.live_value - a.c.live_value)[0];
+  if (richest && richest.c.live_value > 0) recs.push({ e: richest, label: 'richest', sub: `holds ${fmtAmount(richest.c.live_value, network)}` });
+  const bigBirth = [...covs].sort((a, b) => b.birthValue - a.birthValue)[0];
+  if (bigBirth && bigBirth.birthValue > 0) recs.push({ e: bigBirth, label: 'biggest birth', sub: `born holding ${fmtAmount(bigBirth.birthValue, network)}` });
+  const longLife = born(retired).sort((a, b) => (b.lastMs - b.bornMs) - (a.lastMs - a.bornMs))[0];
+  if (longLife && longLife.lastMs > longLife.bornMs) recs.push({ e: longLife, label: 'longest life', sub: `lived ${fmtSpan(longLife.lastMs - longLife.bornMs)}` });
+  /* one coin can hold several crowns; show each coin once, first crown wins */
+  const seen = new Set();
+  const unique = recs.filter((r) => !seen.has(r.e.c.covenant_id) && seen.add(r.e.c.covenant_id));
+  $('#section-records').hidden = unique.length === 0;
+  $('#records-row').innerHTML = unique.map((r) => miniCard(r.e, network, r.label, r.sub)).join('');
 }
 
 /* ---------------------------------------------------------------- landing */
@@ -526,7 +639,8 @@ function renderLanding(entry) {
     if (net.unitHint) bits.push(net.unitHint);
   }
   if (!data.__anchor.exact) bits.push('event times are estimates');
-  $('#freshness').textContent = bits.join(' · ');
+  $('#freshness').innerHTML =
+    `<span class="live-badge-slot">${liveBadgeHtml(network)}</span> · ${bits.map(esc).join(' · ')}`;
 
   const empty = data.covenants.length === 0;
   $('#landing-empty').hidden = !empty;
@@ -560,7 +674,8 @@ function renderExplore(entry) {
     `snapshot ${relTimeShort(data.generated_at_ms)}`,
   ];
   if (!data.__anchor.exact) bits.push('times are estimates');
-  $('#explore-stats').textContent = bits.join(' · ');
+  $('#explore-stats').innerHTML =
+    `<span class="live-badge-slot">${liveBadgeHtml(network)}</span> · ${bits.map(esc).join(' · ')}`;
 
   const empty = data.covenants.length === 0;
   $('#empty-net').hidden = !empty;
@@ -569,29 +684,36 @@ function renderExplore(entry) {
   $('#section-coins').hidden = empty;
 
   if (empty) {
+    $('#watch-strip').hidden = true;
+    $('#section-records').hidden = true;
     $('#empty-net').innerHTML = emptyCardHtml(network);
     return;
   }
 
   $('#pulse-title').textContent = net.pulseTitle;
+  renderWatchStrip(entry, network);
   renderPulse(entry);
+  renderRecords(entry, network);
   renderStories(entry, network);
+  const sortSel = $('#sort');
+  if (sortSel && sortSel.value !== state.sort) sortSel.value = state.sort;
   renderGrid(entry, network);
 }
 
 /* ----------------------------------------------------------------- detail */
 
-function timelineItem(entry, ev, data, network) {
+function timelineItem(entry, ev, data, network, flashTx) {
   const meta = KIND_META[ev.kind] || KIND_META.transition;
-  const when = relTime(daaToMs(ev.accepting_daa, data));
+  const ms = daaToMs(ev.accepting_daa, data);
   const nerdBits = state.nerd
     ? ` · <span class="mono dim">DAA ${esc(fmtInt(ev.accepting_daa))}</span>`
     : '';
-  return `<li class="tl-item ${meta.cls}">` +
+  const flash = flashTx && ev.txid === flashTx ? ' tl-flash' : '';
+  return `<li class="tl-item ${meta.cls}${flash}" data-txid="${esc(ev.txid)}">` +
     `<span class="tl-icon" aria-hidden="true">${ICONS[meta.icon]}</span>` +
     `<div class="tl-body">` +
     `<p class="tl-text">${eventSentence(entry, ev, network, true)}</p>` +
-    `<p class="tl-meta">${esc(when)} · <a href="${esc(txUrl(network, ev.txid))}" target="_blank" rel="noopener noreferrer">view transaction ↗</a>${nerdBits}</p>` +
+    `<p class="tl-meta"><span title="${esc(utcTitle(ms))}">${esc(relTime(ms))}</span> · <a href="${esc(txUrl(network, ev.txid))}" target="_blank" rel="noopener noreferrer">view transaction ↗</a>${nerdBits}</p>` +
     `</div></li>`;
 }
 
@@ -618,6 +740,7 @@ function nerdPanel(entry, network) {
       `<div class="utxo-head"><span class="mono break">${esc(u.outpoint)}</span><span class="utxo-flags">${badges}</span></div>` +
       `<div class="utxo-meta"><span>${esc(fmtAmount(u.value, network))}</span><span class="dim">created at DAA ${esc(fmtInt(u.created_daa))}</span></div>` +
       `<pre class="script">${esc((u.script_asm || []).join('\n'))}</pre>` +
+      (u.script_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.script_hex)}">open in decoder →</a>` : '') +
       `</div>`;
   }).join('');
   return `<dl class="nerd-rows">${rows.map(([k, v]) => `<div class="nerd-row"><dt>${esc(k)}</dt><dd>${v}</dd></div>`).join('')}</dl>` +
@@ -625,7 +748,7 @@ function nerdPanel(entry, network) {
     (utxos || '<p class="dim">no UTXOs recorded.</p>');
 }
 
-function renderDetail(entry, covId) {
+function renderDetail(entry, covId, flashTx) {
   const network = state.network;
   const { data, index } = entry;
   const view = $('#view-detail');
@@ -643,6 +766,7 @@ function renderDetail(entry, covId) {
 
   const c = rec.c;
   const alive = c.status === 'active';
+  const watched = state.watch.has(c.covenant_id);
   document.title = `${rec.name} — kascov`;
 
   const summaryBits = [];
@@ -669,34 +793,117 @@ function renderDetail(entry, covId) {
     `<div class="detail-id">` +
     `<h1>${esc(rec.name)}</h1>` +
     `<p class="detail-tags"><span class="pill ${alive ? 'pill-alive' : 'pill-retired'}">${alive ? 'alive' : 'retired'}</span>` +
+    `<button type="button" class="star${watched ? ' starred' : ''}" data-action="watch" data-id="${esc(c.covenant_id)}"` +
+    ` aria-pressed="${watched}" aria-label="${watched ? 'stop watching' : 'watch'} this coin">★</button>` +
     `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span></p>` +
     `<p class="id-chip"><span class="mono">${esc(shortHex(c.covenant_id, 10, 8))}</span>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(c.covenant_id)}" aria-label="copy this coin’s full id">copy id</button></p>` +
     `</div></header>` +
     `<p class="detail-summary">${esc(summaryBits.join(' · '))}.</p>` +
     `<section aria-label="Life story"><h2>life story</h2>${truncNote}` +
-    `<ol class="timeline">${preface}${c.events.map((ev) => timelineItem(rec, ev, data, network)).join('')}</ol></section>` +
+    `<ol class="timeline">${preface}${c.events.map((ev) => timelineItem(rec, ev, data, network, flashTx)).join('')}</ol></section>` +
     `<section class="nerd" aria-label="Technical details">` +
     `<button type="button" class="nerd-toggle" data-action="nerd" aria-expanded="${state.nerd}">` +
     `<span class="nerd-switch" aria-hidden="true"></span><span>nerd mode</span>` +
     `<span class="dim nerd-hint">raw ids, DAA scores, UTXOs &amp; scripts</span></button>` +
     `<div id="nerd-panel" class="nerd-panel" ${state.nerd ? '' : 'hidden'}>${state.nerd ? nerdPanel(rec, network) : ''}</div>` +
     `</section>`;
+
+  if (flashTx) {
+    /* after render()'s scroll-to-top settles, bring the flashed event into view */
+    setTimeout(() => {
+      const el = view.querySelector(`.tl-item[data-txid="${flashTx}"]`);
+      if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }, 120);
+  }
+}
+
+/* ---------------------------------------------------------------- decoder */
+
+/* a KIP-20-style guard: input introspection asserting the covenant id —
+   the same script kascov's own test suite decodes */
+const DECODE_EXAMPLE = 'b9cf20' + '11'.repeat(32) + '8851';
+
+function runDecode(updateHash) {
+  const raw = $('#decode-input').value;
+  const out = $('#decode-out');
+  if (!raw.trim()) {
+    out.innerHTML = '<p class="dim">paste a script above — the disassembly appears here.</p>';
+    return;
+  }
+  const bytes = window.kascovDisasm.parseHex(raw);
+  if (!bytes) {
+    out.innerHTML = '<p class="decode-err">that doesn’t look like hex — expected an even number of 0-9a-f characters.</p>';
+    return;
+  }
+  const { instructions, truncated } = window.kascovDisasm.disassemble(bytes);
+  const groups = [...new Set(instructions.map((i) => i.group))];
+  const summary =
+    `<p class="decode-summary">` +
+    `<span>${fmtInt(bytes.length)} byte${bytes.length === 1 ? '' : 's'} · ` +
+    `${fmtInt(instructions.length)} instruction${instructions.length === 1 ? '' : 's'}</span>` +
+    groups.map((g) => `<span class="op-chip op-${g}">${g}</span>`).join('') +
+    (groups.includes('covenant') ? '<span class="flag flag-ops">covenant ops</span>' : '') +
+    (groups.includes('zk') ? '<span class="flag flag-ops">zk ops</span>' : '') +
+    (truncated ? '<span class="flag flag-no">truncated / malformed tail</span>' : '') +
+    `</p>`;
+  const rows = instructions.map((inst) => {
+    const dataBit = inst.data && inst.data.length
+      ? ` <span class="inst-data">0x${window.kascovDisasm.toHex(inst.data)}</span>` : '';
+    return `<div class="inst g-${inst.group}">` +
+      `<span class="inst-off">${inst.offset.toString(16).padStart(4, '0')}</span>` +
+      `<span class="inst-hex">${inst.opcode.toString(16).padStart(2, '0')}</span>` +
+      `<span class="inst-text"><span class="op-name">${esc(inst.name)}</span>${dataBit}</span>` +
+      `</div>`;
+  }).join('');
+  out.innerHTML = summary + `<div class="inst-list">${rows}</div>`;
+  if (updateHash) {
+    /* replaceState keeps the link shareable without re-triggering render */
+    const clean = raw.replace(/\s+/g, '');
+    history.replaceState(null, '', `#/decode?s=${encodeURIComponent(clean)}`);
+  }
+}
+
+function renderDecode(route) {
+  document.title = 'script decoder — kascov';
+  const input = $('#decode-input');
+  if (route.s && input.value.replace(/\s+/g, '') !== route.s.replace(/\s+/g, '')) {
+    input.value = route.s;
+  }
+  runDecode(false);
+}
+
+function renderDev() {
+  document.title = 'for developers — kascov';
 }
 
 /* ---------------------------------------------------------------- routing */
 
 function parseRoute() {
   const h = location.hash || '#/';
+  /* the path may carry a query ('#/decode?s=…', '#/…/c/<id>?tx=…') */
+  const qIdx = h.indexOf('?');
+  const path = qIdx === -1 ? h : h.slice(0, qIdx);
+  const params = new URLSearchParams(qIdx === -1 ? '' : h.slice(qIdx + 1));
   /* '#/<network>/c/<id>' and bare '#/c/<id>' (keeps the current network,
-     for back-compat with old links) */
-  let m = h.match(/^#\/(?:(testnet-10|mainnet)\/)?c\/([0-9a-fA-F]{6,64})$/);
-  if (m) return { view: 'detail', network: m[1] || null, id: m[2].toLowerCase() };
+     for back-compat with old links); '?tx=<txid>' highlights that event */
+  let m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?c\/([0-9a-fA-F]{6,64})$/);
+  if (m) {
+    const tx = (params.get('tx') || '').toLowerCase();
+    return {
+      view: 'detail',
+      network: m[1] || null,
+      id: m[2].toLowerCase(),
+      tx: /^[0-9a-f]{64}$/.test(tx) ? tx : null,
+    };
+  }
   /* '#/explore' and '#/<network>/explore' */
-  m = h.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
+  m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
   if (m) return { view: 'explore', network: m[1] || null };
+  if (/^#\/decode\/?$/.test(path)) return { view: 'decode', network: null, s: params.get('s') || '' };
+  if (/^#\/dev\/?$/.test(path)) return { view: 'dev', network: null };
   /* old home links '#/<network>' were data views — send them to the explorer */
-  m = h.match(/^#\/(testnet-10|mainnet)\/?$/);
+  m = path.match(/^#\/(testnet-10|mainnet)\/?$/);
   if (m) return { view: 'explore', network: m[1] };
   return { view: 'landing', network: null };
 }
@@ -704,6 +911,8 @@ function parseRoute() {
 function routeHash(view, id) {
   if (view === 'detail') return `#/${state.network}/c/${id}`;
   if (view === 'explore') return `#/${state.network}/explore`;
+  /* decode/dev are network-free — switching networks keeps the page (and its query) */
+  if (view === 'decode' || view === 'dev') return location.hash || `#/${view}`;
   return '#/';
 }
 
@@ -732,17 +941,45 @@ async function render() {
     state.network = route.network;
     state.shown = PAGE_SIZE;
   }
+  if (state.watchNet !== state.network) {
+    state.watch = loadWatch(state.network);
+    state.watchNet = state.network;
+  }
   const panel = $('#panel');
   const views = {
     landing: $('#view-landing'),
     explore: $('#view-explore'),
     detail: $('#view-detail'),
+    decode: $('#view-decode'),
+    dev: $('#view-dev'),
   };
+  /* a stale cached index.html may predate newer views — never crash on them */
+  for (const k of Object.keys(views)) if (!views[k]) delete views[k];
+  if (!views[route.view]) route.view = 'landing';
 
   document.querySelectorAll('.network-tab').forEach((b) => {
     b.setAttribute('aria-pressed', String(b.dataset.network === state.network));
   });
+  document.querySelectorAll('.nav-link').forEach((a) => {
+    if (a.dataset.nav === route.view) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
   $('#header-search').hidden = route.view !== 'explore';
+
+  /* the decoder and dev docs never need a snapshot — don't block them on data */
+  if ((route.view === 'decode' || route.view === 'dev') && views[route.view]) {
+    panel.hidden = true;
+    for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
+    views.detail.innerHTML = '';
+    if (route.view === 'decode') renderDecode(route);
+    else renderDev();
+    fadeIn(views[route.view]);
+    if (route.view !== lastView) {
+      window.scrollTo({ top: 0, behavior: 'instant' });
+      lastView = route.view;
+    }
+    return;
+  }
 
   let entry = state.cache[state.network];
   if (!entry) {
@@ -768,7 +1005,7 @@ async function render() {
   for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
 
   if (route.view === 'detail') {
-    renderDetail(entry, route.id);
+    renderDetail(entry, route.id, route.tx);
   } else {
     views.detail.innerHTML = '';
     if (route.view === 'explore') renderExplore(entry);
@@ -805,8 +1042,73 @@ async function refreshSnapshot() {
   }
 }
 setInterval(refreshSnapshot, REFRESH_MS);
+
+/* ------------------------------------------------------------- live feed */
+
+/* The tiny <network>-live.json is polled often; the heavyweight snapshot is
+   only refetched when its stats say something actually changed. Servers
+   without the endpoint 404 — the poller then backs off and the 45s full
+   refresh above stays the safety net. */
+const LIVE_MS = 12_000;
+const LIVE_REPROBE_MS = 5 * 60_000;
+const LIVE_FRESH_MS = 3 * 60_000;
+
+function liveBadgeHtml(network) {
+  const ls = state.live[network];
+  const entry = state.cache[network];
+  const tipAt = ls && ls.data && ls.data.tip_at_ms != null ? ls.data.tip_at_ms
+    : entry && entry.data.tip_at_ms != null ? entry.data.tip_at_ms : null;
+  if (tipAt != null) {
+    if (Date.now() - tipAt < LIVE_FRESH_MS) {
+      return '<span class="live-badge live-on"><i class="live-dot" aria-hidden="true"></i>watching live</span>';
+    }
+    return `<span class="live-badge live-stale"><i class="live-dot" aria-hidden="true"></i>` +
+      `sync catching up — last saw the chain ${esc(relTimeShort(tipAt))}</span>`;
+  }
+  return '<span class="live-badge live-off"><i class="live-dot" aria-hidden="true"></i>snapshot mode</span>';
+}
+
+function updateLiveBadge() {
+  const html = liveBadgeHtml(state.network);
+  document.querySelectorAll('.live-badge-slot').forEach((el) => { el.innerHTML = html; });
+}
+
+async function pollLive() {
+  if (document.visibilityState !== 'visible') return;
+  const network = state.network;
+  const ls = state.live[network] || (state.live[network] = { supported: null, missedAt: 0, data: null });
+  if (ls.supported === false && Date.now() - ls.missedAt < LIVE_REPROBE_MS) return;
+  try {
+    const res = await fetch(`data/${network}-live.json`, { cache: 'no-cache' });
+    if (res.status === 404) {
+      ls.supported = false;
+      ls.missedAt = Date.now();
+      updateLiveBadge();
+      return;
+    }
+    if (!res.ok) return;
+    const live = await res.json();
+    ls.supported = true;
+    ls.data = live;
+    updateLiveBadge();
+    const cached = state.cache[network];
+    if (cached && live.stats && (
+      live.stats.events !== cached.data.stats.events ||
+      live.stats.covenants !== cached.data.stats.covenants
+    )) {
+      refreshSnapshot();
+    }
+  } catch (e) {
+    /* transient — the next tick retries */
+  }
+}
+setInterval(pollLive, LIVE_MS);
+
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') refreshSnapshot();
+  if (document.visibilityState === 'visible') {
+    refreshSnapshot();
+    pollLive();
+  }
 });
 
 /* ----------------------------------------------------------------- events */
@@ -871,6 +1173,36 @@ document.addEventListener('click', (e) => {
       renderDetail(entry, route.id);
       window.scrollTo({ top: y, behavior: 'instant' });
     }
+  } else if (action === 'watch') {
+    const id = el.dataset.id;
+    if (!id) return;
+    if (state.watch.has(id)) state.watch.delete(id);
+    else state.watch.add(id);
+    saveWatch(state.network, state.watch);
+    const route = parseRoute();
+    const entry = state.cache[state.network];
+    if (!entry) return;
+    if (route.view === 'explore') {
+      renderWatchStrip(entry, state.network);
+      renderGrid(entry, state.network);
+    } else if (route.view === 'detail') {
+      const y = window.scrollY;
+      renderDetail(entry, route.id);
+      window.scrollTo({ top: y, behavior: 'instant' });
+    }
+  } else if (action === 'decode') {
+    runDecode(true);
+  } else if (action === 'decode-example') {
+    $('#decode-input').value = DECODE_EXAMPLE;
+    runDecode(true);
+  } else if (action === 'decode-share') {
+    runDecode(true);
+    copyToClipboard(location.href).then((ok) => {
+      const original = el.dataset.label || el.textContent;
+      el.dataset.label = original;
+      el.textContent = ok ? 'link copied!' : 'copy failed';
+      setTimeout(() => { el.textContent = el.dataset.label; }, 1400);
+    });
   } else if (action === 'copy') {
     copyToClipboard(el.dataset.copy || '').then((ok) => {
       const original = el.dataset.label || el.textContent;
@@ -895,8 +1227,41 @@ $('#search').addEventListener('input', (e) => {
     .replace(/\s+/g, '-');
   state.shown = PAGE_SIZE;
   const entry = state.cache[state.network];
-  if (entry) renderGrid(entry, state.network);
+  if (!entry) return;
+  /* a pasted 64-hex id resolves instantly — coin id or txid, straight to the coin */
+  if (/^[0-9a-f]{64}$/.test(state.query)) {
+    const byId = entry.index.byId.get(state.query);
+    const byTx = byId ? null : entry.index.txToCov.get(state.query);
+    if (byId || byTx) {
+      const target = byId || byTx;
+      const tx = byTx ? `?tx=${state.query}` : '';
+      e.target.value = '';
+      state.query = '';
+      location.hash = `#/${state.network}/c/${target.c.covenant_id}${tx}`;
+      return;
+    }
+  }
+  renderGrid(entry, state.network);
 });
+
+const sortSelect = $('#sort');
+if (sortSelect) {
+  sortSelect.addEventListener('change', (e) => {
+    state.sort = e.target.value;
+    state.shown = PAGE_SIZE;
+    const entry = state.cache[state.network];
+    if (entry) renderGrid(entry, state.network);
+  });
+}
+
+const decodeInput = $('#decode-input');
+let decodeTimer = 0;
+if (decodeInput) {
+  decodeInput.addEventListener('input', () => {
+    clearTimeout(decodeTimer);
+    decodeTimer = setTimeout(() => runDecode(true), 250);
+  });
+}
 
 window.addEventListener('hashchange', render);
 
@@ -906,5 +1271,6 @@ document.querySelectorAll('.guide-icon').forEach((el) => {
 });
 
 render();
+pollLive();
 
 })();

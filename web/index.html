@@ -35,8 +35,13 @@
       </a>
       <div class="search-wrap header-search" id="header-search" hidden>
         <svg class="search-icon" aria-hidden="true" viewBox="0 0 20 20" width="16" height="16"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="2"/><line x1="12.8" y1="12.8" x2="17" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        <input id="search" type="search" placeholder="search a name like brave-teal-otter, or paste an id…" aria-label="Search smart coins by friendly name, coin id or transaction id" autocomplete="off" spellcheck="false">
+        <input id="search" type="search" placeholder="name, coin id, or a transaction id…" aria-label="Search smart coins by friendly name, coin id or transaction id" autocomplete="off" spellcheck="false">
       </div>
+      <nav class="site-nav" aria-label="Pages">
+        <a class="nav-link" href="#/explore" data-nav="explore">explore</a>
+        <a class="nav-link" href="#/decode" data-nav="decode">decode</a>
+        <a class="nav-link" href="#/dev" data-nav="dev">for devs</a>
+      </nav>
       <nav class="network-tabs" aria-label="Network">
         <button type="button" class="network-tab" data-action="network" data-network="testnet-10" aria-pressed="true">testnet-10</button>
         <button type="button" class="network-tab" data-action="network" data-network="mainnet" aria-pressed="false">mainnet</button>
@@ -84,6 +89,17 @@
       <div class="cta-row">
         <a class="btn btn-accent btn-cta" href="#/explore">open the explorer →</a>
       </div>
+
+      <section class="devcards" aria-label="Developer tools">
+        <a class="devcard" href="#/decode">
+          <h3>script decoder</h3>
+          <p>paste any Kaspa script, read its post-Toccata opcodes — covenant ops highlighted. runs in your browser, nothing leaves the page.</p>
+        </a>
+        <a class="devcard" href="#/dev">
+          <h3>JSON API</h3>
+          <p>everything kascov sees, as plain JSON with CORS on. build a bot, a chart, a better explorer.</p>
+        </a>
+      </section>
     </section>
 
     <!-- ============ EXPLORER ============ -->
@@ -95,9 +111,19 @@
 
       <section class="empty-net" id="empty-net" hidden></section>
 
+      <section class="watch-strip" id="watch-strip" aria-label="Your coins" hidden>
+        <h2>your coins <span class="dim watch-hint">— the ones you starred</span></h2>
+        <div id="watch-row" class="mini-grid"></div>
+      </section>
+
       <section class="pulse" id="section-pulse" aria-label="Activity chart">
         <h2 id="pulse-title">life on the testnet</h2>
         <div id="pulse-chart" class="pulse-chart"></div>
+      </section>
+
+      <section class="records" id="section-records" aria-label="Record holders" hidden>
+        <h2>record holders</h2>
+        <div id="records-row" class="mini-grid"></div>
       </section>
 
       <section class="stories" id="section-stories" aria-label="Latest stories">
@@ -112,8 +138,19 @@
             <button type="button" class="chip" data-action="filter" data-filter="all" aria-pressed="true">all</button>
             <button type="button" class="chip" data-action="filter" data-filter="active" aria-pressed="false">alive</button>
             <button type="button" class="chip" data-action="filter" data-filter="burned" aria-pressed="false">retired</button>
+            <button type="button" class="chip chip-watch" data-action="filter" data-filter="watch" aria-pressed="false">★ watching</button>
           </div>
-          <p class="result-count" id="result-count" aria-live="polite"></p>
+          <div class="toolbar-right">
+            <label class="sort-label" for="sort">sort</label>
+            <select id="sort" aria-label="Sort smart coins">
+              <option value="activity">latest activity</option>
+              <option value="newest">newest born</option>
+              <option value="oldest">oldest</option>
+              <option value="richest">richest</option>
+              <option value="moves">most moves</option>
+            </select>
+            <p class="result-count" id="result-count" aria-live="polite"></p>
+          </div>
         </div>
         <div id="coin-grid" class="coin-grid"></div>
         <div id="grid-foot" class="grid-foot"></div>
@@ -122,18 +159,136 @@
 
     <!-- ============ DETAIL ============ -->
     <section id="view-detail" class="view-fade" aria-label="Smart coin detail" hidden></section>
+
+    <!-- ============ DECODER ============ -->
+    <section id="view-decode" class="view-fade" aria-label="Script decoder" hidden>
+      <header class="page-head">
+        <h1>script decoder</h1>
+        <p class="page-sub">paste any Kaspa script as hex and read it as opcodes — including the post-Toccata set: transaction introspection (KIP-17), covenant ops (KIP-20), zk verification (KIP-16). decoding happens in your browser; nothing leaves the page.</p>
+      </header>
+      <div class="decode-box">
+        <textarea id="decode-input" rows="4" spellcheck="false" autocomplete="off" placeholder="script hex — e.g. 20a39404…82faac · whitespace and 0x prefixes are fine"></textarea>
+        <div class="decode-actions">
+          <button type="button" class="btn btn-accent" data-action="decode">decode</button>
+          <button type="button" class="btn" data-action="decode-example">try a covenant example</button>
+          <button type="button" class="btn" data-action="decode-share">copy share link</button>
+        </div>
+      </div>
+      <div id="decode-out" class="decode-out" aria-live="polite"></div>
+      <details class="op-legend">
+        <summary>what the colors mean</summary>
+        <ul>
+          <li><span class="op-chip op-push">push</span> data pushed onto the stack</li>
+          <li><span class="op-chip op-standard">standard</span> the classic script opcodes (checks, math, stack)</li>
+          <li><span class="op-chip op-introspection">introspection</span> KIP-17 — the script reads its own transaction</li>
+          <li><span class="op-chip op-covenant">covenant</span> KIP-20 — smart-coin identity &amp; state rules</li>
+          <li><span class="op-chip op-zk">zk</span> KIP-16 — zero-knowledge proof verification</li>
+          <li><span class="op-chip op-unknown">unknown</span> not in the post-Toccata opcode table</li>
+        </ul>
+      </details>
+    </section>
+
+    <!-- ============ FOR DEVELOPERS ============ -->
+    <section id="view-dev" class="view-fade" aria-label="For developers" hidden>
+      <header class="page-head">
+        <h1>for developers</h1>
+        <p class="page-sub">kascov indexes every covenant on Kaspa and keeps the history nodes prune. all of it is yours as plain JSON — CORS is on, no keys, no rate cards. build something.</p>
+      </header>
+
+      <section class="dev-section">
+        <h2>the JSON API</h2>
+        <div class="dev-endpoints">
+          <div class="endpoint">
+            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10-live.json</code></p>
+            <p class="endpoint-desc">the small fast feed — stats, chain tip, and the ~150 newest life events. refreshes every few seconds; poll this.</p>
+          </div>
+          <div class="endpoint">
+            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10.json</code></p>
+            <p class="endpoint-desc">the full snapshot — every covenant with its complete event timeline and UTXOs (scripts included, pre-disassembled). a few MB; fetch it when the live feed says something changed.</p>
+          </div>
+          <div class="endpoint">
+            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/mainnet.json</code> <span class="dim">·</span> <code class="mono">/data/mainnet-live.json</code></p>
+            <p class="endpoint-desc">same, for mainnet — mostly waiting for its first smart coins.</p>
+          </div>
+        </div>
+        <p class="dim dev-note">base URL: <code class="mono">https://kascov-explorer.web.app</code> · <code class="mono">Access-Control-Allow-Origin: *</code> · served by an always-on indexer that follows the chain live</p>
+        <h3>try it</h3>
+        <pre class="codeblock"><code># the pulse of the testnet, one request
+curl -s https://kascov-explorer.web.app/data/testnet-10-live.json | jq .stats
+
+# coins born in the last few minutes
+curl -s https://kascov-explorer.web.app/data/testnet-10-live.json \
+  | jq '.recent_events[] | select(.kind == "genesis")'
+
+# one covenant's whole life
+curl -s https://kascov-explorer.web.app/data/testnet-10.json \
+  | jq --arg id "&lt;covenant-id&gt;" '.covenants[] | select(.covenant_id == $id)'</code></pre>
+      </section>
+
+      <section class="dev-section">
+        <h2>field dictionary</h2>
+        <dl class="dev-dict">
+          <div><dt class="mono">covenant_id</dt><dd>the smart coin's permanent 32-byte identity (KIP-20) — survives every move</dd></div>
+          <div><dt class="mono">status</dt><dd><code>active</code> (has live UTXOs) or <code>burned</code> (retired)</dd></div>
+          <div><dt class="mono">events[]</dt><dd>the life story: <code>kind</code> is <code>genesis</code> | <code>transition</code> | <code>burn</code>, ordered by <code>seq</code>; <code>txid</code> is the transaction, <code>accepting_daa</code> when the chain accepted it</dd></div>
+          <div><dt class="mono">accepting_daa / DAA</dt><dd>Kaspa's block-height-like clock — it ticks ~10 per second. <code>tip_daa</code> + <code>tip_at_ms</code> in each snapshot anchor it to wall-clock time</dd></div>
+          <div><dt class="mono">genesis_txid, genesis_daa</dt><dd>where the coin was born — <code>null</code> if it was first seen mid-life (see <code>lineage_complete</code>)</dd></div>
+          <div><dt class="mono">lineage_complete</dt><dd><code>false</code> means kascov started watching after the coin was born; earlier history is honestly missing</dd></div>
+          <div><dt class="mono">utxos[]</dt><dd>every state UTXO ever seen: <code>outpoint</code>, <code>value</code> (sompi, 1e8 = 1 KAS), <code>live</code>, <code>script_hex</code> + <code>script_asm</code> (pre-disassembled), <code>uses_covenant_ops</code>, <code>uses_zk_ops</code></dd></div>
+          <div><dt class="mono">live_value, live_utxos</dt><dd>what the coin holds right now</dd></div>
+          <div><dt class="mono">events_truncated</dt><dd>the full snapshot caps events per covenant (default 500); <code>true</code> means the tail was cut</dd></div>
+          <div><dt class="mono">generated_at_ms</dt><dd>when this JSON was built — your freshness check</dd></div>
+        </dl>
+      </section>
+
+      <section class="dev-section">
+        <h2>run kascov yourself</h2>
+        <p>the whole indexer is a small open-source Rust workspace. your own node, your own index, your own rules.</p>
+        <pre class="codeblock"><code>git clone https://github.com/Knitser/kascov &amp;&amp; cd kascov
+
+# follow testnet-10 live (public resolver, zero setup)
+cargo run -rp kascov -- --network testnet-10 sync --follow
+
+# print covenant events as they happen (great for testing your own covenant)
+cargo run -rp kascov -- --network testnet-10 watch
+
+# machine-readable event stream
+cargo run -rp kascov -- --network testnet-10 --json watch
+
+# export the snapshots this site serves
+cargo run -rp kascov -- --network testnet-10 export</code></pre>
+      </section>
+
+      <section class="dev-section">
+        <h2>make your own smart coin on testnet-10</h2>
+        <p>the repo ships <code class="mono">kascov-lab</code> — a covenant lifecycle lab that births, moves, and retires a real covenant on testnet-10 with faucet funds. launch one, then paste your txid into the search box here and watch kascov tell its story.</p>
+        <pre class="codeblock"><code>cargo run -rp kascov-lab -- --help</code></pre>
+      </section>
+
+      <section class="dev-section">
+        <h2>links</h2>
+        <ul class="dev-links">
+          <li><a href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov ↗</a> — source, issues, ideas</li>
+          <li><a href="https://github.com/kaspanet/kips/blob/master/kip-0020.md" target="_blank" rel="noopener noreferrer">KIP-20 ↗</a> — the covenant spec these coins live by</li>
+          <li><a href="https://docs.kaspa.org/toccata" target="_blank" rel="noopener noreferrer">Toccata ↗</a> — the hardfork that switched this on</li>
+          <li><a href="https://tn10.kaspa.stream/" target="_blank" rel="noopener noreferrer">tn10.kaspa.stream ↗</a> — general block explorer for testnet-10 (blocks, addresses, mempool)</li>
+        </ul>
+      </section>
+    </section>
   </main>
 
   <footer class="site-footer">
     <div class="container footer-inner">
       <p class="footer-motto">Kaspa nodes forget after ~3 days. <strong>kascov remembers.</strong></p>
+      <p class="footer-nav"><a class="footer-link" href="#/explore">explorer</a> · <a class="footer-link" href="#/decode">script decoder</a> · <a class="footer-link" href="#/dev">JSON API &amp; docs</a></p>
       <p><a class="footer-link" href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov</a></p>
-      <p class="footer-dim">data refreshes every few minutes while the kascov worker is watching</p>
+      <p class="footer-dim">data streams live from the kascov indexer — it never stops watching</p>
       <p class="footer-dim">not affiliated with the Kaspa Foundation</p>
     </div>
   </footer>
 
   <noscript><div class="container panel"><p>kascov needs JavaScript to show its smart coins.</p></div></noscript>
+  <script src="disasm.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
