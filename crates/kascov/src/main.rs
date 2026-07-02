@@ -744,11 +744,18 @@ async fn data_handler(
     }
 
     let ttl = if live { 5 } else { 10 };
-    let mut cache = state.cache.lock().await;
-    let fresh = cache
-        .get(name)
-        .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(ttl))
-        .map(|(_, body)| body.clone());
+    // Take a fresh cached body and release the lock immediately — never hold it
+    // across the rebuild below, or one cold miss serializes ALL /data traffic
+    // (a trivial DoS lever). A concurrent cold miss may rebuild redundantly;
+    // that's cheap and bounded by the short TTL, and no request blocks on
+    // another's rebuild.
+    let fresh = {
+        let cache = state.cache.lock().await;
+        cache
+            .get(name)
+            .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(ttl))
+            .map(|(_, body)| body.clone())
+    };
     let body = match fresh {
         Some(body) => body,
         None => {
@@ -767,7 +774,11 @@ async fn data_handler(
             match result {
                 Ok(Ok(json)) => {
                     let body = std::sync::Arc::new(json);
-                    cache.insert(name.to_string(), (std::time::Instant::now(), body.clone()));
+                    state
+                        .cache
+                        .lock()
+                        .await
+                        .insert(name.to_string(), (std::time::Instant::now(), body.clone()));
                     body
                 }
                 Ok(Err(err)) => {
@@ -781,7 +792,6 @@ async fn data_handler(
             }
         }
     };
-    drop(cache);
 
     let cache_control = if live {
         "public, max-age=5, s-maxage=10"
