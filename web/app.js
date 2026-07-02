@@ -11,14 +11,14 @@ const NETWORKS = {
     word: 'testnet',
     unit: 'TKAS',
     unitHint: 'TKAS = test-network KAS (play money, no real-world value)',
-    explorer: 'https://explorer-tn10.kaspa.org',
+    txBase: 'https://tn10.kaspa.stream/txs/',
     pulseTitle: 'life on the testnet',
   },
   'mainnet': {
     label: 'mainnet',
     word: 'mainnet',
     unit: 'KAS',
-    explorer: 'https://explorer.kaspa.org',
+    txBase: 'https://kas.fyi/transaction/',
     pulseTitle: 'life on mainnet',
   },
 };
@@ -26,6 +26,7 @@ const NETWORKS = {
 const MS_PER_DAA = 100;   // the chain ticks ~10 DAA per second
 const PAGE_SIZE = 60;
 const STORY_COUNT = 15;
+const TEASER_COUNT = 3;
 const PULSE_BUCKETS = 12;
 
 /* ------------------------------------------------------- friendly names */
@@ -228,7 +229,7 @@ function shortHex(hex, head, tail) {
 }
 
 function txUrl(network, txid) {
-  return `${NETWORKS[network].explorer}/txs/${txid}`;
+  return NETWORKS[network].txBase + txid;
 }
 
 /* ----------------------------------------------------------------- state */
@@ -427,22 +428,30 @@ function renderPulse(entry) {
 
 /* ---------------------------------------------------------------- stories */
 
-function renderStories(entry, network) {
-  const { data, index } = entry;
+function buildFeed(entry) {
   const feed = [];
-  for (const e of index.covs) {
+  for (const e of entry.index.covs) {
     for (const ev of e.c.events) feed.push({ entry: e, ev, daa: ev.accepting_daa });
   }
   feed.sort((a, b) => b.daa - a.daa);
-  $('#story-list').innerHTML = feed.slice(0, STORY_COUNT).map(({ entry: e, ev }) => {
-    const meta = KIND_META[ev.kind] || KIND_META.transition;
-    const when = relTime(daaToMs(ev.accepting_daa, data));
-    return `<li><a class="story ${meta.cls}" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">` +
-      avatarSvg(e.c.covenant_id, 34) +
-      `<span class="story-text">${eventSentence(e, ev, network)} <span class="story-when">— ${esc(when)}</span></span>` +
-      `<span class="story-kind" aria-hidden="true">${ICONS[meta.icon]}</span>` +
-      `</a></li>`;
-  }).join('');
+  return feed;
+}
+
+function storyRow({ entry: e, ev }, data, network) {
+  const meta = KIND_META[ev.kind] || KIND_META.transition;
+  const when = relTime(daaToMs(ev.accepting_daa, data));
+  return `<li><a class="story ${meta.cls}" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">` +
+    avatarSvg(e.c.covenant_id, 34) +
+    `<span class="story-text">${eventSentence(e, ev, network)} <span class="story-when">— ${esc(when)}</span></span>` +
+    `<span class="story-kind" aria-hidden="true">${ICONS[meta.icon]}</span>` +
+    `</a></li>`;
+}
+
+function renderStories(entry, network) {
+  $('#story-list').innerHTML = buildFeed(entry)
+    .slice(0, STORY_COUNT)
+    .map((f) => storyRow(f, entry.data, network))
+    .join('');
 }
 
 /* ------------------------------------------------------------------- grid */
@@ -483,9 +492,20 @@ function renderGrid(entry, network) {
     : '';
 }
 
-/* ------------------------------------------------------------------- home */
+/* ---------------------------------------------------------------- landing */
 
-function renderHome(entry) {
+function emptyCardHtml(network) {
+  return `<div class="empty-card">` +
+    `<span class="empty-icon" aria-hidden="true">${ICONS.born}</span>` +
+    `<h2>${network === 'mainnet' ? 'Mainnet’s' : 'This network’s'} first smart coin hasn’t been born yet.</h2>` +
+    `<p>The moment it happens, kascov will be watching — and remembering.</p>` +
+    (network === 'mainnet'
+      ? `<button type="button" class="btn btn-accent" data-action="network" data-network="testnet-10">meanwhile, watch the testnet</button>`
+      : '') +
+    `</div>`;
+}
+
+function renderLanding(entry) {
   const network = state.network;
   const { data } = entry;
   const net = NETWORKS[network];
@@ -509,21 +529,47 @@ function renderHome(entry) {
   $('#freshness').textContent = bits.join(' · ');
 
   const empty = data.covenants.length === 0;
+  $('#landing-empty').hidden = !empty;
+  $('#section-teaser').hidden = empty;
+
+  if (empty) {
+    $('#landing-empty').innerHTML = emptyCardHtml(network);
+    return;
+  }
+
+  $('#teaser-list').innerHTML = buildFeed(entry)
+    .slice(0, TEASER_COUNT)
+    .map((f) => storyRow(f, data, network))
+    .join('');
+}
+
+/* --------------------------------------------------------------- explorer */
+
+function renderExplore(entry) {
+  const network = state.network;
+  const { data } = entry;
+  const net = NETWORKS[network];
+
+  document.title = `kascov — exploring ${net.label}`;
+
+  const s = data.stats;
+  const bits = [
+    `${fmtInt(s.covenants)} smart coin${s.covenants === 1 ? '' : 's'}`,
+    `${fmtInt(s.active)} alive`,
+    `${fmtInt(s.events)} event${s.events === 1 ? '' : 's'}`,
+    `snapshot ${relTimeShort(data.generated_at_ms)}`,
+  ];
+  if (!data.__anchor.exact) bits.push('times are estimates');
+  $('#explore-stats').textContent = bits.join(' · ');
+
+  const empty = data.covenants.length === 0;
   $('#empty-net').hidden = !empty;
   $('#section-pulse').hidden = empty;
   $('#section-stories').hidden = empty;
   $('#section-coins').hidden = empty;
 
   if (empty) {
-    $('#empty-net').innerHTML =
-      `<div class="empty-card">` +
-      `<span class="empty-icon" aria-hidden="true">${ICONS.born}</span>` +
-      `<h2>${network === 'mainnet' ? 'Mainnet’s' : 'This network’s'} first smart coin hasn’t been born yet.</h2>` +
-      `<p>The moment it happens, kascov will be watching — and remembering.</p>` +
-      (network === 'mainnet'
-        ? `<button type="button" class="btn btn-accent" data-action="network" data-network="testnet-10">meanwhile, watch the testnet</button>`
-        : '') +
-      `</div>`;
+    $('#empty-net').innerHTML = emptyCardHtml(network);
     return;
   }
 
@@ -588,7 +634,7 @@ function renderDetail(entry, covId) {
   if (!rec) {
     document.title = 'smart coin not found — kascov';
     const other = network === 'mainnet' ? 'testnet-10' : 'mainnet';
-    view.innerHTML = `<a class="back" href="#/${esc(network)}">← all smart coins</a>` +
+    view.innerHTML = `<a class="back" href="#/explore">← all smart coins</a>` +
       `<div class="empty-card"><h2>We haven’t met this smart coin.</h2>` +
       `<p class="dim">It isn’t in the ${esc(NETWORKS[network].label)} snapshot — it may live on the other network, or the id might be mistyped.</p>` +
       `<button type="button" class="btn" data-action="network" data-network="${other}">look on ${other}</button></div>`;
@@ -617,7 +663,7 @@ function renderDetail(entry, covId) {
     : '';
 
   view.innerHTML =
-    `<a class="back" href="#/${esc(network)}">← all smart coins</a>` +
+    `<a class="back" href="#/explore">← all smart coins</a>` +
     `<header class="detail-head">` +
     `<span role="img" aria-label="avatar of ${esc(rec.name)}">${avatarSvg(c.covenant_id, 88)}</span>` +
     `<div class="detail-id">` +
@@ -642,20 +688,42 @@ function renderDetail(entry, covId) {
 
 function parseRoute() {
   const h = location.hash || '#/';
-  /* '#/<network>/c/<id>' and '#/<network>'; bare '#/c/<id>' and '#/' keep
-     the current network for back-compat with old links */
+  /* '#/<network>/c/<id>' and bare '#/c/<id>' (keeps the current network,
+     for back-compat with old links) */
   let m = h.match(/^#\/(?:(testnet-10|mainnet)\/)?c\/([0-9a-fA-F]{6,64})$/);
   if (m) return { view: 'detail', network: m[1] || null, id: m[2].toLowerCase() };
+  /* '#/explore' and '#/<network>/explore' */
+  m = h.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
+  if (m) return { view: 'explore', network: m[1] || null };
+  /* old home links '#/<network>' were data views — send them to the explorer */
   m = h.match(/^#\/(testnet-10|mainnet)\/?$/);
-  if (m) return { view: 'home', network: m[1] };
-  return { view: 'home', network: null };
+  if (m) return { view: 'explore', network: m[1] };
+  return { view: 'landing', network: null };
 }
 
 function routeHash(view, id) {
-  return view === 'detail' ? `#/${state.network}/c/${id}` : `#/${state.network}`;
+  if (view === 'detail') return `#/${state.network}/c/${id}`;
+  if (view === 'explore') return `#/${state.network}/explore`;
+  return '#/';
+}
+
+/* Fade a view in without ever risking it staying invisible: the resting
+   state is opacity 1; the transient .is-entering class (opacity 0) is
+   removed on the next frame so the CSS transition carries it to 1, with a
+   timeout as a belt-and-braces fallback and a reduced-motion override in
+   the CSS pinning entering views to opacity 1. */
+function fadeIn(el) {
+  el.classList.remove('is-entering');
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  void el.offsetWidth;                 /* flush styles so the transition replays */
+  el.classList.add('is-entering');
+  const settle = () => el.classList.remove('is-entering');
+  requestAnimationFrame(() => requestAnimationFrame(settle));
+  setTimeout(settle, 400);
 }
 
 let renderToken = 0;
+let lastView = null;
 
 async function render() {
   const token = ++renderToken;
@@ -665,20 +733,23 @@ async function render() {
     state.shown = PAGE_SIZE;
   }
   const panel = $('#panel');
-  const home = $('#view-home');
-  const detail = $('#view-detail');
+  const views = {
+    landing: $('#view-landing'),
+    explore: $('#view-explore'),
+    detail: $('#view-detail'),
+  };
 
   document.querySelectorAll('.network-tab').forEach((b) => {
     b.setAttribute('aria-pressed', String(b.dataset.network === state.network));
   });
+  $('#header-search').hidden = route.view !== 'explore';
 
   let entry = state.cache[state.network];
   if (!entry) {
     panel.hidden = false;
     panel.className = 'panel';
     panel.innerHTML = `<p>pointing the camera at ${esc(NETWORKS[state.network].label)}…</p>`;
-    home.hidden = true;
-    detail.hidden = true;
+    for (const el of Object.values(views)) el.hidden = true;
     try {
       entry = await loadNetwork(state.network);
     } catch (err) {
@@ -694,23 +765,21 @@ async function render() {
 
   panel.hidden = true;
 
+  for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
+
   if (route.view === 'detail') {
-    home.hidden = true;
-    detail.hidden = false;
     renderDetail(entry, route.id);
-    detail.classList.remove('fade-in');
-    void detail.offsetWidth;
-    detail.classList.add('fade-in');
+  } else {
+    views.detail.innerHTML = '';
+    if (route.view === 'explore') renderExplore(entry);
+    else renderLanding(entry);
+  }
+  fadeIn(views[route.view]);
+
+  if (route.view !== lastView) {
     /* jump like a page navigation — CSS smooth-scroll is for anchors only */
     window.scrollTo({ top: 0, behavior: 'instant' });
-  } else {
-    detail.hidden = true;
-    detail.innerHTML = '';
-    home.hidden = false;
-    renderHome(entry);
-    home.classList.remove('fade-in');
-    void home.offsetWidth;
-    home.classList.add('fade-in');
+    lastView = route.view;
   }
 }
 

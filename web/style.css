@@ -140,6 +140,16 @@ h2 {
   color: #06211d;
 }
 
+/* search lives in the header, but only on the explorer view */
+.search-wrap.header-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 460px;
+  margin-inline: auto;
+}
+.search-wrap.header-search[hidden] { display: none; }
+.header-search #search { padding-block: 0.45rem; }
+
 /* --------------------------------------------------------------- panel */
 
 .panel {
@@ -270,6 +280,29 @@ h2 {
 
 .guide-step strong { display: block; font-size: 0.95rem; }
 .guide-step span:not(.guide-icon) { color: var(--muted); font-size: 0.84rem; line-height: 1.4; display: block; }
+
+/* ------------------------------------------------------------- explorer */
+
+#view-explore { padding-top: 1.3rem; }
+
+.explore-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem 1.2rem;
+  margin-bottom: 1.7rem;
+}
+
+.stats-strip {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.howto-link { font-size: 0.82rem; color: var(--faint); white-space: nowrap; }
+.howto-link:hover { color: var(--accent); text-decoration: none; }
 
 /* --------------------------------------------------------------- pulse */
 
@@ -516,8 +549,15 @@ h2 {
   transition: border-color 0.15s ease, background 0.15s ease, transform 0.14s ease;
 }
 .btn:hover { border-color: var(--border-strong); background: var(--card-hover); transform: translateY(-1px); }
+a.btn { display: inline-block; }
+a.btn:hover { text-decoration: none; }
 .btn-accent { background: var(--accent); border-color: var(--accent); color: #06211d; }
 .btn-accent:hover { background: #86d4c8; border-color: #86d4c8; }
+
+/* landing teaser + call to action */
+.teaser { margin-bottom: 2rem; }
+.cta-row { text-align: center; padding: 0.2rem 0 2.8rem; }
+.btn-cta { font-size: 1rem; font-weight: 700; padding: 0.75rem 1.9rem; }
 
 /* ---------------------------------------------------------- empty state */
 
@@ -828,11 +868,12 @@ h2 {
 
 /* ----------------------------------------------------------- transitions */
 
-.fade-in { animation: fadeIn 0.22s ease; }
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(5px); }
-  to { opacity: 1; transform: none; }
-}
+/* Views rest at opacity 1 (no class needed); .is-entering is a transient
+   JS-applied state removed on the next frame, so content can never stay
+   invisible — even if the removal never runs, reduced-motion pins it to 1
+   and a JS timeout clears the class. */
+.view-fade { transition: opacity 0.22s ease, transform 0.22s ease; }
+.view-fade.is-entering { opacity: 0; transform: translateY(5px); }
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
@@ -840,11 +881,15 @@ h2 {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+  .view-fade.is-entering { opacity: 1 !important; transform: none !important; }
 }
 
 /* ------------------------------------------------------------ responsive */
 
 @media (max-width: 720px) {
+  /* header search drops to its own row so nothing overflows on phones */
+  .header-inner { flex-wrap: wrap; }
+  .search-wrap.header-search { order: 3; flex-basis: 100%; max-width: none; margin: 0; }
   .guide-steps { grid-template-columns: 1fr; gap: 0.8rem; }
   .guide-step:not(:last-child)::after { content: ""; }
   .nerd-row { grid-template-columns: 1fr; gap: 0.15rem; padding: 0.55rem 0; }

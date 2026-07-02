@@ -1,0 +1,11 @@
+import { type AnyZodSchema } from './zod-schema-type';
+import type { JSONPath } from './zod-types';
+import type { UpdaterFunction } from './ZodSwitch';
+export declare const ZodDiscriminatedUnionEditor: React.FC<{
+    schema: AnyZodSchema;
+    setValue: UpdaterFunction<Record<string, unknown>>;
+    value: Record<string, unknown>;
+    mayPad: boolean;
+    jsonPath: JSONPath;
+    onRemove: null | (() => void);
+}>;

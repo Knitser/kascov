@@ -1,0 +1,161 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.useElementSize = exports.updateAllElementsSizes = void 0;
+const react_1 = require("react");
+let elementSizeHooks = [];
+const updateAllElementsSizes = () => {
+    for (const listener of elementSizeHooks) {
+        listener();
+    }
+};
+exports.updateAllElementsSizes = updateAllElementsSizes;
+const getElement = (source) => {
+    if (!source) {
+        return null;
+    }
+    if ('current' in source) {
+        return source.current;
+    }
+    return source;
+};
+const useElementSize = (source, options) => {
+    const [size, setSize] = (0, react_1.useState)(() => {
+        const element = getElement(source);
+        if (!element) {
+            return null;
+        }
+        const rect = element.getClientRects();
+        if (!rect[0]) {
+            return null;
+        }
+        return {
+            width: rect[0].width,
+            height: rect[0].height,
+            left: rect[0].x,
+            top: rect[0].y,
+            windowSize: {
+                height: window.innerHeight,
+                width: window.innerWidth,
+            },
+        };
+    });
+    const observer = (0, react_1.useMemo)(() => {
+        if (typeof ResizeObserver === 'undefined') {
+            return null;
+        }
+        return new ResizeObserver((entries) => {
+            // `contentRect` is the element's pre-transform content box.
+            // `getClientRects()` is the post-transform AABB. Dividing each AABB
+            // axis by its content-box counterpart cancels the parent CSS transform
+            // whether it is uniform or not.
+            const { contentRect, target } = entries[0];
+            const newSize = target.getClientRects();
+            if (!(newSize === null || newSize === void 0 ? void 0 : newSize[0])) {
+                setSize(null);
+                return;
+            }
+            const probableCssParentScaleX = contentRect.width === 0 ? 1 : newSize[0].width / contentRect.width;
+            const probableCssParentScaleY = contentRect.height === 0 ? 1 : newSize[0].height / contentRect.height;
+            const width = options.shouldApplyCssTransforms || probableCssParentScaleX === 0
+                ? newSize[0].width
+                : newSize[0].width * (1 / probableCssParentScaleX);
+            const height = options.shouldApplyCssTransforms || probableCssParentScaleY === 0
+                ? newSize[0].height
+                : newSize[0].height * (1 / probableCssParentScaleY);
+            setSize((prevState) => {
+                const isSame = prevState &&
+                    prevState.width === width &&
+                    prevState.height === height &&
+                    prevState.left === newSize[0].x &&
+                    prevState.top === newSize[0].y &&
+                    prevState.windowSize.height === window.innerHeight &&
+                    prevState.windowSize.width === window.innerWidth;
+                if (isSame) {
+                    return prevState;
+                }
+                return {
+                    width,
+                    height,
+                    left: newSize[0].x,
+                    top: newSize[0].y,
+                    windowSize: {
+                        height: window.innerHeight,
+                        width: window.innerWidth,
+                    },
+                };
+            });
+        });
+    }, [options.shouldApplyCssTransforms]);
+    const updateSize = (0, react_1.useCallback)(() => {
+        const element = getElement(source);
+        if (!element) {
+            return;
+        }
+        const rect = element.getClientRects();
+        if (!rect[0]) {
+            setSize(null);
+            return;
+        }
+        setSize((prevState) => {
+            const isSame = prevState &&
+                prevState.width === rect[0].width &&
+                prevState.height === rect[0].height &&
+                prevState.left === rect[0].x &&
+                prevState.top === rect[0].y &&
+                prevState.windowSize.height === window.innerHeight &&
+                prevState.windowSize.width === window.innerWidth;
+            if (isSame) {
+                return prevState;
+            }
+            return {
+                width: rect[0].width,
+                height: rect[0].height,
+                left: rect[0].x,
+                top: rect[0].y,
+                windowSize: {
+                    height: window.innerHeight,
+                    width: window.innerWidth,
+                },
+            };
+        });
+    }, [source]);
+    (0, react_1.useEffect)(() => {
+        updateSize();
+    }, [updateSize]);
+    (0, react_1.useEffect)(() => {
+        if (!observer) {
+            return;
+        }
+        const element = getElement(source);
+        if (element) {
+            observer.observe(element);
+        }
+        return () => {
+            if (element) {
+                observer.unobserve(element);
+            }
+        };
+    }, [observer, source]);
+    (0, react_1.useEffect)(() => {
+        if (!options.triggerOnWindowResize) {
+            return;
+        }
+        window.addEventListener('resize', updateSize);
+        return () => {
+            window.removeEventListener('resize', updateSize);
+        };
+    }, [options.triggerOnWindowResize, updateSize]);
+    (0, react_1.useEffect)(() => {
+        elementSizeHooks.push(updateSize);
+        return () => {
+            elementSizeHooks = elementSizeHooks.filter((e) => e !== updateSize);
+        };
+    }, [updateSize]);
+    return (0, react_1.useMemo)(() => {
+        if (!size) {
+            return null;
+        }
+        return { ...size, refresh: updateSize };
+    }, [size, updateSize]);
+};
+exports.useElementSize = useElementSize;

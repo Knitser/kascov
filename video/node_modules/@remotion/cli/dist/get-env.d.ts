@@ -1,0 +1,1 @@
+export declare const getEnvironmentVariables: (onUpdate: ((newProps: Record<string, string>) => void) | null, logLevel: "error" | "info" | "trace" | "verbose" | "warn", indent: boolean) => Record<string, string>;
