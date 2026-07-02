@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS covenant_utxos (
     created_daa INTEGER NOT NULL,
     spent_block BLOB,
     spent_txid BLOB,
+    spent_sig BLOB,
     PRIMARY KEY (txid, output_index)
 );
 CREATE INDEX IF NOT EXISTS utxo_by_covenant ON covenant_utxos(covenant_id);
@@ -94,6 +95,9 @@ pub struct UtxoRow {
     pub spk_script: Vec<u8>,
     pub created_daa: u64,
     pub live: bool,
+    pub spent_txid: Option<TxId>,
+    /// Unlocking script of the spend, when captured (spend-time decoding).
+    pub spent_sig: Option<Vec<u8>>,
 }
 
 /// Events produced while processing one accepting chain block, applied atomically.
@@ -102,7 +106,8 @@ pub struct BlockEvents {
     pub accepting_daa: u64,
     pub events: Vec<NewEvent>,
     pub created_utxos: Vec<NewUtxo>,
-    pub spent_utxos: Vec<(Outpoint, TxId)>,
+    /// (outpoint, spending txid, spending input's signature script)
+    pub spent_utxos: Vec<(Outpoint, TxId, Vec<u8>)>,
 }
 
 impl BlockEvents {
@@ -171,6 +176,9 @@ impl Store {
         // bursts instead of failing with SQLITE_BUSY.
         conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
+        // Additive migration for pre-existing databases (SQLite has no
+        // ADD COLUMN IF NOT EXISTS; a duplicate-column error means done).
+        let _ = conn.execute("ALTER TABLE covenant_utxos ADD COLUMN spent_sig BLOB", []);
 
         let store = Self { conn };
         match store.meta("network")? {
@@ -264,13 +272,14 @@ impl Store {
     /// and advance the cursor.
     pub fn apply(&mut self, block: &BlockEvents, new_cursor: BlockHash) -> Result<()> {
         let tx = self.conn.transaction().map_err(db_err)?;
-        for (outpoint, spending_txid) in &block.spent_utxos {
+        for (outpoint, spending_txid, sig) in &block.spent_utxos {
             tx.execute(
-                "UPDATE covenant_utxos SET spent_block = ?1, spent_txid = ?2
-                 WHERE txid = ?3 AND output_index = ?4",
+                "UPDATE covenant_utxos SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3
+                 WHERE txid = ?4 AND output_index = ?5",
                 params![
                     block.accepting_block.0.as_slice(),
                     spending_txid.0.as_slice(),
+                    sig,
                     outpoint.txid.0.as_slice(),
                     outpoint.index
                 ],
@@ -344,8 +353,11 @@ impl Store {
         let tx = self.conn.transaction().map_err(db_err)?;
         for hash in removed {
             let hash = hash.0.as_slice();
-            tx.execute("UPDATE covenant_utxos SET spent_block = NULL, spent_txid = NULL WHERE spent_block = ?1", [hash])
-                .map_err(db_err)?;
+            tx.execute(
+                "UPDATE covenant_utxos SET spent_block = NULL, spent_txid = NULL, spent_sig = NULL WHERE spent_block = ?1",
+                [hash],
+            )
+            .map_err(db_err)?;
             tx.execute("DELETE FROM covenant_utxos WHERE created_block = ?1", [hash]).map_err(db_err)?;
             tx.execute(
                 "UPDATE covenants SET event_count = event_count -
@@ -450,7 +462,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT txid, output_index, value, spk_version, spk_script, created_daa,
-                        spent_block IS NULL
+                        spent_block IS NULL, spent_txid, spent_sig
                  FROM covenant_utxos WHERE covenant_id = ?1 AND (?2 = 0 OR spent_block IS NULL)
                  ORDER BY created_daa",
             )
@@ -464,6 +476,8 @@ impl Store {
                     spk_script: row.get(4)?,
                     created_daa: row.get(5)?,
                     live: row.get(6)?,
+                    spent_txid: row.get::<_, Option<[u8; 32]>>(7)?.map(TxId),
+                    spent_sig: row.get(8)?,
                 })
             })
             .map_err(db_err)?

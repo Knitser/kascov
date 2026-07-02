@@ -2097,6 +2097,7 @@ dependencies = [
 name = "kascov-decode"
 version = "0.1.0"
 dependencies = [
+ "blake2b_simd",
  "hex",
  "serde",
 ]

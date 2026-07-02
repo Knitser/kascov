@@ -116,6 +116,10 @@ pub struct Output {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Input {
     pub previous_outpoint: Outpoint,
+    /// The unlocking script — for P2SH spends its final push reveals the
+    /// actual program a covenant ran (spend-time decoding).
+    #[serde(with = "serde_bytes_hex", default)]
+    pub signature_script: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

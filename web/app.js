@@ -840,12 +840,22 @@ function nerdPanel(entry, network) {
       u.live ? '<span class="flag flag-yes">live</span>' : '<span class="flag flag-off">spent</span>',
       u.uses_covenant_ops ? '<span class="flag flag-ops">covenant ops</span>' : '',
       u.uses_zk_ops ? '<span class="flag flag-ops">zk ops</span>' : '',
+      u.revealed_uses_covenant_ops ? '<span class="flag flag-ops">ran covenant ops</span>' : '',
+      u.revealed_uses_zk_ops ? '<span class="flag flag-ops">ran zk ops</span>' : '',
     ].filter(Boolean).join(' ');
+    const reveal = u.revealed_asm
+      ? `<p class="reveal-label">revealed at spend — the program this state actually ran` +
+        (u.spent_txid ? ` <a href="${esc(txUrl(network, u.spent_txid))}" target="_blank" rel="noopener noreferrer">(tx ↗)</a>` : '') +
+        `:</p>` +
+        `<pre class="script script-reveal">${esc(u.revealed_asm.join('\n'))}</pre>` +
+        (u.revealed_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.revealed_hex)}">open revealed program in decoder →</a>` : '')
+      : '';
     return `<div class="utxo">` +
       `<div class="utxo-head"><span class="mono break">${esc(u.outpoint)}</span><span class="utxo-flags">${badges}</span></div>` +
       `<div class="utxo-meta"><span>${esc(fmtAmount(u.value, network))}</span><span class="dim">created at DAA ${esc(fmtInt(u.created_daa))}</span></div>` +
       `<pre class="script">${esc((u.script_asm || []).join('\n'))}</pre>` +
       (u.script_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.script_hex)}">open in decoder →</a>` : '') +
+      reveal +
       `</div>`;
   }).join('');
   return `<dl class="nerd-rows">${rows.map(([k, v]) => `<div class="nerd-row"><dt>${esc(k)}</dt><dd>${v}</dd></div>`).join('')}</dl>` +

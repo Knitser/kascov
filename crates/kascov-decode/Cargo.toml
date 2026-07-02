@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 hex = { workspace = true }
 serde = { workspace = true }
+blake2b_simd = { workspace = true }

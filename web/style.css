@@ -1215,6 +1215,9 @@ a.btn:hover { text-decoration: none; }
 
 .decode-open { font-size: 0.8rem; display: inline-block; margin-top: 0.4rem; }
 
+.reveal-label { margin: 0.7rem 0 0.35rem; font-size: 0.8rem; color: var(--burn); }
+.script-reveal { border-color: rgba(242, 165, 102, 0.35); }
+
 /* dev page */
 .dev-section { margin-bottom: 2.6rem; }
 .dev-section h2 { margin-top: 0; }

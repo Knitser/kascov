@@ -157,6 +157,7 @@ fn map_tx(tx: RpcTransaction) -> Transaction {
                     txid: TxId(input.previous_outpoint.transaction_id.as_bytes()),
                     index: input.previous_outpoint.index,
                 },
+                signature_script: input.signature_script,
             })
             .collect(),
         outputs: tx

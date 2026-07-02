@@ -28,6 +28,7 @@ secp256k1 = { version = "0.29", features = ["global-context", "rand-std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["compression-gzip", "compression-br"] }
+blake2b_simd = "1"
 clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

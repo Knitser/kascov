@@ -7,7 +7,7 @@ use comfy_table::{presets::UTF8_FULL_CONDENSED, Table};
 use kascov_core::detect::{covenant_sightings, CovenantSighting};
 use kascov_core::node::NodeHandle;
 use kascov_core::store::Store;
-use kascov_core::{BlockHash, CovenantId, Network};
+use kascov_core::{BlockHash, CovenantId, Network, TxId};
 
 #[derive(Parser)]
 #[command(name = "kascov", version, about = "Kaspa covenant explorer (Toccata / KIP-20)")]
@@ -206,7 +206,7 @@ fn build_snapshot(store: &Store, network: kascov_core::Network, max_events: u64)
             .into_iter()
             .map(|utxo| {
                 let decoded = registry.decode(utxo.spk_version, &utxo.spk_script);
-                serde_json::json!({
+                let mut json = serde_json::json!({
                     "outpoint": utxo.outpoint.to_string(),
                     "value": utxo.value,
                     "created_daa": utxo.created_daa,
@@ -215,7 +215,27 @@ fn build_snapshot(store: &Store, network: kascov_core::Network, max_events: u64)
                     "script_asm": decoded.instructions.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
                     "uses_covenant_ops": decoded.uses_covenant_ops,
                     "uses_zk_ops": decoded.uses_zk_ops,
-                })
+                });
+                if let Some(spent_txid) = utxo.spent_txid {
+                    json["spent_txid"] = serde_json::json!(spent_txid);
+                }
+                // Spend-time decoding: a P2SH spend reveals the program that ran.
+                if let Some(sig) = &utxo.spent_sig {
+                    if let Some(redeem) = kascov_decode::p2sh_reveal(&utxo.spk_script, sig) {
+                        let d = registry.decode(utxo.spk_version, &redeem);
+                        json["revealed_hex"] = serde_json::json!(hex::encode(&redeem));
+                        json["revealed_asm"] = serde_json::json!(
+                            d.instructions.iter().map(|i| i.to_string()).collect::<Vec<_>>()
+                        );
+                        json["revealed_uses_covenant_ops"] = serde_json::json!(d.uses_covenant_ops);
+                        json["revealed_uses_zk_ops"] = serde_json::json!(d.uses_zk_ops);
+                    } else if sig.len() <= 520 {
+                        json["sig_hex"] = serde_json::json!(hex::encode(sig));
+                    } else {
+                        json["sig_len"] = serde_json::json!(sig.len());
+                    }
+                }
+                json
             })
             .collect();
         exported.push(serde_json::json!({
@@ -416,6 +436,15 @@ fn show(cli: &Cli, covenant_id: CovenantId, decode: bool) -> Result<()> {
                     if decoded.uses_zk_ops { "zk-ops" } else { "" },
                 );
             }
+            if let Some(sig) = &utxo.spent_sig {
+                if let Some(redeem) = kascov_decode::p2sh_reveal(&utxo.spk_script, sig) {
+                    println!("    revealed at spend (tx {}):", utxo.spent_txid.map(|t| t.to_string()).unwrap_or_default());
+                    let d = registry.decode(utxo.spk_version, &redeem);
+                    for instruction in &d.instructions {
+                        println!("      {:>4}  {}", format!("{:04x}", instruction.offset), instruction);
+                    }
+                }
+            }
         } else {
             println!("  script  {}", hex::encode(&utxo.spk_script));
         }
@@ -439,6 +468,23 @@ fn trace(cli: &Cli, covenant_id: CovenantId) -> Result<()> {
     if truncated {
         println!("[history truncated — covenant first seen mid-life]");
     }
+
+    // Spend-time reveals, keyed by the spending tx: the data pushes of the
+    // revealed P2SH program are the covenant's state payload.
+    let mut reveal_by_tx: std::collections::HashMap<TxId, Vec<Vec<u8>>> = Default::default();
+    for utxo in store.utxos(&covenant_id, false)? {
+        let (Some(spent_txid), Some(sig)) = (utxo.spent_txid, &utxo.spent_sig) else { continue };
+        let Some(redeem) = kascov_decode::p2sh_reveal(&utxo.spk_script, sig) else { continue };
+        let (instructions, _) = kascov_decode::disasm::disassemble(&redeem);
+        let pushes: Vec<Vec<u8>> = instructions.into_iter().filter_map(|i| i.data).collect();
+        reveal_by_tx.entry(spent_txid).or_insert(pushes);
+    }
+
+    let fmt_push = |bytes: &[u8]| {
+        let hex = hex::encode(bytes);
+        if hex.len() > 40 { format!("{}…{} ({}B)", &hex[..16], &hex[hex.len() - 8..], bytes.len()) } else { hex }
+    };
+    let mut prev_payload: Option<Vec<Vec<u8>>> = None;
     for event in &events {
         println!(
             "#{:03} {:<10} tx {}  @ DAA {}  (chain block {})",
@@ -448,6 +494,26 @@ fn trace(cli: &Cli, covenant_id: CovenantId) -> Result<()> {
             event.accepting_daa,
             abbrev(&event.accepting_block.to_string()),
         );
+        if let Some(payload) = reveal_by_tx.get(&event.txid) {
+            match &prev_payload {
+                Some(prev) if prev.len() == payload.len() => {
+                    for (i, (a, b)) in prev.iter().zip(payload).enumerate() {
+                        if a != b {
+                            println!("      payload[{i}] Δ {} → {}", fmt_push(a), fmt_push(b));
+                        }
+                    }
+                    if prev == payload {
+                        println!("      payload unchanged ({} pushes)", payload.len());
+                    }
+                }
+                _ => {
+                    for (i, p) in payload.iter().enumerate() {
+                        println!("      payload[{i}] = {}", fmt_push(p));
+                    }
+                }
+            }
+            prev_payload = Some(payload.clone());
+        }
     }
     Ok(())
 }

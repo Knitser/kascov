@@ -24,7 +24,13 @@ fn covenant_tx(txid: TxId, spends: Vec<Outpoint>, covenant: Option<CovenantId>) 
     Transaction {
         txid,
         version: 1,
-        inputs: spends.into_iter().map(|previous_outpoint| Input { previous_outpoint }).collect(),
+        inputs: spends
+            .into_iter()
+            .map(|previous_outpoint| Input {
+                previous_outpoint,
+                signature_script: vec![0x01, 0x99], // a one-push unlocking script
+            })
+            .collect(),
         outputs: match covenant {
             Some(covenant_id) => vec![Output {
                 value: 100_000_000,
@@ -141,6 +147,15 @@ async fn genesis_transitions_burn_and_reorg() {
     assert_eq!(summary.event_count, 3);
     assert_eq!(summary.live_utxos, 0, "covenant should be burned");
 
+    // The burn's unlocking script was captured for spend-time decoding.
+    let spent = store
+        .utxos(&cov(0xC1), false)
+        .unwrap()
+        .into_iter()
+        .find(|u| u.spent_txid == Some(tx_id(0xD0)))
+        .expect("burned state UTXO recorded");
+    assert_eq!(spent.spent_sig.as_deref(), Some([0x01, 0x99].as_slice()));
+
     // Pass 3: chain block 3 is reorged out, replaced by an empty block 4.
     chain.block(h(4), 301, vec![]);
     chain.steps.lock().unwrap().push(ChainStep {
@@ -152,6 +167,13 @@ async fn genesis_transitions_burn_and_reorg() {
     let summary = store.summary(&cov(0xC1)).unwrap().unwrap();
     assert_eq!(summary.event_count, 2, "burn event must be rolled back");
     assert_eq!(summary.live_utxos, 1, "state UTXO must be live again after rollback");
+    let unspent = store
+        .utxos(&cov(0xC1), false)
+        .unwrap()
+        .into_iter()
+        .find(|u| u.outpoint.txid == tx_id(0xB0))
+        .expect("transition UTXO present");
+    assert_eq!(unspent.spent_sig, None, "rollback must clear the captured sig");
 
     // Pass 4: the burn is re-accepted in chain block 5 — index converges.
     chain.block(h(5), 302, vec![burn_tx]);

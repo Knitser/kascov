@@ -191,7 +191,13 @@ fn classify<'a>(
             };
             if let Some(id) = id {
                 touched.entry(id).or_default().0 += 1;
-                block_events.spent_utxos.push((input.previous_outpoint, tx.txid));
+                // The signature script is the spend-time reveal: for P2SH
+                // states its final push is the program the covenant ran.
+                block_events.spent_utxos.push((
+                    input.previous_outpoint,
+                    tx.txid,
+                    input.signature_script.clone(),
+                ));
             }
         }
         for (index, output) in tx.outputs.iter().enumerate() {
