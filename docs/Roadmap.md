@@ -18,8 +18,19 @@ Rough priority order, July 2026. Updated July 2 after the realtime/explorer wave
 ## Mid
 
 - **Per-covenant API + SSE** — `/covenants/:id` JSON and an `/events` push stream on the worker; the web app's poller can then switch to push.
-- **SilverScript template decoders** — recognize compiled contracts from `silverscript-lang/tests/examples/` (Mecenas, escrow, last-will) and name their state fields in the [[Decoding]] registry — surfaced on coin detail pages.
-- **Snapshot sharding** — the TN10 full snapshot passed ~5 MB during the July 2 storm (2,900+ covenants); shard per-covenant or paginate before it hurts first paint.
+- ~~**SilverScript template decoders**~~ — **shipped July 2 (late)**: data-driven `TemplateDecoder` (invariant-body suffix match, labeled constructor pushes), `Template::derive_body` for extraction, p2pk/p2sh recognizers live; Mecenas/Escrow/LastWill entries wired, bodies pending one compile run of silverscript-lang ([[Decoding#SilverScript templates]]).
+- **Snapshot sharding** — the TN10 full snapshot passed ~10 MB during the July 2 storm (6,000+ covenants); shard per-covenant or paginate before it hurts first paint. Brotli (shipped) buys time.
+
+## Toccata coverage gaps (audit July 2, vs docs.kaspa.org/toccata)
+
+What kascov covers: covenant ids/lineage (consensus-validated genesis), P2SH reveals, introspection/covenant/zk op visibility, template recognition. What Toccata offers that kascov doesn't surface yet, in suggested order:
+
+1. **Transaction payloads** — v1 txs carry payloads (`OpTxPayload*` introspection exists); capture payload bytes of covenant-touching txs at sync (same touchpoint as sig capture) and show them on the timeline. Covenant apps will stash state/messages there.
+2. **Committed compute budgets** — v1 inputs carry compute-budget commitments; capture per covenant spend and display ("this transition budgeted N units"). Same sync touchpoint.
+3. **ZK precompile labeling** — when `OpZkPrecompile` covenants appear, decode which system (Groth16 vs RISC Zero) from the invocation shape; a decoder heuristic, cheap.
+4. **User lanes + gas commitments** — non-native subnetwork lanes with gas admission; kascov ignores `subnetwork_id`/`gas` entirely. A "lanes" activity view is the based-apps counterpart of the covenant explorer.
+5. **Seqcommit lanes (KIP-21)** — `OpChainblockSeqCommit` is flagged in scripts but lane commitments aren't indexed; pairs with vprogs-based apps maturing.
+6. **Auth/covenant group visualization** — multi-covenant transactions: which inputs authorize which outputs, as a small diagram on the coin page (data already indexed).
 
 ## Publishing
 
