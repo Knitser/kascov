@@ -1,12 +1,12 @@
 {
   "hosting": {
     "public": "web",
-    "ignore": ["firebase.json", "**/.*"],
+    "ignore": ["firebase.json", "**/.*", "**/data/**"],
     "cleanUrls": true,
-    "headers": [
+    "rewrites": [
       {
         "source": "/data/**",
-        "headers": [{ "key": "Cache-Control", "value": "public, max-age=300" }]
+        "run": { "serviceId": "kascov-worker", "region": "europe-west4" }
       }
     ]
   }
