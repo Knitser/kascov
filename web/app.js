@@ -783,6 +783,32 @@ async function render() {
   }
 }
 
+/* Live refresh: refetch the current network's snapshot periodically (only
+   while the tab is visible) and re-render in place when it actually changed.
+   The detail view is left alone mid-visit so open sections don't collapse;
+   its cache still updates for the next navigation. */
+const REFRESH_MS = 45_000;
+async function refreshSnapshot() {
+  if (document.visibilityState !== 'visible') return;
+  const network = state.network;
+  try {
+    const res = await fetch(`data/${network}.json`, { cache: 'no-cache' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const old = state.cache[network];
+    if (old && data.generated_at_ms === old.data.generated_at_ms) return;
+    data.__anchor = makeAnchor(data, network);
+    state.cache[network] = { data, index: buildIndex(data) };
+    if (network === state.network && parseRoute().view !== 'detail') render();
+  } catch (e) {
+    /* transient — the next tick retries */
+  }
+}
+setInterval(refreshSnapshot, REFRESH_MS);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refreshSnapshot();
+});
+
 /* ----------------------------------------------------------------- events */
 
 async function copyToClipboard(text) {
