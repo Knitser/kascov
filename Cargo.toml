@@ -6,7 +6,7 @@ members = ["crates/kascov-core", "crates/kascov-decode", "crates/kascov", "crate
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/exoticxp/kascov"
+repository = "https://github.com/Knitser/kascov"
 
 [workspace.dependencies]
 kascov-core = { path = "crates/kascov-core" }

@@ -1,5 +1,7 @@
 # kascov — Kaspa Covenant Explorer
 
+**Live dashboard: [kascov-explorer.web.app](https://kascov-explorer.web.app)**
+
 CLI + indexer for **covenants on Kaspa L1**, introduced by the [Toccata hardfork](https://docs.kaspa.org/toccata) (June 30, 2026).
 
 Toccata lets UTXOs carry application state: outputs can be bound to a **covenant ID** ([KIP-20](https://github.com/kaspanet/kips/blob/master/kip-0020.md)) that persists across state transitions, forming an on-chain lineage from a covenant's genesis to its current state UTXO. Nodes validate this — but expose no way to *query* it. There is no "get UTXOs by covenant ID" RPC, and block explorers don't decode covenant data yet.

@@ -16,7 +16,7 @@ Rough priority order, July 2026.
 
 ## Publishing
 
-- Repo has no remote yet ([[Architecture]] assumes `github.com/exoticxp/kascov`).
+- Repo: `github.com/Knitser/kascov` · dashboard: `kascov-explorer.web.app` (Firebase Hosting, static export via `kascov export`).
 - The pitch writes itself: *mainnet covenant traffic is still near zero — the complete history starts with whoever indexes from day one.* Ship the "first covenant explorer for Kaspa L1" post while that's still true.
 
 ## Operational notes

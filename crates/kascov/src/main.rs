@@ -183,14 +183,40 @@ fn open_store(cli: &Cli) -> Result<Store> {
 }
 
 async fn sync(cli: &Cli, from: Option<BlockHash>, follow: bool, watch: bool) -> Result<()> {
-    use kascov_core::sync::SyncUpdate;
-    let node = NodeHandle::connect(cli.network, cli.rpc.as_deref())
-        .await
-        .context("failed to connect to node")?;
     let mut store = open_store(cli)?;
+    loop {
+        let node = match NodeHandle::connect(cli.network, cli.rpc.as_deref()).await {
+            Ok(node) => node,
+            Err(err) if follow => {
+                eprintln!("connect failed ({err}), retrying in 10s…");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                continue;
+            }
+            Err(err) => return Err(err).context("failed to connect to node"),
+        };
+        match sync_session(cli, &node, &mut store, from, follow, watch).await {
+            Ok(()) => return Ok(()),
+            Err(err) if follow => {
+                eprintln!("sync interrupted ({err}), reconnecting in 5s…");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+async fn sync_session(
+    cli: &Cli,
+    node: &NodeHandle,
+    store: &mut kascov_core::store::Store,
+    from: Option<BlockHash>,
+    follow: bool,
+    watch: bool,
+) -> Result<()> {
+    use kascov_core::sync::SyncUpdate;
     let json = cli.json;
     loop {
-        let stats = kascov_core::sync::sync_once(&node, &mut store, from, |update| match update {
+        let stats = kascov_core::sync::sync_once(node, store, from, |update| match update {
             SyncUpdate::Progress(s) if !watch => {
                 eprintln!("… {} chain blocks, {} covenant events", s.chain_blocks, s.events);
             }
