@@ -934,6 +934,13 @@ function timelineItem(entry, ev, data, network, flashTx) {
     `</div></li>`;
 }
 
+const fieldRow = (f) =>
+  `<span class="tpl-field"><span class="dim">${esc(f.name)}</span> ` +
+  `<span class="mono" title="${esc(f.value)}">${esc(shortHex(f.value, 12, 8))}</span></span>`;
+const templateLine = (name, fields) => name
+  ? `<p class="tpl-line"><span class="flag flag-tpl">${esc(name)}</span>${(fields || []).map(fieldRow).join('')}</p>`
+  : '';
+
 function nerdPanel(entry, network) {
   const c = entry.c;
   const rows = [
@@ -947,12 +954,6 @@ function nerdPanel(entry, network) {
     ['events indexed', `<span class="mono">${esc(fmtInt(c.event_count))}</span>${c.events_truncated ? ' <span class="flag flag-no">truncated</span>' : ''}`],
     ['live UTXOs', `<span class="mono">${esc(fmtInt(c.live_utxos))}</span> holding <span class="mono">${esc(fmtAmount(c.live_value, network))}</span>`],
   ];
-  const fieldRow = (f) =>
-    `<span class="tpl-field"><span class="dim">${esc(f.name)}</span> ` +
-    `<span class="mono" title="${esc(f.value)}">${esc(shortHex(f.value, 12, 8))}</span></span>`;
-  const templateLine = (name, fields) => name
-    ? `<p class="tpl-line"><span class="flag flag-tpl">${esc(name)}</span>${(fields || []).map(fieldRow).join('')}</p>`
-    : '';
   const utxos = (c.utxos || []).map((u) => {
     const badges = [
       u.live ? '<span class="flag flag-yes">live</span>' : '<span class="flag flag-off">spent</span>',
@@ -1092,6 +1093,9 @@ function runDecode(updateHash) {
   }
   const { instructions, truncated } = window.kascovDisasm.disassemble(bytes);
   const groups = [...new Set(instructions.map((i) => i.group))];
+  const tpl = !truncated && window.kascovDisasm.matchTemplates
+    ? window.kascovDisasm.matchTemplates(instructions, bytes)
+    : null;
   const summary =
     `<p class="decode-summary">` +
     `<span>${fmtInt(bytes.length)} byte${bytes.length === 1 ? '' : 's'} · ` +
@@ -1100,7 +1104,8 @@ function runDecode(updateHash) {
     (groups.includes('covenant') ? '<span class="flag flag-ops">covenant ops</span>' : '') +
     (groups.includes('zk') ? '<span class="flag flag-ops">zk ops</span>' : '') +
     (truncated ? '<span class="flag flag-no">truncated / malformed tail</span>' : '') +
-    `</p>`;
+    `</p>` +
+    (tpl ? templateLine(tpl.name, tpl.fields) : '');
   const rows = instructions.map((inst) => {
     const dataBit = inst.data && inst.data.length
       ? ` <span class="inst-data">0x${window.kascovDisasm.toHex(inst.data)}</span>` : '';

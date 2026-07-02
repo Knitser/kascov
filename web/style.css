@@ -236,16 +236,10 @@ h2 {
 
 /* --------------------------------------------------------------- guide */
 
-.guide {
-  margin: 1.8rem 0 2.6rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-soft);
-  padding: 1rem 1.2rem 1.1rem;
-}
+.guide { margin: 1.8rem 0 2.6rem; }
 
 .guide-title {
-  margin: 0 0 0.7rem;
+  margin: 0 0 0.85rem;
   font-size: 0.78rem;
   letter-spacing: 0.09em;
   color: var(--faint);
@@ -257,38 +251,64 @@ h2 {
   padding: 0;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 1rem;
+  gap: 1.4rem;
 }
 
 .guide-step {
   display: flex;
-  gap: 0.7rem;
+  gap: 0.9rem;
   align-items: flex-start;
   position: relative;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  padding: 1.05rem 1.15rem;
+  transition: transform 0.14s ease, border-color 0.14s ease;
 }
+.guide-step:nth-child(1) {
+  border-color: rgba(111, 217, 164, 0.24);
+  background: linear-gradient(180deg, rgba(111, 217, 164, 0.07), var(--card) 65%);
+}
+.guide-step:nth-child(2) {
+  border-color: rgba(152, 168, 255, 0.24);
+  background: linear-gradient(180deg, rgba(152, 168, 255, 0.07), var(--card) 65%);
+}
+.guide-step:nth-child(3) {
+  border-color: rgba(242, 165, 102, 0.24);
+  background: linear-gradient(180deg, rgba(242, 165, 102, 0.07), var(--card) 65%);
+}
+.guide-step:hover { transform: translateY(-2px); }
+.guide-step:nth-child(1):hover { border-color: rgba(111, 217, 164, 0.55); }
+.guide-step:nth-child(2):hover { border-color: rgba(152, 168, 255, 0.55); }
+.guide-step:nth-child(3):hover { border-color: rgba(242, 165, 102, 0.55); }
 
 .guide-step:not(:last-child)::after {
   content: "\2192";
   position: absolute;
-  right: -0.85rem;
-  top: 0.45rem;
+  right: -1.18rem;
+  top: 50%;
+  transform: translateY(-50%);
   color: var(--faint);
+  font-size: 1.05rem;
 }
 
 .guide-icon {
   flex: none;
-  width: 38px;
-  height: 38px;
-  border-radius: 11px;
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
   display: grid;
   place-items: center;
 }
+.guide-icon svg { width: 24px; height: 24px; }
 .guide-step:nth-child(1) .guide-icon { background: var(--born-soft); color: var(--born); }
 .guide-step:nth-child(2) .guide-icon { background: var(--move-soft); color: var(--move); }
 .guide-step:nth-child(3) .guide-icon { background: var(--burn-soft); color: var(--burn); }
 
-.guide-step strong { display: block; font-size: 0.95rem; }
-.guide-step span:not(.guide-icon) { color: var(--muted); font-size: 0.84rem; line-height: 1.4; display: block; }
+.guide-step strong { display: block; font-size: 1.02rem; margin-bottom: 2px; }
+.guide-step:nth-child(1) strong { color: var(--born); }
+.guide-step:nth-child(2) strong { color: var(--move); }
+.guide-step:nth-child(3) strong { color: var(--burn); }
+.guide-step span:not(.guide-icon) { color: var(--muted); font-size: 0.86rem; line-height: 1.45; display: block; }
 
 /* ------------------------------------------------------------- explorer */
 

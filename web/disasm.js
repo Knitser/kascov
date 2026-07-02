@@ -212,6 +212,135 @@ function parseHex(text) {
   return out;
 }
 
-window.kascovDisasm = { disassemble, opcodeInfo, parseHex, toAsm, toHex };
+
+/* SilverScript example contracts (kaspanet/silverscript), each compiled
+   twice with sentinel constructor args — skeletons derive at load. Kept
+   byte-identical to kascov-decode's embedded dumps. */
+const SS_DUMPS = [
+  {
+    name: 'SilverScript · Mecenas',
+    a: '6b6c76009c637502e803b100c3201111111111111111111111111111111111111111111111111111111111111111030000207c7e01ac7e876902e803b9be760400e1f50594527994760400e1f505547993a16300c252795479949c696700c20400e1f5059c6951c3b9bf876951c2789c6968007a75007a75007a75516776519c637578aa2033333333333333333333333333333333333333333333333333333333333333338769765279ac69757551677500696868',
+    b: '6b6c76009c637502d007b100c3202222222222222222222222222222222222222222222222222222222222222222030000207c7e01ac7e876902e803b9be760480b2e60e94527994760480b2e60e547993a16300c252795479949c696700c20480b2e60e9c6951c3b9bf876951c2789c6968007a75007a75007a75516776519c637578aa2044444444444444444444444444444444444444444444444444444444444444448769765279ac69757551677500696868',
+    sentinels: [
+      ['recipient', '11'.repeat(32)],
+      ['funder_hash', '33'.repeat(32)],
+      ['pledge', '00e1f505'],
+      ['period', 'e803'],
+    ],
+  },
+  {
+    name: 'SilverScript · Escrow',
+    a: '78aa2033333333333333333333333333333333333333333333333333333333333333338769765279ac6900c2b9be02e803949c6900c3201111111111111111111111111111111111111111111111111111111111111111030000207c7e01ac7e8700c3202222222222222222222222222222222222222222222222222222222222222222030000207c7e01ac7e879b69757551',
+    b: '78aa2044444444444444444444444444444444444444444444444444444444444444448769765279ac6900c2b9be02e803949c6900c3202222222222222222222222222222222222222222222222222222222222222222030000207c7e01ac7e8700c3201111111111111111111111111111111111111111111111111111111111111111030000207c7e01ac7e879b69757551',
+    sentinels: [
+      ['arbiter_hash', '33'.repeat(32)],
+      ['buyer', '11'.repeat(32)],
+      ['seller', '22'.repeat(32)],
+    ],
+  },
+  {
+    name: 'SilverScript · LastWill',
+    a: '6b6c76009c637502b400b178aa2033333333333333333333333333333333333333333333333333333333333333338769765279ac697575516776519c637578aa2044444444444444444444444444444444444444444444444444444444444444448769765279ac697575516776529c637578aa2011111111111111111111111111111111111111111111111111111111111111118769765279ac6900c2b9be02e803949c6900c3b9bf876975755167750069686868',
+    b: '6b6c76009c637502b400b178aa2044444444444444444444444444444444444444444444444444444444444444448769765279ac697575516776519c637578aa2033333333333333333333333333333333333333333333333333333333333333338769765279ac697575516776529c637578aa2022222222222222222222222222222222222222222222222222222222222222228769765279ac6900c2b9be02e803949c6900c3b9bf876975755167750069686868',
+    sentinels: [
+      ['inheritor_hash', '33'.repeat(32)],
+      ['cold_hash', '44'.repeat(32)],
+      ['hot_hash', '11'.repeat(32)],
+    ],
+  },
+];
+
+/* ---- skeleton template matching (port of kascov-decode's Skeleton) ---- */
+
+function pushValue(inst) {
+  if (inst.data && inst.data.length >= 0) return Array.from(inst.data);
+  if (inst.opcode === 0x00) return [];
+  if (inst.opcode === 0x4f) return [0x81];
+  if (inst.opcode >= 0x51 && inst.opcode <= 0x60) return [inst.opcode - 0x50];
+  return null;
+}
+
+const sameBytes = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+function deriveSkeleton(name, aHex, bHex, sentinels) {
+  const ia = disassemble(parseHex(aHex));
+  const ib = disassemble(parseHex(bHex));
+  if (ia.truncated || ib.truncated) return null;
+  const A = ia.instructions, B = ib.instructions;
+  if (A.length !== B.length) return null;
+  const items = [];
+  for (let i = 0; i < A.length; i++) {
+    const x = A[i], y = B[i];
+    const px = x.group === 'push', py = y.group === 'push';
+    if (!px && !py) {
+      if (x.opcode !== y.opcode) return null;
+      items.push({ op: x.opcode });
+    } else if (px && py) {
+      const vx = pushValue(x), vy = pushValue(y);
+      if (!vx || !vy) return null;
+      if (sameBytes(vx, vy)) items.push({ const: vx });
+      else {
+        const hit = sentinels.find(([, s]) => sameBytes(vx, Array.from(parseHex(s) || [])));
+        if (!hit) return null;
+        items.push({ slot: hit[0] });
+      }
+    } else return null;
+  }
+  return { name, items, order: sentinels.map(([l]) => l) };
+}
+
+let SS_SKELETONS = null;
+function skeletons() {
+  if (!SS_SKELETONS) {
+    SS_SKELETONS = SS_DUMPS
+      .map((d) => deriveSkeleton(d.name, d.a, d.b, d.sentinels))
+      .filter(Boolean);
+  }
+  return SS_SKELETONS;
+}
+
+/* Name a disassembled script if it matches a known contract or state shape;
+   returns { name, fields: [{name, value(hex)}] } or null. */
+function matchTemplates(instructions, bytes) {
+  /* the ubiquitous state shapes first */
+  if (bytes && (bytes.length === 34 || bytes.length === 35) &&
+      bytes[0] === bytes.length - 2 && bytes[bytes.length - 1] === 0xac) {
+    return { name: 'p2pk state', fields: [{ name: 'owner_pubkey', value: toHex(bytes.slice(1, -1)) }] };
+  }
+  if (bytes && bytes.length === 35 && bytes[0] === 0xaa && bytes[1] === 0x20 && bytes[34] === 0x87) {
+    return { name: 'p2sh commitment', fields: [{ name: 'program_hash', value: toHex(bytes.slice(2, 34)) }] };
+  }
+  for (const skel of skeletons()) {
+    if (instructions.length !== skel.items.length) continue;
+    const values = new Map();
+    let ok = true;
+    for (let i = 0; i < skel.items.length && ok; i++) {
+      const item = skel.items[i], inst = instructions[i];
+      if (item.op !== undefined) {
+        ok = inst.group !== 'push' && inst.opcode === item.op;
+      } else if (item.const) {
+        const v = pushValue(inst);
+        ok = !!v && sameBytes(v, item.const);
+      } else {
+        const v = pushValue(inst);
+        if (!v) { ok = false; break; }
+        const prev = values.get(item.slot);
+        if (prev && !sameBytes(prev, v)) { ok = false; break; }
+        values.set(item.slot, v);
+      }
+    }
+    if (ok) {
+      return {
+        name: skel.name,
+        fields: skel.order
+          .filter((l) => values.has(l))
+          .map((l) => ({ name: l, value: toHex(Uint8Array.from(values.get(l))) })),
+      };
+    }
+  }
+  return null;
+}
+
+window.kascovDisasm = { disassemble, opcodeInfo, parseHex, toAsm, toHex, matchTemplates };
 
 })();
