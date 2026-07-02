@@ -7,6 +7,10 @@
       {
         "source": "/data/**",
         "run": { "serviceId": "kascov-worker", "region": "europe-west4" }
+      },
+      {
+        "source": "**",
+        "destination": "/index.html"
       }
     ],
     "headers": [

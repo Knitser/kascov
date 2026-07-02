@@ -345,6 +345,113 @@ async function loadNetwork(network) {
   return entry;
 }
 
+/* The tiny live feed, for instant first paint while the full snapshot
+   (multi-MB on a busy testnet) is still downloading. */
+async function loadLite(network) {
+  const ls = state.live[network] || (state.live[network] = { supported: null, missedAt: 0, data: null });
+  if (ls.data) return ls.data;
+  try {
+    const res = await fetch(`data/${network}-live.json`, { cache: 'no-cache' });
+    if (!res.ok) {
+      if (res.status === 404) {
+        ls.supported = false;
+        ls.missedAt = Date.now();
+      }
+      return null;
+    }
+    ls.data = await res.json();
+    ls.supported = true;
+    return ls.data;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* DAA → ms against the live feed's own tip anchor. */
+function liteMs(live, daa) {
+  const aDaa = live.tip_daa != null ? live.tip_daa : live.stats.last_activity_daa;
+  const aMs = live.tip_at_ms != null ? live.tip_at_ms : live.generated_at_ms;
+  return aMs - (aDaa - daa) * MS_PER_DAA;
+}
+
+function liteStoryRow(ev, live, network) {
+  const name = friendlyName(ev.covenant_id);
+  const meta = KIND_META[ev.kind] || KIND_META.transition;
+  const ms = liteMs(live, ev.accepting_daa);
+  const sentence =
+    ev.kind === 'genesis' ? `<strong>${esc(name)}</strong> was born`
+    : ev.kind === 'burn' ? `<strong>${esc(name)}</strong> retired`
+    : `<strong>${esc(name)}</strong> moved`;
+  return `<li><a class="story ${meta.cls}" href="#/${esc(network)}/c/${esc(ev.covenant_id)}">` +
+    avatarSvg(ev.covenant_id, 34) +
+    `<span class="story-text">${sentence} <span class="story-when" title="${esc(utcTitle(ms))}">— ${esc(relTime(ms))}</span></span>` +
+    `<span class="story-kind" aria-hidden="true">${ICONS[meta.icon]}</span>` +
+    `</a></li>`;
+}
+
+/* First-paint renderers: everything the live feed can show right away.
+   The sections that need the full snapshot (grid, pulse, records, watch)
+   show a lightweight loading note and fill in when it lands. */
+function renderLiteLanding(live, network) {
+  const net = NETWORKS[network];
+  document.title = 'kascov — watch Kaspa’s smart coins live their lives';
+  document.querySelectorAll('[data-net-word]').forEach((el) => { el.textContent = net.word; });
+  const s = live.stats;
+  $('#hero-stats').innerHTML = [
+    { n: s.covenants, label: 'smart coins tracked' },
+    { n: s.active, label: 'alive right now' },
+    { n: s.events, label: 'life events recorded' },
+  ].map((st) => `<div class="stat"><span class="stat-n">${esc(fmtInt(st.n))}</span><span class="stat-label">${esc(st.label)}</span></div>`).join('');
+  const bits = ['loading the full picture…'];
+  if (s.live_value > 0) bits.unshift(`together they hold ${fmtAmount(s.live_value, network)}`);
+  $('#freshness').innerHTML =
+    `<span class="live-badge-slot">${liveBadgeHtml(network)}</span> · ${bits.map(esc).join(' · ')}`;
+  const empty = s.covenants === 0;
+  $('#landing-empty').hidden = !empty;
+  $('#section-teaser').hidden = empty;
+  if (empty) {
+    $('#landing-empty').innerHTML = emptyCardHtml(network);
+    return;
+  }
+  $('#teaser-list').innerHTML = (live.recent_events || [])
+    .slice(0, TEASER_COUNT)
+    .map((ev) => liteStoryRow(ev, live, network))
+    .join('');
+}
+
+function renderLiteExplore(live, network) {
+  const net = NETWORKS[network];
+  document.title = `kascov — exploring ${net.label}`;
+  const s = live.stats;
+  const bits = [
+    `${fmtInt(s.covenants)} smart coin${s.covenants === 1 ? '' : 's'}`,
+    `${fmtInt(s.active)} alive`,
+    `${fmtInt(s.events)} event${s.events === 1 ? '' : 's'}`,
+    'loading the full picture…',
+  ];
+  $('#explore-stats').innerHTML =
+    `<span class="live-badge-slot">${liveBadgeHtml(network)}</span> · ${bits.map(esc).join(' · ')}`;
+  const empty = s.covenants === 0;
+  $('#empty-net').hidden = !empty;
+  $('#watch-strip').hidden = true;
+  $('#section-records').hidden = true;
+  $('#section-pulse').hidden = true;
+  $('#section-stories').hidden = empty;
+  $('#section-coins').hidden = empty;
+  if (empty) {
+    $('#empty-net').innerHTML = emptyCardHtml(network);
+    return;
+  }
+  $('#story-list').innerHTML = (live.recent_events || [])
+    .slice(0, STORY_COUNT)
+    .map((ev) => liteStoryRow(ev, live, network))
+    .join('');
+  $('#result-count').textContent = `${fmtInt(s.covenants)} smart coins`;
+  $('#coin-grid').innerHTML =
+    `<div class="no-results"><p class="dim">loading all ${esc(fmtInt(s.covenants))} smart coins…</p></div>`;
+  $('#grid-foot').innerHTML = '';
+}
+
 /* ------------------------------------------------------------- sentences */
 
 function eventSentence(entry, ev, network, withBalance) {
@@ -1131,21 +1238,48 @@ async function render() {
 
   let entry = state.cache[state.network];
   if (!entry) {
+    const network = state.network;
+    /* start the heavyweight snapshot immediately; re-render when it lands */
+    const fullPromise = loadNetwork(network)
+      .then((e) => {
+        if (state.network === network && !document.hidden) render();
+        return e;
+      })
+      .catch(() => null);
+
+    /* instant first paint from the tiny live feed (landing/explorer only —
+       a coin page needs the full snapshot) */
+    if (route.view !== 'detail') {
+      const live = (state.live[network] && state.live[network].data) || (await loadLite(network));
+      if (token !== renderToken) return;
+      if (live) {
+        panel.hidden = true;
+        for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
+        views.detail.innerHTML = '';
+        if (route.view === 'explore') renderLiteExplore(live, network);
+        else renderLiteLanding(live, network);
+        fadeIn(views[route.view]);
+        if (route.view !== lastView) {
+          window.scrollTo({ top: 0, behavior: 'instant' });
+          lastView = route.view;
+        }
+        return; /* the fullPromise re-render completes the page */
+      }
+    }
+
     panel.hidden = false;
     panel.className = 'panel';
     panel.innerHTML = `<p>pointing the camera at ${esc(NETWORKS[state.network].label)}…</p>`;
     for (const el of Object.values(views)) el.hidden = true;
-    try {
-      entry = await loadNetwork(state.network);
-    } catch (err) {
-      if (token !== renderToken) return;
+    entry = await fullPromise;
+    if (token !== renderToken) return;
+    if (!entry) {
       panel.hidden = false;
       panel.className = 'panel panel-error';
-      panel.innerHTML = `<p>Couldn’t load the ${esc(NETWORKS[state.network].label)} snapshot (${esc(err.message)}).</p>` +
+      panel.innerHTML = `<p>Couldn’t load the ${esc(NETWORKS[state.network].label)} snapshot.</p>` +
         `<button type="button" class="btn" data-action="retry">try again</button>`;
       return;
     }
-    if (token !== renderToken) return;
   }
 
   panel.hidden = true;
@@ -1372,11 +1506,19 @@ document.addEventListener('click', (e) => {
 });
 
 $('#search').addEventListener('input', (e) => {
+  const hadQuery = Boolean(state.query);
   /* forgive pasted outpoints ('txid:0') and spaced names ('proud olive stoat') */
   state.query = e.target.value.trim().toLowerCase()
     .replace(/:\d+$/, '')
     .replace(/\s+/g, '-');
   state.shown = PAGE_SIZE;
+  /* results live below the fold — bring them into view when a search starts */
+  if (state.query && !hadQuery) {
+    const coins = $('#section-coins');
+    if (coins && !coins.hidden && coins.getBoundingClientRect().top > window.innerHeight * 0.55) {
+      coins.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
   const entry = state.cache[state.network];
   if (!entry) return;
   /* a pasted 64-hex id resolves instantly — coin id or txid, straight to the coin */
@@ -1457,6 +1599,13 @@ window.addEventListener('hashchange', render);
 document.querySelectorAll('.guide-icon').forEach((el) => {
   el.innerHTML = ICONS[el.dataset.icon] || '';
 });
+
+/* pasted clean URLs (hosting rewrites everything to this page):
+   /explore, /decode?s=…, /testnet-10/c/<id> → the same hash routes */
+if (location.pathname !== '/' && location.pathname !== '/index.html' && !location.hash) {
+  const path = location.pathname.replace(/^\/+|\/+$/g, '');
+  history.replaceState(null, '', `/#/${path}${location.search}`);
+}
 
 render();
 pollLive();
