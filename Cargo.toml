@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = ["crates/kascov-core", "crates/kascov"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/exoticxp/kascov"
+
+[workspace.dependencies]
+kascov-core = { path = "crates/kascov-core" }
+
+# Kaspa crates are frozen pre-Toccata on crates.io — pin git deps to a single rev.
+# This rev must be wire-compatible with the node kascov connects to (borsh wRPC is
+# version-sensitive); bump it together with the node.
+kaspa-wrpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957" }
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957" }
+kaspa-notify = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957" }
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957" }
+kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+comfy-table = "7"
+hex = "0.4"
+futures = "0.3"
+
+[profile.release]
+lto = "thin"

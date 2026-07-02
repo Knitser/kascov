@@ -1,0 +1,21 @@
+[package]
+name = "kascov-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kaspa-wrpc-client = { workspace = true }
+kaspa-rpc-core = { workspace = true }
+kaspa-consensus-core = { workspace = true }
+kaspa-notify = { workspace = true }
+kaspa-addresses = { workspace = true }
+kaspa-hashes = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+futures = { workspace = true }
