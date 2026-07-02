@@ -100,6 +100,15 @@ h2 {
   padding-block: 0.7rem;
 }
 
+/* nav + network tabs are one right-hand group, so they stay put whether or
+   not the search box (center, explorer-only) is present */
+.header-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 1rem;
+  flex: none;
+}
+
 .wordmark {
   display: inline-flex;
   align-items: center;
@@ -1315,9 +1324,10 @@ a.btn:hover { text-decoration: none; }
 }
 
 @media (max-width: 720px) {
-  .site-nav { order: 2; gap: 0.7rem; }
-  .network-tabs { order: 1; margin-left: auto; }
   .wordmark { order: 0; }
+  /* nav + tabs stay grouped on the right; search drops to its own row (above) */
+  .header-right { order: 1; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; gap: 0.6rem; }
+  .site-nav { gap: 0.7rem; }
   .toolbar-right { margin-left: 0; flex-basis: 100%; }
   .toolbar-right .result-count { margin-left: auto; }
   .dev-dict > div { grid-template-columns: 1fr; gap: 0.15rem; }

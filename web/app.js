@@ -1293,10 +1293,13 @@ document.addEventListener('click', (e) => {
     if (!NETWORKS[net] || net === state.network) return;
     state.network = net;
     state.shown = PAGE_SIZE;
-    /* encode the network in the hash so the choice survives reloads
-       and shared links land on the right network */
+    /* encode the network in the hash so the choice survives reloads and
+       shared links land on the right network. A specific coin can't exist on
+       the other network, so switching from a detail page lands on that
+       network's explorer overview rather than a guaranteed "not found". */
     const route = parseRoute();
-    const target = routeHash(route.view, route.id);
+    const view = route.view === 'detail' ? 'explore' : route.view;
+    const target = routeHash(view, route.id);
     if (location.hash === target) render();
     else location.hash = target;
   } else if (action === 'filter') {
