@@ -954,7 +954,15 @@ function nerdPanel(entry, network) {
     ['events indexed', `<span class="mono">${esc(fmtInt(c.event_count))}</span>${c.events_truncated ? ' <span class="flag flag-no">truncated</span>' : ''}`],
     ['live UTXOs', `<span class="mono">${esc(fmtInt(c.live_utxos))}</span> holding <span class="mono">${esc(fmtAmount(c.live_value, network))}</span>`],
   ];
-  const utxos = (c.utxos || []).map((u) => {
+  const allUtxos = c.utxos || [];
+  const foldUtxos = allUtxos.length > UTXO_WINDOW + 4 && !state.utxoAll;
+  const shownUtxos = foldUtxos ? allUtxos.slice(0, UTXO_WINDOW) : allUtxos;
+  const utxoFoot = allUtxos.length > UTXO_WINDOW + 4
+    ? `<button type="button" class="btn btn-expand" data-action="utxo-all">` +
+      (foldUtxos ? `show all ${fmtInt(allUtxos.length)} UTXOs ↓` : 'collapse UTXOs ↑') +
+      `</button>`
+    : '';
+  const utxos = shownUtxos.map((u) => {
     const badges = [
       u.live ? '<span class="flag flag-yes">live</span>' : '<span class="flag flag-off">spent</span>',
       u.uses_covenant_ops ? '<span class="flag flag-ops">covenant ops</span>' : '',
@@ -994,15 +1002,25 @@ function nerdPanel(entry, network) {
       `</div>`;
   }).join('');
   return `<dl class="nerd-rows">${rows.map(([k, v]) => `<div class="nerd-row"><dt>${esc(k)}</dt><dd>${v}</dd></div>`).join('')}</dl>` +
-    `<h3 class="nerd-h">UTXOs (${(c.utxos || []).length})</h3>` +
-    (utxos || '<p class="dim">no UTXOs recorded.</p>');
+    `<h3 class="nerd-h">UTXOs (${allUtxos.length})</h3>` +
+    (utxos || '<p class="dim">no UTXOs recorded.</p>') +
+    utxoFoot;
 }
+
+/* long coins fold: show a window of events/UTXOs with expanders */
+const STORY_WINDOW = 8;
+const UTXO_WINDOW = 8;
 
 function renderDetail(entry, covId, flashTx) {
   const network = state.network;
   const { data, index } = entry;
   const view = $('#view-detail');
   const rec = index.byId.get(covId);
+  if (state.detailId !== covId) {
+    state.detailId = covId;
+    state.storyAll = false;
+    state.utxoAll = false;
+  }
 
   if (!rec) {
     document.title = 'smart coin not found — kascov';
@@ -1040,6 +1058,23 @@ function renderDetail(entry, covId, flashTx) {
     ? `<p class="dim trunc-note">part of this coin’s story is missing — it had more events than we keep per coin.</p>`
     : '';
 
+  /* long life stories fold to a window; a highlighted event beyond the
+     fold auto-expands so ?tx= deep links always land */
+  const events = c.events;
+  if (flashTx && !state.storyAll) {
+    const at = events.findIndex((ev) => ev.txid === flashTx);
+    if (at >= STORY_WINDOW - 1) state.storyAll = true;
+  }
+  const foldStory = events.length > STORY_WINDOW + 4 && !state.storyAll;
+  const shownEvents = foldStory ? events.slice(0, STORY_WINDOW) : events;
+  const storyFoot = events.length > STORY_WINDOW + 4
+    ? `<button type="button" class="btn btn-expand" data-action="story-all">` +
+      (foldStory
+        ? `show all ${fmtInt(events.length)} events ↓`
+        : 'collapse the story ↑') +
+      `</button>`
+    : '';
+
   view.innerHTML =
     `<a class="back" href="#/explore">← all smart coins</a>` +
     `<header class="detail-head">` +
@@ -1056,7 +1091,7 @@ function renderDetail(entry, covId, flashTx) {
     `</div></header>` +
     `<p class="detail-summary">${esc(summaryBits.join(' · '))}.</p>` +
     `<section aria-label="Life story"><h2>life story</h2>${truncNote}` +
-    `<ol class="timeline">${preface}${c.events.map((ev) => timelineItem(rec, ev, data, network, flashTx)).join('')}</ol></section>` +
+    `<ol class="timeline">${preface}${shownEvents.map((ev) => timelineItem(rec, ev, data, network, flashTx)).join('')}</ol>${storyFoot}</section>` +
     `<section class="nerd" aria-label="Technical details">` +
     `<button type="button" class="nerd-toggle" data-action="nerd" aria-expanded="${state.nerd}">` +
     `<span class="nerd-switch" aria-hidden="true"></span><span>nerd mode</span>` +
@@ -1075,22 +1110,60 @@ function renderDetail(entry, covId, flashTx) {
 
 /* ---------------------------------------------------------------- decoder */
 
-/* a KIP-20-style guard: input introspection asserting the covenant id —
-   the same script kascov's own test suite decodes */
-const DECODE_EXAMPLE = 'b9cf20' + '11'.repeat(32) + '8851';
+/* the example gallery: protocol shapes, the three compiled SilverScript
+   contracts (real silverc output), and the real mainnet ZK covenant's
+   revealed program */
+const DECODE_EXAMPLES = {
+  p2pk: '20' + 'a3'.repeat(32) + 'ac',
+  p2sh: 'aa20' + 'c5'.repeat(32) + '87',
+  guard: 'b9cf20' + '11'.repeat(32) + '8851',
+  zk: '08b1762f000000000075088b1e466a00000000756320901be291efb290173ae8c021842fad986e73b878bff72d3405821b7ed0136270d0519d00796001307f20dcbe0edd8a2b405aabdead896b04ae82cd9a881df095fee9805fd5584068a9b888007900587f51080100000000000010a569007958607fb9b9c976022901947c02210194bca2690108517900587f7e0275087e517958607f7e01757eb9b9c976022001947cbc7eb9cf76d0519dd2519daa01877e02aa207c7e0200007c7e00c38800c2b9be0340420f94a269a8200f3756c052ff1749fbbe0d4b28010a42c989e227130752e7188047498ba124aa207a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e01010121a6695167b9cf76d0519d76d2519d00d376c3b9bf88c2b9be0340420f94a2695168',
+};
+/* the SilverScript instances come from disasm.js's embedded compiler dumps */
+for (const d of (window.kascovDisasm.SS_DUMPS || [])) {
+  if (d.name.includes('Mecenas')) DECODE_EXAMPLES.mecenas = d.a;
+  else if (d.name.includes('Escrow')) DECODE_EXAMPLES.escrow = d.a;
+  else if (d.name.includes('LastWill')) DECODE_EXAMPLES.lastwill = d.a;
+}
+
+/* long-script ergonomics: window the output, collapse the input, download */
+const DECODE_WINDOW = 200;
+const DECODE_COLLAPSE_INPUT = 2000; /* hex chars */
+const DECODE_SHARE_MAX = 8192;
+let decodeShowAll = false;
+let lastDecodeKey = '';
 
 function runDecode(updateHash) {
   const raw = $('#decode-input').value;
   const out = $('#decode-out');
+  const dlBtn = $('#decode-download');
+  const inToggle = $('#decode-input-toggle');
   if (!raw.trim()) {
     out.innerHTML = '<p class="dim">paste a script above — the disassembly appears here.</p>';
+    if (dlBtn) dlBtn.hidden = true;
+    if (inToggle) inToggle.hidden = true;
     return;
   }
   const bytes = window.kascovDisasm.parseHex(raw);
   if (!bytes) {
     out.innerHTML = '<p class="decode-err">that doesn’t look like hex — expected an even number of 0-9a-f characters.</p>';
+    if (dlBtn) dlBtn.hidden = true;
     return;
   }
+  const cleanKey = raw.replace(/\s+/g, '');
+  if (cleanKey !== lastDecodeKey) {
+    lastDecodeKey = cleanKey;
+    decodeShowAll = false;
+    /* huge paste: fold the input away so the result is what you see */
+    const input = $('#decode-input');
+    const big = cleanKey.length > DECODE_COLLAPSE_INPUT;
+    if (inToggle) inToggle.hidden = !big;
+    if (input) {
+      input.classList.toggle('collapsed', big);
+      if (inToggle) inToggle.textContent = big ? 'expand input ▼' : 'collapse input ▲';
+    }
+  }
+  if (dlBtn) dlBtn.hidden = false;
   const { instructions, truncated } = window.kascovDisasm.disassemble(bytes);
   const groups = [...new Set(instructions.map((i) => i.group))];
   const tpl = !truncated && window.kascovDisasm.matchTemplates
@@ -1106,7 +1179,8 @@ function runDecode(updateHash) {
     (truncated ? '<span class="flag flag-no">truncated / malformed tail</span>' : '') +
     `</p>` +
     (tpl ? templateLine(tpl.name, tpl.fields) : '');
-  const rows = instructions.map((inst) => {
+  const shown = decodeShowAll ? instructions : instructions.slice(0, DECODE_WINDOW);
+  const rows = shown.map((inst) => {
     const dataBit = inst.data && inst.data.length
       ? ` <span class="inst-data">0x${window.kascovDisasm.toHex(inst.data)}</span>` : '';
     return `<div class="inst g-${inst.group}">` +
@@ -1115,12 +1189,39 @@ function runDecode(updateHash) {
       `<span class="inst-text"><span class="op-name">${esc(inst.name)}</span>${dataBit}</span>` +
       `</div>`;
   }).join('');
-  out.innerHTML = summary + `<div class="inst-list">${rows}</div>`;
-  if (updateHash) {
-    /* replaceState keeps the link shareable without re-triggering render */
-    const clean = raw.replace(/\s+/g, '');
-    history.replaceState(null, '', `#/decode?s=${encodeURIComponent(clean)}`);
+  const foot = instructions.length > DECODE_WINDOW
+    ? `<div class="decode-foot"><button type="button" class="btn" data-action="decode-all">` +
+      (decodeShowAll
+        ? 'collapse to first ' + fmtInt(DECODE_WINDOW) + ' ↑'
+        : `show all ${fmtInt(instructions.length)} instructions ↓`) +
+      `</button></div>`
+    : '';
+  out.innerHTML = summary + `<div class="inst-list">${rows}</div>` + foot;
+  if (updateHash && cleanKey.length <= DECODE_SHARE_MAX) {
+    /* replaceState keeps the link shareable without re-triggering render;
+       megabyte URLs help nobody, so huge scripts skip it */
+    history.replaceState(null, '', `#/decode?s=${encodeURIComponent(cleanKey)}`);
   }
+}
+
+function downloadDisassembly() {
+  const raw = $('#decode-input').value;
+  const bytes = window.kascovDisasm.parseHex(raw);
+  if (!bytes) return;
+  const { instructions, truncated } = window.kascovDisasm.disassemble(bytes);
+  const lines = instructions.map(
+    (i) => i.offset.toString(16).padStart(4, '0') + '  ' + window.kascovDisasm.toAsm(i)
+  );
+  if (truncated) lines.push('[truncated / malformed tail]');
+  const blob = new Blob(
+    [`# kascov disassembly · ${bytes.length} bytes · ${instructions.length} instructions\n` + lines.join('\n') + '\n'],
+    { type: 'text/plain' }
+  );
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'kascov-disassembly.txt';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
 function renderDecode(route) {
@@ -1482,9 +1583,39 @@ document.addEventListener('click', (e) => {
     }
   } else if (action === 'decode') {
     runDecode(true);
-  } else if (action === 'decode-example') {
-    $('#decode-input').value = DECODE_EXAMPLE;
-    runDecode(true);
+  } else if (action === 'decode-load') {
+    const hex = DECODE_EXAMPLES[el.dataset.example];
+    if (hex) {
+      $('#decode-input').value = hex;
+      runDecode(true);
+    }
+  } else if (action === 'decode-all') {
+    decodeShowAll = !decodeShowAll;
+    runDecode(false);
+  } else if (action === 'decode-download') {
+    downloadDisassembly();
+  } else if (action === 'decode-input-toggle') {
+    const input = $('#decode-input');
+    const collapsed = input.classList.toggle('collapsed');
+    el.textContent = collapsed ? 'expand input ▼' : 'collapse input ▲';
+  } else if (action === 'story-all') {
+    state.storyAll = !state.storyAll;
+    const entry = state.cache[state.network];
+    const route = parseRoute();
+    if (entry && route.view === 'detail') {
+      const y = window.scrollY;
+      renderDetail(entry, route.id);
+      window.scrollTo({ top: y, behavior: 'instant' });
+    }
+  } else if (action === 'utxo-all') {
+    state.utxoAll = !state.utxoAll;
+    const entry = state.cache[state.network];
+    const route = parseRoute();
+    if (entry && route.view === 'detail') {
+      const y = window.scrollY;
+      renderDetail(entry, route.id);
+      window.scrollTo({ top: y, behavior: 'instant' });
+    }
   } else if (action === 'decode-share') {
     runDecode(true);
     copyToClipboard(location.href).then((ok) => {

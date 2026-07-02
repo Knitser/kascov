@@ -1244,6 +1244,19 @@ a.btn:hover { text-decoration: none; }
 
 .decode-open { font-size: 0.8rem; display: inline-block; margin-top: 0.4rem; }
 
+#decode-input.collapsed { height: 88px; min-height: 88px; }
+.decode-foot { margin-top: 0.7rem; text-align: center; }
+.btn-expand { display: block; margin: 0.5rem auto 1.4rem; }
+.timeline + .btn-expand { margin-left: 56px; margin-right: auto; display: inline-block; }
+.example-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.8rem;
+}
+.example-label { font-size: 0.82rem; margin-right: 0.2rem; }
+
 .reveal-label { margin: 0.7rem 0 0.35rem; font-size: 0.8rem; color: var(--burn); }
 .script-reveal { border-color: rgba(242, 165, 102, 0.35); }
 .spend-note { margin: 0.5rem 0 0; font-size: 0.8rem; }

@@ -176,8 +176,19 @@
         <textarea id="decode-input" rows="4" spellcheck="false" autocomplete="off" placeholder="script hex — e.g. 20a39404…82faac · whitespace and 0x prefixes are fine"></textarea>
         <div class="decode-actions">
           <button type="button" class="btn btn-accent" data-action="decode">decode</button>
-          <button type="button" class="btn" data-action="decode-example">try a covenant example</button>
           <button type="button" class="btn" data-action="decode-share">copy share link</button>
+          <button type="button" class="btn" data-action="decode-download" id="decode-download" hidden>download .txt</button>
+          <button type="button" class="btn" data-action="decode-input-toggle" id="decode-input-toggle" hidden>collapse input ▲</button>
+        </div>
+        <div class="example-row" role="group" aria-label="Example scripts">
+          <span class="dim example-label">try an example:</span>
+          <button type="button" class="chip" data-action="decode-load" data-example="p2pk">p2pk state</button>
+          <button type="button" class="chip" data-action="decode-load" data-example="p2sh">p2sh commitment</button>
+          <button type="button" class="chip" data-action="decode-load" data-example="guard">covenant guard</button>
+          <button type="button" class="chip" data-action="decode-load" data-example="mecenas">SilverScript · Mecenas</button>
+          <button type="button" class="chip" data-action="decode-load" data-example="escrow">SilverScript · Escrow</button>
+          <button type="button" class="chip" data-action="decode-load" data-example="lastwill">SilverScript · LastWill</button>
+          <button type="button" class="chip" data-action="decode-load" data-example="zk">mainnet ZK covenant</button>
         </div>
       </div>
       <div id="decode-out" class="decode-out" aria-live="polite"></div>

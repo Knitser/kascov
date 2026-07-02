@@ -341,6 +341,6 @@ function matchTemplates(instructions, bytes) {
   return null;
 }
 
-window.kascovDisasm = { disassemble, opcodeInfo, parseHex, toAsm, toHex, matchTemplates };
+window.kascovDisasm = { disassemble, opcodeInfo, parseHex, toAsm, toHex, matchTemplates, SS_DUMPS };
 
 })();
