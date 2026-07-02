@@ -249,6 +249,13 @@ impl Store {
         Ok(daa.zip(at_ms))
     }
 
+    /// Point the cursor at a new chain block without touching indexed data —
+    /// recovery for testnet resets, where the stored cursor no longer exists
+    /// on the node and sync would otherwise wedge forever.
+    pub fn reset_cursor(&mut self, to: BlockHash) -> Result<()> {
+        self.apply(&BlockEvents::empty(to), to)
+    }
+
     /// Write a consistent copy of the database (safe while a writer is active).
     pub fn backup_to(&self, out: &Path) -> Result<()> {
         if out.exists() {

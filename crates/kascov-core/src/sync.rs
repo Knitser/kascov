@@ -122,6 +122,31 @@ pub async fn sync_once(
                 }
             }
         }
+        if bodies.len() < wanted.len() {
+            // One sequential retry for transient RPC failures, then fail the
+            // pass: advancing the cursor past unresolved bodies would drop
+            // covenant events silently and permanently.
+            for &hash in &accepting.mergeset {
+                if bodies.len() == wanted.len() {
+                    break;
+                }
+                if let Ok(block) = node.block_with_txs(hash).await {
+                    for tx in block.transactions {
+                        if wanted.contains(&tx.txid) {
+                            bodies.insert(tx.txid, tx);
+                        }
+                    }
+                }
+            }
+            if bodies.len() < wanted.len() {
+                return Err(crate::Error::Rpc(format!(
+                    "unresolved accepted tx bodies in chain block {} ({} of {}) — failing the pass to retry",
+                    accepted.accepting_block,
+                    bodies.len(),
+                    wanted.len()
+                )));
+            }
+        }
 
         let block_events = classify(
             store,

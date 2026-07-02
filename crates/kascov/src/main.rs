@@ -314,6 +314,9 @@ async fn sync(cli: &Cli, from: Option<BlockHash>, follow: bool, watch: bool) -> 
             Ok(()) => return Ok(()),
             Err(err) if follow => {
                 eprintln!("sync interrupted ({err}), reconnecting in 5s…");
+                if recover_wedged_cursor(&node, &mut store, cli.network).await {
+                    eprintln!("cursor restarted at the current sink (testnet reset recovery)");
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
             Err(err) => return Err(err),
@@ -411,7 +414,8 @@ fn show(cli: &Cli, covenant_id: CovenantId, decode: bool) -> Result<()> {
     let Some(summary) = store.summary(&covenant_id)? else {
         anyhow::bail!("covenant {covenant_id} not in index");
     };
-    let utxos = store.utxos(&covenant_id, true)?;
+    // --decode includes spent states: that's where the revealed programs live
+    let utxos = store.utxos(&covenant_id, !decode)?;
     let registry = kascov_decode::Registry::default();
     if cli.json {
         let decoded: Vec<_> = decode
@@ -435,7 +439,8 @@ fn show(cli: &Cli, covenant_id: CovenantId, decode: bool) -> Result<()> {
     }
     for utxo in &utxos {
         println!(
-            "State     {} — {:.8} KAS (spk v{}, {} bytes) @ DAA {}{}",
+            "{}     {} — {:.8} KAS (spk v{}, {} bytes) @ DAA {}{}",
+            if utxo.live { "State" } else { "Spent" },
             utxo.outpoint,
             utxo.value as f64 / 100_000_000.0,
             utxo.spk_version,
@@ -683,6 +688,23 @@ async fn serve(
     Ok(())
 }
 
+/// After repeated sync failures, check for the testnet-reset signature: the
+/// node answers fine but our stored cursor block no longer exists there.
+/// Recovery restarts the cursor at the current sink — indexed history stays,
+/// and the gap is real (the old chain is gone), not an artifact.
+async fn recover_wedged_cursor(node: &NodeHandle, store: &mut Store, network: Network) -> bool {
+    let Ok(Some(cursor)) = store.cursor() else { return false };
+    let Ok(dag) = node.dag_info().await else { return false };
+    if node.block_with_txs(cursor).await.is_ok() {
+        return false; // cursor exists — the failures are something else
+    }
+    tracing::error!(
+        "{network}: cursor {cursor} is unknown to a healthy node (testnet reset?) — restarting from sink {}",
+        dag.sink
+    );
+    store.reset_cursor(dag.sink).is_ok()
+}
+
 /// Follow a network's virtual chain forever, reconnecting on any failure.
 async fn follow_forever(network: Network, rpc: Option<String>, db: std::path::PathBuf) {
     use kascov_core::sync::SyncUpdate;
@@ -704,6 +726,7 @@ async fn follow_forever(network: Network, rpc: Option<String>, db: std::path::Pa
             }
         };
         tracing::info!("{network}: following the chain");
+        let mut consecutive_errors = 0u32;
         loop {
             let result = kascov_core::sync::sync_once(&node, &mut store, None, |update| {
                 if let SyncUpdate::Event { covenant_id, kind, .. } = update {
@@ -712,9 +735,19 @@ async fn follow_forever(network: Network, rpc: Option<String>, db: std::path::Pa
             })
             .await;
             match result {
-                Ok(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+                Ok(_) => {
+                    consecutive_errors = 0;
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
                 Err(err) => {
-                    tracing::warn!("{network}: sync interrupted ({err}), reconnecting in 5s");
+                    consecutive_errors += 1;
+                    tracing::warn!("{network}: sync interrupted ({err}), attempt {consecutive_errors}");
+                    if consecutive_errors >= 3
+                        && recover_wedged_cursor(&node, &mut store, network).await
+                    {
+                        consecutive_errors = 0;
+                        continue;
+                    }
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     break;
                 }

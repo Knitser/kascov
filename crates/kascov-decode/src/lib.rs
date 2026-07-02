@@ -105,56 +105,142 @@ impl StateDecoder for P2shCommitmentDecoder {
     }
 }
 
-/// A recognizable compiled-contract shape: leading data pushes (the
-/// constructor arguments, labeled) followed by an invariant body.
-pub struct Template {
-    pub name: &'static str,
-    /// Labels for the leading pushes, in on-script order.
-    pub params: &'static [&'static str],
-    pub body: Vec<u8>,
+/// One position in a compiled-contract skeleton. SilverScript inlines
+/// constructor arguments at their use sites (an argument can appear several
+/// times mid-script), so templates are matched on the disassembled
+/// instruction stream: fixed opcodes and constant pushes must be identical,
+/// argument slots accept any push and yield labeled fields.
+enum SkelItem {
+    /// A non-push instruction that must match exactly.
+    Op(u8),
+    /// A push whose bytes are part of the template itself.
+    ConstPush(Vec<u8>),
+    /// A push carrying a constructor argument.
+    Slot(&'static str),
 }
 
-impl Template {
-    /// Split two instances of the same compiled contract (built with
-    /// different constructor arguments) into their invariant body: the
-    /// longest common byte suffix that begins on an instruction boundary in
-    /// both and is preceded only by data pushes.
-    pub fn derive_body(a: &[u8], b: &[u8]) -> Option<Vec<u8>> {
-        let boundaries = |script: &[u8]| -> Option<Vec<usize>> {
-            let (ins, truncated) = disassemble(script);
-            if truncated {
-                return None;
-            }
-            Some(ins.iter().map(|i| i.offset).chain([script.len()]).collect())
-        };
-        let ba = boundaries(a)?;
-        let bb = boundaries(b)?;
-        // longest common suffix in bytes
-        let mut k = 0;
-        while k < a.len() && k < b.len() && a[a.len() - 1 - k] == b[b.len() - 1 - k] {
-            k += 1;
-        }
-        // largest instruction boundary in both that the suffix covers
-        let split_a = ba.iter().copied().find(|&off| a.len() - off <= k && bb.contains(&(b.len() - (a.len() - off))))?;
-        let body = a[split_a..].to_vec();
-        // the leading remainder must be pure pushes in both instances
-        let leading_ok = |script: &[u8], split: usize| {
-            let (ins, _) = disassemble(script);
-            ins.iter().take_while(|i| i.offset < split).all(|i| i.data.is_some() || i.opcode == 0x00 || (0x4f..=0x60).contains(&i.opcode))
-        };
-        (leading_ok(a, split_a) && leading_ok(b, b.len() - body.len()) && !body.is_empty()).then_some(body)
+pub struct Skeleton {
+    pub name: &'static str,
+    items: Vec<SkelItem>,
+    /// Field labels in constructor order (for display ordering).
+    param_order: Vec<&'static str>,
+}
+
+/// A push instruction's value, whether it's a data push or a small-int
+/// opcode (`OpFalse`/`Op1Negate`/`Op1..Op16`), in script-number encoding.
+fn push_value(inst: &Instruction) -> Option<Vec<u8>> {
+    if let Some(data) = &inst.data {
+        return Some(data.clone());
+    }
+    match inst.opcode {
+        0x00 => Some(vec![]),
+        0x4f => Some(vec![0x81]),
+        0x51..=0x60 => Some(vec![inst.opcode - 0x50]),
+        _ => None,
     }
 }
 
-/// Matches compiled contracts by invariant body suffix and labels their
-/// leading constructor pushes.
+fn is_push(inst: &Instruction) -> bool {
+    inst.group == OpGroup::Push
+}
+
+impl Skeleton {
+    /// Derive a skeleton from two builds of the same contract with different
+    /// sentinel arguments. Instructions must align one-to-one: equal
+    /// non-push opcodes stay fixed, equal pushes become constants, and
+    /// differing pushes become slots — labeled by looking the first build's
+    /// value up in `sentinels` (constructor order).
+    pub fn derive(
+        name: &'static str,
+        a: &[u8],
+        b: &[u8],
+        sentinels: &[(&'static str, Vec<u8>)],
+    ) -> Option<Skeleton> {
+        let (ia, ta) = disassemble(a);
+        let (ib, tb) = disassemble(b);
+        if ta || tb || ia.len() != ib.len() {
+            return None;
+        }
+        let mut items = Vec::with_capacity(ia.len());
+        for (x, y) in ia.iter().zip(&ib) {
+            match (is_push(x), is_push(y)) {
+                (false, false) => {
+                    if x.opcode != y.opcode {
+                        return None;
+                    }
+                    items.push(SkelItem::Op(x.opcode));
+                }
+                (true, true) => {
+                    let vx = push_value(x)?;
+                    let vy = push_value(y)?;
+                    if vx == vy {
+                        items.push(SkelItem::ConstPush(vx));
+                    } else {
+                        let (label, _) = sentinels.iter().find(|(_, s)| *s == vx)?;
+                        items.push(SkelItem::Slot(label));
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some(Skeleton {
+            name,
+            items,
+            param_order: sentinels.iter().map(|(l, _)| *l).collect(),
+        })
+    }
+
+    /// Match a script against this skeleton; on success return its fields in
+    /// constructor order. Repeated slots of the same argument must agree.
+    fn match_script(&self, instructions: &[Instruction]) -> Option<Vec<Field>> {
+        if instructions.len() != self.items.len() {
+            return None;
+        }
+        let mut values: Vec<(&'static str, Vec<u8>)> = Vec::new();
+        for (item, inst) in self.items.iter().zip(instructions) {
+            match item {
+                SkelItem::Op(op) => {
+                    if is_push(inst) || inst.opcode != *op {
+                        return None;
+                    }
+                }
+                SkelItem::ConstPush(bytes) => {
+                    if push_value(inst).as_ref() != Some(bytes) {
+                        return None;
+                    }
+                }
+                SkelItem::Slot(label) => {
+                    let v = push_value(inst)?;
+                    match values.iter().find(|(l, _)| l == label) {
+                        Some((_, prev)) if *prev != v => return None,
+                        Some(_) => {}
+                        None => values.push((label, v)),
+                    }
+                }
+            }
+        }
+        Some(
+            self.param_order
+                .iter()
+                .filter_map(|label| {
+                    values
+                        .iter()
+                        .find(|(l, _)| l == label)
+                        .map(|(_, v)| Field { name: label, value: v.clone() })
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Matches compiled contracts against known skeletons.
 pub struct TemplateDecoder {
-    templates: Vec<Template>,
+    skeletons: Vec<Skeleton>,
 }
 
 impl TemplateDecoder {
-    pub fn new(templates: Vec<Template>) -> Self {
-        Self { templates }
+    pub fn new(skeletons: Vec<Skeleton>) -> Self {
+        Self { skeletons }
     }
 }
 
@@ -167,66 +253,96 @@ impl StateDecoder for TemplateDecoder {
         if truncated {
             return None;
         }
-        for t in &self.templates {
-            if t.body.is_empty() || script.len() < t.body.len() {
-                continue;
+        for skel in &self.skeletons {
+            if let Some(fields) = skel.match_script(&instructions) {
+                let mut d = base_decode("template", script);
+                d.template = Some(skel.name);
+                d.fields = fields;
+                return Some(d);
             }
-            let split = script.len() - t.body.len();
-            if script[split..] != t.body[..] {
-                continue;
-            }
-            let lead: Vec<_> = instructions.iter().take_while(|i| i.offset < split).collect();
-            // leading part must be exactly the constructor pushes, ending at the split
-            let lead_end = lead.last().map(|_| {
-                instructions.iter().find(|i| i.offset >= split).map(|i| i.offset).unwrap_or(script.len())
-            });
-            if lead.len() != t.params.len() || lead_end != Some(split) {
-                continue;
-            }
-            let small_int = |op: u8| -> Option<Vec<u8>> {
-                match op {
-                    0x00 => Some(vec![0]),
-                    0x4f => Some(vec![0x81]), // -1, script-number encoding
-                    0x51..=0x60 => Some(vec![op - 0x50]),
-                    _ => None,
-                }
-            };
-            let mut fields = Vec::with_capacity(lead.len());
-            for (param, inst) in t.params.iter().zip(&lead) {
-                let value = inst.data.clone().or_else(|| small_int(inst.opcode))?;
-                fields.push(Field { name: param, value });
-            }
-            let mut d = base_decode("template", script);
-            d.template = Some(t.name);
-            d.fields = fields;
-            return Some(d);
         }
         None
     }
 }
 
-/// SilverScript example contracts (kaspanet/silverscript,
-/// silverscript-lang/tests/examples). Bodies are the invariant compiled
-/// bytecode derived from two differently-parameterized builds via
-/// `Template::derive_body`; params are labeled by matching sentinel
-/// constructor values. Empty bodies are placeholders awaiting regeneration
-/// (see docs/Decoding.md) and are skipped at registration.
-const SILVERSCRIPT_TEMPLATES: &[(&str, &[&str], &str)] = &[
-    ("SilverScript · Mecenas", &["recipient", "funder_hash", "pledge", "period"], ""),
-    ("SilverScript · Escrow", &["arbiter_hash", "buyer", "seller"], ""),
-    ("SilverScript · LastWill", &["inheritor_hash", "cold_hash", "hot_hash"], ""),
-];
+/* ------------------------------------------------ SilverScript templates
+   The example contracts from kaspanet/silverscript
+   (silverscript-lang/tests/examples), each compiled twice with sentinel
+   constructor arguments via `compile_contract` — skeletons derive at
+   registration and stay aligned with these exact dumps. */
 
-fn silverscript_templates() -> Vec<Template> {
-    SILVERSCRIPT_TEMPLATES
-        .iter()
-        .filter(|(_, _, body)| !body.is_empty())
-        .map(|(name, params, body)| Template {
-            name,
-            params,
-            body: hex::decode(body).expect("template body hex"),
-        })
-        .collect()
+const SENT_A32: [u8; 32] = [0x11; 32];
+const SENT_B32: [u8; 32] = [0x22; 32];
+const SENT_C32: [u8; 32] = [0x33; 32];
+const SENT_D32: [u8; 32] = [0x44; 32];
+
+const MECENAS_A: &str = "6b6c76009c637502e803b100c3201111111111111111111111111111111111111111111111111111111111111111030000207c7e01ac7e876902e803b9be760400e1f50594527994760400e1f505547993a16300c252795479949c696700c20400e1f5059c6951c3b9bf876951c2789c6968007a75007a75007a75516776519c637578aa2033333333333333333333333333333333333333333333333333333333333333338769765279ac69757551677500696868";
+const MECENAS_B: &str = "6b6c76009c637502d007b100c3202222222222222222222222222222222222222222222222222222222222222222030000207c7e01ac7e876902e803b9be760480b2e60e94527994760480b2e60e547993a16300c252795479949c696700c20480b2e60e9c6951c3b9bf876951c2789c6968007a75007a75007a75516776519c637578aa2044444444444444444444444444444444444444444444444444444444444444448769765279ac69757551677500696868";
+const ESCROW_A: &str = "78aa2033333333333333333333333333333333333333333333333333333333333333338769765279ac6900c2b9be02e803949c6900c3201111111111111111111111111111111111111111111111111111111111111111030000207c7e01ac7e8700c3202222222222222222222222222222222222222222222222222222222222222222030000207c7e01ac7e879b69757551";
+const ESCROW_B: &str = "78aa2044444444444444444444444444444444444444444444444444444444444444448769765279ac6900c2b9be02e803949c6900c3202222222222222222222222222222222222222222222222222222222222222222030000207c7e01ac7e8700c3201111111111111111111111111111111111111111111111111111111111111111030000207c7e01ac7e879b69757551";
+const LASTWILL_A: &str = "6b6c76009c637502b400b178aa2033333333333333333333333333333333333333333333333333333333333333338769765279ac697575516776519c637578aa2044444444444444444444444444444444444444444444444444444444444444448769765279ac697575516776529c637578aa2011111111111111111111111111111111111111111111111111111111111111118769765279ac6900c2b9be02e803949c6900c3b9bf876975755167750069686868";
+const LASTWILL_B: &str = "6b6c76009c637502b400b178aa2044444444444444444444444444444444444444444444444444444444444444448769765279ac697575516776519c637578aa2033333333333333333333333333333333333333333333333333333333333333338769765279ac697575516776529c637578aa2022222222222222222222222222222222222222222222222222222222222222228769765279ac6900c2b9be02e803949c6900c3b9bf876975755167750069686868";
+
+/// Minimal script-number encoding of the sentinel ints used in the dumps.
+fn snum(v: i64) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut abs = v.unsigned_abs();
+    while abs > 0 {
+        out.push((abs & 0xff) as u8);
+        abs >>= 8;
+    }
+    if let Some(last) = out.last() {
+        if last & 0x80 != 0 {
+            out.push(0);
+        }
+    }
+    out
+}
+
+fn silverscript_skeletons() -> Vec<Skeleton> {
+    let hex2 = |s: &str| hex::decode(s).expect("template dump hex");
+    let mut out = Vec::new();
+    // contract Mecenas(pubkey recipient, byte[32] funder, int pledge, int period)
+    if let Some(s) = Skeleton::derive(
+        "SilverScript · Mecenas",
+        &hex2(MECENAS_A),
+        &hex2(MECENAS_B),
+        &[
+            ("recipient", SENT_A32.to_vec()),
+            ("funder_hash", SENT_C32.to_vec()),
+            ("pledge", snum(100_000_000)),
+            ("period", snum(1000)),
+        ],
+    ) {
+        out.push(s);
+    }
+    // contract Escrow(byte[32] arbiter, pubkey buyer, pubkey seller)
+    if let Some(s) = Skeleton::derive(
+        "SilverScript · Escrow",
+        &hex2(ESCROW_A),
+        &hex2(ESCROW_B),
+        &[
+            ("arbiter_hash", SENT_C32.to_vec()),
+            ("buyer", SENT_A32.to_vec()),
+            ("seller", SENT_B32.to_vec()),
+        ],
+    ) {
+        out.push(s);
+    }
+    // contract LastWill(byte[32] inheritor, byte[32] cold, byte[32] hot)
+    if let Some(s) = Skeleton::derive(
+        "SilverScript · LastWill",
+        &hex2(LASTWILL_A),
+        &hex2(LASTWILL_B),
+        &[
+            ("inheritor_hash", SENT_C32.to_vec()),
+            ("cold_hash", SENT_D32.to_vec()),
+            ("hot_hash", SENT_A32.to_vec()),
+        ],
+    ) {
+        out.push(s);
+    }
+    out
 }
 
 /// The committed hash of a canonical Kaspa P2SH script-public-key
@@ -259,7 +375,7 @@ impl Default for Registry {
     fn default() -> Self {
         Self {
             decoders: vec![
-                Box::new(TemplateDecoder::new(silverscript_templates())),
+                Box::new(TemplateDecoder::new(silverscript_skeletons())),
                 Box::new(P2pkStateDecoder),
                 Box::new(P2shCommitmentDecoder),
             ],
@@ -309,36 +425,51 @@ mod tests {
     }
 
     #[test]
-    fn template_matches_and_labels_constructor_pushes() {
-        // synthetic "contract": <argB> <argA> OpTxInputIndex OpInputCovenantId OpEqualVerify OpTrue
-        let body = vec![0xb9, 0xcf, 0x88, 0x51];
-        let instance = |a: u8, b: u8| {
-            let mut s = vec![0x20];
-            s.extend([b; 32]);
-            s.extend([0x04, a, a, a, a]);
-            s.extend(&body);
-            s
-        };
-        let derived = Template::derive_body(&instance(0x11, 0x33), &instance(0x22, 0x44))
-            .expect("derives the invariant body");
-        assert_eq!(derived, body);
+    fn all_silverscript_skeletons_derive() {
+        let names: Vec<_> = silverscript_skeletons().iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            [
+                "SilverScript · Mecenas",
+                "SilverScript · Escrow",
+                "SilverScript · LastWill"
+            ],
+            "every embedded compiler dump must derive a skeleton"
+        );
+    }
 
-        let dec = TemplateDecoder::new(vec![Template {
-            name: "synthetic",
-            params: &["big_field", "small_field"],
-            body: derived,
-        }]);
-        let d = dec.decode(0, &instance(0x55, 0x66)).expect("template matches");
-        assert_eq!(d.template, Some("synthetic"));
-        assert_eq!(d.fields[0].name, "big_field");
-        assert_eq!(d.fields[0].value, vec![0x66; 32]);
-        assert_eq!(d.fields[1].name, "small_field");
-        assert_eq!(d.fields[1].value, vec![0x55; 4]);
+    #[test]
+    fn skeleton_matches_real_compiled_instances_and_labels_args() {
+        let reg = Registry::default();
 
-        // a script with a different tail must not match
-        let mut other = instance(0x55, 0x66);
-        *other.last_mut().unwrap() = 0x52;
-        assert!(dec.decode(0, &other).is_none());
+        // Mecenas instance B: sentinel args flipped vs A
+        let d = reg.decode(0, &hex::decode(MECENAS_B).unwrap());
+        assert_eq!(d.template, Some("SilverScript · Mecenas"));
+        let get = |n: &str| d.fields.iter().find(|f| f.name == n).map(|f| f.value.clone());
+        assert_eq!(get("recipient"), Some(vec![0x22; 32]));
+        assert_eq!(get("funder_hash"), Some(vec![0x44; 32]));
+        assert_eq!(get("pledge"), Some(snum(250_000_000)));
+        assert_eq!(get("period"), Some(snum(2000)));
+
+        // Escrow A: arbiter/buyer/seller land on the right labels even though
+        // buyer/seller swap between the two builds
+        let d = reg.decode(0, &hex::decode(ESCROW_A).unwrap());
+        assert_eq!(d.template, Some("SilverScript · Escrow"));
+        let get = |n: &str| d.fields.iter().find(|f| f.name == n).map(|f| f.value.clone());
+        assert_eq!(get("arbiter_hash"), Some(vec![0x33; 32]));
+        assert_eq!(get("buyer"), Some(vec![0x11; 32]));
+        assert_eq!(get("seller"), Some(vec![0x22; 32]));
+
+        // LastWill B
+        let d = reg.decode(0, &hex::decode(LASTWILL_B).unwrap());
+        assert_eq!(d.template, Some("SilverScript · LastWill"));
+
+        // one flipped opcode → no template, falls back to plain disasm
+        let mut broken = hex::decode(MECENAS_A).unwrap();
+        let last = broken.len() - 1;
+        broken[last] = 0x51;
+        let d = reg.decode(0, &broken);
+        assert_eq!(d.template, None);
     }
 
     #[test]
