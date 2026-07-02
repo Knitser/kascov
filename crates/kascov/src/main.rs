@@ -74,6 +74,25 @@ enum Command {
         #[arg(long, default_value_t = 500)]
         max_events: u64,
     },
+    /// Run the always-on worker: follow the chain for each network and serve
+    /// fresh JSON snapshots over HTTP (for Cloud Run behind a CDN).
+    Serve {
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        listen: String,
+        /// Comma-separated networks to follow and serve
+        #[arg(long, default_value = "testnet-10,mainnet")]
+        networks: String,
+        /// Directory holding <network>.db files (default: ~/.kascov)
+        #[arg(long)]
+        db_dir: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = 500)]
+        max_events: u64,
+    },
+    /// Write a consistent copy of the index database (safe while syncing).
+    Backup {
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -92,11 +111,34 @@ async fn main() -> Result<()> {
         Command::Trace { covenant_id } => trace(&cli, covenant_id),
         Command::Watch => sync(&cli, None, true, true).await,
         Command::Export { ref out, max_events } => export(&cli, out.clone(), max_events),
+        Command::Serve { ref listen, ref networks, ref db_dir, max_events } => {
+            serve(&cli, listen.clone(), networks.clone(), db_dir.clone(), max_events).await
+        }
+        Command::Backup { ref out } => {
+            let store = open_store(&cli)?;
+            store.backup_to(out)?;
+            eprintln!("backed up {} index to {}", cli.network, out.display());
+            Ok(())
+        }
     }
 }
 
 fn export(cli: &Cli, out: Option<std::path::PathBuf>, max_events: u64) -> Result<()> {
     let store = open_store(cli)?;
+    let snapshot = build_snapshot(&store, cli.network, max_events)?;
+    let covenants = snapshot["stats"]["covenants"].as_u64().unwrap_or(0);
+    let events = snapshot["stats"]["events"].as_u64().unwrap_or(0);
+
+    let out = out.unwrap_or_else(|| std::path::PathBuf::from(format!("web/data/{}.json", cli.network)));
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&out, serde_json::to_string(&snapshot)?)?;
+    eprintln!("exported {covenants} covenants ({events} events) to {}", out.display());
+    Ok(())
+}
+
+fn build_snapshot(store: &Store, network: kascov_core::Network, max_events: u64) -> Result<serde_json::Value> {
     let registry = kascov_decode::Registry::default();
     let covenants = store.list(u64::MAX)?;
 
@@ -141,7 +183,7 @@ fn export(cli: &Cli, out: Option<std::path::PathBuf>, max_events: u64) -> Result
 
     let active = covenants.iter().filter(|c| c.live_utxos > 0).count();
     let snapshot = serde_json::json!({
-        "network": cli.network.to_string(),
+        "network": network.to_string(),
         "generated_at_ms": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -156,19 +198,7 @@ fn export(cli: &Cli, out: Option<std::path::PathBuf>, max_events: u64) -> Result
         },
         "covenants": exported,
     });
-
-    let out = out.unwrap_or_else(|| std::path::PathBuf::from(format!("web/data/{}.json", cli.network)));
-    if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&out, serde_json::to_string(&snapshot)?)?;
-    eprintln!(
-        "exported {} covenants ({} events) to {}",
-        covenants.len(),
-        total_events,
-        out.display()
-    );
-    Ok(())
+    Ok(snapshot)
 }
 
 fn db_path(cli: &Cli) -> std::path::PathBuf {
@@ -462,4 +492,154 @@ fn abbrev(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+struct ServeState {
+    base_dir: std::path::PathBuf,
+    networks: Vec<Network>,
+    max_events: u64,
+    cache: tokio::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<String>)>>,
+}
+
+async fn serve(
+    cli: &Cli,
+    listen: String,
+    networks: String,
+    db_dir: Option<std::path::PathBuf>,
+    max_events: u64,
+) -> Result<()> {
+    use axum::routing::get;
+
+    let networks: Vec<Network> = networks
+        .split(',')
+        .map(|s| s.trim().parse())
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e: kascov_core::Error| anyhow::anyhow!("{e}"))?;
+    let base_dir = db_dir.unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        std::path::PathBuf::from(home).join(".kascov")
+    });
+    std::fs::create_dir_all(&base_dir)?;
+
+    for &network in &networks {
+        let db = base_dir.join(format!("{network}.db"));
+        let rpc = cli.rpc.clone();
+        tokio::spawn(follow_forever(network, rpc, db));
+    }
+
+    let state = std::sync::Arc::new(ServeState {
+        base_dir,
+        networks,
+        max_events,
+        cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+    });
+    let app = axum::Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/data/{file}", get(data_handler))
+        .with_state(state);
+
+    eprintln!("kascov worker listening on {listen}");
+    let listener = tokio::net::TcpListener::bind(&listen).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Follow a network's virtual chain forever, reconnecting on any failure.
+async fn follow_forever(network: Network, rpc: Option<String>, db: std::path::PathBuf) {
+    use kascov_core::sync::SyncUpdate;
+    loop {
+        let mut store = match kascov_core::store::Store::open(&db, network) {
+            Ok(store) => store,
+            Err(err) => {
+                tracing::error!("{network}: cannot open store: {err}");
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                continue;
+            }
+        };
+        let node = match NodeHandle::connect(network, rpc.as_deref()).await {
+            Ok(node) => node,
+            Err(err) => {
+                tracing::warn!("{network}: connect failed ({err}), retrying in 10s");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                continue;
+            }
+        };
+        tracing::info!("{network}: following the chain");
+        loop {
+            let result = kascov_core::sync::sync_once(&node, &mut store, None, |update| {
+                if let SyncUpdate::Event { covenant_id, kind, .. } = update {
+                    tracing::info!("{network}: {} covenant {covenant_id}", kind.as_str());
+                }
+            })
+            .await;
+            match result {
+                Ok(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+                Err(err) => {
+                    tracing::warn!("{network}: sync interrupted ({err}), reconnecting in 5s");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn data_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(file): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let not_found = || (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let Some(name) = file.strip_suffix(".json") else { return not_found() };
+    let Ok(network) = name.parse::<Network>() else { return not_found() };
+    if !state.networks.contains(&network) {
+        return not_found();
+    }
+
+    let mut cache = state.cache.lock().await;
+    let fresh = cache
+        .get(name)
+        .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(10))
+        .map(|(_, body)| body.clone());
+    let body = match fresh {
+        Some(body) => body,
+        None => {
+            let db = state.base_dir.join(format!("{network}.db"));
+            let max_events = state.max_events;
+            let result = tokio::task::spawn_blocking(move || -> Result<String> {
+                let store = kascov_core::store::Store::open(&db, network)?;
+                let snapshot = build_snapshot(&store, network, max_events)?;
+                Ok(serde_json::to_string(&snapshot)?)
+            })
+            .await;
+            match result {
+                Ok(Ok(json)) => {
+                    let body = std::sync::Arc::new(json);
+                    cache.insert(name.to_string(), (std::time::Instant::now(), body.clone()));
+                    body
+                }
+                Ok(Err(err)) => {
+                    tracing::error!("{network}: snapshot failed: {err}");
+                    return (StatusCode::SERVICE_UNAVAILABLE, "snapshot unavailable").into_response();
+                }
+                Err(err) => {
+                    tracing::error!("{network}: snapshot task panicked: {err}");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+                }
+            }
+        }
+    };
+    drop(cache);
+
+    (
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=15, s-maxage=30"),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
+        body.as_str().to_owned(),
+    )
+        .into_response()
 }

@@ -1,0 +1,13 @@
+{
+  "hosting": {
+    "public": "web",
+    "ignore": ["firebase.json", "**/.*", "**/data/**"],
+    "cleanUrls": true,
+    "rewrites": [
+      {
+        "source": "/data/**",
+        "run": { "serviceId": "kascov-worker", "region": "europe-west4" }
+      }
+    ]
+  }
+}

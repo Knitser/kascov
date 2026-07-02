@@ -1,0 +1,8 @@
+target
+video
+web
+docs
+node_modules
+.git
+.claude
+*.db

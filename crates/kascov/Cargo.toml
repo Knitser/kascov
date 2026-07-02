@@ -9,6 +9,7 @@ kascov-core = { workspace = true }
 kascov-decode = { workspace = true }
 
 tokio = { workspace = true }
+axum = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

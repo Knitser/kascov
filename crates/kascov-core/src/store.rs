@@ -190,6 +190,17 @@ impl Store {
         Ok(self.meta("cursor")?.and_then(|s| s.parse().ok()))
     }
 
+    /// Write a consistent copy of the database (safe while a writer is active).
+    pub fn backup_to(&self, out: &Path) -> Result<()> {
+        if out.exists() {
+            std::fs::remove_file(out)
+                .map_err(|e| Error::Invalid { what: "backup path", value: e.to_string() })?;
+        }
+        let path = out.to_string_lossy();
+        self.conn.execute("VACUUM INTO ?1", [path.as_ref()]).map_err(db_err)?;
+        Ok(())
+    }
+
     /// Is this outpoint a live covenant UTXO? Returns its covenant id.
     pub fn live_covenant_utxo(&self, outpoint: &Outpoint) -> Result<Option<CovenantId>> {
         self.conn

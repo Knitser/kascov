@@ -4,3 +4,7 @@
 *.db-shm
 .DS_Store
 web/.claude/
+node_modules/
+video/out/
+video/.remotion/
+.firebase/
