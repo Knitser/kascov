@@ -112,7 +112,8 @@ pub struct NewEvent {
     pub txid: TxId,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum EventKind {
     Genesis,
     Transition,
@@ -120,12 +121,18 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             EventKind::Genesis => "genesis",
             EventKind::Transition => "transition",
             EventKind::Burn => "burn",
         }
+    }
+}
+
+impl std::fmt::Display for EventKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -319,6 +326,7 @@ impl Store {
                  FROM covenants c ORDER BY c.last_activity_daa DESC LIMIT ?1",
             )
             .map_err(db_err)?;
+        let limit = limit.min(i64::MAX as u64) as i64;
         let rows = stmt
             .query_map([limit], |row| {
                 Ok(CovenantSummary {

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use futures::stream::{FuturesUnordered, StreamExt};
 
 use crate::model::*;
-use crate::node::NodeHandle;
+use crate::node::ChainSource;
 use crate::store::{BlockEvents, EventKind, NewEvent, NewUtxo, Store};
 use crate::Result;
 
@@ -18,16 +18,24 @@ pub struct SyncStats {
     pub reorged_out: u64,
 }
 
+/// Live updates emitted while syncing.
+#[derive(Clone, Debug)]
+pub enum SyncUpdate {
+    Progress(SyncStats),
+    Reorg { rolled_back: u64 },
+    Event { covenant_id: CovenantId, kind: EventKind, txid: TxId, accepting_daa: u64 },
+}
+
 /// How often the cursor advances through event-less chain blocks.
 const CHECKPOINT_EVERY: u64 = 500;
 
 /// Process all virtual chain changes since the stored cursor (or `from`, or the
 /// current sink for a fresh index). Returns once caught up.
 pub async fn sync_once(
-    node: &NodeHandle,
+    node: &impl ChainSource,
     store: &mut Store,
     from: Option<BlockHash>,
-    mut progress: impl FnMut(&SyncStats),
+    mut updates: impl FnMut(SyncUpdate),
 ) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
@@ -50,6 +58,7 @@ pub async fn sync_once(
         stats.reorged_out = step.removed.len() as u64;
         tracing::info!("reorg: rolling back {} chain blocks", step.removed.len());
         store.rollback(&step.removed)?;
+        updates(SyncUpdate::Reorg { rolled_back: stats.reorged_out });
     }
 
     let mut since_checkpoint = 0u64;
@@ -97,12 +106,12 @@ pub async fn sync_once(
         if !block_events.events.is_empty() {
             stats.events += block_events.events.len() as u64;
             for event in &block_events.events {
-                tracing::info!(
-                    "{:?} covenant {} in tx {}",
-                    event.kind,
-                    event.covenant_id,
-                    event.txid
-                );
+                updates(SyncUpdate::Event {
+                    covenant_id: event.covenant_id,
+                    kind: event.kind,
+                    txid: event.txid,
+                    accepting_daa: block_events.accepting_daa,
+                });
             }
             store.apply(&block_events, accepted.accepting_block)?;
             since_checkpoint = 0;
@@ -112,7 +121,7 @@ pub async fn sync_once(
         }
 
         if stats.chain_blocks % 100 == 0 {
-            progress(&stats);
+            updates(SyncUpdate::Progress(stats));
         }
     }
 

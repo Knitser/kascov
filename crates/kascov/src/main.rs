@@ -58,6 +58,8 @@ enum Command {
     Show { covenant_id: CovenantId },
     /// Print a covenant's full lineage (genesis → tip).
     Trace { covenant_id: CovenantId },
+    /// Follow the chain live and print covenant events as they are accepted.
+    Watch,
 }
 
 #[tokio::main]
@@ -70,10 +72,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Scan { last } => scan(&cli, last).await,
-        Command::Sync { from, follow } => sync(&cli, from, follow).await,
+        Command::Sync { from, follow } => sync(&cli, from, follow, false).await,
         Command::List { limit } => list(&cli, limit),
         Command::Show { covenant_id } => show(&cli, covenant_id),
         Command::Trace { covenant_id } => trace(&cli, covenant_id),
+        Command::Watch => sync(&cli, None, true, true).await,
     }
 }
 
@@ -88,23 +91,48 @@ fn open_store(cli: &Cli) -> Result<Store> {
     Ok(Store::open(&db_path(cli), cli.network)?)
 }
 
-async fn sync(cli: &Cli, from: Option<BlockHash>, follow: bool) -> Result<()> {
+async fn sync(cli: &Cli, from: Option<BlockHash>, follow: bool, watch: bool) -> Result<()> {
+    use kascov_core::sync::SyncUpdate;
     let node = NodeHandle::connect(cli.network, cli.rpc.as_deref())
         .await
         .context("failed to connect to node")?;
     let mut store = open_store(cli)?;
+    let json = cli.json;
     loop {
-        let stats = kascov_core::sync::sync_once(&node, &mut store, from, |s| {
-            eprintln!("… {} chain blocks, {} covenant events", s.chain_blocks, s.events);
+        let stats = kascov_core::sync::sync_once(&node, &mut store, from, |update| match update {
+            SyncUpdate::Progress(s) if !watch => {
+                eprintln!("… {} chain blocks, {} covenant events", s.chain_blocks, s.events);
+            }
+            SyncUpdate::Progress(_) => {}
+            SyncUpdate::Reorg { rolled_back } => {
+                if json {
+                    println!("{}", serde_json::json!({"type": "reorg", "rolled_back": rolled_back}));
+                } else {
+                    println!("REORG      rolled back {rolled_back} chain blocks");
+                }
+            }
+            SyncUpdate::Event { covenant_id, kind, txid, accepting_daa } => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "type": "event", "kind": kind, "covenant_id": covenant_id,
+                            "txid": txid, "accepting_daa": accepting_daa,
+                        })
+                    );
+                } else {
+                    println!("{:<10} {covenant_id}  tx {txid}  @ DAA {accepting_daa}", kind.as_str().to_uppercase());
+                }
+            }
         })
         .await?;
-        eprintln!(
-            "synced: {} chain blocks processed, {} covenant events{}",
-            stats.chain_blocks,
-            stats.events,
-            if stats.reorged_out > 0 { format!(", {} reorged out", stats.reorged_out) } else { String::new() }
-        );
         if !follow {
+            eprintln!(
+                "synced: {} chain blocks processed, {} covenant events{}",
+                stats.chain_blocks,
+                stats.events,
+                if stats.reorged_out > 0 { format!(", {} reorged out", stats.reorged_out) } else { String::new() }
+            );
             break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
