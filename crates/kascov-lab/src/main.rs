@@ -27,7 +27,7 @@ use kaspa_wrpc_client::{
 };
 use secp256k1::{Keypair, SECP256K1};
 
-const FEE: u64 = 50_000; // 0.0005 KAS per tx — generous for 1-in-1-out
+const FEE: u64 = 500_000; // 0.005 KAS per tx — TN10's post-Toccata minimum relay fee is ~0.00166 for 1-in-1-out
 
 #[derive(Parser)]
 #[command(name = "kascov-lab", about = "Covenant lab: create real covenants on testnet-10")]
