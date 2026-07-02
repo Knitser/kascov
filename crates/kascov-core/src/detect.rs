@@ -22,7 +22,7 @@ pub struct CovenantSighting {
     pub daa_score: u64,
 }
 
-fn hex_ser<S: serde::Serializer>(bytes: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+pub fn hex_ser<S: serde::Serializer>(bytes: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(&hex::encode(bytes))
 }
 

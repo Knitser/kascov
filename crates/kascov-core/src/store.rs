@@ -1,0 +1,395 @@
+//! SQLite index of covenant activity. One file per network, disposable and
+//! rebuildable — the value is continuity (nodes prune, we don't).
+
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
+use std::path::Path;
+
+use crate::model::*;
+use crate::{Error, Result};
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS covenants (
+    covenant_id BLOB PRIMARY KEY,
+    genesis_txid BLOB,
+    genesis_daa INTEGER,
+    lineage_complete INTEGER NOT NULL DEFAULT 1,
+    event_count INTEGER NOT NULL DEFAULT 0,
+    last_activity_daa INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS covenant_events (
+    covenant_id BLOB NOT NULL,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL, -- genesis | transition | burn
+    txid BLOB NOT NULL,
+    accepting_block BLOB NOT NULL,
+    accepting_daa INTEGER NOT NULL,
+    PRIMARY KEY (covenant_id, seq)
+);
+CREATE INDEX IF NOT EXISTS ev_by_accepting ON covenant_events(accepting_block);
+CREATE TABLE IF NOT EXISTS covenant_utxos (
+    txid BLOB NOT NULL,
+    output_index INTEGER NOT NULL,
+    covenant_id BLOB NOT NULL,
+    value INTEGER NOT NULL,
+    spk_version INTEGER NOT NULL,
+    spk_script BLOB NOT NULL,
+    created_block BLOB NOT NULL,
+    created_daa INTEGER NOT NULL,
+    spent_block BLOB,
+    spent_txid BLOB,
+    PRIMARY KEY (txid, output_index)
+);
+CREATE INDEX IF NOT EXISTS utxo_by_covenant ON covenant_utxos(covenant_id);
+CREATE INDEX IF NOT EXISTS utxo_by_created ON covenant_utxos(created_block);
+CREATE INDEX IF NOT EXISTS utxo_by_spent ON covenant_utxos(spent_block) WHERE spent_block IS NOT NULL;
+";
+
+pub struct Store {
+    conn: Connection,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CovenantSummary {
+    pub covenant_id: CovenantId,
+    pub genesis_txid: Option<TxId>,
+    pub genesis_daa: Option<u64>,
+    pub lineage_complete: bool,
+    pub event_count: u64,
+    pub last_activity_daa: u64,
+    pub live_utxos: u64,
+    pub live_value: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EventRow {
+    pub seq: u64,
+    pub kind: String,
+    pub txid: TxId,
+    pub accepting_block: BlockHash,
+    pub accepting_daa: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UtxoRow {
+    pub outpoint: Outpoint,
+    pub value: u64,
+    pub spk_version: u16,
+    #[serde(serialize_with = "crate::detect::hex_ser")]
+    pub spk_script: Vec<u8>,
+    pub created_daa: u64,
+    pub live: bool,
+}
+
+/// Events produced while processing one accepting chain block, applied atomically.
+pub struct BlockEvents {
+    pub accepting_block: BlockHash,
+    pub accepting_daa: u64,
+    pub events: Vec<NewEvent>,
+    pub created_utxos: Vec<NewUtxo>,
+    pub spent_utxos: Vec<(Outpoint, TxId)>,
+}
+
+impl BlockEvents {
+    pub fn empty(accepting_block: BlockHash) -> Self {
+        Self {
+            accepting_block,
+            accepting_daa: 0,
+            events: vec![],
+            created_utxos: vec![],
+            spent_utxos: vec![],
+        }
+    }
+}
+
+pub struct NewEvent {
+    pub covenant_id: CovenantId,
+    pub kind: EventKind,
+    pub txid: TxId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    Genesis,
+    Transition,
+    Burn,
+}
+
+impl EventKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            EventKind::Genesis => "genesis",
+            EventKind::Transition => "transition",
+            EventKind::Burn => "burn",
+        }
+    }
+}
+
+pub struct NewUtxo {
+    pub outpoint: Outpoint,
+    pub covenant_id: CovenantId,
+    pub value: u64,
+    pub spk_version: u16,
+    pub spk_script: Vec<u8>,
+}
+
+fn db_err(e: rusqlite::Error) -> Error {
+    Error::Rpc(format!("store: {e}"))
+}
+
+impl Store {
+    pub fn open(path: &Path, network: Network) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::Invalid { what: "db path", value: e.to_string() })?;
+        }
+        let conn = Connection::open(path).map_err(db_err)?;
+        conn.pragma_update(None, "journal_mode", "WAL").map_err(db_err)?;
+        conn.execute_batch(SCHEMA).map_err(db_err)?;
+
+        let store = Self { conn };
+        match store.meta("network")? {
+            None => store.set_meta("network", &network.to_string())?,
+            Some(existing) if existing != network.to_string() => {
+                return Err(Error::NodeMismatch(format!(
+                    "index at {} belongs to {existing}, not {network}",
+                    path.display()
+                )));
+            }
+            Some(_) => {}
+        }
+        Ok(store)
+    }
+
+    fn meta(&self, key: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| row.get(0))
+            .optional()
+            .map_err(db_err)
+    }
+
+    fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn
+            .execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)", params![key, value])
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    pub fn cursor(&self) -> Result<Option<BlockHash>> {
+        Ok(self.meta("cursor")?.and_then(|s| s.parse().ok()))
+    }
+
+    /// Is this outpoint a live covenant UTXO? Returns its covenant id.
+    pub fn live_covenant_utxo(&self, outpoint: &Outpoint) -> Result<Option<CovenantId>> {
+        self.conn
+            .query_row(
+                "SELECT covenant_id FROM covenant_utxos
+                 WHERE txid = ?1 AND output_index = ?2 AND spent_block IS NULL",
+                params![outpoint.txid.0.as_slice(), outpoint.index],
+                |row| row.get::<_, [u8; 32]>(0).map(CovenantId),
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
+    pub fn known_covenant(&self, id: &CovenantId) -> Result<bool> {
+        let count: u64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM covenants WHERE covenant_id = ?1",
+                [id.0.as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+        Ok(count > 0)
+    }
+
+    /// Apply everything observed in one accepting chain block, atomically,
+    /// and advance the cursor.
+    pub fn apply(&mut self, block: &BlockEvents, new_cursor: BlockHash) -> Result<()> {
+        let tx = self.conn.transaction().map_err(db_err)?;
+        for (outpoint, spending_txid) in &block.spent_utxos {
+            tx.execute(
+                "UPDATE covenant_utxos SET spent_block = ?1, spent_txid = ?2
+                 WHERE txid = ?3 AND output_index = ?4",
+                params![
+                    block.accepting_block.0.as_slice(),
+                    spending_txid.0.as_slice(),
+                    outpoint.txid.0.as_slice(),
+                    outpoint.index
+                ],
+            )
+            .map_err(db_err)?;
+        }
+        for utxo in &block.created_utxos {
+            tx.execute(
+                "INSERT OR REPLACE INTO covenant_utxos
+                 (txid, output_index, covenant_id, value, spk_version, spk_script,
+                  created_block, created_daa, spent_block, spent_txid)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL)",
+                params![
+                    utxo.outpoint.txid.0.as_slice(),
+                    utxo.outpoint.index,
+                    utxo.covenant_id.0.as_slice(),
+                    utxo.value,
+                    utxo.spk_version,
+                    utxo.spk_script,
+                    block.accepting_block.0.as_slice(),
+                    block.accepting_daa
+                ],
+            )
+            .map_err(db_err)?;
+        }
+        for event in &block.events {
+            let is_genesis = event.kind == EventKind::Genesis;
+            tx.execute(
+                "INSERT INTO covenants (covenant_id, genesis_txid, genesis_daa, lineage_complete)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(covenant_id) DO NOTHING",
+                params![
+                    event.covenant_id.0.as_slice(),
+                    is_genesis.then_some(event.txid.0.as_slice()),
+                    is_genesis.then_some(block.accepting_daa),
+                    is_genesis
+                ],
+            )
+            .map_err(db_err)?;
+            tx.execute(
+                "INSERT INTO covenant_events (covenant_id, seq, kind, txid, accepting_block, accepting_daa)
+                 VALUES (?1,
+                   (SELECT COALESCE(MAX(seq), -1) + 1 FROM covenant_events WHERE covenant_id = ?1),
+                   ?2, ?3, ?4, ?5)",
+                params![
+                    event.covenant_id.0.as_slice(),
+                    event.kind.as_str(),
+                    event.txid.0.as_slice(),
+                    block.accepting_block.0.as_slice(),
+                    block.accepting_daa
+                ],
+            )
+            .map_err(db_err)?;
+            tx.execute(
+                "UPDATE covenants SET event_count = event_count + 1, last_activity_daa = ?2
+                 WHERE covenant_id = ?1",
+                params![event.covenant_id.0.as_slice(), block.accepting_daa],
+            )
+            .map_err(db_err)?;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('cursor', ?1)",
+            [new_cursor.to_string()],
+        )
+        .map_err(db_err)?;
+        tx.commit().map_err(db_err)
+    }
+
+    /// Undo everything attributed to the given (reorged-out) chain blocks.
+    pub fn rollback(&mut self, removed: &[BlockHash]) -> Result<()> {
+        let tx = self.conn.transaction().map_err(db_err)?;
+        for hash in removed {
+            let hash = hash.0.as_slice();
+            tx.execute("UPDATE covenant_utxos SET spent_block = NULL, spent_txid = NULL WHERE spent_block = ?1", [hash])
+                .map_err(db_err)?;
+            tx.execute("DELETE FROM covenant_utxos WHERE created_block = ?1", [hash]).map_err(db_err)?;
+            tx.execute(
+                "UPDATE covenants SET event_count = event_count -
+                   (SELECT COUNT(*) FROM covenant_events WHERE accepting_block = ?1 AND covenant_id = covenants.covenant_id)",
+                [hash],
+            )
+            .map_err(db_err)?;
+            tx.execute("DELETE FROM covenant_events WHERE accepting_block = ?1", [hash]).map_err(db_err)?;
+        }
+        // Covenants whose genesis was rolled back disappear entirely.
+        tx.execute("DELETE FROM covenants WHERE event_count <= 0", []).map_err(db_err)?;
+        tx.commit().map_err(db_err)
+    }
+
+    pub fn list(&self, limit: u64) -> Result<Vec<CovenantSummary>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT c.covenant_id, c.genesis_txid, c.genesis_daa, c.lineage_complete,
+                        c.event_count, c.last_activity_daa,
+                        (SELECT COUNT(*) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL),
+                        (SELECT COALESCE(SUM(value), 0) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL)
+                 FROM covenants c ORDER BY c.last_activity_daa DESC LIMIT ?1",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([limit], |row| {
+                Ok(CovenantSummary {
+                    covenant_id: CovenantId(row.get(0)?),
+                    genesis_txid: row.get::<_, Option<[u8; 32]>>(1)?.map(TxId),
+                    genesis_daa: row.get(2)?,
+                    lineage_complete: row.get(3)?,
+                    event_count: row.get(4)?,
+                    last_activity_daa: row.get(5)?,
+                    live_utxos: row.get(6)?,
+                    live_value: row.get(7)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    pub fn summary(&self, id: &CovenantId) -> Result<Option<CovenantSummary>> {
+        Ok(self.list(u64::MAX)?.into_iter().find(|c| c.covenant_id == *id))
+    }
+
+    pub fn events(&self, id: &CovenantId) -> Result<Vec<EventRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT seq, kind, txid, accepting_block, accepting_daa
+                 FROM covenant_events WHERE covenant_id = ?1 ORDER BY seq",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([id.0.as_slice()], |row| {
+                Ok(EventRow {
+                    seq: row.get(0)?,
+                    kind: row.get(1)?,
+                    txid: TxId(row.get(2)?),
+                    accepting_block: BlockHash(row.get(3)?),
+                    accepting_daa: row.get(4)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    pub fn utxos(&self, id: &CovenantId, live_only: bool) -> Result<Vec<UtxoRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT txid, output_index, value, spk_version, spk_script, created_daa,
+                        spent_block IS NULL
+                 FROM covenant_utxos WHERE covenant_id = ?1 AND (?2 = 0 OR spent_block IS NULL)
+                 ORDER BY created_daa",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![id.0.as_slice(), live_only as i64], |row| {
+                Ok(UtxoRow {
+                    outpoint: Outpoint { txid: TxId(row.get(0)?), index: row.get(1)? },
+                    value: row.get(2)?,
+                    spk_version: row.get(3)?,
+                    spk_script: row.get(4)?,
+                    created_daa: row.get(5)?,
+                    live: row.get(6)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+}

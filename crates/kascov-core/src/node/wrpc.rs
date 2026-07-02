@@ -79,6 +79,30 @@ impl NodeHandle {
         let block = self.client.get_block(to_hash(hash), true).await.map_err(rpc_err)?;
         Ok(map_block(block))
     }
+
+    /// Virtual selected chain changes since `cursor`, with accepted tx ids.
+    pub async fn virtual_chain_from(&self, cursor: BlockHash) -> Result<ChainStep> {
+        let response = self
+            .client
+            .get_virtual_chain_from_block(to_hash(cursor), true, None)
+            .await
+            .map_err(rpc_err)?;
+        Ok(ChainStep {
+            removed: response.removed_chain_block_hashes.into_iter().map(from_hash).collect(),
+            added: response
+                .accepted_transaction_ids
+                .into_iter()
+                .map(|accepted| AcceptedBlock {
+                    accepting_block: from_hash(accepted.accepting_block_hash),
+                    accepted_tx_ids: accepted
+                        .accepted_transaction_ids
+                        .into_iter()
+                        .map(|id| TxId(id.as_bytes()))
+                        .collect(),
+                })
+                .collect(),
+        })
+    }
 }
 
 fn rpc_err(e: kaspa_rpc_core::RpcError) -> Error {
@@ -94,11 +118,24 @@ fn to_hash(hash: BlockHash) -> RpcHash {
 }
 
 fn map_block(block: RpcBlock) -> Block {
+    let mergeset = block
+        .verbose_data
+        .as_ref()
+        .map(|verbose| {
+            verbose
+                .merge_set_blues_hashes
+                .iter()
+                .chain(verbose.merge_set_reds_hashes.iter())
+                .map(|h| from_hash(*h))
+                .collect()
+        })
+        .unwrap_or_default();
     Block {
         hash: from_hash(block.header.hash),
         daa_score: block.header.daa_score,
         timestamp_ms: block.header.timestamp,
         parents: block.header.direct_parents().iter().map(|h| from_hash(*h)).collect(),
+        mergeset,
         transactions: block.transactions.into_iter().map(map_tx).collect(),
     }
 }

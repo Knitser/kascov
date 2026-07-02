@@ -132,7 +132,24 @@ pub struct Block {
     pub daa_score: u64,
     pub timestamp_ms: u64,
     pub parents: Vec<BlockHash>,
+    /// Blocks merged by this block (blues + reds), when the node provided
+    /// verbose data. Needed to resolve accepted transactions' bodies.
+    pub mergeset: Vec<BlockHash>,
     pub transactions: Vec<Transaction>,
+}
+
+/// One step of the virtual selected chain, as reported by the node.
+#[derive(Clone, Debug)]
+pub struct ChainStep {
+    pub removed: Vec<BlockHash>,
+    pub added: Vec<AcceptedBlock>,
+}
+
+/// A chain block together with the transactions it accepted.
+#[derive(Clone, Debug)]
+pub struct AcceptedBlock {
+    pub accepting_block: BlockHash,
+    pub accepted_tx_ids: Vec<TxId>,
 }
 
 #[derive(Clone, Debug)]
