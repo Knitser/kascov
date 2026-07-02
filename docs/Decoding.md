@@ -1,32 +1,42 @@
 # Decoding
 
-`kascov-decode` — turning covenant state scripts into something readable.
+`kascov-decode` — turning covenant state scripts into something readable. Three layers, each additive: disassembly (always works) → spend-time reveals (the actual programs) → template recognition (named contracts with labeled fields).
 
 ## The fallback that always works
 
-`DisasmDecoder` disassembles any script into named opcodes with the full post-Toccata opcode table (extracted from rusty-kaspa's `crypto/txscript/src/opcodes/mod.rs` at the pinned rev). Each instruction is tagged with a group:
+`DisasmDecoder` disassembles any script into named opcodes with the full post-Toccata opcode table (extracted from rusty-kaspa's `crypto/txscript/src/opcodes/mod.rs` at the pinned rev). Each instruction is tagged with a group: **push** · **standard** · **introspection** (KIP-17, 0xb2–0xc9 + `OpNum2Bin`/`OpBin2Num`) · **covenant** (KIP-20: `OpInputCovenantId`, `OpCovOutputIdx`, `OpOutputAuthorizingInput`, …) · **zk** (`OpZkPrecompile`, KIP-16).
 
-- **push** — data pushes (the candidates for state fields)
-- **standard** — pre-Toccata opcodes
-- **introspection** — KIP-17 transaction introspection (0xb2–0xc9, `OpNum2Bin`/`OpBin2Num`)
-- **covenant** — KIP-20 ops (`OpInputCovenantId`, `OpCovOutputIdx`, `OpOutputAuthorizingInput`, …)
-- **zk** — `OpZkPrecompile` (KIP-16)
+`web/disasm.js` is a **verified port** of this disassembler — byte-identical output on every script in the live index — powering the site's [#/decode](https://kascov-explorer.web.app/#/decode) page, where any hex round-trips entirely in the browser.
 
-`show --decode` output from a real TN10 covenant:
+## Spend-time decoding (shipped)
 
-```
-State  1a9487f5…f674d5:0 — 1.00000000 KAS (spk v0, 35 bytes)
-  0000  OpBlake2b
-  0001  OpData 0xc5608c8a1186226b7822a7485effadbaeca493f90e7f1803404d32b6af90cf8a
-  0022  OpEqual
-```
+State UTXOs are usually **P2SH commitments** (`OpBlake2b <32B hash> OpEqual`): the program lives in the *spending* input's signature script. The [[Sync Engine]] captures every covenant spend's signature script (`spent_sig`, reorg-safe); `p2sh_reveal(spk, sig)` peels the final push (the redeem script) and accepts it **only if its blake2b-256 matches the committed hash**.
 
-That's a **P2SH commitment** — consistent with [[Toccata Protocol Notes#KIP-20 mechanics (what kascov indexes)]]: the state UTXO commits to a script hash; the actual covenant logic (the preimage) is revealed in the *spending* transaction's signature script.
+Where it surfaces:
 
-## Decoder registry
+- `show --decode` — prints the revealed program under each spent state UTXO
+- `trace` — prints the revealed state **payload per event** and the **payload Δ** between consecutive reveals (the roadmap's original ask)
+- exports/API — `revealed_hex`, `revealed_asm`, `revealed_uses_covenant_ops`/`_zk_ops`; non-P2SH spends carry `sig_hex` (≤520 B) or `sig_len`
+- the web nerd panel — "revealed at spend" block with a decoder deep-link
 
-`Registry` tries template-specific `StateDecoder` implementations in order and falls back to disassembly. Decoders are additive — recognizing a known SilverScript template means naming its state fields from the ordered pushes. None registered yet; the registry exists so adding one never touches the CLI.
+Reveals exist for spends indexed from July 2 (evening) onward; earlier spends predate capture. Today's TN10 storm coins are P2PK-style (their unlocking script is just a signature — captured, shown as `spend signature …`); the reveal path lights up as P2SH covenants circulate.
 
-## Spend-time decoding (next)
+## Template decoders (named contracts, labeled fields)
 
-Because logic lives in the P2SH preimage, the deep decode target is the **spending input's signature script**, not the output. Plan ([[Roadmap]]): capture signature scripts of covenant-spending transactions during [[Sync Engine|sync]], disassemble the revealed preimage, and diff state pushes across transitions (`payload Δ` in `trace`).
+`Registry` tries `StateDecoder` implementations in order and falls back to disassembly. Registered:
+
+| Decoder | Matches | Labeled fields |
+|---|---|---|
+| `TemplateDecoder` | compiled contracts by **invariant body suffix**; leading pushes = constructor args | per-template (below) |
+| `P2pkStateDecoder` | `<push 32/33B> OpCheckSig` | `owner_pubkey` |
+| `P2shCommitmentDecoder` | `OpBlake2b <32B> OpEqual` | `program_hash` |
+
+Exports carry `template` + `state_fields` (and `revealed_template` + `revealed_fields` on reveals); the web nerd panel renders them as labeled rows, and named contracts get a pill on the coin page.
+
+### SilverScript templates
+
+Compiled [SilverScript](https://github.com/kaspanet/silverscript) contracts are `<constructor arg pushes> ++ <invariant body>`. `Template::derive_body(a, b)` extracts the body from **two builds of the same contract with different arguments** (longest common suffix on instruction boundaries, pure-push leader) — so adding a template is pure data: name, param labels, body hex.
+
+Wired entries (in `SILVERSCRIPT_TEMPLATES`): **Mecenas** (`recipient`, `funder_hash`, `pledge`, `period`) · **Escrow** (`arbiter_hash`, `buyer`, `seller`) · **LastWill** (`inheritor_hash`, `cold_hash`, `hot_hash`) — sources in `silverscript-lang/tests/examples/`. Their body hex is regenerated by compiling each contract twice with sentinel args (`compile_contract` from silverscript-lang; a ready-made dump example is described in the repo history) and feeding the pairs to `derive_body`. Until the bodies are filled in, the entries are skipped at registration — matching never guesses.
+
+Escrow and LastWill are indistinguishable by argument shape (both 3×32B), which is exactly why matching uses compiled bodies rather than arity heuristics.

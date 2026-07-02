@@ -1,12 +1,12 @@
 # Covenant Lab
 
-`kascov-lab` — we don't just observe covenants, we make them. The lab creates a real covenant lifecycle on **testnet-10** that the explorer then indexes and traces: the end-to-end proof.
+`kascov-lab` — we don't just observe covenants, we make them. The lab creates a real covenant lifecycle on **testnet-10** that the explorer then indexes and traces: the end-to-end proof. (Proven July 2: covenant `3af0fffe…` — genesis → 2 transitions → burn, fully traced.)
 
 ## Why no SilverScript needed
 
 A covenant is a *consensus* construct (KIP-20), not a language construct. Any v1 transaction output carrying a `CovenantBinding` forms one — the script can be a plain pay-to-pubkey. The lab:
 
-1. **Genesis** — spends a funding UTXO; output 0 carries `CovenantBinding { authorizing_input: 0, covenant_id }` where the id is computed with the consensus helper `covenant_id(outpoint, [(0, &output)])` (BLAKE2b-256, domain `"CovenantID"` — see [[Toccata Protocol Notes]]).
+1. **Genesis** — spends a funding UTXO; output 0 carries `CovenantBinding { authorizing_input: 0, covenant_id }` where the id is computed with the consensus helper `covenant_id(outpoint, [(0, &output)])` (BLAKE2b-256, domain `"CovenantID"` — see [[Toccata Protocol Notes]]). The [[Sync Engine#Classification]] now validates exactly this construction when classifying genesis events — the lab and the indexer literally call the same function.
 2. **Transitions** — each spends the previous covenant UTXO and re-binds the same id (continuation). The spent UTXO's `covenant_id` is set in the signing entry.
 3. **Burn** — spends the covenant UTXO into a plain output. Lineage ends.
 
@@ -23,9 +23,12 @@ kascov-lab demo --transitions 2        # genesis → 2 transitions → burn
 # watch kascov catch it (start sync BEFORE the demo to capture all events):
 kascov --network testnet-10 sync --follow &
 kascov --network testnet-10 trace <covenant-id-from-demo>
+
+# or just paste the demo's txid into the search box at kascov-explorer.web.app —
+# it lands on the coin with the event highlighted, live within seconds
 ```
 
-Key file: `/tmp/kascov-lab-key.hex` (throwaway testnet key).
+Key file: `/tmp/kascov-lab-key.hex` (throwaway testnet key). TN10 min relay fee ≈ 166k sompi for a 1-in-1-out tx; the lab uses 500k.
 
 ## Design note
 
