@@ -555,6 +555,111 @@ function renderGrid(entry, network) {
     : '';
 }
 
+/* --------------------------------------------------- search suggestions */
+
+const suggest = { items: [], active: -1 };
+
+function suggestionItems(entry) {
+  const q = state.query;
+  if (!entry || !q || q.length < 2) return [];
+  const out = [];
+  const seen = new Set();
+  const push = (e, why, tx, score) => {
+    if (seen.has(e.c.covenant_id)) return;
+    seen.add(e.c.covenant_id);
+    out.push({ e, why, tx, score });
+  };
+  for (const e of entry.index.covs) {
+    if (e.name.startsWith(q)) push(e, 'name', null, 0);
+    else if (e.name.includes(q)) push(e, 'name', null, 1);
+    else if (e.c.covenant_id.startsWith(q)) push(e, 'coin id', null, 2);
+    if (out.length >= 24) break;
+  }
+  /* hex-looking input also suggests transaction matches (deep-linked) */
+  if (/^[0-9a-f]{4,}$/.test(q)) {
+    for (const e of entry.index.covs) {
+      if (seen.has(e.c.covenant_id)) continue;
+      if (e.c.genesis_txid && e.c.genesis_txid.startsWith(q)) {
+        push(e, 'genesis tx', e.c.genesis_txid, 3);
+      } else {
+        const ev = e.c.events.find((x) => x.txid.startsWith(q));
+        if (ev) push(e, 'transaction', ev.txid, 3);
+      }
+      if (out.length >= 32) break;
+    }
+  }
+  out.sort((a, b) => a.score - b.score ||
+    (b.e.c.last_activity_daa || 0) - (a.e.c.last_activity_daa || 0));
+  return out.slice(0, 8);
+}
+
+function markMatch(name, q) {
+  const i = name.indexOf(q);
+  if (i < 0) return esc(name);
+  return esc(name.slice(0, i)) + '<mark>' + esc(name.slice(i, i + q.length)) + '</mark>' +
+    esc(name.slice(i + q.length));
+}
+
+function closeSuggest() {
+  const host = $('#search-suggest');
+  if (!host) return;
+  host.hidden = true;
+  host.innerHTML = '';
+  suggest.items = [];
+  suggest.active = -1;
+  const input = $('#search');
+  if (input) {
+    input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant');
+  }
+}
+
+function renderSuggest() {
+  const host = $('#search-suggest');
+  if (!host) return;
+  suggest.items = suggestionItems(state.cache[state.network]);
+  suggest.active = -1;
+  if (!suggest.items.length) { closeSuggest(); return; }
+  host.innerHTML = suggest.items.map((s, i) => {
+    const alive = s.e.c.status === 'active';
+    const href = `#/${esc(state.network)}/c/${esc(s.e.c.covenant_id)}` +
+      (s.tx ? `?tx=${esc(s.tx)}` : '');
+    const kind = s.why === 'name' ? '' :
+      `<span class="suggest-kind">${esc(s.why)} ${esc(shortHex(s.tx || s.e.c.covenant_id, 8, 6))}</span>`;
+    return `<a class="suggest-item" id="sugg-${i}" role="option" href="${href}" data-suggest="${i}">` +
+      avatarSvg(s.e.c.covenant_id, 26) +
+      `<span class="suggest-name">${markMatch(s.e.name, state.query)}</span>` +
+      kind +
+      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}">${alive ? 'alive' : 'retired'}</span>` +
+      `</a>`;
+  }).join('');
+  host.hidden = false;
+  const input = $('#search');
+  if (input) input.setAttribute('aria-expanded', 'true');
+}
+
+function setActiveSuggest(i) {
+  suggest.active = i;
+  const input = $('#search');
+  document.querySelectorAll('.suggest-item').forEach((el, k) => {
+    el.classList.toggle('is-active', k === i);
+  });
+  if (input) {
+    if (i >= 0) input.setAttribute('aria-activedescendant', `sugg-${i}`);
+    else input.removeAttribute('aria-activedescendant');
+  }
+  const el = document.getElementById(`sugg-${i}`);
+  if (el) el.scrollIntoView({ block: 'nearest' });
+}
+
+function goToSuggestion(s) {
+  const input = $('#search');
+  if (input) input.value = '';
+  state.query = '';
+  closeSuggest();
+  location.hash = `#/${state.network}/c/${s.e.c.covenant_id}` + (s.tx ? `?tx=${s.tx}` : '');
+}
+
 /* ------------------------------------------------- records + watch strip */
 
 function miniCard(e, network, label, sub) {
@@ -940,6 +1045,7 @@ async function render() {
   if (route.network && NETWORKS[route.network] && route.network !== state.network) {
     state.network = route.network;
     state.shown = PAGE_SIZE;
+    closeSuggest();
   }
   if (state.watchNet !== state.network) {
     state.watch = loadWatch(state.network);
@@ -1237,12 +1343,49 @@ $('#search').addEventListener('input', (e) => {
       const tx = byTx ? `?tx=${state.query}` : '';
       e.target.value = '';
       state.query = '';
+      closeSuggest();
       location.hash = `#/${state.network}/c/${target.c.covenant_id}${tx}`;
       return;
     }
   }
   renderGrid(entry, state.network);
+  renderSuggest();
 });
+
+$('#search').addEventListener('keydown', (e) => {
+  const open = suggest.items.length > 0 && !$('#search-suggest').hidden;
+  if (e.key === 'ArrowDown' && open) {
+    e.preventDefault();
+    setActiveSuggest(Math.min(suggest.active + 1, suggest.items.length - 1));
+  } else if (e.key === 'ArrowUp' && open) {
+    e.preventDefault();
+    setActiveSuggest(Math.max(suggest.active - 1, -1));
+  } else if (e.key === 'Enter' && open) {
+    e.preventDefault();
+    const pick = suggest.items[suggest.active >= 0 ? suggest.active : 0];
+    if (pick) goToSuggestion(pick);
+  } else if (e.key === 'Escape') {
+    closeSuggest();
+  }
+});
+
+$('#search').addEventListener('blur', () => {
+  /* let a click on a suggestion land first */
+  setTimeout(closeSuggest, 150);
+});
+
+const suggestHost = $('#search-suggest');
+if (suggestHost) {
+  /* keep focus in the input so blur doesn't eat the click */
+  suggestHost.addEventListener('mousedown', (e) => e.preventDefault());
+  suggestHost.addEventListener('click', (e) => {
+    const a = e.target.closest('[data-suggest]');
+    if (!a) return;
+    e.preventDefault();
+    const s = suggest.items[Number(a.dataset.suggest)];
+    if (s) goToSuggestion(s);
+  });
+}
 
 const sortSelect = $('#sort');
 if (sortSelect) {

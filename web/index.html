@@ -35,7 +35,8 @@
       </a>
       <div class="search-wrap header-search" id="header-search" hidden>
         <svg class="search-icon" aria-hidden="true" viewBox="0 0 20 20" width="16" height="16"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="2"/><line x1="12.8" y1="12.8" x2="17" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        <input id="search" type="search" placeholder="name, coin id, or a transaction id…" aria-label="Search smart coins by friendly name, coin id or transaction id" autocomplete="off" spellcheck="false">
+        <input id="search" type="search" placeholder="name, coin id, or a transaction id…" aria-label="Search smart coins by friendly name, coin id or transaction id" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="search-suggest">
+        <div id="search-suggest" class="suggest" role="listbox" aria-label="Matching smart coins" hidden></div>
       </div>
       <nav class="site-nav" aria-label="Pages">
         <a class="nav-link" href="#/explore" data-nav="explore">explore</a>
