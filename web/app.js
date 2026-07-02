@@ -11,14 +11,14 @@ const NETWORKS = {
     word: 'testnet',
     unit: 'TKAS',
     unitHint: 'TKAS = test-network KAS (play money, no real-world value)',
-    txBase: 'https://tn10.kaspa.stream/txs/',
+    txBase: 'https://tn10.kaspa.stream/transactions/',
     pulseTitle: 'life on the testnet',
   },
   'mainnet': {
     label: 'mainnet',
     word: 'mainnet',
     unit: 'KAS',
-    txBase: 'https://kas.fyi/transaction/',
+    txBase: 'https://explorer.kaspa.org/transactions/',
     pulseTitle: 'life on mainnet',
   },
 };
