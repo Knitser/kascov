@@ -38,11 +38,37 @@ cargo run -p kascov -- --network testnet-10 --rpc ws://127.0.0.1:17210 scan --la
 cargo run -p kascov -- --json scan --last 500 | jq .covenant_id
 ```
 
+## The website
+
+[kascov-explorer.web.app](https://kascov-explorer.web.app) is the hosted face of this index:
+
+- **explorer** — every smart coin with a friendly name, life story timeline, live-updating stats ("watching live" means the indexer saw the chain tip seconds ago; times are exact, UTC on hover)
+- **search that answers the tester's question** — paste a transaction id and land on the coin it touched, with that event highlighted; a clear "kascov hasn't seen this" when it isn't covenant traffic
+- **watchlist** (★), record holders, sorting
+- **[/#/decode](https://kascov-explorer.web.app/#/decode)** — paste any script hex, get the post-Toccata disassembly (KIP-17 introspection, KIP-20 covenant ops, KIP-16 zk) in the browser
+- **[/#/dev](https://kascov-explorer.web.app/#/dev)** — the JSON API documented with curl examples
+
+## The JSON API
+
+An always-on worker (Cloud Run) follows the chain and serves the index as JSON, CORS `*`, no keys:
+
+```sh
+# small fast feed: stats + chain tip + newest ~150 events (poll this)
+curl -s https://kascov-explorer.web.app/data/testnet-10-live.json | jq .stats
+
+# full snapshot: every covenant, complete timelines, UTXOs with decoded scripts
+curl -s https://kascov-explorer.web.app/data/testnet-10.json | jq '.covenants[0]'
+```
+
+Field-by-field docs live on the [for developers page](https://kascov-explorer.web.app/#/dev).
+
 ## Design notes
 
-- Rust workspace: `kascov-core` (node client, detection, sync, storage), `kascov` (CLI). Kaspa RPC types never leave one module (`node/wrpc.rs`) — the rest of the code uses kascov's own stable model.
+- Rust workspace: `kascov-core` (node client, detection, sync, storage), `kascov` (CLI + serve worker), `kascov-decode` (post-Toccata disassembler; `web/disasm.js` is its verified JS port), `kascov-lab` (make real covenants on TN10).
+- Kaspa RPC types never leave one module (`node/wrpc.rs`) — the rest of the code uses kascov's own stable model.
 - Kaspa crates on crates.io are frozen pre-Toccata; deps are pinned to a single [rusty-kaspa](https://github.com/kaspanet/rusty-kaspa) git rev in the workspace manifest. The pin must be wire-compatible (borsh) with the node you connect to.
-- Index storage is SQLite — single file per network, disposable and rebuildable (TN12 resets happen).
+- Index storage is SQLite — single file per network, disposable and rebuildable. The hosted worker restores/backs up its DBs via GCS so history survives restarts; `sync` records the chain tip so exports can date events exactly, and prefetches accepting blocks concurrently to outrun busy testnets.
+- Deployment: Firebase Hosting serves `web/`; `/data/**` rewrites to the Cloud Run worker (`scripts/deploy-worker.sh`). The old laptop publish loop (`scripts/kascov-live.sh`) is no longer needed for production data.
 
 ## License
 
