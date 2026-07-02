@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kascov-core", "crates/kascov-decode", "crates/kascov"]
+members = ["crates/kascov-core", "crates/kascov-decode", "crates/kascov", "crates/kascov-lab"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,6 +21,9 @@ kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", rev = 
 kaspa-notify = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957" }
 kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957" }
 kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957" }
+kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", rev = "98a4ccd8d200853787f227bd4536ac540cf34957" }
+# Must match rusty-kaspa's secp256k1 version (sign() takes their Keypair type).
+secp256k1 = { version = "0.29", features = ["global-context", "rand-std"] }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 clap = { version = "4", features = ["derive"] }

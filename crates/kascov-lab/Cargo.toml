@@ -1,0 +1,18 @@
+[package]
+name = "kascov-lab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kaspa-wrpc-client = { workspace = true }
+kaspa-rpc-core = { workspace = true }
+kaspa-consensus-core = { workspace = true }
+kaspa-addresses = { workspace = true }
+kaspa-txscript = { workspace = true }
+secp256k1 = { workspace = true }
+
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
