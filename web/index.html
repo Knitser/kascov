@@ -3,17 +3,25 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>kascov — Kaspa covenant explorer</title>
-  <meta name="description" content="The first covenant explorer for Kaspa L1. Trace KIP-20 covenant lineages — genesis, transitions, burns — inspect live UTXOs and scripts on testnet-10 and mainnet.">
-  <meta property="og:title" content="kascov — Kaspa covenant explorer">
-  <meta property="og:description" content="The first covenant explorer for Kaspa L1. Trace KIP-20 covenant lineages before node pruning erases them.">
+  <title>kascov — watch Kaspa's smart coins live their lives</title>
+  <meta name="description" content="The first covenant explorer for Kaspa L1. kascov watches every smart coin on the Kaspa network get born, move, and retire — and saves the history the network deletes after ~3 days.">
+  <meta property="og:title" content="kascov — watch Kaspa's smart coins live their lives">
+  <meta property="og:description" content="The first covenant explorer for Kaspa L1. Every smart coin, born, moving, retiring — recorded live, remembered forever.">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="kascov">
-  <meta name="theme-color" content="#0b100f">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b100f'/%3E%3Cpath d='M22 16v32M22 32l20-16M24 34l20 14' stroke='%2370C7BA' stroke-width='6' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+  <meta property="og:url" content="https://kascov-explorer.web.app/">
+  <meta property="og:image" content="https://kascov-explorer.web.app/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="kascov — watch Kaspa's smart coins live their lives">
+  <meta name="twitter:description" content="The first covenant explorer for Kaspa L1. Every smart coin, born, moving, retiring — recorded live, remembered forever.">
+  <meta name="twitter:image" content="https://kascov-explorer.web.app/og.png">
+  <meta name="theme-color" content="#0a100f">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a100f'/%3E%3Ccircle cx='32' cy='32' r='19' fill='none' stroke='%2370C7BA' stroke-width='5'/%3E%3Ccircle cx='32' cy='32' r='7' fill='%2370C7BA'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -21,13 +29,13 @@
 
   <header class="site-header">
     <div class="container header-inner">
-      <div class="brand">
-        <a class="wordmark" href="#/">kascov</a>
-        <span class="tagline">covenant explorer for Kaspa L1</span>
-      </div>
+      <a class="wordmark" href="#/" aria-label="kascov home">
+        <svg class="wordmark-eye" viewBox="0 0 64 64" width="22" height="22" aria-hidden="true"><circle cx="32" cy="32" r="24" fill="none" stroke="currentColor" stroke-width="7"/><circle cx="32" cy="32" r="9" fill="currentColor"/></svg>
+        kascov
+      </a>
       <nav class="network-tabs" aria-label="Network">
-        <button type="button" class="network-tab" data-network="testnet-10" aria-pressed="true">testnet-10</button>
-        <button type="button" class="network-tab" data-network="mainnet" aria-pressed="false">mainnet</button>
+        <button type="button" class="network-tab" data-action="network" data-network="testnet-10" aria-pressed="true">testnet-10</button>
+        <button type="button" class="network-tab" data-action="network" data-network="mainnet" aria-pressed="false">mainnet</button>
       </nav>
     </div>
   </header>
@@ -35,39 +43,78 @@
   <main id="main" class="container">
     <div id="panel" class="panel" role="status" aria-live="polite" hidden></div>
 
-    <section id="view-list" aria-label="Covenant overview" hidden>
-      <div class="stats-grid" id="stats"></div>
-      <p class="freshness" id="freshness"></p>
+    <!-- ============ HOME ============ -->
+    <section id="view-home" hidden>
+      <section class="hero" aria-label="Overview">
+        <h1 class="hero-title">Kaspa coins just learned to <em>carry rules</em>.</h1>
+        <p class="hero-sub">kascov watches every smart coin on the Kaspa <span data-net-word>testnet</span> — born, moving, retiring — and saves the history the network deletes after 3&nbsp;days.</p>
+        <div class="hero-stats" id="hero-stats"></div>
+        <p class="freshness" id="freshness"></p>
+      </section>
 
-      <div class="toolbar">
-        <div class="search-wrap">
-          <svg class="search-icon" aria-hidden="true" viewBox="0 0 20 20" width="16" height="16"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="2"/><line x1="12.8" y1="12.8" x2="17" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          <input id="search" type="search" placeholder="search covenant id or event txid…" aria-label="Search covenants by covenant id or event transaction id" autocomplete="off" spellcheck="false">
-        </div>
-        <div class="chips" role="group" aria-label="Filter by status">
-          <button type="button" class="chip" data-status="all" aria-pressed="true">all</button>
-          <button type="button" class="chip" data-status="active" aria-pressed="false">active</button>
-          <button type="button" class="chip" data-status="burned" aria-pressed="false">burned</button>
-        </div>
-        <p class="result-count" id="result-count" aria-live="polite"></p>
-      </div>
+      <section class="guide" aria-label="How to read this">
+        <h2 class="guide-title">how to read this</h2>
+        <ol class="guide-steps">
+          <li class="guide-step">
+            <span class="guide-icon icon-born" data-icon="born" aria-hidden="true"></span>
+            <div><strong>Born</strong><span>a coin gets an identity and rules</span></div>
+          </li>
+          <li class="guide-step">
+            <span class="guide-icon icon-move" data-icon="move" aria-hidden="true"></span>
+            <div><strong>Moves</strong><span>it changes hands or state — identity travels with it</span></div>
+          </li>
+          <li class="guide-step">
+            <span class="guide-icon icon-burn" data-icon="burn" aria-hidden="true"></span>
+            <div><strong>Retired</strong><span>its story ends, recorded forever here</span></div>
+          </li>
+        </ol>
+      </section>
 
-      <div id="cov-list" class="cov-list"></div>
-      <div id="list-foot" class="list-foot"></div>
+      <section class="empty-net" id="empty-net" hidden></section>
+
+      <section class="pulse" id="section-pulse" aria-label="Activity chart">
+        <h2 id="pulse-title">life on the testnet</h2>
+        <div id="pulse-chart" class="pulse-chart"></div>
+      </section>
+
+      <section class="stories" id="section-stories" aria-label="Latest stories">
+        <h2>latest stories</h2>
+        <ol class="story-list" id="story-list"></ol>
+      </section>
+
+      <section class="coins" id="section-coins" aria-label="All smart coins">
+        <h2>all smart coins</h2>
+        <div class="toolbar">
+          <div class="search-wrap">
+            <svg class="search-icon" aria-hidden="true" viewBox="0 0 20 20" width="16" height="16"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="2"/><line x1="12.8" y1="12.8" x2="17" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            <input id="search" type="search" placeholder="search a name like brave-teal-otter, or paste a coin or transaction id…" aria-label="Search smart coins by friendly name, coin id or transaction id" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="chips" role="group" aria-label="Filter by status">
+            <button type="button" class="chip" data-action="filter" data-filter="all" aria-pressed="true">all</button>
+            <button type="button" class="chip" data-action="filter" data-filter="active" aria-pressed="false">alive</button>
+            <button type="button" class="chip" data-action="filter" data-filter="burned" aria-pressed="false">retired</button>
+          </div>
+          <p class="result-count" id="result-count" aria-live="polite"></p>
+        </div>
+        <div id="coin-grid" class="coin-grid"></div>
+        <div id="grid-foot" class="grid-foot"></div>
+      </section>
     </section>
 
-    <section id="view-detail" aria-label="Covenant detail" hidden></section>
+    <!-- ============ DETAIL ============ -->
+    <section id="view-detail" aria-label="Smart coin detail" hidden></section>
   </main>
 
   <footer class="site-footer">
     <div class="container footer-inner">
+      <p class="footer-motto">Kaspa nodes forget after ~3 days. <strong>kascov remembers.</strong></p>
       <p><a class="footer-link" href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov</a></p>
-      <p>Kaspa nodes prune history after ~3 days — kascov indexes it before it&rsquo;s gone.</p>
+      <p class="footer-dim">data refreshes periodically — this is a snapshot, not real-time</p>
       <p class="footer-dim">not affiliated with the Kaspa Foundation</p>
     </div>
   </footer>
 
-  <noscript><div class="container panel"><p>kascov needs JavaScript to render covenant snapshots.</p></div></noscript>
+  <noscript><div class="container panel"><p>kascov needs JavaScript to show its smart coins.</p></div></noscript>
   <script src="app.js"></script>
 </body>
 </html>
