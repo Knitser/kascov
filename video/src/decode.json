@@ -815,8 +815,8 @@
  "spent_txid": "bd1d47649514caad3cbec84a8e71d2a335204fe7eab6939ce6dd2424f83d8c6a",
  "stats": {
   "tn10": {
-   "covenants": 7900,
-   "events": 32414
+   "covenants": 8438,
+   "events": 33916
   },
   "mainnet": {
    "covenants": 5,

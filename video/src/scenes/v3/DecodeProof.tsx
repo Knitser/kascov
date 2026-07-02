@@ -181,19 +181,54 @@ export const DecodeProof: React.FC = () => {
                 </span>
               </div>
             ))}
-            {/* zk callout */}
-            {zkOn && (
+            {/* zk callout — hands off to the naming beat below */}
+            {zkOn && f < ZK_AT + 78 && (
               <div
                 style={{
                   marginTop: 8,
                   fontSize: 30,
                   lineHeight: 1.45,
                   color: T.text,
-                  opacity: seg(f, ZK_AT + 12, ZK_AT + 30),
+                  opacity: seg(f, ZK_AT + 12, ZK_AT + 30) * (1 - seg(f, ZK_AT + 62, ZK_AT + 76)),
                 }}
               >
                 that purple line is a{' '}
                 <span style={{color: '#c398ff', fontWeight: 750}}>zero-knowledge proof</span> being verified on Kaspa L1.
+              </div>
+            )}
+
+            {/* SilverScript naming beat takes the callout's spot */}
+            {f >= ZK_AT + 78 && (
+              <div style={{marginTop: 8, opacity: seg(f, ZK_AT + 78, ZK_AT + 92)}}>
+                <div style={{fontSize: 25, color: T.muted, marginBottom: 12}}>
+                  it even <span style={{color: T.text, fontWeight: 650}}>names compiled contracts</span>:
+                </div>
+                {['Mecenas', 'Escrow', 'LastWill'].map((n, i) => {
+                  const at = ZK_AT + 86 + i * 9;
+                  const s = pop(f, fps, at, 14);
+                  return (
+                    <div
+                      key={n}
+                      style={{
+                        display: 'inline-block',
+                        marginRight: 10,
+                        marginBottom: 9,
+                        padding: '6px 16px',
+                        borderRadius: 999,
+                        background: T.accentSoft,
+                        border: `1px solid ${T.borderStrong}`,
+                        color: T.accent,
+                        fontFamily: T.mono,
+                        fontSize: 20,
+                        fontWeight: 650,
+                        opacity: seg(f, at, at + 6),
+                        transform: `translateY(${(1 - s) * 12}px)`,
+                      }}
+                    >
+                      SilverScript · {n}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
