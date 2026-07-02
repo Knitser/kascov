@@ -11,9 +11,9 @@ Rough priority order, July 2026. Updated July 2 after the realtime/explorer wave
 
 ## Near
 
-- **Spend-time decoding** — capture covenant-spending signature scripts during [[Sync Engine|sync]]; disassemble the revealed P2SH preimage; show `payload Δ` between transitions in `trace` **and on the web timeline**. See [[Decoding#Spend-time decoding (next)]].
-- **KIP-20 genesis hash validation** in classification — recompute the covenant id from the genesis outpoint + authorized outputs (the [[Covenant Lab]] already does this construction) to distinguish true genesis from truncated-lineage first sightings, instead of the current observational rule. Directly hardens `lineage_complete` shown in the UI and API.
-- **Notification-based follow** — subscribe to `virtual-chain-changed` instead of the 2s poll in `sync --follow`. (Catch-up speed is solved by prefetching; this trims steady-state latency.)
+- ~~**Spend-time decoding**~~ — **shipped July 2 (evening)**: sync captures every covenant spend's signature script (`spent_sig`, additive migration, reorg-safe); `kascov_decode::p2sh_reveal` verifies + peels the redeem script against the committed blake2b hash; `trace` prints per-event state payloads and the `payload Δ` between reveals; exports carry `revealed_hex`/`revealed_asm` (+ op flags) and the web nerd panel shows "revealed at spend" with a decoder deep-link. Reveals exist for spends indexed from this version on.
+- ~~**KIP-20 genesis hash validation**~~ — **shipped July 2 (evening)**: classification recomputes the id via the consensus `covenant_id` from the pinned rusty-kaspa rev (`node::compute_covenant_id` boundary wrapper); unprovable first sightings are recorded as transitions with `lineage_complete = false`.
+- **Notification-based follow** — subscribe to `virtual-chain-changed` instead of the 2s poll in `sync --follow`. Deliberately deferred: with concurrent prefetch the end-to-end freshness is already ~2–4s, so notifications buy ~1–2s at the cost of new reconnect/subscription failure modes. Do it when SSE push lands (same plumbing).
 
 ## Mid
 
