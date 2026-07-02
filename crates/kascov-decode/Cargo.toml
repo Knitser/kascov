@@ -1,0 +1,9 @@
+[package]
+name = "kascov-decode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hex = { workspace = true }
+serde = { workspace = true }

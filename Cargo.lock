@@ -1939,6 +1939,7 @@ dependencies = [
  "futures",
  "hex",
  "kascov-core",
+ "kascov-decode",
  "serde_json",
  "tokio",
  "tracing",
@@ -1963,6 +1964,14 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "kascov-decode"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
 ]
 
 [[package]]

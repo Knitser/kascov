@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kascov-core", "crates/kascov"]
+members = ["crates/kascov-core", "crates/kascov-decode", "crates/kascov"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ repository = "https://github.com/exoticxp/kascov"
 
 [workspace.dependencies]
 kascov-core = { path = "crates/kascov-core" }
+kascov-decode = { path = "crates/kascov-decode" }
 
 # Kaspa crates are frozen pre-Toccata on crates.io — pin git deps to a single rev.
 # This rev must be wire-compatible with the node kascov connects to (borsh wRPC is

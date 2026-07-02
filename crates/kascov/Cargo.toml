@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 kascov-core = { workspace = true }
+kascov-decode = { workspace = true }
 
 tokio = { workspace = true }
 clap = { workspace = true }

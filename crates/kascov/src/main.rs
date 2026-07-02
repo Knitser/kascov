@@ -55,7 +55,12 @@ enum Command {
         limit: u64,
     },
     /// Show one covenant: summary, live state UTXOs.
-    Show { covenant_id: CovenantId },
+    Show {
+        covenant_id: CovenantId,
+        /// Disassemble the state script instead of printing raw hex
+        #[arg(long)]
+        decode: bool,
+    },
     /// Print a covenant's full lineage (genesis → tip).
     Trace { covenant_id: CovenantId },
     /// Follow the chain live and print covenant events as they are accepted.
@@ -74,7 +79,7 @@ async fn main() -> Result<()> {
         Command::Scan { last } => scan(&cli, last).await,
         Command::Sync { from, follow } => sync(&cli, from, follow, false).await,
         Command::List { limit } => list(&cli, limit),
-        Command::Show { covenant_id } => show(&cli, covenant_id),
+        Command::Show { covenant_id, decode } => show(&cli, covenant_id, decode),
         Command::Trace { covenant_id } => trace(&cli, covenant_id),
         Command::Watch => sync(&cli, None, true, true).await,
     }
@@ -173,16 +178,20 @@ fn list(cli: &Cli, limit: u64) -> Result<()> {
     Ok(())
 }
 
-fn show(cli: &Cli, covenant_id: CovenantId) -> Result<()> {
+fn show(cli: &Cli, covenant_id: CovenantId, decode: bool) -> Result<()> {
     let store = open_store(cli)?;
     let Some(summary) = store.summary(&covenant_id)? else {
         anyhow::bail!("covenant {covenant_id} not in index");
     };
     let utxos = store.utxos(&covenant_id, true)?;
+    let registry = kascov_decode::Registry::default();
     if cli.json {
+        let decoded: Vec<_> = decode
+            .then(|| utxos.iter().map(|u| registry.decode(u.spk_version, &u.spk_script)).collect())
+            .unwrap_or_default();
         println!(
             "{}",
-            serde_json::json!({ "summary": summary, "live_utxos": utxos })
+            serde_json::json!({ "summary": summary, "live_utxos": utxos, "decoded": decoded })
         );
         return Ok(());
     }
@@ -205,7 +214,24 @@ fn show(cli: &Cli, covenant_id: CovenantId) -> Result<()> {
             utxo.spk_script.len(),
             utxo.created_daa,
         );
-        println!("  script  {}", hex::encode(&utxo.spk_script));
+        if decode {
+            let decoded = registry.decode(utxo.spk_version, &utxo.spk_script);
+            for instruction in &decoded.instructions {
+                println!("    {:>4}  {}", format!("{:04x}", instruction.offset), instruction);
+            }
+            if decoded.truncated {
+                println!("    [script truncated / malformed tail]");
+            }
+            if decoded.uses_covenant_ops || decoded.uses_zk_ops {
+                println!(
+                    "    uses: {}{}",
+                    if decoded.uses_covenant_ops { "covenant-ops " } else { "" },
+                    if decoded.uses_zk_ops { "zk-ops" } else { "" },
+                );
+            }
+        } else {
+            println!("  script  {}", hex::encode(&utxo.spk_script));
+        }
     }
     Ok(())
 }
