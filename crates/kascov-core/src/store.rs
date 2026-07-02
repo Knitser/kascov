@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS covenant_events (
     PRIMARY KEY (covenant_id, seq)
 );
 CREATE INDEX IF NOT EXISTS ev_by_accepting ON covenant_events(accepting_block);
+CREATE INDEX IF NOT EXISTS ev_by_daa ON covenant_events(accepting_daa);
 CREATE TABLE IF NOT EXISTS covenant_utxos (
     txid BLOB NOT NULL,
     output_index INTEGER NOT NULL,
@@ -71,6 +72,16 @@ pub struct EventRow {
     pub kind: String,
     pub txid: TxId,
     pub accepting_block: BlockHash,
+    pub accepting_daa: u64,
+}
+
+/// An event joined with its covenant, for cross-covenant feeds.
+#[derive(Clone, Debug, Serialize)]
+pub struct GlobalEventRow {
+    pub covenant_id: CovenantId,
+    pub seq: u64,
+    pub kind: String,
+    pub txid: TxId,
     pub accepting_daa: u64,
 }
 
@@ -156,6 +167,9 @@ impl Store {
         }
         let conn = Connection::open(path).map_err(db_err)?;
         conn.pragma_update(None, "journal_mode", "WAL").map_err(db_err)?;
+        // Concurrent readers (backup, serve snapshots) must wait out write
+        // bursts instead of failing with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
 
         let store = Self { conn };
@@ -188,6 +202,26 @@ impl Store {
 
     pub fn cursor(&self) -> Result<Option<BlockHash>> {
         Ok(self.meta("cursor")?.and_then(|s| s.parse().ok()))
+    }
+
+    /// Record where the chain tip was (virtual DAA score) and when we saw it,
+    /// atomically — exports anchor DAA scores to wall-clock time with this.
+    pub fn set_tip(&self, daa: u64, at_ms: u64) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO meta (key, value)
+                 VALUES ('tip_daa', ?1), ('tip_at_ms', ?2)",
+                params![daa.to_string(), at_ms.to_string()],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// The last recorded chain tip as (virtual DAA, wall-clock ms), if any.
+    pub fn tip(&self) -> Result<Option<(u64, u64)>> {
+        let daa: Option<u64> = self.meta("tip_daa")?.and_then(|s| s.parse().ok());
+        let at_ms: Option<u64> = self.meta("tip_at_ms")?.and_then(|s| s.parse().ok());
+        Ok(daa.zip(at_ms))
     }
 
     /// Write a consistent copy of the database (safe while a writer is active).
@@ -385,6 +419,32 @@ impl Store {
         Ok(rows)
     }
 
+    /// The newest events across all covenants, newest first.
+    pub fn recent_events(&self, limit: u64) -> Result<Vec<GlobalEventRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT covenant_id, seq, kind, txid, accepting_daa
+                 FROM covenant_events ORDER BY accepting_daa DESC, rowid DESC LIMIT ?1",
+            )
+            .map_err(db_err)?;
+        let limit = limit.min(i64::MAX as u64) as i64;
+        let rows = stmt
+            .query_map([limit], |row| {
+                Ok(GlobalEventRow {
+                    covenant_id: CovenantId(row.get(0)?),
+                    seq: row.get(1)?,
+                    kind: row.get(2)?,
+                    txid: TxId(row.get(3)?),
+                    accepting_daa: row.get(4)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
     pub fn utxos(&self, id: &CovenantId, live_only: bool) -> Result<Vec<UtxoRow>> {
         let mut stmt = self
             .conn
@@ -410,5 +470,76 @@ impl Store {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_store(name: &str) -> Store {
+        let path = std::env::temp_dir()
+            .join(format!("kascov-store-test-{}-{name}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        Store::open(&path, Network::Testnet(10)).unwrap()
+    }
+
+    fn block_with_events(hash: u8, daa: u64, events: Vec<(u8, EventKind, u8)>) -> BlockEvents {
+        BlockEvents {
+            accepting_block: BlockHash([hash; 32]),
+            accepting_daa: daa,
+            events: events
+                .into_iter()
+                .map(|(cov, kind, tx)| NewEvent {
+                    covenant_id: CovenantId([cov; 32]),
+                    kind,
+                    txid: TxId([tx; 32]),
+                })
+                .collect(),
+            created_utxos: vec![],
+            spent_utxos: vec![],
+        }
+    }
+
+    #[test]
+    fn tip_roundtrip_and_overwrite() {
+        let store = test_store("tip");
+        assert_eq!(store.tip().unwrap(), None);
+        store.set_tip(123, 456_000).unwrap();
+        assert_eq!(store.tip().unwrap(), Some((123, 456_000)));
+        store.set_tip(999, 999_000).unwrap();
+        assert_eq!(store.tip().unwrap(), Some((999, 999_000)));
+    }
+
+    #[test]
+    fn recent_events_orders_newest_first_and_limits() {
+        let mut store = test_store("recent");
+        store
+            .apply(&block_with_events(1, 100, vec![(0xA1, EventKind::Genesis, 0x01)]), BlockHash([1; 32]))
+            .unwrap();
+        store
+            .apply(
+                &block_with_events(
+                    2,
+                    200,
+                    vec![(0xA1, EventKind::Transition, 0x02), (0xB2, EventKind::Genesis, 0x03)],
+                ),
+                BlockHash([2; 32]),
+            )
+            .unwrap();
+
+        let recent = store.recent_events(10).unwrap();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].accepting_daa, 200);
+        // same DAA: later insertion (rowid) first
+        assert_eq!(recent[0].covenant_id, CovenantId([0xB2; 32]));
+        assert_eq!(recent[0].kind, "genesis");
+        assert_eq!(recent[1].covenant_id, CovenantId([0xA1; 32]));
+        assert_eq!(recent[2].accepting_daa, 100);
+        assert_eq!(recent[2].seq, 0);
+
+        let capped = store.recent_events(1).unwrap();
+        assert_eq!(capped.len(), 1);
+        assert_eq!(capped[0].accepting_daa, 200);
     }
 }

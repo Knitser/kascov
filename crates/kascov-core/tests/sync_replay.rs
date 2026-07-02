@@ -124,6 +124,10 @@ async fn genesis_transitions_burn_and_reorg() {
     assert_eq!(stats.events, 2);
     assert_eq!(events, vec![(EventKind::Genesis, cov(0xC1)), (EventKind::Transition, cov(0xC1))]);
 
+    let tip = store.tip().unwrap().expect("tip recorded on every pass");
+    assert_eq!(tip.0, 0, "FakeChain reports virtual daa 0");
+    assert!(tip.1 > 0, "tip wall-clock must be recorded");
+
     let summary = store.summary(&cov(0xC1)).unwrap().unwrap();
     assert_eq!(summary.event_count, 2);
     assert_eq!(summary.live_utxos, 1, "transition output should be the only live state UTXO");

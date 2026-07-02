@@ -29,6 +29,11 @@ pub enum SyncUpdate {
 /// How often the cursor advances through event-less chain blocks.
 const CHECKPOINT_EVERY: u64 = 500;
 
+/// Accepting blocks fetched ahead while earlier ones are processed. Keeps
+/// catch-up throughput above the chain's block rate (fetches are WAN-bound;
+/// TN10 alone produces ~10 blocks/s).
+const FETCH_AHEAD: usize = 16;
+
 /// Process all virtual chain changes since the stored cursor (or `from`, or the
 /// current sink for a fresh index). Returns once caught up.
 pub async fn sync_once(
@@ -39,13 +44,25 @@ pub async fn sync_once(
 ) -> Result<SyncStats> {
     let mut stats = SyncStats::default();
 
+    // Note the chain tip (virtual DAA ↔ wall clock) so exports can date events
+    // exactly. Advisory — a failed lookup only matters for a fresh index,
+    // which needs the sink below.
+    let dag = node.dag_info().await;
+    if let Ok(dag) = &dag {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        store.set_tip(dag.virtual_daa_score, now_ms)?;
+    }
+
     let cursor = match store.cursor()? {
         Some(cursor) => cursor,
         None => {
             // Fresh index: start from `from`, or the current sink.
             let start = match from {
                 Some(from) => from,
-                None => node.dag_info().await?.sink,
+                None => dag?.sink,
             };
             tracing::info!("fresh index, starting at {start}");
             store.apply(&BlockEvents::empty(start), start)?;
@@ -64,12 +81,22 @@ pub async fn sync_once(
     let mut since_checkpoint = 0u64;
     let mut last_seen: Option<BlockHash> = None;
 
-    for accepted in &step.added {
+    /* Prefetch accepting blocks concurrently (ordered) while the store work
+       below stays strictly sequential per chain block. Items are moved into
+       the stream so the fetch closure stays lifetime-free. */
+    let mut prefetched = futures::stream::iter(step.added)
+        .map(|accepted| async move {
+            let block = node.block_with_txs(accepted.accepting_block).await;
+            (accepted, block)
+        })
+        .buffered(FETCH_AHEAD);
+
+    while let Some((accepted, block)) = prefetched.next().await {
         stats.chain_blocks += 1;
         since_checkpoint += 1;
         last_seen = Some(accepted.accepting_block);
 
-        let accepting = node.block_with_txs(accepted.accepting_block).await?;
+        let accepting = block?;
         let wanted: HashSet<TxId> = accepted.accepted_tx_ids.iter().copied().collect();
 
         // Resolve accepted transaction bodies: the accepting block's own txs
@@ -98,7 +125,7 @@ pub async fn sync_once(
 
         let block_events = classify(
             store,
-            accepted,
+            &accepted,
             accepting.daa_score,
             accepted.accepted_tx_ids.iter().filter_map(|id| bodies.get(id)),
         )?;
