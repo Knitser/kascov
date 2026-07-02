@@ -33,7 +33,7 @@ gcloud run deploy $SERVICE \
   --no-cpu-throttling \
   --memory 1Gi \
   --cpu 1 \
-  --set-env-vars "BACKUP_BUCKET=$BUCKET,NETWORKS=testnet-10,mainnet" \
+  --set-env-vars "^@^BACKUP_BUCKET=$BUCKET@NETWORKS=testnet-10,mainnet" \
   --port 8080
 
 echo "==> granting the service account access to the backup bucket"
