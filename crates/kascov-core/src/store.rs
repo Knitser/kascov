@@ -272,20 +272,11 @@ impl Store {
     /// and advance the cursor.
     pub fn apply(&mut self, block: &BlockEvents, new_cursor: BlockHash) -> Result<()> {
         let tx = self.conn.transaction().map_err(db_err)?;
-        for (outpoint, spending_txid, sig) in &block.spent_utxos {
-            tx.execute(
-                "UPDATE covenant_utxos SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3
-                 WHERE txid = ?4 AND output_index = ?5",
-                params![
-                    block.accepting_block.0.as_slice(),
-                    spending_txid.0.as_slice(),
-                    sig,
-                    outpoint.txid.0.as_slice(),
-                    outpoint.index
-                ],
-            )
-            .map_err(db_err)?;
-        }
+        // Created rows must land BEFORE spends are marked: one accepting chain
+        // block can sweep a whole intra-block chain (tx B spending tx A's
+        // covenant output), and marking spends first would no-op against the
+        // not-yet-inserted row — leaving a zombie "live" UTXO and dropping the
+        // captured spend signature.
         for utxo in &block.created_utxos {
             tx.execute(
                 "INSERT OR REPLACE INTO covenant_utxos
@@ -301,6 +292,20 @@ impl Store {
                     utxo.spk_script,
                     block.accepting_block.0.as_slice(),
                     block.accepting_daa
+                ],
+            )
+            .map_err(db_err)?;
+        }
+        for (outpoint, spending_txid, sig) in &block.spent_utxos {
+            tx.execute(
+                "UPDATE covenant_utxos SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3
+                 WHERE txid = ?4 AND output_index = ?5",
+                params![
+                    block.accepting_block.0.as_slice(),
+                    spending_txid.0.as_slice(),
+                    sig,
+                    outpoint.txid.0.as_slice(),
+                    outpoint.index
                 ],
             )
             .map_err(db_err)?;

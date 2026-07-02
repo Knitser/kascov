@@ -1,1 +1,0 @@
-export declare const pLimit: (concurrency: number) => <Arguments extends unknown[], ReturnType>(fn: (..._arguments: Arguments) => ReturnType | PromiseLike<ReturnType>, ...args: Arguments) => Promise<ReturnType>;

@@ -1,1 +1,0 @@
-export declare const getOriginalLocationFromStack: (stack: string, type: "sequence" | "visual-control") => Promise<import("../../../error-overlay/react-overlay/utils/get-source-map").OriginalPosition | null>;

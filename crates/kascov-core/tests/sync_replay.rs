@@ -225,3 +225,39 @@ async fn mid_life_covenant_is_marked_truncated() {
     let kinds: Vec<String> = store.events(&cov(0xC2)).unwrap().iter().map(|e| e.kind.clone()).collect();
     assert_eq!(kinds, ["transition"], "first sighting without genesis proof is a transition");
 }
+
+#[tokio::test]
+async fn intra_block_create_and_spend_is_marked_spent() {
+    let dir = std::env::temp_dir().join(format!("kascov-test-{}", std::process::id()));
+    let db = dir.join("intra-block.db");
+    let _ = std::fs::remove_file(&db);
+    let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
+
+    let mut chain = FakeChain { blocks: HashMap::new(), steps: Mutex::new(vec![]), sink: h(0) };
+
+    // tx A births covenant X, tx B immediately spends A:0 (continuation) —
+    // and BOTH are accepted by the same chain block, as happens routinely on
+    // a 10 bps network where one accepting block sweeps a whole mergeset.
+    let funding = Outpoint { txid: tx_id(0x01), index: 0 };
+    let id = valid_genesis_id(funding);
+    let tx_a = covenant_tx(tx_id(0xA0), vec![funding], Some(id));
+    let tx_b = covenant_tx(tx_id(0xB0), vec![Outpoint { txid: tx_id(0xA0), index: 0 }], Some(id));
+    chain.block(h(1), 100, vec![tx_a, tx_b]);
+    chain
+        .steps
+        .lock()
+        .unwrap()
+        .push(ChainStep { removed: vec![], added: vec![accepted(h(1), &[tx_id(0xA0), tx_id(0xB0)])] });
+
+    sync_once(&chain, &mut store, Some(h(0)), |_| {}).await.unwrap();
+
+    let summary = store.summary(&id).unwrap().unwrap();
+    assert_eq!(summary.event_count, 2, "genesis + transition");
+    assert_eq!(summary.live_utxos, 1, "A:0 was spent within the block; only B:0 is live");
+
+    let utxos = store.utxos(&id, false).unwrap();
+    let a0 = utxos.iter().find(|u| u.outpoint.txid == tx_id(0xA0)).unwrap();
+    assert!(!a0.live, "intra-block-spent UTXO must not stay live");
+    assert_eq!(a0.spent_txid, Some(tx_id(0xB0)));
+    assert!(a0.spent_sig.is_some(), "the spend's signature script must be captured");
+}
