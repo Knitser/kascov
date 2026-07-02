@@ -65,6 +65,15 @@ enum Command {
     Trace { covenant_id: CovenantId },
     /// Follow the chain live and print covenant events as they are accepted.
     Watch,
+    /// Export the index as a JSON snapshot for the web dashboard.
+    Export {
+        /// Output file (default: web/data/<network>.json)
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Cap on events exported per covenant
+        #[arg(long, default_value_t = 500)]
+        max_events: u64,
+    },
 }
 
 #[tokio::main]
@@ -82,7 +91,84 @@ async fn main() -> Result<()> {
         Command::Show { covenant_id, decode } => show(&cli, covenant_id, decode),
         Command::Trace { covenant_id } => trace(&cli, covenant_id),
         Command::Watch => sync(&cli, None, true, true).await,
+        Command::Export { ref out, max_events } => export(&cli, out.clone(), max_events),
     }
+}
+
+fn export(cli: &Cli, out: Option<std::path::PathBuf>, max_events: u64) -> Result<()> {
+    let store = open_store(cli)?;
+    let registry = kascov_decode::Registry::default();
+    let covenants = store.list(u64::MAX)?;
+
+    let mut exported = Vec::with_capacity(covenants.len());
+    let mut total_events = 0u64;
+    for summary in &covenants {
+        let events = store.events(&summary.covenant_id)?;
+        total_events += events.len() as u64;
+        let truncated_events = events.len() as u64 > max_events;
+        let utxos: Vec<_> = store
+            .utxos(&summary.covenant_id, false)?
+            .into_iter()
+            .map(|utxo| {
+                let decoded = registry.decode(utxo.spk_version, &utxo.spk_script);
+                serde_json::json!({
+                    "outpoint": utxo.outpoint.to_string(),
+                    "value": utxo.value,
+                    "created_daa": utxo.created_daa,
+                    "live": utxo.live,
+                    "script_hex": hex::encode(&utxo.spk_script),
+                    "script_asm": decoded.instructions.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+                    "uses_covenant_ops": decoded.uses_covenant_ops,
+                    "uses_zk_ops": decoded.uses_zk_ops,
+                })
+            })
+            .collect();
+        exported.push(serde_json::json!({
+            "covenant_id": summary.covenant_id,
+            "status": if summary.live_utxos > 0 { "active" } else { "burned" },
+            "genesis_txid": summary.genesis_txid,
+            "genesis_daa": summary.genesis_daa,
+            "lineage_complete": summary.lineage_complete,
+            "event_count": summary.event_count,
+            "last_activity_daa": summary.last_activity_daa,
+            "live_utxos": summary.live_utxos,
+            "live_value": summary.live_value,
+            "events": events.iter().take(max_events as usize).collect::<Vec<_>>(),
+            "events_truncated": truncated_events,
+            "utxos": utxos,
+        }));
+    }
+
+    let active = covenants.iter().filter(|c| c.live_utxos > 0).count();
+    let snapshot = serde_json::json!({
+        "network": cli.network.to_string(),
+        "generated_at_ms": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        "stats": {
+            "covenants": covenants.len(),
+            "active": active,
+            "burned": covenants.len() - active,
+            "events": total_events,
+            "live_value": covenants.iter().map(|c| c.live_value).sum::<u64>(),
+            "last_activity_daa": covenants.iter().map(|c| c.last_activity_daa).max().unwrap_or(0),
+        },
+        "covenants": exported,
+    });
+
+    let out = out.unwrap_or_else(|| std::path::PathBuf::from(format!("web/data/{}.json", cli.network)));
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&out, serde_json::to_string(&snapshot)?)?;
+    eprintln!(
+        "exported {} covenants ({} events) to {}",
+        covenants.len(),
+        total_events,
+        out.display()
+    );
+    Ok(())
 }
 
 fn db_path(cli: &Cli) -> std::path::PathBuf {
