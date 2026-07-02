@@ -42,11 +42,11 @@ cargo run -p kascov -- --json scan --last 500 | jq .covenant_id
 
 [kascov-explorer.web.app](https://kascov-explorer.web.app) is the hosted face of this index:
 
-- **explorer** — every smart coin with a friendly name, life story timeline, live-updating stats ("watching live" means the indexer saw the chain tip seconds ago; times are exact, UTC on hover)
-- **search that answers the tester's question** — paste a transaction id and land on the coin it touched, with that event highlighted; a clear "kascov hasn't seen this" when it isn't covenant traffic
-- **watchlist** (★), record holders, sorting
-- **[/#/decode](https://kascov-explorer.web.app/#/decode)** — paste any script hex, get the post-Toccata disassembly (KIP-17 introspection, KIP-20 covenant ops, KIP-16 zk) in the browser
-- **[/#/dev](https://kascov-explorer.web.app/#/dev)** — the JSON API documented with curl examples
+- **explorer** — every smart coin with a friendly name, life story timeline, live-updating stats ("watching live" means the indexer saw the chain tip seconds ago; times are exact, UTC on hover). First paint comes from a 30 KB live feed in ~1 s while the full snapshot loads.
+- **search that answers the tester's question** — paste a transaction id (or start typing a name for live suggestions) and land on the coin it touched, with that event highlighted; a clear "kascov hasn't seen this" when it isn't covenant traffic
+- **watchlist** (★), record holders, sorting; long life stories and UTXO panels fold with expanders
+- **[/decode](https://kascov-explorer.web.app/decode)** — paste any script hex, get the post-Toccata disassembly (KIP-17 introspection, KIP-20 covenant ops, KIP-16 zk) in the browser, with a downloadable .txt and an example gallery. It **names compiled SilverScript contracts** (Mecenas, Escrow, LastWill) and labels their constructor arguments — as does the indexer for on-chain states and spend-time reveals.
+- **[/dev](https://kascov-explorer.web.app/dev)** — the JSON API documented with curl examples
 
 ## The JSON API
 
