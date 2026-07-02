@@ -158,6 +158,7 @@ fn map_tx(tx: RpcTransaction) -> Transaction {
                     index: input.previous_outpoint.index,
                 },
                 signature_script: input.signature_script,
+                compute_budget: input.compute_budget,
             })
             .collect(),
         outputs: tx
@@ -173,6 +174,7 @@ fn map_tx(tx: RpcTransaction) -> Transaction {
                 }),
             })
             .collect(),
+        payload: tx.payload,
     }
 }
 

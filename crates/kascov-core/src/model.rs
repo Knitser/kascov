@@ -120,6 +120,9 @@ pub struct Input {
     /// actual program a covenant ran (spend-time decoding).
     #[serde(with = "serde_bytes_hex", default)]
     pub signature_script: Vec<u8>,
+    /// v1 per-input compute budget commitment (replaces v0 sig_op_count).
+    #[serde(default)]
+    pub compute_budget: u16,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -128,6 +131,9 @@ pub struct Transaction {
     pub version: u16,
     pub inputs: Vec<Input>,
     pub outputs: Vec<Output>,
+    /// v1 transaction payload — covenant apps carry state/messages here.
+    #[serde(with = "serde_bytes_hex", default)]
+    pub payload: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

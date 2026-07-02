@@ -197,6 +197,7 @@ fn classify<'a>(
                     input.previous_outpoint,
                     tx.txid,
                     input.signature_script.clone(),
+                    input.compute_budget,
                 ));
             }
         }
@@ -232,7 +233,12 @@ fn classify<'a>(
                 EventKind::Transition
             };
             known_overlay.insert(covenant_id);
-            block_events.events.push(NewEvent { covenant_id, kind, txid: tx.txid });
+            block_events.events.push(NewEvent {
+                covenant_id,
+                kind,
+                txid: tx.txid,
+                payload: (!tx.payload.is_empty()).then(|| tx.payload.clone()),
+            });
         }
     }
     Ok(block_events)

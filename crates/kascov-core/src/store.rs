@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS covenant_events (
     txid BLOB NOT NULL,
     accepting_block BLOB NOT NULL,
     accepting_daa INTEGER NOT NULL,
+    payload BLOB,       -- the tx's v1 payload, when non-empty
     PRIMARY KEY (covenant_id, seq)
 );
 CREATE INDEX IF NOT EXISTS ev_by_accepting ON covenant_events(accepting_block);
@@ -74,6 +75,16 @@ pub struct EventRow {
     pub txid: TxId,
     pub accepting_block: BlockHash,
     pub accepting_daa: u64,
+    /// The transaction's v1 payload, when it carried one.
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "opt_hex_ser")]
+    pub payload: Option<Vec<u8>>,
+}
+
+fn opt_hex_ser<S: serde::Serializer>(bytes: &Option<Vec<u8>>, s: S) -> std::result::Result<S::Ok, S::Error> {
+    match bytes {
+        Some(b) => s.serialize_str(&hex::encode(b)),
+        None => s.serialize_none(),
+    }
 }
 
 /// An event joined with its covenant, for cross-covenant feeds.
@@ -98,6 +109,8 @@ pub struct UtxoRow {
     pub spent_txid: Option<TxId>,
     /// Unlocking script of the spend, when captured (spend-time decoding).
     pub spent_sig: Option<Vec<u8>>,
+    /// The spending input's v1 compute-budget commitment.
+    pub spent_budget: Option<u16>,
 }
 
 /// Events produced while processing one accepting chain block, applied atomically.
@@ -106,8 +119,8 @@ pub struct BlockEvents {
     pub accepting_daa: u64,
     pub events: Vec<NewEvent>,
     pub created_utxos: Vec<NewUtxo>,
-    /// (outpoint, spending txid, spending input's signature script)
-    pub spent_utxos: Vec<(Outpoint, TxId, Vec<u8>)>,
+    /// (outpoint, spending txid, spending input's signature script, budget)
+    pub spent_utxos: Vec<(Outpoint, TxId, Vec<u8>, u16)>,
 }
 
 impl BlockEvents {
@@ -126,6 +139,8 @@ pub struct NewEvent {
     pub covenant_id: CovenantId,
     pub kind: EventKind,
     pub txid: TxId,
+    /// The tx's v1 payload, stored only when non-empty.
+    pub payload: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -176,9 +191,11 @@ impl Store {
         // bursts instead of failing with SQLITE_BUSY.
         conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
-        // Additive migration for pre-existing databases (SQLite has no
+        // Additive migrations for pre-existing databases (SQLite has no
         // ADD COLUMN IF NOT EXISTS; a duplicate-column error means done).
         let _ = conn.execute("ALTER TABLE covenant_utxos ADD COLUMN spent_sig BLOB", []);
+        let _ = conn.execute("ALTER TABLE covenant_utxos ADD COLUMN spent_budget INTEGER", []);
+        let _ = conn.execute("ALTER TABLE covenant_events ADD COLUMN payload BLOB", []);
 
         let store = Self { conn };
         match store.meta("network")? {
@@ -296,14 +313,15 @@ impl Store {
             )
             .map_err(db_err)?;
         }
-        for (outpoint, spending_txid, sig) in &block.spent_utxos {
+        for (outpoint, spending_txid, sig, budget) in &block.spent_utxos {
             tx.execute(
-                "UPDATE covenant_utxos SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3
-                 WHERE txid = ?4 AND output_index = ?5",
+                "UPDATE covenant_utxos SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3, spent_budget = ?4
+                 WHERE txid = ?5 AND output_index = ?6",
                 params![
                     block.accepting_block.0.as_slice(),
                     spending_txid.0.as_slice(),
                     sig,
+                    budget,
                     outpoint.txid.0.as_slice(),
                     outpoint.index
                 ],
@@ -325,16 +343,17 @@ impl Store {
             )
             .map_err(db_err)?;
             tx.execute(
-                "INSERT INTO covenant_events (covenant_id, seq, kind, txid, accepting_block, accepting_daa)
+                "INSERT INTO covenant_events (covenant_id, seq, kind, txid, accepting_block, accepting_daa, payload)
                  VALUES (?1,
                    (SELECT COALESCE(MAX(seq), -1) + 1 FROM covenant_events WHERE covenant_id = ?1),
-                   ?2, ?3, ?4, ?5)",
+                   ?2, ?3, ?4, ?5, ?6)",
                 params![
                     event.covenant_id.0.as_slice(),
                     event.kind.as_str(),
                     event.txid.0.as_slice(),
                     block.accepting_block.0.as_slice(),
-                    block.accepting_daa
+                    block.accepting_daa,
+                    event.payload
                 ],
             )
             .map_err(db_err)?;
@@ -359,7 +378,7 @@ impl Store {
         for hash in removed {
             let hash = hash.0.as_slice();
             tx.execute(
-                "UPDATE covenant_utxos SET spent_block = NULL, spent_txid = NULL, spent_sig = NULL WHERE spent_block = ?1",
+                "UPDATE covenant_utxos SET spent_block = NULL, spent_txid = NULL, spent_sig = NULL, spent_budget = NULL WHERE spent_block = ?1",
                 [hash],
             )
             .map_err(db_err)?;
@@ -416,7 +435,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT seq, kind, txid, accepting_block, accepting_daa
+                "SELECT seq, kind, txid, accepting_block, accepting_daa, payload
                  FROM covenant_events WHERE covenant_id = ?1 ORDER BY seq",
             )
             .map_err(db_err)?;
@@ -428,6 +447,7 @@ impl Store {
                     txid: TxId(row.get(2)?),
                     accepting_block: BlockHash(row.get(3)?),
                     accepting_daa: row.get(4)?,
+                    payload: row.get(5)?,
                 })
             })
             .map_err(db_err)?
@@ -467,7 +487,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT txid, output_index, value, spk_version, spk_script, created_daa,
-                        spent_block IS NULL, spent_txid, spent_sig
+                        spent_block IS NULL, spent_txid, spent_sig, spent_budget
                  FROM covenant_utxos WHERE covenant_id = ?1 AND (?2 = 0 OR spent_block IS NULL)
                  ORDER BY created_daa",
             )
@@ -483,6 +503,7 @@ impl Store {
                     live: row.get(6)?,
                     spent_txid: row.get::<_, Option<[u8; 32]>>(7)?.map(TxId),
                     spent_sig: row.get(8)?,
+                    spent_budget: row.get(9)?,
                 })
             })
             .map_err(db_err)?
@@ -513,6 +534,7 @@ mod tests {
                     covenant_id: CovenantId([cov; 32]),
                     kind,
                     txid: TxId([tx; 32]),
+                    payload: None,
                 })
                 .collect(),
             created_utxos: vec![],

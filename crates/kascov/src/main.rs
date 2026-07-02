@@ -223,6 +223,9 @@ fn build_snapshot(store: &Store, network: kascov_core::Network, max_events: u64)
                 if let Some(spent_txid) = utxo.spent_txid {
                     json["spent_txid"] = serde_json::json!(spent_txid);
                 }
+                if let Some(budget) = utxo.spent_budget {
+                    json["spent_budget"] = serde_json::json!(budget);
+                }
                 // Spend-time decoding: a P2SH spend reveals the program that ran.
                 if let Some(sig) = &utxo.spent_sig {
                     if let Some(redeem) = kascov_decode::p2sh_reveal(&utxo.spk_script, sig) {
@@ -256,7 +259,17 @@ fn build_snapshot(store: &Store, network: kascov_core::Network, max_events: u64)
             "last_activity_daa": summary.last_activity_daa,
             "live_utxos": summary.live_utxos,
             "live_value": summary.live_value,
-            "events": events.iter().take(max_events as usize).collect::<Vec<_>>(),
+            "events": events.iter().take(max_events as usize).map(|e| {
+                let mut v = serde_json::to_value(e).expect("event serializes");
+                // based-app payloads can be large; the snapshot inlines small ones only
+                if let Some(p) = &e.payload {
+                    if p.len() > 512 {
+                        v.as_object_mut().expect("event object").remove("payload");
+                        v["payload_len"] = serde_json::json!(p.len());
+                    }
+                }
+                v
+            }).collect::<Vec<_>>(),
             "events_truncated": truncated_events,
             "utxos": utxos,
         }));
@@ -422,12 +435,13 @@ fn show(cli: &Cli, covenant_id: CovenantId, decode: bool) -> Result<()> {
     }
     for utxo in &utxos {
         println!(
-            "State     {} — {:.8} KAS (spk v{}, {} bytes) @ DAA {}",
+            "State     {} — {:.8} KAS (spk v{}, {} bytes) @ DAA {}{}",
             utxo.outpoint,
             utxo.value as f64 / 100_000_000.0,
             utxo.spk_version,
             utxo.spk_script.len(),
             utxo.created_daa,
+            utxo.spent_budget.map(|b| format!("  [spent with budget {b}]")).unwrap_or_default(),
         );
         if decode {
             let decoded = registry.decode(utxo.spk_version, &utxo.spk_script);
@@ -502,6 +516,9 @@ fn trace(cli: &Cli, covenant_id: CovenantId) -> Result<()> {
             event.accepting_daa,
             abbrev(&event.accepting_block.to_string()),
         );
+        if let Some(p) = &event.payload {
+            println!("      tx payload {}", fmt_push(p));
+        }
         if let Some(payload) = reveal_by_tx.get(&event.txid) {
             match &prev_payload {
                 Some(prev) if prev.len() == payload.len() => {

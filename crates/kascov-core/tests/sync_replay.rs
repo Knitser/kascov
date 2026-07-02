@@ -35,6 +35,7 @@ fn covenant_tx(txid: TxId, spends: Vec<Outpoint>, covenant: Option<CovenantId>) 
             .map(|previous_outpoint| Input {
                 previous_outpoint,
                 signature_script: vec![0x01, 0x99], // a one-push unlocking script
+                compute_budget: 7,
             })
             .collect(),
         outputs: match covenant {
@@ -46,6 +47,7 @@ fn covenant_tx(txid: TxId, spends: Vec<Outpoint>, covenant: Option<CovenantId>) 
             }],
             None => vec![Output { value: 100_000_000, spk_version: 0, spk_script: vec![0xcc], covenant: None }],
         },
+        payload: vec![0xde, 0xad], // v1 payload, captured on covenant events
     }
 }
 
@@ -157,7 +159,7 @@ async fn genesis_transitions_burn_and_reorg() {
     assert_eq!(summary.event_count, 3);
     assert_eq!(summary.live_utxos, 0, "covenant should be burned");
 
-    // The burn's unlocking script was captured for spend-time decoding.
+    // The burn's unlocking script, budget, and the tx payload were captured.
     let spent = store
         .utxos(&cov_x, false)
         .unwrap()
@@ -165,6 +167,9 @@ async fn genesis_transitions_burn_and_reorg() {
         .find(|u| u.spent_txid == Some(tx_id(0xD0)))
         .expect("burned state UTXO recorded");
     assert_eq!(spent.spent_sig.as_deref(), Some([0x01, 0x99].as_slice()));
+    assert_eq!(spent.spent_budget, Some(7));
+    let burn_event = store.events(&cov_x).unwrap().into_iter().last().unwrap();
+    assert_eq!(burn_event.payload.as_deref(), Some([0xde, 0xad].as_slice()));
 
     // Pass 3: chain block 3 is reorged out, replaced by an empty block 4.
     chain.block(h(4), 301, vec![]);

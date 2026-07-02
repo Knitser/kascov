@@ -810,9 +810,14 @@ function renderExplore(entry) {
 function timelineItem(entry, ev, data, network, flashTx) {
   const meta = KIND_META[ev.kind] || KIND_META.transition;
   const ms = daaToMs(ev.accepting_daa, data);
-  const nerdBits = state.nerd
+  let nerdBits = state.nerd
     ? ` · <span class="mono dim">DAA ${esc(fmtInt(ev.accepting_daa))}</span>`
     : '';
+  if (state.nerd && ev.payload) {
+    nerdBits += ` · <span class="dim">payload</span> <span class="mono" title="${esc(ev.payload)}">${esc(shortHex(ev.payload, 12, 8))}</span>`;
+  } else if (state.nerd && ev.payload_len) {
+    nerdBits += ` · <span class="dim">payload ${esc(fmtInt(ev.payload_len))}B</span>`;
+  }
   const flash = flashTx && ev.txid === flashTx ? ' tl-flash' : '';
   return `<li class="tl-item ${meta.cls}${flash}" data-txid="${esc(ev.txid)}">` +
     `<span class="tl-icon" aria-hidden="true">${ICONS[meta.icon]}</span>` +
@@ -871,7 +876,9 @@ function nerdPanel(entry, network) {
     }
     return `<div class="utxo">` +
       `<div class="utxo-head"><span class="mono break">${esc(u.outpoint)}</span><span class="utxo-flags">${badges}</span></div>` +
-      `<div class="utxo-meta"><span>${esc(fmtAmount(u.value, network))}</span><span class="dim">created at DAA ${esc(fmtInt(u.created_daa))}</span></div>` +
+      `<div class="utxo-meta"><span>${esc(fmtAmount(u.value, network))}</span><span class="dim">created at DAA ${esc(fmtInt(u.created_daa))}</span>` +
+      (u.spent_budget != null ? `<span class="dim">spent with budget ${esc(fmtInt(u.spent_budget))}</span>` : '') +
+      `</div>` +
       templateLine(u.template, u.state_fields) +
       `<pre class="script">${esc((u.script_asm || []).join('\n'))}</pre>` +
       (u.script_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.script_hex)}">open in decoder →</a>` : '') +
