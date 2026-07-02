@@ -84,8 +84,11 @@ export const entries: Entry[] = data.covenants
   .map(toEntry)
   .sort((a, b) => (b.c.last_activity_daa || 0) - (a.c.last_activity_daa || 0));
 
-/* The one covenant with a complete arc: genesis + >=2 transitions + burn. */
+/* The star: our own covenant (dizzy-coral-tapir, created by hand on launch
+   day) when present, else the first covenant with a complete arc:
+   genesis + >=2 transitions + burn. */
 export const star: Entry =
+  entries.find((e) => e.c.covenant_id.startsWith('05cfc476')) ??
   entries.find((e) => {
     const kinds = e.c.events.map((ev) => ev.kind);
     return (
@@ -93,7 +96,8 @@ export const star: Entry =
       kinds.filter((k) => k === 'transition').length >= 2 &&
       kinds.includes('burn')
     );
-  }) ?? entries[0];
+  }) ??
+  entries[0];
 
 export type StarStep = {
   kind: EventKind;

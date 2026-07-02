@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "CLI Reference.md",
+                "file": "Architecture.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "CLI Reference"
+              "title": "Architecture"
             }
           }
         ]
@@ -94,7 +94,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "CLI Reference.md",
+                "file": "Architecture.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +104,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for CLI Reference"
+              "title": "Backlinks for Architecture"
             }
           },
           {
@@ -113,12 +113,12 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "CLI Reference.md",
+                "file": "Architecture.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links from CLI Reference"
+              "title": "Outgoing links from Architecture"
             }
           },
           {
@@ -156,13 +156,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "CLI Reference.md",
+                "file": "Architecture.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of CLI Reference"
+              "title": "Outline of Architecture"
             }
           }
         ]
@@ -185,6 +185,14 @@
   },
   "active": "160954a3fcd92743",
   "lastOpenFiles": [
-    "Architecture.md"
+    "Toccata Protocol Notes.md",
+    "Sync Engine.md",
+    "Storage Schema.md",
+    "Roadmap.md",
+    "Home.md",
+    "Decoding.md",
+    "Covenant Lab.md",
+    "Architecture.md",
+    "CLI Reference.md"
   ]
 }
