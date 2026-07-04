@@ -2068,6 +2068,7 @@ dependencies = [
  "hex",
  "kascov-core",
  "kascov-decode",
+ "kaspa-addresses",
  "serde_json",
  "tokio",
  "tower-http",
@@ -2079,8 +2080,10 @@ dependencies = [
 name = "kascov-core"
 version = "0.1.0"
 dependencies = [
+ "blake2b_simd",
  "futures",
  "hex",
+ "kascov-decode",
  "kaspa-addresses",
  "kaspa-consensus-core",
  "kaspa-hashes",

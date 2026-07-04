@@ -12,6 +12,8 @@ kaspa-notify = { workspace = true }
 kaspa-addresses = { workspace = true }
 kaspa-hashes = { workspace = true }
 
+kascov-decode = { workspace = true }
+
 tokio = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
@@ -20,3 +22,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
 futures = { workspace = true }
+
+[dev-dependencies]
+# tests build p2sh commitments whose hash must match what p2sh_reveal checks
+blake2b_simd = { workspace = true }

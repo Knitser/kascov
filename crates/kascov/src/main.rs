@@ -180,6 +180,10 @@ fn stats_json(store: &Store) -> Result<serde_json::Value> {
 /// when this reports a change.
 const LIVE_EVENTS: u64 = 150;
 
+/// Row cap for the address endpoint — a TN10 faucet key can plausibly own
+/// thousands of covenants; covenants_total still reports the true count.
+const ADDR_MAX_COVENANTS: usize = 1000;
+
 fn build_live_snapshot(store: &Store, network: kascov_core::Network) -> Result<serde_json::Value> {
     let tip = store.tip()?;
     Ok(serde_json::json!({
@@ -189,6 +193,30 @@ fn build_live_snapshot(store: &Store, network: kascov_core::Network) -> Result<s
         "tip_at_ms": tip.map(|t| t.1),
         "stats": stats_json(store)?,
         "recent_events": store.recent_events(LIVE_EVENTS)?,
+    }))
+}
+
+/// "Today on the testnet": the last 24 hours in one small JSON — counts,
+/// headline coins, and the tip anchor. Pure SQL over the index.
+const DIGEST_WINDOW_HOURS: u64 = 24;
+const DIGEST_WINDOW_DAA: u64 = DIGEST_WINDOW_HOURS * 3600 * 10; // DAA ticks ~10/s
+
+fn build_digest(store: &Store, network: kascov_core::Network) -> Result<serde_json::Value> {
+    let tip = store.tip()?;
+    let d = store.digest(DIGEST_WINDOW_DAA)?;
+    Ok(serde_json::json!({
+        "network": network.to_string(),
+        "window_hours": DIGEST_WINDOW_HOURS,
+        "generated_at_ms": now_ms(),
+        "tip_daa": tip.map(|t| t.0),
+        "tip_at_ms": tip.map(|t| t.1),
+        "births": d.births,
+        "moves": d.moves,
+        "burns": d.burns,
+        "value_born": d.value_born,
+        "active_now": d.active_now,
+        "busiest": d.busiest.map(|(id, n)| serde_json::json!({ "covenant_id": id, "events": n })),
+        "biggest_birth": d.biggest_birth.map(|(id, v)| serde_json::json!({ "covenant_id": id, "value": v })),
     }))
 }
 
@@ -224,6 +252,70 @@ fn build_grid_snapshot(store: &Store, network: kascov_core::Network) -> Result<s
         "tip_at_ms": tip.map(|t| t.1),
         "stats": stats_json(store)?,
         "covenants": rows,
+    }))
+}
+
+/// Contract-type analytics: which script templates run on this network,
+/// aggregated over every state UTXO ever indexed (recognition is stamped at
+/// write time — this is two GROUP BYs, no decoding). Reveal counts ride
+/// along because compiled contracts (Mecenas, Escrow, LastWill) live behind
+/// p2sh commitments and only show themselves at spend time.
+fn build_templates_snapshot(store: &Store, network: kascov_core::Network) -> Result<serde_json::Value> {
+    #[derive(Default)]
+    struct Row {
+        live_states: u64,
+        live_value: u64,
+        ever_seen: u64,
+        covenants: u64,
+        revealed_runs: u64,
+    }
+    let mut named: std::collections::BTreeMap<String, Row> = Default::default();
+    let mut unrecognized = Row::default();
+    for s in store.template_stats()? {
+        let row = Row {
+            live_states: s.live_states,
+            live_value: s.live_value,
+            ever_seen: s.ever_seen,
+            covenants: s.covenants,
+            revealed_runs: 0,
+        };
+        match s.template {
+            Some(name) => {
+                named.insert(name, row);
+            }
+            None => unrecognized = row,
+        }
+    }
+    // A template can exist through reveals alone — no live state carries it.
+    for (name, runs) in store.revealed_template_counts()? {
+        named.entry(name).or_default().revealed_runs = runs;
+    }
+    let mut rows: Vec<(String, Row)> = named.into_iter().collect();
+    rows.sort_by(|a, b| {
+        (b.1.ever_seen + b.1.revealed_runs)
+            .cmp(&(a.1.ever_seen + a.1.revealed_runs))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let tip = store.tip()?;
+    Ok(serde_json::json!({
+        "network": network.to_string(),
+        "generated_at_ms": now_ms(),
+        "tip_daa": tip.map(|t| t.0),
+        "tip_at_ms": tip.map(|t| t.1),
+        "templates": rows.iter().map(|(name, r)| serde_json::json!({
+            "name": name,
+            "live_states": r.live_states,
+            "live_value": r.live_value,
+            "ever_seen": r.ever_seen,
+            "covenants": r.covenants,
+            "revealed_runs": r.revealed_runs,
+        })).collect::<Vec<_>>(),
+        "unrecognized": {
+            "live_states": unrecognized.live_states,
+            "live_value": unrecognized.live_value,
+            "ever_seen": unrecognized.ever_seen,
+            "covenants": unrecognized.covenants,
+        },
     }))
 }
 
@@ -720,10 +812,45 @@ impl CachedBody {
     }
 }
 
+/// Cap on concurrent SSE subscribers per network — extras are rejected with
+/// 503 and stay on the polling path.
+const MAX_STREAM_SUBSCRIBERS: usize = 512;
+/// Broadcast buffer per network. A receiver that falls behind gets
+/// `RecvError::Lagged`, skips ahead, and the client resyncs via the poll.
+const STREAM_BUFFER: usize = 256;
+
+/// One network's live event fan-out: the chain follower broadcasts each
+/// covenant event as pre-serialized JSON; every open SSE connection holds a
+/// receiver. Messages are hints — clients confirm through the polled feeds.
+struct LiveChannel {
+    tx: tokio::sync::broadcast::Sender<std::sync::Arc<str>>,
+    subscribers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl LiveChannel {
+    fn new() -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel(STREAM_BUFFER);
+        Self { tx, subscribers: Default::default() }
+    }
+}
+
+/// Frees a subscriber slot when its SSE stream is dropped (client gone,
+/// keep-alive write failed, or the connection timed out).
+struct SubscriberSlot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for SubscriberSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 struct ServeState {
     base_dir: std::path::PathBuf,
     networks: Vec<Network>,
     max_events: u64,
+    /// Per-network live event broadcast (SSE). A Vec, not a HashMap:
+    /// `Network` has no `Hash` impl and there are at most a couple entries.
+    live: Vec<(Network, LiveChannel)>,
     cache: tokio::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<CachedBody>)>>,
     /// Per-key build locks: concurrent cold misses on the SAME key share one
     /// rebuild instead of stampeding (at 42k covenants, N parallel grid
@@ -752,16 +879,19 @@ async fn serve(
     });
     std::fs::create_dir_all(&base_dir)?;
 
+    let mut live = Vec::with_capacity(networks.len());
     for &network in &networks {
+        let channel = LiveChannel::new();
         let db = base_dir.join(format!("{network}.db"));
-        let rpc = cli.rpc.clone();
-        tokio::spawn(follow_forever(network, rpc, db));
+        tokio::spawn(follow_forever(network, cli.rpc.clone(), db, channel.tx.clone()));
+        live.push((network, channel));
     }
 
     let state = std::sync::Arc::new(ServeState {
         base_dir,
         networks,
         max_events,
+        live,
         cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         build_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
     });
@@ -770,6 +900,10 @@ async fn serve(
         .route("/data/{file}", get(data_handler))
         .route("/data/{network}/c/{id}", get(detail_handler))
         .route("/data/{network}/tx/{txid}", get(tx_handler))
+        .route("/data/{network}/digest.json", get(digest_handler))
+        .route("/data/{network}/templates.json", get(templates_handler))
+        .route("/data/{network}/addr/{address}", get(addr_handler))
+        .route("/data/{network}/stream", get(stream_handler))
         // compresses the small dynamic responses; the big cached bodies are
         // pre-gzipped (Content-Encoding already set, so this layer skips them)
         .layer(tower_http::compression::CompressionLayer::new())
@@ -799,8 +933,17 @@ async fn recover_wedged_cursor(node: &NodeHandle, store: &mut Store, network: Ne
 }
 
 /// Follow a network's virtual chain forever, reconnecting on any failure.
-async fn follow_forever(network: Network, rpc: Option<String>, db: std::path::PathBuf) {
+async fn follow_forever(
+    network: Network,
+    rpc: Option<String>,
+    db: std::path::PathBuf,
+    live_tx: tokio::sync::broadcast::Sender<std::sync::Arc<str>>,
+) {
     use kascov_core::sync::SyncUpdate;
+    // Lives across reconnects: every sync failure breaks to a fresh session,
+    // so a per-session counter would reset before ever reaching the
+    // testnet-reset recovery threshold below.
+    let mut consecutive_errors = 0u32;
     loop {
         let mut store = match kascov_core::store::Store::open(&db, network) {
             Ok(store) => store,
@@ -819,11 +962,23 @@ async fn follow_forever(network: Network, rpc: Option<String>, db: std::path::Pa
             }
         };
         tracing::info!("{network}: following the chain");
-        let mut consecutive_errors = 0u32;
         loop {
             let result = kascov_core::sync::sync_once(&node, &mut store, None, |update| {
-                if let SyncUpdate::Event { covenant_id, kind, .. } = update {
+                if let SyncUpdate::Event { covenant_id, kind, txid, accepting_daa } = update {
                     tracing::info!("{network}: {} covenant {covenant_id}", kind.as_str());
+                    // Fan out to any open SSE streams; serialization is skipped
+                    // entirely when nobody is listening, and send() failing
+                    // (zero receivers) is fine.
+                    if live_tx.receiver_count() > 0 {
+                        let msg = serde_json::json!({
+                            "covenant_id": covenant_id,
+                            "kind": kind.as_str(),
+                            "txid": txid,
+                            "accepting_daa": accepting_daa,
+                        })
+                        .to_string();
+                        let _ = live_tx.send(msg.into());
+                    }
                 }
             })
             .await;
@@ -1069,4 +1224,222 @@ async fn tx_handler(
             (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
         }
     }
+}
+
+/// The last 24 hours as one small object — counts, value born, and the
+/// headline coins. A daily summary moves slowly; the CDN absorbs the herd.
+async fn digest_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let Ok(network) = net_name.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/digest");
+    let cc = "public, max-age=60, s-maxage=300, stale-while-revalidate=600";
+    serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        Ok(Some(serde_json::to_string(&build_digest(&store, network)?)?))
+    })
+    .await
+}
+
+/// Contract-type analytics: what runs on this network, by recognized
+/// script template. Slow-moving and cheap to rebuild (two GROUP BYs), so
+/// the CDN absorbs essentially all traffic.
+async fn templates_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let Ok(network) = net_name.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/templates");
+    let cc = "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
+    serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        Ok(Some(serde_json::to_string(&build_templates_snapshot(&store, network)?)?))
+    })
+    .await
+}
+
+fn addr_prefix(network: Network) -> kaspa_addresses::Prefix {
+    match network {
+        Network::Mainnet => kaspa_addresses::Prefix::Mainnet,
+        Network::Testnet(_) => kaspa_addresses::Prefix::Testnet,
+    }
+}
+
+/// `kaspa:…`/`kaspatest:…` (any known prefix — pubkeys are network-independent)
+/// or raw 32/33-byte pubkey hex. Returns (canonical address re-encoded for the
+/// queried network, pubkey bytes). Script-hash addresses carry no pubkey -> None.
+fn parse_addr_or_pubkey(raw: &str, network: Network) -> Option<(String, Vec<u8>)> {
+    use kaspa_addresses::{Address, Version};
+    let (version, pubkey) = if raw.contains(':') {
+        let addr = Address::try_from(raw).ok()?; // validates charset + checksum
+        if !matches!(addr.version, Version::PubKey | Version::PubKeyECDSA) {
+            return None;
+        }
+        (addr.version, addr.payload.to_vec())
+    } else {
+        let bytes = hex::decode(raw).ok()?;
+        let version = match bytes.len() {
+            32 => Version::PubKey,
+            33 => Version::PubKeyECDSA,
+            _ => return None,
+        };
+        (version, bytes)
+    };
+    if pubkey.len() != version.public_key_len() {
+        return None;
+    }
+    Some((Address::new(addr_prefix(network), version, &pubkey).to_string(), pubkey))
+}
+
+/// Which smart coins has this address/pubkey touched (as a p2pk-state owner)?
+async fn addr_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, address)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let Ok(network) = net_name.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    let raw = address.strip_suffix(".json").unwrap_or(&address);
+    let Some((canonical, pubkey)) = parse_addr_or_pubkey(raw, network) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+            "expected a kaspa address or 32/33-byte pubkey hex",
+        )
+            .into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    // pubkey hex normalizes the cache key: address form and hex form share one entry
+    let key = format!("{network}/addr/{}", hex::encode(&pubkey));
+    let cc = "public, max-age=10, s-maxage=30, stale-while-revalidate=120";
+    serve_cached(&state, key, 20, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let rows = store.covenants_by_pubkey(&pubkey)?;
+        let total = rows.len();
+        let tip = store.tip()?;
+        let mut covenants = Vec::with_capacity(rows.len().min(ADDR_MAX_COVENANTS));
+        for r in rows.iter().take(ADDR_MAX_COVENANTS) {
+            let Some(c) = store.summary(&r.covenant_id)? else { continue };
+            covenants.push(serde_json::json!({
+                // grid-row shape — keep in sync with build_grid_snapshot
+                "covenant_id": c.covenant_id,
+                "status": if c.live_utxos > 0 { "active" } else { "burned" },
+                "genesis_daa": c.genesis_daa,
+                "lineage_complete": c.lineage_complete,
+                "event_count": c.event_count,
+                "last_activity_daa": c.last_activity_daa,
+                "live_utxos": c.live_utxos,
+                "live_value": c.live_value,
+                "born_value": store.born_value(&c.covenant_id)?,
+                // …plus this key's role in it
+                "controls_now": r.controls_now,
+                "states_seen": r.states_seen,
+                "first_seen_daa": r.first_seen_daa,
+                "last_seen_daa": r.last_seen_daa,
+            }));
+        }
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "tip_daa": tip.map(|t| t.0),
+            "tip_at_ms": tip.map(|t| t.1),
+            "address": canonical,
+            "pubkey": hex::encode(&pubkey),
+            "covenants_total": total,
+            "covenants": covenants,
+        }))?))
+    })
+    .await
+}
+
+/// Push covenant events over SSE the moment the follower indexes them.
+/// Hints only — no replay, no backlog, lagged subscribers skip ahead;
+/// consumers confirm state through the polled feeds.
+async fn stream_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::{header, HeaderName, HeaderValue, StatusCode};
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use axum::response::IntoResponse;
+    use std::sync::atomic::Ordering;
+
+    let Ok(network) = net_name.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    let Some((_, channel)) = state.live.iter().find(|(n, _)| *n == network) else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    // Reserve a subscriber slot; back out over the cap.
+    if channel.subscribers.fetch_add(1, Ordering::AcqRel) >= MAX_STREAM_SUBSCRIBERS {
+        channel.subscribers.fetch_sub(1, Ordering::AcqRel);
+        return (StatusCode::SERVICE_UNAVAILABLE, "stream full — use the polling feeds").into_response();
+    }
+    let slot = SubscriberSlot(channel.subscribers.clone());
+    let rx = channel.tx.subscribe();
+
+    // broadcast::Receiver is not a Stream; unfold avoids a tokio-stream dep.
+    // The slot rides in the state so disconnects free it via Drop. Streams
+    // also carry a hard lifetime: a client that connects and never reads
+    // would otherwise pin a subscriber slot forever (keep-alives sink into
+    // TCP buffers without erroring) — after the deadline the stream ends
+    // cleanly and well-behaved clients (EventSource) reconnect on their own.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    let stream = futures::stream::unfold((rx, slot), move |(mut rx, slot)| async move {
+        loop {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Ok(msg)) => {
+                    let event = Event::default().data(&*msg);
+                    return Some((Ok::<_, std::convert::Infallible>(event), (rx, slot)));
+                }
+                // Fell behind the buffer: skip ahead — clients resync by polling.
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
+                // Lifetime reached — recycle the slot.
+                Err(_) => return None,
+            }
+        }
+    });
+
+    let mut resp = Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(25)).text("ka"))
+        .into_response();
+    let headers = resp.headers_mut();
+    // no-store beats axum's default no-cache: the CDN must never coalesce a stream
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    // ask proxies not to buffer (nginx-style hint; Firebase may ignore it)
+    headers.insert(HeaderName::from_static("x-accel-buffering"), HeaderValue::from_static("no"));
+    resp
 }

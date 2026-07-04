@@ -46,6 +46,11 @@ CREATE TABLE IF NOT EXISTS covenant_utxos (
     spent_block BLOB,
     spent_txid BLOB,
     spent_sig BLOB,
+    -- template columns: NULL = not yet decoded, '' = decoded but no template
+    -- matched, else the recognized template name. revealed_template is the
+    -- same for the verified P2SH program revealed by this row's spend.
+    template TEXT,
+    revealed_template TEXT,
     PRIMARY KEY (txid, output_index)
 );
 CREATE INDEX IF NOT EXISTS utxo_by_covenant ON covenant_utxos(covenant_id);
@@ -99,6 +104,20 @@ pub struct StoreStats {
     pub last_activity_daa: u64,
 }
 
+/// Activity inside a trailing DAA window, plus current liveness — pure SQL.
+#[derive(Clone, Debug)]
+pub struct DigestStats {
+    pub births: u64,
+    pub moves: u64,
+    pub burns: u64,
+    pub value_born: u64,
+    pub active_now: u64,
+    /// (covenant, events inside the window)
+    pub busiest: Option<(CovenantId, u64)>,
+    /// (covenant, value at birth) among covenants born inside the window
+    pub biggest_birth: Option<(CovenantId, u64)>,
+}
+
 /// An event joined with its covenant, for cross-covenant feeds.
 #[derive(Clone, Debug, Serialize)]
 pub struct GlobalEventRow {
@@ -107,6 +126,29 @@ pub struct GlobalEventRow {
     pub kind: String,
     pub txid: TxId,
     pub accepting_daa: u64,
+}
+
+/// A covenant a pubkey has appeared in as a p2pk-state owner, with role hints.
+#[derive(Clone, Debug, Serialize)]
+pub struct PubkeyCovenantRow {
+    pub covenant_id: CovenantId,
+    /// The key currently owns at least one live state UTXO of this covenant.
+    pub controls_now: bool,
+    /// How many state UTXOs (live + spent) have carried this key.
+    pub states_seen: u64,
+    pub first_seen_daa: u64,
+    pub last_seen_daa: u64,
+}
+
+/// One recognized script shape's footprint across every state UTXO ever
+/// indexed. `template: None` is the unrecognized bucket.
+#[derive(Clone, Debug, Serialize)]
+pub struct TemplateStat {
+    pub template: Option<String>,
+    pub live_states: u64,
+    pub live_value: u64,
+    pub ever_seen: u64,
+    pub covenants: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -191,6 +233,14 @@ fn db_err(e: rusqlite::Error) -> Error {
     Error::Rpc(format!("store: {e}"))
 }
 
+/// Process-wide decode registry for write-time template recognition —
+/// construction derives the SilverScript skeletons once, and Registry is
+/// Send + Sync (its decoders are `Box<dyn StateDecoder: Send + Sync>`).
+fn registry() -> &'static kascov_decode::Registry {
+    static REGISTRY: std::sync::OnceLock<kascov_decode::Registry> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(kascov_decode::Registry::default)
+}
+
 impl Store {
     pub fn open(path: &Path, network: Network) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -208,8 +258,24 @@ impl Store {
         let _ = conn.execute("ALTER TABLE covenant_utxos ADD COLUMN spent_sig BLOB", []);
         let _ = conn.execute("ALTER TABLE covenant_utxos ADD COLUMN spent_budget INTEGER", []);
         let _ = conn.execute("ALTER TABLE covenant_events ADD COLUMN payload BLOB", []);
+        let _ = conn.execute("ALTER TABLE covenant_utxos ADD COLUMN template TEXT", []);
+        let _ = conn.execute("ALTER TABLE covenant_utxos ADD COLUMN revealed_template TEXT", []);
+        // Partial "todo" indexes keep the backfill probe below O(1) once every
+        // row is stamped. They reference the columns added above, so they must
+        // be created here (after the ALTERs), never inside SCHEMA — and unlike
+        // the duplicate-column ALTERs, a failure here is a real error.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS utxo_template_todo ON covenant_utxos(template) WHERE template IS NULL",
+            [],
+        )
+        .map_err(db_err)?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS utxo_reveal_todo ON covenant_utxos(revealed_template) WHERE spent_sig IS NOT NULL AND revealed_template IS NULL",
+            [],
+        )
+        .map_err(db_err)?;
 
-        let store = Self { conn };
+        let mut store = Self { conn };
         match store.meta("network")? {
             None => store.set_meta("network", &network.to_string())?,
             Some(existing) if existing != network.to_string() => {
@@ -220,6 +286,8 @@ impl Store {
             }
             Some(_) => {}
         }
+        // After the ownership check — a wrong-network database is never mutated.
+        store.backfill_templates()?;
         Ok(store)
     }
 
@@ -279,6 +347,87 @@ impl Store {
         Ok(())
     }
 
+    /// Stamp template recognition onto rows that predate the columns (or were
+    /// written by an older binary): one-shot after a migration, O(1) probes
+    /// against the empty partial "todo" indexes on every open after that.
+    /// Batched transactions keep each writer hold short under busy_timeout.
+    fn backfill_templates(&mut self) -> Result<()> {
+        const BATCH: i64 = 2000;
+        let mut states = 0u64;
+        loop {
+            // Statement scoped so its borrow ends before the write transaction.
+            let rows: Vec<(i64, u16, Vec<u8>)> = {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT rowid, spk_version, spk_script FROM covenant_utxos
+                         WHERE template IS NULL LIMIT ?1",
+                    )
+                    .map_err(db_err)?;
+                let collected = stmt
+                    .query_map([BATCH], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?;
+                collected
+            };
+            if rows.is_empty() {
+                break;
+            }
+            let tx = self.conn.transaction().map_err(db_err)?;
+            for (rowid, version, script) in &rows {
+                let template = registry().decode(*version, script).template.unwrap_or("");
+                tx.execute(
+                    "UPDATE covenant_utxos SET template = ?1 WHERE rowid = ?2",
+                    params![template, rowid],
+                )
+                .map_err(db_err)?;
+            }
+            tx.commit().map_err(db_err)?;
+            states += rows.len() as u64;
+        }
+        let mut reveals = 0u64;
+        loop {
+            let rows: Vec<(i64, u16, Vec<u8>, Vec<u8>)> = {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT rowid, spk_version, spk_script, spent_sig FROM covenant_utxos
+                         WHERE spent_sig IS NOT NULL AND revealed_template IS NULL LIMIT ?1",
+                    )
+                    .map_err(db_err)?;
+                let collected = stmt
+                    .query_map([BATCH], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?;
+                collected
+            };
+            if rows.is_empty() {
+                break;
+            }
+            let tx = self.conn.transaction().map_err(db_err)?;
+            for (rowid, version, spk, sig) in &rows {
+                let template = kascov_decode::p2sh_reveal(spk, sig)
+                    .and_then(|redeem| registry().decode(*version, &redeem).template)
+                    .unwrap_or("");
+                tx.execute(
+                    "UPDATE covenant_utxos SET revealed_template = ?1 WHERE rowid = ?2",
+                    params![template, rowid],
+                )
+                .map_err(db_err)?;
+            }
+            tx.commit().map_err(db_err)?;
+            reveals += rows.len() as u64;
+        }
+        if states + reveals > 0 {
+            tracing::info!("template backfill: {states} state scripts decoded, {reveals} spend reveals checked");
+        }
+        Ok(())
+    }
+
     /// Is this outpoint a live covenant UTXO? Returns its covenant id.
     pub fn live_covenant_utxo(&self, outpoint: &Outpoint) -> Result<Option<CovenantId>> {
         self.conn
@@ -314,11 +463,15 @@ impl Store {
         // not-yet-inserted row — leaving a zombie "live" UTXO and dropping the
         // captured spend signature.
         for utxo in &block.created_utxos {
+            // Recognition is stamped at write time ('' = no template matched)
+            // so template analytics stay pure GROUP BYs at read time.
+            let template =
+                registry().decode(utxo.spk_version, &utxo.spk_script).template.unwrap_or("");
             tx.execute(
                 "INSERT OR REPLACE INTO covenant_utxos
                  (txid, output_index, covenant_id, value, spk_version, spk_script,
-                  created_block, created_daa, spent_block, spent_txid)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL)",
+                  created_block, created_daa, spent_block, spent_txid, template)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, ?9)",
                 params![
                     utxo.outpoint.txid.0.as_slice(),
                     utxo.outpoint.index,
@@ -327,20 +480,42 @@ impl Store {
                     utxo.spk_version,
                     utxo.spk_script,
                     block.accepting_block.0.as_slice(),
-                    block.accepting_daa
+                    block.accepting_daa,
+                    template
                 ],
             )
             .map_err(db_err)?;
         }
         for (outpoint, spending_txid, sig, budget) in &block.spent_utxos {
+            // Spend-time recognition: a verified P2SH reveal names the program
+            // that actually ran ('' = spend seen, nothing recognized). Reading
+            // the row here is safe because created rows land first (above); a
+            // row we never indexed matches neither the SELECT nor the UPDATE
+            // and self-heals via the backfill at the next open.
+            let revealed: Option<String> = tx
+                .query_row(
+                    "SELECT spk_version, spk_script FROM covenant_utxos
+                     WHERE txid = ?1 AND output_index = ?2",
+                    params![outpoint.txid.0.as_slice(), outpoint.index],
+                    |r| Ok((r.get::<_, u16>(0)?, r.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()
+                .map_err(db_err)?
+                .map(|(version, spk)| {
+                    kascov_decode::p2sh_reveal(&spk, sig)
+                        .and_then(|redeem| registry().decode(version, &redeem).template)
+                        .unwrap_or("")
+                        .to_string()
+                });
             tx.execute(
-                "UPDATE covenant_utxos SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3, spent_budget = ?4
-                 WHERE txid = ?5 AND output_index = ?6",
+                "UPDATE covenant_utxos SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3, spent_budget = ?4, revealed_template = ?5
+                 WHERE txid = ?6 AND output_index = ?7",
                 params![
                     block.accepting_block.0.as_slice(),
                     spending_txid.0.as_slice(),
                     sig,
                     budget,
+                    revealed,
                     outpoint.txid.0.as_slice(),
                     outpoint.index
                 ],
@@ -396,8 +571,12 @@ impl Store {
         let tx = self.conn.transaction().map_err(db_err)?;
         for hash in removed {
             let hash = hash.0.as_slice();
+            // revealed_template goes back to NULL (not ''): with spent_sig
+            // NULL the reveal-todo index predicate no longer matches, so the
+            // backfill won't re-decode. `template` stays — it derives from the
+            // row's own immutable spk_script.
             tx.execute(
-                "UPDATE covenant_utxos SET spent_block = NULL, spent_txid = NULL, spent_sig = NULL, spent_budget = NULL WHERE spent_block = ?1",
+                "UPDATE covenant_utxos SET spent_block = NULL, spent_txid = NULL, spent_sig = NULL, spent_budget = NULL, revealed_template = NULL WHERE spent_block = ?1",
                 [hash],
             )
             .map_err(db_err)?;
@@ -507,6 +686,78 @@ impl Store {
         })
     }
 
+    /// Activity inside the trailing `window_daa` window ("the last 24 hours"),
+    /// anchored at the recorded tip — falling back to the newest event for
+    /// indexes that predate tip tracking. Pure SQL; ev_by_daa covers the scans.
+    pub fn digest(&self, window_daa: u64) -> Result<DigestStats> {
+        let tip_daa: Option<u64> = match self.tip()? {
+            Some((daa, _)) => Some(daa),
+            None => self
+                .conn
+                .query_row("SELECT MAX(accepting_daa) FROM covenant_events", [], |r| r.get(0))
+                .map_err(db_err)?,
+        };
+        let cutoff = tip_daa.unwrap_or(0).saturating_sub(window_daa);
+        let (births, moves, burns) = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(kind = 'genesis'), 0),
+                        COALESCE(SUM(kind = 'transition'), 0),
+                        COALESCE(SUM(kind = 'burn'), 0)
+                 FROM covenant_events WHERE accepting_daa >= ?1",
+                params![cutoff],
+                |r| Ok((r.get::<_, u64>(0)?, r.get::<_, u64>(1)?, r.get::<_, u64>(2)?)),
+            )
+            .map_err(db_err)?;
+        // same birth definition as born_values(): outputs created at genesis DAA
+        let value_born: u64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(u.value), 0)
+                 FROM covenant_utxos u
+                 JOIN covenants c ON c.covenant_id = u.covenant_id AND u.created_daa = c.genesis_daa
+                 WHERE c.genesis_daa >= ?1",
+                params![cutoff],
+                |r| r.get(0),
+            )
+            .map_err(db_err)?;
+        // ties broken by covenant_id so cached bodies stay deterministic
+        let busiest = self
+            .conn
+            .query_row(
+                "SELECT covenant_id, COUNT(*) AS n FROM covenant_events
+                 WHERE accepting_daa >= ?1
+                 GROUP BY covenant_id ORDER BY n DESC, covenant_id LIMIT 1",
+                params![cutoff],
+                |r| Ok((CovenantId(r.get(0)?), r.get::<_, u64>(1)?)),
+            )
+            .optional()
+            .map_err(db_err)?;
+        let biggest_birth = self
+            .conn
+            .query_row(
+                "SELECT c.covenant_id, COALESCE(SUM(u.value), 0) AS v
+                 FROM covenants c
+                 JOIN covenant_utxos u ON u.covenant_id = c.covenant_id AND u.created_daa = c.genesis_daa
+                 WHERE c.genesis_daa >= ?1
+                 GROUP BY c.covenant_id ORDER BY v DESC, c.covenant_id LIMIT 1",
+                params![cutoff],
+                |r| Ok((CovenantId(r.get(0)?), r.get::<_, u64>(1)?)),
+            )
+            .optional()
+            .map_err(db_err)?;
+        // identical semantics to stats().active — the site's "alive right now"
+        let active_now: u64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(DISTINCT covenant_id) FROM covenant_utxos WHERE spent_block IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(db_err)?;
+        Ok(DigestStats { births, moves, burns, value_born, active_now, busiest, biggest_birth })
+    }
+
     /// Per-covenant birth amounts (sum of outputs created at the genesis DAA),
     /// one query for the whole grid.
     pub fn born_values(&self) -> Result<std::collections::HashMap<CovenantId, u64>> {
@@ -527,6 +778,75 @@ impl Store {
         Ok(rows)
     }
 
+    /// One covenant's birth amount — grid parity for single-covenant endpoints
+    /// (born_values() builds the map for the whole grid; this is the point query).
+    pub fn born_value(&self, id: &CovenantId) -> Result<u64> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(u.value), 0)
+                 FROM covenant_utxos u
+                 JOIN covenants c ON c.covenant_id = u.covenant_id AND u.created_daa = c.genesis_daa
+                 WHERE u.covenant_id = ?1",
+                [id.0.as_slice()],
+                |r| r.get(0),
+            )
+            .map_err(db_err)
+    }
+
+    /// "What runs on this network": per-template aggregates in one GROUP BY.
+    /// Recognition is stamped at write time, so this never decodes a script.
+    /// NULL rows (written by an older binary, healed at the next open) fold
+    /// into the unrecognized bucket — honest degradation under version skew.
+    pub fn template_stats(&self) -> Result<Vec<TemplateStat>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT COALESCE(template, '') AS tpl,
+                        COALESCE(SUM(CASE WHEN spent_block IS NULL THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN spent_block IS NULL THEN value ELSE 0 END), 0),
+                        COUNT(*),
+                        COUNT(DISTINCT covenant_id)
+                 FROM covenant_utxos GROUP BY tpl ORDER BY COUNT(*) DESC, tpl",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let tpl: String = row.get(0)?;
+                Ok(TemplateStat {
+                    template: (!tpl.is_empty()).then_some(tpl),
+                    live_states: row.get(1)?,
+                    live_value: row.get(2)?,
+                    ever_seen: row.get(3)?,
+                    covenants: row.get(4)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// How many spends ran each recognized template — verified P2SH reveals
+    /// only. Compiled contracts (Mecenas, Escrow, LastWill) live behind p2sh
+    /// commitments and surface exclusively here; a tx sweeping N states
+    /// counts N.
+    pub fn revealed_template_counts(&self) -> Result<Vec<(String, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT revealed_template, COUNT(*) FROM covenant_utxos
+                 WHERE revealed_template IS NOT NULL AND revealed_template != ''
+                 GROUP BY revealed_template ORDER BY COUNT(*) DESC, revealed_template",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
     /// Which covenant did this transaction touch? Covers genesis, transitions,
     /// and burns (their txids are all event txids).
     pub fn covenant_by_txid(&self, txid: &TxId) -> Result<Option<CovenantId>> {
@@ -540,6 +860,51 @@ impl Store {
             .optional()
             .map_err(db_err)?;
         Ok(row)
+    }
+
+    /// Covenants whose p2pk state has carried this owner pubkey (32-byte x-only
+    /// or 33-byte ECDSA). Matches the state script byte-exactly — the same shape
+    /// P2pkStateDecoder recognizes: [len-2 push opcode][key][OpCheckSig].
+    /// Full scan of covenant_utxos: spk_script has no index; exact-equality is a
+    /// cheap memcmp and fine at current row counts. If it ever measures hot, the
+    /// additive lever is CREATE INDEX IF NOT EXISTS utxo_by_spk ON
+    /// covenant_utxos(spk_script).
+    pub fn covenants_by_pubkey(&self, pubkey: &[u8]) -> Result<Vec<PubkeyCovenantRow>> {
+        if !matches!(pubkey.len(), 32 | 33) {
+            return Ok(vec![]);
+        }
+        let mut expected = Vec::with_capacity(pubkey.len() + 2);
+        expected.push(pubkey.len() as u8); // 0x20 or 0x21
+        expected.extend_from_slice(pubkey);
+        expected.push(0xac); //               OpCheckSig
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT covenant_id,
+                        MAX(spent_block IS NULL) AS controls_now,
+                        COUNT(*) AS states_seen,
+                        MIN(created_daa) AS first_seen_daa,
+                        MAX(created_daa) AS last_seen_daa
+                 FROM covenant_utxos
+                 WHERE spk_script = ?1
+                 GROUP BY covenant_id
+                 ORDER BY last_seen_daa DESC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([expected.as_slice()], |row| {
+                Ok(PubkeyCovenantRow {
+                    covenant_id: CovenantId(row.get(0)?),
+                    controls_now: row.get(1)?,
+                    states_seen: row.get(2)?,
+                    first_seen_daa: row.get(3)?,
+                    last_seen_daa: row.get(4)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
     }
 
     pub fn events(&self, id: &CovenantId) -> Result<Vec<EventRow>> {
@@ -693,5 +1058,205 @@ mod tests {
         let capped = store.recent_events(1).unwrap();
         assert_eq!(capped.len(), 1);
         assert_eq!(capped[0].accepting_daa, 200);
+    }
+
+    #[test]
+    fn digest_windows_and_headliners() {
+        // fresh empty store: tip fallback path — all zeros, no headliners
+        let empty = test_store("digest-empty");
+        let d0 = empty.digest(864_000).unwrap();
+        assert_eq!((d0.births, d0.moves, d0.burns), (0, 0, 0));
+        assert_eq!((d0.value_born, d0.active_now), (0, 0));
+        assert_eq!(d0.busiest, None);
+        assert_eq!(d0.biggest_birth, None);
+
+        let mut store = test_store("digest");
+        // old genesis — outside the window once the tip is set
+        store
+            .apply(&block_with_events(1, 1_000, vec![(0xA1, EventKind::Genesis, 0x01)]), BlockHash([1; 32]))
+            .unwrap();
+        // inside the window: 0xB2 born holding 50 KAS + two moves, 0xA1 retires
+        let mut b2 = block_with_events(
+            2,
+            999_000,
+            vec![
+                (0xB2, EventKind::Genesis, 0x03),
+                (0xB2, EventKind::Transition, 0x04),
+                (0xB2, EventKind::Transition, 0x05),
+                (0xA1, EventKind::Burn, 0x06),
+            ],
+        );
+        b2.created_utxos = vec![NewUtxo {
+            outpoint: Outpoint { txid: TxId([0x03; 32]), index: 0 },
+            covenant_id: CovenantId([0xB2; 32]),
+            value: 5_000_000_000,
+            spk_version: 1,
+            spk_script: vec![0xac],
+        }];
+        store.apply(&b2, BlockHash([2; 32])).unwrap();
+        store.set_tip(1_000_000, 1_751_000_000_000).unwrap();
+
+        // cutoff = 1_000_000 - 864_000 = 136_000: the daa-1000 genesis drops out
+        let d = store.digest(864_000).unwrap();
+        assert_eq!((d.births, d.moves, d.burns), (1, 2, 1));
+        assert_eq!(d.value_born, 5_000_000_000);
+        assert_eq!(d.active_now, 1);
+        assert_eq!(d.busiest, Some((CovenantId([0xB2; 32]), 3)));
+        assert_eq!(d.biggest_birth, Some((CovenantId([0xB2; 32]), 5_000_000_000)));
+    }
+
+    #[test]
+    fn covenants_by_pubkey_matches_exact_p2pk_states() {
+        let mut store = test_store("pubkey");
+        let key_a = [0xaa_u8; 32];
+        let key_b = [0xbb_u8; 33];
+        let p2pk = |key: &[u8]| {
+            let mut s = vec![key.len() as u8];
+            s.extend_from_slice(key);
+            s.push(0xac);
+            s
+        };
+        // decoy: keyA embedded at offset 1 but the tail isn't OpCheckSig
+        let mut decoy = vec![0x20];
+        decoy.extend_from_slice(&key_a);
+        decoy.push(0x00);
+        let utxo = |tx: u8, cov: u8, script: Vec<u8>| NewUtxo {
+            outpoint: Outpoint { txid: TxId([tx; 32]), index: 0 },
+            covenant_id: CovenantId([cov; 32]),
+            value: 1_000,
+            spk_version: 1,
+            spk_script: script,
+        };
+
+        let mut b1 = BlockEvents::empty(BlockHash([1; 32]));
+        b1.accepting_daa = 100;
+        b1.created_utxos = vec![
+            utxo(0x01, 0xA1, p2pk(&key_a)), // keyA state #1 (spent below)
+            utxo(0x02, 0xB2, p2pk(&key_b)), // keyB (33-byte ECDSA) state
+            utxo(0x03, 0xC3, decoy),        // keyA bytes under the wrong opcode
+            utxo(0x05, 0xD4, p2pk(&key_a)), // keyA's only state here (spent below)
+        ];
+        store.apply(&b1, BlockHash([1; 32])).unwrap();
+
+        let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
+        b2.accepting_daa = 200;
+        b2.created_utxos = vec![utxo(0x04, 0xA1, p2pk(&key_a))]; // keyA state #2, live
+        b2.spent_utxos = vec![
+            (Outpoint { txid: TxId([0x01; 32]), index: 0 }, TxId([0x04; 32]), vec![], 0),
+            (Outpoint { txid: TxId([0x05; 32]), index: 0 }, TxId([0x06; 32]), vec![], 0),
+        ];
+        store.apply(&b2, BlockHash([2; 32])).unwrap();
+
+        // keyA: current owner of 0xA1 (one live, one spent state), past owner of 0xD4
+        let rows = store.covenants_by_pubkey(&key_a).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].covenant_id, CovenantId([0xA1; 32]));
+        assert!(rows[0].controls_now);
+        assert_eq!(rows[0].states_seen, 2);
+        assert_eq!(rows[0].first_seen_daa, 100);
+        assert_eq!(rows[0].last_seen_daa, 200);
+        assert_eq!(rows[1].covenant_id, CovenantId([0xD4; 32]));
+        assert!(!rows[1].controls_now);
+        assert_eq!(rows[1].states_seen, 1);
+
+        let rows_b = store.covenants_by_pubkey(&key_b).unwrap();
+        assert_eq!(rows_b.len(), 1);
+        assert_eq!(rows_b[0].covenant_id, CovenantId([0xB2; 32]));
+        assert!(rows_b[0].controls_now);
+        assert_eq!(rows_b[0].states_seen, 1);
+
+        // unmatched and wrong-length keys answer honestly empty
+        assert!(store.covenants_by_pubkey(&[0xcc; 32]).unwrap().is_empty());
+        assert!(store.covenants_by_pubkey(&[0xaa; 31]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn template_stats_recognize_and_bucket() {
+        let mut store = test_store("templates");
+        let mut p2pk = vec![0x20];
+        p2pk.extend([0x7f; 32]);
+        p2pk.push(0xac);
+        let junk = vec![0x51, 0x51]; // OpTrue OpTrue — matches no template
+        // p2sh commitment over a redeem that is itself template-less
+        let redeem = vec![0xb9, 0xcf, 0x51]; // OpTxInputIndex OpInputCovenantId OpTrue
+        let digest = blake2b_simd::Params::new().hash_length(32).hash(&redeem);
+        let mut p2sh = vec![0xaa, 0x20];
+        p2sh.extend_from_slice(digest.as_bytes());
+        p2sh.push(0x87);
+        let utxo = |tx: u8, cov: u8, script: Vec<u8>| NewUtxo {
+            outpoint: Outpoint { txid: TxId([tx; 32]), index: 0 },
+            covenant_id: CovenantId([cov; 32]),
+            value: 1_000,
+            spk_version: 1,
+            spk_script: script,
+        };
+
+        let mut b1 = BlockEvents::empty(BlockHash([1; 32]));
+        b1.accepting_daa = 100;
+        b1.created_utxos =
+            vec![utxo(0x01, 0xA1, p2pk), utxo(0x02, 0xB2, junk), utxo(0x03, 0xC3, p2sh)];
+        store.apply(&b1, BlockHash([1; 32])).unwrap();
+
+        let by_name = |stats: &[TemplateStat], name: Option<&str>| {
+            stats.iter().find(|s| s.template.as_deref() == name).cloned().unwrap()
+        };
+        let stats = store.template_stats().unwrap();
+        assert_eq!(stats.len(), 3); // p2pk state, p2sh commitment, unrecognized
+        let p2pk_row = by_name(&stats, Some("p2pk state"));
+        assert_eq!((p2pk_row.live_states, p2pk_row.ever_seen, p2pk_row.covenants), (1, 1, 1));
+        assert_eq!(p2pk_row.live_value, 1_000);
+        let unrec = by_name(&stats, None); // '' sentinel: decoded, nothing matched
+        assert_eq!((unrec.live_states, unrec.ever_seen, unrec.covenants), (1, 1, 1));
+        assert!(store.revealed_template_counts().unwrap().is_empty());
+
+        // spend the p2sh state, revealing its (template-less) program
+        let mut sig = vec![0x03];
+        sig.extend_from_slice(&redeem);
+        let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
+        b2.accepting_daa = 200;
+        b2.spent_utxos =
+            vec![(Outpoint { txid: TxId([0x03; 32]), index: 0 }, TxId([0x04; 32]), sig, 0)];
+        store.apply(&b2, BlockHash([2; 32])).unwrap();
+
+        let stats = store.template_stats().unwrap();
+        let p2sh_row = by_name(&stats, Some("p2sh commitment"));
+        assert_eq!((p2sh_row.live_states, p2sh_row.live_value), (0, 0)); // spent…
+        assert_eq!((p2sh_row.ever_seen, p2sh_row.covenants), (1, 1)); // …but remembered
+        // the reveal ran but matched no template — '' is stored, not counted
+        assert!(store.revealed_template_counts().unwrap().is_empty());
+        let revealed: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT revealed_template FROM covenant_utxos WHERE txid = ?1",
+                [[0x03u8; 32].as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(revealed.as_deref(), Some(""));
+
+        // a reveal that IS a recognized shape gets named and counted: commit
+        // to a p2pk-shaped redeem, then spend it
+        let redeem2: Vec<u8> = {
+            let mut s = vec![0x20];
+            s.extend([0x11; 32]);
+            s.push(0xac);
+            s
+        };
+        let digest2 = blake2b_simd::Params::new().hash_length(32).hash(&redeem2);
+        let mut p2sh2 = vec![0xaa, 0x20];
+        p2sh2.extend_from_slice(digest2.as_bytes());
+        p2sh2.push(0x87);
+        let mut sig2 = vec![redeem2.len() as u8];
+        sig2.extend_from_slice(&redeem2);
+        let mut b3 = BlockEvents::empty(BlockHash([3; 32]));
+        b3.accepting_daa = 300;
+        b3.created_utxos = vec![utxo(0x05, 0xC3, p2sh2)];
+        b3.spent_utxos =
+            vec![(Outpoint { txid: TxId([0x05; 32]), index: 0 }, TxId([0x06; 32]), sig2, 0)];
+        store.apply(&b3, BlockHash([3; 32])).unwrap();
+        assert_eq!(
+            store.revealed_template_counts().unwrap(),
+            vec![("p2pk state".to_string(), 1)]
+        );
     }
 }

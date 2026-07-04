@@ -38,7 +38,7 @@
       </a>
       <div class="search-wrap header-search" id="header-search" hidden>
         <svg class="search-icon" aria-hidden="true" viewBox="0 0 20 20" width="16" height="16"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="2"/><line x1="12.8" y1="12.8" x2="17" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        <input id="search" type="search" placeholder="name, coin id, or a transaction id…" aria-label="Search smart coins by friendly name, coin id or transaction id" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="search-suggest">
+        <input id="search" type="search" placeholder="name, coin id, transaction id, or address…" aria-label="Search smart coins by friendly name, coin id, transaction id or address" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="search-suggest">
         <div id="search-suggest" class="suggest" role="listbox" aria-label="Matching smart coins" hidden></div>
       </div>
       <div class="header-right">
@@ -65,6 +65,12 @@
         <p class="hero-sub">kascov watches every smart coin on the Kaspa <span data-net-word>testnet</span> — born, moving, retiring — and saves the history the network deletes after 3&nbsp;days.</p>
         <div class="hero-stats" id="hero-stats"></div>
         <p class="freshness" id="freshness"></p>
+      </section>
+
+      <section class="digest" id="section-digest" aria-label="The last 24 hours" hidden>
+        <h2>the last 24 hours</h2>
+        <div class="digest-counts" id="digest-counts"></div>
+        <div class="mini-grid" id="digest-cards" hidden></div>
       </section>
 
       <section class="guide" aria-label="How to read this">
@@ -132,6 +138,11 @@
         <div id="records-row" class="mini-grid"></div>
       </section>
 
+      <section class="templates" id="section-templates" aria-label="Contract types" hidden>
+        <h2>what’s running here</h2>
+        <div id="template-bars" class="template-bars"></div>
+      </section>
+
       <section class="stories" id="section-stories" aria-label="Latest stories">
         <h2>latest stories</h2>
         <ol class="story-list" id="story-list"></ol>
@@ -165,6 +176,9 @@
 
     <!-- ============ DETAIL ============ -->
     <section id="view-detail" class="view-fade" aria-label="Smart coin detail" hidden></section>
+
+    <!-- ============ ADDRESS ============ -->
+    <section id="view-address" class="view-fade" aria-label="Address lookup" hidden></section>
 
     <!-- ============ DECODER ============ -->
     <section id="view-decode" class="view-fade" aria-label="Script decoder" hidden>
@@ -232,6 +246,22 @@
             <p class="endpoint-desc">which smart coin did this transaction touch? answers <code class="mono">{"covenant_id": …}</code> or 404 — genesis, moves, and burns all resolve.</p>
           </div>
           <div class="endpoint">
+            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/digest.json</code></p>
+            <p class="endpoint-desc">the last 24 hours in one object — births, moves, burns, value born (sompi), the busiest coin, the biggest birth, and how many coins are alive right now. refreshes about once a minute.</p>
+          </div>
+          <div class="endpoint">
+            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/addr/&lt;address-or-pubkey&gt;.json</code></p>
+            <p class="endpoint-desc">which smart coins has this address touched? accepts <code class="mono">kaspa:…</code> / <code class="mono">kaspatest:…</code> or raw 32/33-byte pubkey hex. answers the canonical address, the pubkey, and grid-style rows with role hints (<code class="mono">controls_now</code>, <code class="mono">states_seen</code>). matches p2pk covenant states only.</p>
+          </div>
+          <div class="endpoint">
+            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/templates.json</code></p>
+            <p class="endpoint-desc">what runs on this network — recognized script templates aggregated over every state UTXO: <code class="mono">live_states</code> / <code class="mono">live_value</code> now, <code class="mono">ever_seen</code> all-time, distinct <code class="mono">covenants</code>, and <code class="mono">revealed_runs</code> (compiled contracts proven at spend time; a tx sweeping N states counts N). unrecognized scripts are counted, not hidden.</p>
+          </div>
+          <div class="endpoint">
+            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/stream</code></p>
+            <p class="endpoint-desc">server-sent events — one JSON message per life event the moment the indexer sees it (<code class="mono">covenant_id</code>, <code class="mono">kind</code>, <code class="mono">txid</code>, <code class="mono">accepting_daa</code>), plus a <code class="mono">: ka</code> comment every 25s. treat messages as hints and confirm through the polled feeds — some CDNs buffer streams, so keep a poll running.</p>
+          </div>
+          <div class="endpoint">
             <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/mainnet-live.json</code> <span class="dim">·</span> <code class="mono">/data/mainnet.json</code> <span class="dim">·</span> <code class="mono">/data/mainnet/…</code></p>
             <p class="endpoint-desc">same endpoints for mainnet — its first smart coins arrived July 2, 2026, and their complete history starts here. spend-time reveals and KIP-20-validated genesis exist for activity from that evening onward.</p>
           </div>
@@ -253,7 +283,19 @@ curl -s https://kascov-explorer.web.app/data/testnet-10.json \
 curl -s https://kascov-explorer.web.app/data/testnet-10/c/&lt;covenant-id&gt;.json | jq .events
 
 # which coin did a transaction touch?
-curl -s https://kascov-explorer.web.app/data/testnet-10/tx/&lt;txid&gt;.json</code></pre>
+curl -s https://kascov-explorer.web.app/data/testnet-10/tx/&lt;txid&gt;.json
+
+# the last 24 hours, one object
+curl -s https://kascov-explorer.web.app/data/testnet-10/digest.json | jq
+
+# every smart coin an address has touched (p2pk states)
+curl -s https://kascov-explorer.web.app/data/testnet-10/addr/&lt;address-or-pubkey&gt;.json | jq .covenants
+
+# what runs on this network, by recognized template
+curl -s https://kascov-explorer.web.app/data/testnet-10/templates.json | jq .templates
+
+# push, not poll — every life event as it happens (SSE)
+curl -N https://kascov-explorer.web.app/data/testnet-10/stream</code></pre>
       </section>
 
       <section class="dev-section">
@@ -269,6 +311,8 @@ curl -s https://kascov-explorer.web.app/data/testnet-10/tx/&lt;txid&gt;.json</co
           <div><dt class="mono">utxos[]</dt><dd>every state UTXO ever seen: <code>outpoint</code>, <code>value</code> (sompi, 1e8 = 1 KAS), <code>live</code>, <code>script_hex</code> + <code>script_asm</code> (pre-disassembled), <code>uses_covenant_ops</code>, <code>uses_zk_ops</code>; spent ones add <code>spent_txid</code></dd></div>
           <div><dt class="mono">revealed_hex / revealed_asm</dt><dd>spend-time decoding — when a P2SH state is spent, the unlocking script reveals the program it actually ran, verified against the committed blake2b hash (plus <code>revealed_uses_covenant_ops</code>/<code>_zk_ops</code>; non-P2SH spends carry <code>sig_hex</code> instead)</dd></div>
           <div><dt class="mono">template / state_fields</dt><dd>recognized script shapes with labeled fields — <code>p2pk state</code> (owner_pubkey), <code>p2sh commitment</code> (program_hash), and compiled SilverScript contracts (Mecenas, Escrow, LastWill) once seen; revealed programs get <code>revealed_template</code>/<code>revealed_fields</code></dd></div>
+          <div><dt class="mono">templates[] / unrecognized</dt><dd>templates endpoint — per script shape: <code>live_states</code>/<code>live_value</code> held now, <code>ever_seen</code> state UTXOs all-time, <code>covenants</code> distinct coins, <code>revealed_runs</code> spends whose verified P2SH reveal matched the template; <code>unrecognized</code> buckets everything else</dd></div>
+          <div><dt class="mono">controls_now / states_seen</dt><dd>address endpoint — <code>true</code> while the key still owns a live state of that coin (vs a past owner only), plus how many of the coin's states have carried the key; <code>first_seen_daa</code>/<code>last_seen_daa</code> bracket the relationship</dd></div>
           <div><dt class="mono">events[].payload / spent_budget</dt><dd>v1 extras, captured per event/spend: the transaction payload (hex when ≤512 B, else <code>payload_len</code>) and the spending input's compute-budget commitment</dd></div>
           <div><dt class="mono">live_value, live_utxos</dt><dd>what the coin holds right now</dd></div>
           <div><dt class="mono">events_truncated</dt><dd>the full snapshot caps events per covenant (default 500); <code>true</code> means the tail was cut</dd></div>

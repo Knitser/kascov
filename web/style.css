@@ -1367,3 +1367,64 @@ a.btn:hover { text-decoration: none; }
   .inst { grid-template-columns: 48px minmax(0, 1fr); }
   .inst-hex { display: none; }
 }
+
+/* ------------------------------------------------------- address pages */
+
+.addr-head { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; }
+/* the 999px pill radius looks wrong once a ~70-char address wraps */
+.addr-head .id-chip { border-radius: 14px; max-width: 100%; }
+
+/* ------------------------------------------------------------- live flash */
+
+/* one ripple on the live-badge dot per pushed (SSE) event; the global
+   reduced-motion rule above already pins animations to 0.01ms */
+.live-on.live-flash .live-dot { animation: livepulse 2.2s ease-out infinite, liveflash 0.8s ease-out; }
+
+@keyframes liveflash {
+  0% { box-shadow: 0 0 0 0 rgba(111, 217, 164, 0.85); }
+  100% { box-shadow: 0 0 0 14px rgba(111, 217, 164, 0); }
+}
+
+/* ================================================== what's running here */
+
+.templates { margin-bottom: 2.6rem; }
+.template-bars { display: grid; gap: 0.5rem; }
+/* .tpl-row/.tpl-name are the explore bars — distinct from the detail
+   page's .tpl-line/.tpl-field template chips */
+.tpl-row {
+  display: grid;
+  grid-template-columns: 210px minmax(70px, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  font-size: 0.88rem;
+}
+.tpl-name { font-weight: 600; overflow-wrap: anywhere; }
+.tpl-track {
+  height: 14px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.tpl-fill { display: block; height: 100%; border-radius: 5px; }
+.tpl-counts { font-size: 0.82rem; white-space: nowrap; }
+
+@media (max-width: 720px) {
+  .tpl-row { grid-template-columns: 1fr; gap: 0.2rem; }
+  .tpl-counts { white-space: normal; }
+}
+
+/* ===================================================== daily digest strip */
+
+.digest { max-width: 720px; margin: 0 auto 2.4rem; }
+.digest h2 { text-align: center; }
+.digest-counts {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.9rem;
+  margin-bottom: 0.9rem;
+}
+.digest-counts .stat-n { font-size: clamp(1.4rem, 3.5vw, 2rem); }
+.digest-counts .n-born { color: var(--born); }
+.digest-counts .n-move { color: var(--move); }
+.digest-counts .n-burn { color: var(--burn); }

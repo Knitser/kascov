@@ -28,6 +28,8 @@ const PAGE_SIZE = 60;
 const STORY_COUNT = 15;
 const TEASER_COUNT = 3;
 const PULSE_BUCKETS = 12;
+const ADDR_RE = /^(kaspa|kaspatest):[a-z0-9]{20,}$/i;
+const PUBKEY_RE = /^[0-9a-fA-F]{64}(?:[0-9a-fA-F]{2})?$/; // 32B x-only or 33B ECDSA
 
 /* ------------------------------------------------------- friendly names */
 
@@ -253,6 +255,9 @@ const state = {
   live: {},           // network -> { supported, missedAt, data }
   details: {},        // network -> Map(covenant id -> merged detail entry)
   txLookup: {},       // 64-hex query -> 'pending' | 'miss' (server tx resolver)
+  addrs: {},          // network -> Map(addressOrPubkey query -> /addr response)
+  templates: {},      // network -> { data, at } (contract-type analytics)
+  digest: {},         // network -> { data, at, animated }
   watch: new Set(),   // covenant ids starred on the current network
   watchNet: null,
 };
@@ -369,6 +374,18 @@ async function loadDetail(network, covId) {
   return rec;
 }
 
+/* which smart coins has this address/pubkey touched — fetched on demand */
+async function loadAddress(network, q) {
+  const map = state.addrs[network] || (state.addrs[network] = new Map());
+  const hit = map.get(q);
+  if (hit) return hit;
+  const res = await fetch(`data/${network}/addr/${encodeURIComponent(q)}.json`, { cache: 'no-cache' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  map.set(q, data);
+  return data;
+}
+
 /* The tiny live feed, for instant first paint while the full snapshot
    (multi-MB on a busy testnet) is still downloading. */
 async function loadLite(network) {
@@ -388,6 +405,29 @@ async function loadLite(network) {
     return ls.data;
   } catch (e) {
     return null;
+  }
+}
+
+/* Contract-type analytics — what runs on this network, by recognized script
+   template. Cached per network for a minute (mirrors the server ttl); a 404
+   from an older worker is remembered (data: null) and reprobed after the
+   ttl, so the section hides instead of pinning a dead panel. */
+const TEMPLATES_TTL_MS = 60_000;
+
+async function loadTemplates(network) {
+  const t = state.templates[network];
+  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
+  try {
+    const res = await fetch(`data/${network}/templates.json`, { cache: 'no-cache' });
+    if (!res.ok) {
+      state.templates[network] = { data: null, at: Date.now() };
+      return null;
+    }
+    const data = await res.json();
+    state.templates[network] = { data, at: Date.now() };
+    return data;
+  } catch (e) {
+    return t ? t.data : null;
   }
 }
 
@@ -446,6 +486,7 @@ function renderLiteLanding(live, network) {
   const empty = s.covenants === 0;
   $('#landing-empty').hidden = !empty;
   $('#section-teaser').hidden = empty;
+  renderDigestStrip(network, empty);
   if (empty) {
     $('#landing-empty').innerHTML = emptyCardHtml(network);
     return;
@@ -472,6 +513,8 @@ function renderLiteExplore(live, network) {
   $('#empty-net').hidden = !empty;
   $('#watch-strip').hidden = true;
   $('#section-records').hidden = true;
+  const tpl = $('#section-templates');
+  if (tpl) tpl.hidden = true; /* appears when the full snapshot render runs */
   $('#section-pulse').hidden = true;
   $('#section-stories').hidden = empty;
   $('#section-coins').hidden = empty;
@@ -691,7 +734,9 @@ function renderGrid(entry, network) {
         grid.innerHTML = `<div class="no-results">` +
           `<p>kascov hasn’t seen <strong class="mono">${esc(shortHex(state.query, 12, 10))}</strong> in any covenant on ${esc(NETWORKS[network].label)}.</p>` +
           `<p class="dim">it may be a regular (non-covenant) transaction, still unconfirmed, or on the other network — ` +
-          `<a href="${esc(txUrl(network, state.query))}" target="_blank" rel="noopener noreferrer">check it on the block explorer ↗</a></p></div>`;
+          `<a href="${esc(txUrl(network, state.query))}" target="_blank" rel="noopener noreferrer">check it on the block explorer ↗</a></p>` +
+          `<p class="dim">if it’s a public key rather than a transaction, ` +
+          `<a href="#/${esc(network)}/addr/${esc(state.query)}">see the smart coins it owns →</a></p></div>`;
       }
     } else if (state.filter === 'watch' && !state.watch.size) {
       grid.innerHTML = `<div class="no-results"><p>You’re not watching any coins yet.</p>` +
@@ -865,6 +910,57 @@ function renderRecords(entry, network) {
   $('#records-row').innerHTML = unique.map((r) => miniCard(r.e, network, r.label, r.sub)).join('');
 }
 
+/* --------------------------------------------------------- contract types */
+
+/* bar colors from a fixed token whitelist — never from response data — so
+   the style attribute stays injection-safe alongside the esc()'d text */
+function templateColor(name) {
+  if (/^SilverScript/.test(name)) return 'var(--accent)';
+  if (/^p2pk/.test(name)) return 'var(--born)';
+  if (/^p2sh/.test(name)) return 'var(--move)';
+  return 'var(--burn)';
+}
+
+/* "what's running here" — bar length ∝ live states (present tense); a
+   template that only ever showed up in spend-time reveals keeps a zero bar
+   and the "ran N× at spend" count carries the truth */
+function renderTemplates(network) {
+  const section = $('#section-templates');
+  const host = $('#template-bars');
+  if (!section || !host) return; /* stale cached index.html */
+  const cached = state.templates[network];
+  if (!cached) {
+    section.hidden = false;
+    host.innerHTML = '<p class="dim">reading contract types…</p>';
+    return;
+  }
+  if (!cached.data) { section.hidden = true; return; } /* older worker (404) */
+  const data = cached.data;
+  const rows = (data.templates || []).map((x) => ({ ...x, label: x.name, unrec: false }));
+  if (data.unrecognized && data.unrecognized.ever_seen > 0) {
+    rows.push({ ...data.unrecognized, label: 'unrecognized scripts', revealed_runs: 0, unrec: true });
+  }
+  section.hidden = false;
+  if (!rows.length) {
+    host.innerHTML = '<p class="dim">no contract state seen here yet.</p>';
+    return;
+  }
+  const max = Math.max(1, ...rows.map((r) => r.live_states));
+  host.innerHTML = rows.map((r) => {
+    const w = r.live_states > 0 ? Math.max((r.live_states / max) * 100, 2).toFixed(1) : 0;
+    const color = r.unrec ? 'var(--faint)' : templateColor(r.label);
+    const bits = [
+      `${fmtInt(r.live_states)} live`,
+      `${fmtInt(r.ever_seen)} ever`,
+      `${fmtInt(r.covenants)} coin${r.covenants === 1 ? '' : 's'}`,
+    ];
+    if (r.revealed_runs > 0) bits.push(`ran ${fmtInt(r.revealed_runs)}× at spend`);
+    return `<div class="tpl-row"><span class="tpl-name">${esc(r.label)}</span>` +
+      `<span class="tpl-track" aria-hidden="true"><span class="tpl-fill" style="width:${w}%;background:${color}"></span></span>` +
+      `<span class="tpl-counts dim">${esc(bits.join(' · '))}</span></div>`;
+  }).join('');
+}
+
 /* ---------------------------------------------------------------- landing */
 
 function emptyCardHtml(network) {
@@ -876,6 +972,109 @@ function emptyCardHtml(network) {
       ? `<button type="button" class="btn btn-accent" data-action="network" data-network="testnet-10">meanwhile, watch the testnet</button>`
       : '') +
     `</div>`;
+}
+
+/* ----------------------------------------------------------- daily digest */
+
+/* "the last 24 hours" — one tiny object per network, cached for a minute
+   (mirrors the server ttl). A failed or 404 fetch marks it missing and
+   returns whatever we already had, so the strip degrades to hidden instead
+   of flashing errors under the hero. */
+const DIGEST_TTL_MS = 60_000;
+
+async function loadDigest(network) {
+  const ds = state.digest[network] ||
+    (state.digest[network] = { data: null, at: 0, animated: false });
+  if (Date.now() - ds.at < DIGEST_TTL_MS) return ds.data;
+  try {
+    const res = await fetch(`data/${network}/digest.json`, { cache: 'no-cache' });
+    if (!res.ok) {
+      /* misses respect the TTL too — an old worker without the endpoint
+         shouldn't be re-asked on every landing render */
+      ds.at = Date.now();
+      return ds.data; /* stale-ok */
+    }
+    ds.data = await res.json();
+    ds.at = Date.now();
+    return ds.data;
+  } catch (e) {
+    return ds.data;
+  }
+}
+
+/* count-up to the real number: ~700ms, ease-out cubic, landing exactly on
+   the target; reduced motion gets the settled value immediately */
+function animateStatN(el, target) {
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    el.textContent = fmtInt(target);
+    return;
+  }
+  const t0 = performance.now();
+  const DUR = 700;
+  const tick = (now) => {
+    const p = Math.min(1, (now - t0) / DUR);
+    const eased = 1 - Math.pow(1 - p, 3);
+    el.textContent = p < 1 ? fmtInt(Math.round(target * eased)) : fmtInt(target);
+    if (p < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function paintDigest(d, network) {
+  const host = $('#section-digest');
+  if (!host) return; /* stale cached index.html */
+  const counts = [
+    { n: Number(d.births) || 0, label: 'born', cls: 'n-born' },
+    { n: Number(d.moves) || 0, label: 'moved', cls: 'n-move' },
+    { n: Number(d.burns) || 0, label: 'retired', cls: 'n-burn' },
+  ];
+  $('#digest-counts').innerHTML = counts.map((st) =>
+    `<div class="stat"><span class="stat-n ${st.cls}" data-n="${st.n}">0</span>` +
+    `<span class="stat-label">${esc(st.label)}</span></div>`).join('');
+  /* headline cards reuse the grid record when it's here; before the full
+     snapshot lands the name falls back to friendlyName (same as liteStoryRow) */
+  const entry = state.cache[network];
+  const rec = (id) => (entry && entry.index.byId.get(id)) ||
+    { c: { covenant_id: id }, name: friendlyName(id) };
+  const cards = [];
+  if (d.biggest_birth && d.biggest_birth.covenant_id) {
+    cards.push(miniCard(rec(d.biggest_birth.covenant_id), network, 'biggest new coin',
+      `born holding ${fmtAmount(d.biggest_birth.value || 0, network)}`));
+  }
+  if (d.busiest && d.busiest.covenant_id) {
+    const n = Number(d.busiest.events) || 0;
+    cards.push(miniCard(rec(d.busiest.covenant_id), network, 'busiest coin',
+      `${fmtInt(n)} life event${n === 1 ? '' : 's'}`));
+  }
+  const cardHost = $('#digest-cards');
+  cardHost.innerHTML = cards.join('');
+  cardHost.hidden = cards.length === 0;
+  host.hidden = false;
+  host.dataset.gen = String(d.generated_at_ms);
+  /* the count-up plays once per network per page load; 45s re-renders and
+     later repaints set the settled numbers statically */
+  const ds = state.digest[network];
+  const animate = ds && !ds.animated;
+  if (ds) ds.animated = true;
+  document.querySelectorAll('#digest-counts .stat-n').forEach((el) => {
+    const n = Number(el.dataset.n) || 0;
+    if (animate) animateStatN(el, n);
+    else el.textContent = fmtInt(n);
+  });
+}
+
+function renderDigestStrip(network, empty) {
+  const host = $('#section-digest');
+  if (!host) return; /* stale cached index.html */
+  if (empty) { host.hidden = true; return; }
+  const ds = state.digest[network];
+  if (ds && ds.data) paintDigest(ds.data, network);
+  else host.hidden = true; /* nothing for this network yet — no flash */
+  loadDigest(network).then((d) => {
+    if (!d || state.network !== network || parseRoute().view !== 'landing') return;
+    if (host.dataset.gen === String(d.generated_at_ms) && !host.hidden) return;
+    paintDigest(d, network);
+  });
 }
 
 function renderLanding(entry) {
@@ -905,6 +1104,7 @@ function renderLanding(entry) {
   const empty = data.covenants.length === 0;
   $('#landing-empty').hidden = !empty;
   $('#section-teaser').hidden = empty;
+  renderDigestStrip(network, empty);
 
   if (empty) {
     $('#landing-empty').innerHTML = emptyCardHtml(network);
@@ -947,6 +1147,8 @@ function renderExplore(entry) {
   if (empty) {
     $('#watch-strip').hidden = true;
     $('#section-records').hidden = true;
+    const tpl = $('#section-templates');
+    if (tpl) tpl.hidden = true;
     $('#empty-net').innerHTML = emptyCardHtml(network);
     return;
   }
@@ -955,6 +1157,10 @@ function renderExplore(entry) {
   renderWatchStrip(entry, network);
   renderPulse(entry);
   renderRecords(entry, network);
+  renderTemplates(network);
+  loadTemplates(network).then(() => {
+    if (state.network === network && parseRoute().view === 'explore') renderTemplates(network);
+  });
   renderStories(entry, network);
   const sortSel = $('#sort');
   if (sortSel && sortSel.value !== state.sort) sortSel.value = state.sort;
@@ -1329,6 +1535,79 @@ function renderDev() {
   document.title = 'for developers — kascov';
 }
 
+/* ---------------------------------------------------------------- address */
+
+/* which smart coins has this address/pubkey touched — renders from its own
+   endpoint (two-phase like renderDetail: instant header, fill on fetch) and
+   never blocks on the multi-MB grid snapshot; names upgrade to the grid's
+   dedup-suffixed ones when it happens to be loaded */
+function renderAddress(route) {
+  const network = state.network;
+  const view = $('#view-address');
+  const q = route.id;
+  const net = NETWORKS[network];
+  document.title = `address ${shortHex(q, 10, 6)} — kascov`;
+  const back = `<a class="back" href="#/${esc(network)}/explore">← all smart coins</a>`;
+  const headChip = (label, value) =>
+    `<p class="id-chip">${label ? `<span class="dim">${esc(label)}</span> ` : ''}<span class="mono break">${esc(value)}</span>` +
+    `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(value)}">copy</button></p>`;
+  if (!ADDR_RE.test(q) && !PUBKEY_RE.test(q)) {
+    view.innerHTML = back + `<div class="empty-card"><h2>that doesn’t look like an address.</h2>` +
+      `<p class="dim">paste a kaspa address (kaspa:… / kaspatest:…) or a 32/33-byte pubkey as hex.</p></div>`;
+    return;
+  }
+  const map = state.addrs[network];
+  const data = map && map.get(q);
+  if (!data) {
+    view.innerHTML = back + `<header class="page-head addr-head"><h1>address</h1>` + headChip(null, q) +
+      `<p class="page-sub dim">checking which smart coins this address has touched…</p></header>`;
+    loadAddress(network, q)
+      .then(() => {
+        const r = parseRoute();
+        if (state.network === network && r.view === 'address' && r.id === q) renderAddress(r);
+      })
+      .catch(() => {
+        const r = parseRoute();
+        if (state.network === network && r.view === 'address' && r.id === q) {
+          view.innerHTML = back + `<div class="empty-card"><h2>couldn’t look up this address.</h2>` +
+            `<p class="dim">the lookup didn’t answer — the worker may be busy, or the address malformed.</p>` +
+            `<button type="button" class="btn" data-action="retry-addr">try again</button></div>`;
+        }
+      });
+    return;
+  }
+  const rows = data.covenants || [];
+  /* date cards from the response's own tip anchor (liteMs pattern) */
+  const aDaa = data.tip_daa != null ? data.tip_daa : (rows[0] ? rows[0].last_activity_daa : 0);
+  const aMs = data.tip_at_ms != null ? data.tip_at_ms : data.generated_at_ms;
+  const toMs = (daa) => aMs - (aDaa - daa) * MS_PER_DAA;
+  const entry = state.cache[network];
+  const controls = rows.filter((r) => r.controls_now).length;
+  const bits = [`${fmtInt(data.covenants_total)} smart coin${data.covenants_total === 1 ? '' : 's'} touched`];
+  if (controls) bits.push(`${fmtInt(controls)} controlled right now`);
+  if (data.covenants_total > rows.length) bits.push(`showing the ${fmtInt(rows.length)} most recent`);
+  const cards = rows.map((c) => {
+    const gridRec = entry && entry.index.byId.get(c.covenant_id);
+    const name = gridRec ? gridRec.name : friendlyName(c.covenant_id);
+    const alive = c.status === 'active';
+    const sb = [`${c.genesis_daa != null ? 'born' : 'first seen'} ${relTimeShort(toMs(c.genesis_daa != null ? c.genesis_daa : c.first_seen_daa))}`];
+    if (alive) sb.push(`holds ${fmtAmount(c.live_value, network)}`);
+    else sb.push(`retired ${relTimeShort(toMs(c.last_activity_daa))}`);
+    sb.push(c.controls_now ? 'this key controls it now' : 'this key owned it earlier');
+    return `<article class="card"><div class="card-head">${avatarSvg(c.covenant_id, 40)}` +
+      `<div class="card-id"><a class="card-link" href="#/${esc(network)}/c/${esc(c.covenant_id)}">${esc(name)}</a>` +
+      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}">${alive ? 'alive' : 'retired'}</span></div></div>` +
+      `<p class="card-story">${esc(sb.join(' · '))}</p></article>`;
+  }).join('');
+  view.innerHTML = back + `<header class="page-head addr-head"><h1>address</h1>` +
+    headChip(null, data.address) +
+    (data.pubkey !== q.toLowerCase() ? headChip('pubkey', data.pubkey) : '') +
+    `<p class="page-sub">${bits.map(esc).join(' · ')} <span class="dim">on ${esc(net.label)}</span></p></header>` +
+    (rows.length ? `<div class="coin-grid">${cards}</div>`
+      : `<div class="empty-card"><h2>this address hasn’t touched any smart coins we’ve seen.</h2>` +
+        `<p class="dim">kascov matches p2pk covenant states only — plain payments to this address don’t appear here, and covenants with richer scripts may not name their owner.</p></div>`);
+}
+
 /* ---------------------------------------------------------------- routing */
 
 function parseRoute() {
@@ -1349,6 +1628,9 @@ function parseRoute() {
       tx: /^[0-9a-f]{64}$/.test(tx) ? tx : null,
     };
   }
+  /* '#/<network>/addr/<address-or-pubkey>' and bare '#/addr/…' (current network) */
+  m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?addr\/([a-zA-Z0-9:]{6,120})$/);
+  if (m) return { view: 'address', network: m[1] || null, id: m[2] };
   /* '#/explore' and '#/<network>/explore' */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
   if (m) return { view: 'explore', network: m[1] || null };
@@ -1362,6 +1644,8 @@ function parseRoute() {
 
 function routeHash(view, id) {
   if (view === 'detail') return `#/${state.network}/c/${id}`;
+  /* pubkeys are network-independent — an address page survives a network switch */
+  if (view === 'address') return `#/${state.network}/addr/${id}`;
   if (view === 'explore') return `#/${state.network}/explore`;
   /* decode/dev are network-free — switching networks keeps the page (and its query) */
   if (view === 'decode' || view === 'dev') return location.hash || `#/${view}`;
@@ -1398,11 +1682,13 @@ async function render() {
     state.watch = loadWatch(state.network);
     state.watchNet = state.network;
   }
+  syncStream();
   const panel = $('#panel');
   const views = {
     landing: $('#view-landing'),
     explore: $('#view-explore'),
     detail: $('#view-detail'),
+    address: $('#view-address'),
     decode: $('#view-decode'),
     dev: $('#view-dev'),
   };
@@ -1419,12 +1705,14 @@ async function render() {
   });
   $('#header-search').hidden = route.view !== 'explore';
 
-  /* the decoder and dev docs never need a snapshot — don't block them on data */
-  if ((route.view === 'decode' || route.view === 'dev') && views[route.view]) {
+  /* the decoder, dev docs, and address pages never need a snapshot — don't
+     block them on data (address pages fetch from their own endpoint) */
+  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'address') && views[route.view]) {
     panel.hidden = true;
     for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
     views.detail.innerHTML = '';
     if (route.view === 'decode') renderDecode(route);
+    else if (route.view === 'address') renderAddress(route);
     else renderDev();
     fadeIn(views[route.view]);
     if (route.view !== lastView) {
@@ -1593,11 +1881,72 @@ async function pollLive() {
 }
 setInterval(pollLive, LIVE_MS);
 
+/* ------------------------------------------------------------ live stream */
+
+/* Server-sent events push each covenant event the moment the indexer sees
+   it. Strictly an optimization over the polling above: a message only
+   schedules an immediate pollLive() (debounced, so bursts fold into one),
+   and any error backs off and leaves polling untouched. Some CDNs buffer
+   rewrites — if the stream never delivers, nothing is lost. */
+const STREAM_RETRY_BASE_MS = 5_000;
+const STREAM_RETRY_MAX_MS = 60_000;
+const STREAM_POKE_MS = 500;
+
+const stream = { es: null, network: null, retryMs: STREAM_RETRY_BASE_MS, retryTimer: 0, pokeTimer: 0 };
+
+function streamWanted() {
+  const view = parseRoute().view;
+  return document.visibilityState === 'visible' && (view === 'landing' || view === 'explore');
+}
+
+function closeStream() {
+  if (stream.es) { stream.es.close(); stream.es = null; }
+  stream.network = null;
+  clearTimeout(stream.retryTimer);
+  clearTimeout(stream.pokeTimer);
+  stream.retryTimer = 0;
+  stream.pokeTimer = 0;
+}
+
+function flashLiveBadge() {
+  document.querySelectorAll('.live-badge').forEach((el) => {
+    el.classList.remove('live-flash');
+    void el.offsetWidth; /* restart the animation */
+    el.classList.add('live-flash');
+  });
+}
+
+/* Open/close/retarget the stream to match the current view + network.
+   Idempotent — called from render() and visibilitychange. */
+function syncStream() {
+  if (typeof EventSource === 'undefined') return;
+  if (!streamWanted()) { closeStream(); return; }
+  if (stream.es && stream.network === state.network) return;
+  closeStream();
+  const network = state.network;
+  const es = new EventSource(`data/${network}/stream`);
+  stream.es = es;
+  stream.network = network;
+  es.onopen = () => { stream.retryMs = STREAM_RETRY_BASE_MS; };
+  es.onmessage = () => {
+    flashLiveBadge();
+    clearTimeout(stream.pokeTimer);
+    stream.pokeTimer = setTimeout(pollLive, STREAM_POKE_MS);
+  };
+  es.onerror = () => {
+    if (stream.es !== es) return;
+    closeStream();
+    stream.retryTimer = setTimeout(syncStream, stream.retryMs);
+    stream.retryMs = Math.min(stream.retryMs * 2, STREAM_RETRY_MAX_MS);
+  };
+}
+
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     refreshSnapshot();
     pollLive();
   }
+  syncStream();
 });
 
 /* ----------------------------------------------------------------- events */
@@ -1741,11 +2090,24 @@ document.addEventListener('click', (e) => {
     render();
   } else if (action === 'retry-detail') {
     render(); /* the detail map has no entry for a failed fetch — this refetches */
+  } else if (action === 'retry-addr') {
+    render(); /* failed lookups are never cached — this refetches */
   }
 });
 
 $('#search').addEventListener('input', (e) => {
   const hadQuery = Boolean(state.query);
+  const raw = e.target.value.trim();
+  /* a kaspa address or a 66-hex pubkey can't be a coin or tx id — go straight
+     to its address page (64-hex stays coin/tx-first; the miss card offers the
+     pubkey interpretation) */
+  if (ADDR_RE.test(raw) || /^[0-9a-fA-F]{66}$/.test(raw)) {
+    e.target.value = '';
+    state.query = '';
+    closeSuggest();
+    location.hash = `#/${state.network}/addr/${raw.toLowerCase()}`;
+    return;
+  }
   /* forgive pasted outpoints ('txid:0') and spaced names ('proud olive stoat') */
   state.query = e.target.value.trim().toLowerCase()
     .replace(/:\d+$/, '')
