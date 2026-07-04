@@ -2060,8 +2060,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "clap",
  "comfy-table",
+ "flate2",
  "futures",
  "hex",
  "kascov-core",

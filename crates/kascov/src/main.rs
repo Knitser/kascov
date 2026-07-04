@@ -160,16 +160,19 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn stats_json(covenants: &[kascov_core::store::CovenantSummary], total_events: u64) -> serde_json::Value {
-    let active = covenants.iter().filter(|c| c.live_utxos > 0).count();
-    serde_json::json!({
-        "covenants": covenants.len(),
-        "active": active,
-        "burned": covenants.len() - active,
-        "events": total_events,
-        "live_value": covenants.iter().map(|c| c.live_value).sum::<u64>(),
-        "last_activity_daa": covenants.iter().map(|c| c.last_activity_daa).max().unwrap_or(0),
-    })
+/// Whole-index stats straight from SQL aggregates — the old path materialized
+/// every covenant summary (40k+ rows with correlated subqueries) just to
+/// count them, every few seconds, which is what OOM-looped the worker.
+fn stats_json(store: &Store) -> Result<serde_json::Value> {
+    let s = store.stats()?;
+    Ok(serde_json::json!({
+        "covenants": s.covenants,
+        "active": s.active,
+        "burned": s.burned,
+        "events": s.total_events,
+        "live_value": s.live_value,
+        "last_activity_daa": s.last_activity_daa,
+    }))
 }
 
 /// The small fast-changing feed the web app polls: stats + tip + newest
@@ -178,16 +181,153 @@ fn stats_json(covenants: &[kascov_core::store::CovenantSummary], total_events: u
 const LIVE_EVENTS: u64 = 150;
 
 fn build_live_snapshot(store: &Store, network: kascov_core::Network) -> Result<serde_json::Value> {
-    let covenants = store.list(u64::MAX)?;
-    let total_events: u64 = covenants.iter().map(|c| c.event_count).sum();
     let tip = store.tip()?;
     Ok(serde_json::json!({
         "network": network.to_string(),
         "generated_at_ms": now_ms(),
         "tip_daa": tip.map(|t| t.0),
         "tip_at_ms": tip.map(|t| t.1),
-        "stats": stats_json(&covenants, total_events),
+        "stats": stats_json(store)?,
         "recent_events": store.recent_events(LIVE_EVENTS)?,
+    }))
+}
+
+/// The explorer grid: stats + one summary row per covenant, no timelines and
+/// no scripts. This is what the web app loads up front; per-coin detail comes
+/// from `/data/{network}/c/{id}.json` on demand. At 42k covenants the old
+/// all-in-one snapshot passed 1 GiB in flight — this stays a few MB.
+fn build_grid_snapshot(store: &Store, network: kascov_core::Network) -> Result<serde_json::Value> {
+    let covenants = store.list(u64::MAX)?;
+    let born = store.born_values()?;
+    let tip = store.tip()?;
+    let rows: Vec<_> = covenants
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "covenant_id": c.covenant_id,
+                "status": if c.live_utxos > 0 { "active" } else { "burned" },
+                "genesis_daa": c.genesis_daa,
+                "lineage_complete": c.lineage_complete,
+                "event_count": c.event_count,
+                "last_activity_daa": c.last_activity_daa,
+                "live_utxos": c.live_utxos,
+                "live_value": c.live_value,
+                "born_value": born.get(&c.covenant_id).copied().unwrap_or(0),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "network": network.to_string(),
+        "grid": true,
+        "generated_at_ms": now_ms(),
+        "tip_daa": tip.map(|t| t.0),
+        "tip_at_ms": tip.map(|t| t.1),
+        "stats": stats_json(store)?,
+        "covenants": rows,
+    }))
+}
+
+/// One covenant's full story: every event and every UTXO, scripts decoded,
+/// spend-time reveals verified. Small (one coin), built on demand.
+fn build_covenant_detail(
+    store: &Store,
+    registry: &kascov_decode::Registry,
+    network: kascov_core::Network,
+    summary: &kascov_core::store::CovenantSummary,
+    max_events: u64,
+) -> Result<serde_json::Value> {
+    let mut detail = covenant_json(store, registry, summary, max_events)?;
+    let tip = store.tip()?;
+    let obj = detail.as_object_mut().expect("covenant json is an object");
+    obj.insert("network".into(), serde_json::json!(network.to_string()));
+    obj.insert("generated_at_ms".into(), serde_json::json!(now_ms()));
+    obj.insert("tip_daa".into(), serde_json::json!(tip.map(|t| t.0)));
+    obj.insert("tip_at_ms".into(), serde_json::json!(tip.map(|t| t.1)));
+    Ok(detail)
+}
+
+/// One covenant as JSON: summary fields + timeline + UTXOs with decoded
+/// scripts and spend-time reveals. Shared by the full export and the
+/// on-demand detail endpoint.
+fn covenant_json(
+    store: &Store,
+    registry: &kascov_decode::Registry,
+    summary: &kascov_core::store::CovenantSummary,
+    max_events: u64,
+) -> Result<serde_json::Value> {
+    let events = store.events(&summary.covenant_id)?;
+    let truncated_events = events.len() as u64 > max_events;
+    let utxos: Vec<_> = store
+        .utxos(&summary.covenant_id, false)?
+        .into_iter()
+        .map(|utxo| {
+            let decoded = registry.decode(utxo.spk_version, &utxo.spk_script);
+            let mut json = serde_json::json!({
+                "outpoint": utxo.outpoint.to_string(),
+                "value": utxo.value,
+                "created_daa": utxo.created_daa,
+                "live": utxo.live,
+                "script_hex": hex::encode(&utxo.spk_script),
+                "script_asm": decoded.instructions.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+                "uses_covenant_ops": decoded.uses_covenant_ops,
+                "uses_zk_ops": decoded.uses_zk_ops,
+            });
+            if let Some(template) = decoded.template {
+                json["template"] = serde_json::json!(template);
+                json["state_fields"] = serde_json::json!(decoded.fields);
+            }
+            if let Some(spent_txid) = utxo.spent_txid {
+                json["spent_txid"] = serde_json::json!(spent_txid);
+            }
+            if let Some(budget) = utxo.spent_budget {
+                json["spent_budget"] = serde_json::json!(budget);
+            }
+            // Spend-time decoding: a P2SH spend reveals the program that ran.
+            if let Some(sig) = &utxo.spent_sig {
+                if let Some(redeem) = kascov_decode::p2sh_reveal(&utxo.spk_script, sig) {
+                    let d = registry.decode(utxo.spk_version, &redeem);
+                    json["revealed_hex"] = serde_json::json!(hex::encode(&redeem));
+                    json["revealed_asm"] = serde_json::json!(
+                        d.instructions.iter().map(|i| i.to_string()).collect::<Vec<_>>()
+                    );
+                    json["revealed_uses_covenant_ops"] = serde_json::json!(d.uses_covenant_ops);
+                    json["revealed_uses_zk_ops"] = serde_json::json!(d.uses_zk_ops);
+                    if let Some(template) = d.template {
+                        json["revealed_template"] = serde_json::json!(template);
+                        json["revealed_fields"] = serde_json::json!(d.fields);
+                    }
+                } else if sig.len() <= 520 {
+                    json["sig_hex"] = serde_json::json!(hex::encode(sig));
+                } else {
+                    json["sig_len"] = serde_json::json!(sig.len());
+                }
+            }
+            json
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "covenant_id": summary.covenant_id,
+        "status": if summary.live_utxos > 0 { "active" } else { "burned" },
+        "genesis_txid": summary.genesis_txid,
+        "genesis_daa": summary.genesis_daa,
+        "lineage_complete": summary.lineage_complete,
+        "event_count": summary.event_count,
+        "last_activity_daa": summary.last_activity_daa,
+        "live_utxos": summary.live_utxos,
+        "live_value": summary.live_value,
+        "events": events.iter().take(max_events as usize).map(|e| {
+            let mut v = serde_json::to_value(e).expect("event serializes");
+            // based-app payloads can be large; the snapshot inlines small ones only
+            if let Some(p) = &e.payload {
+                if p.len() > 512 {
+                    v.as_object_mut().expect("event object").remove("payload");
+                    v["payload_len"] = serde_json::json!(p.len());
+                }
+            }
+            v
+        }).collect::<Vec<_>>(),
+        "events_truncated": truncated_events,
+        "utxos": utxos,
     }))
 }
 
@@ -196,83 +336,8 @@ fn build_snapshot(store: &Store, network: kascov_core::Network, max_events: u64)
     let covenants = store.list(u64::MAX)?;
 
     let mut exported = Vec::with_capacity(covenants.len());
-    let mut total_events = 0u64;
     for summary in &covenants {
-        let events = store.events(&summary.covenant_id)?;
-        total_events += events.len() as u64;
-        let truncated_events = events.len() as u64 > max_events;
-        let utxos: Vec<_> = store
-            .utxos(&summary.covenant_id, false)?
-            .into_iter()
-            .map(|utxo| {
-                let decoded = registry.decode(utxo.spk_version, &utxo.spk_script);
-                let mut json = serde_json::json!({
-                    "outpoint": utxo.outpoint.to_string(),
-                    "value": utxo.value,
-                    "created_daa": utxo.created_daa,
-                    "live": utxo.live,
-                    "script_hex": hex::encode(&utxo.spk_script),
-                    "script_asm": decoded.instructions.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
-                    "uses_covenant_ops": decoded.uses_covenant_ops,
-                    "uses_zk_ops": decoded.uses_zk_ops,
-                });
-                if let Some(template) = decoded.template {
-                    json["template"] = serde_json::json!(template);
-                    json["state_fields"] = serde_json::json!(decoded.fields);
-                }
-                if let Some(spent_txid) = utxo.spent_txid {
-                    json["spent_txid"] = serde_json::json!(spent_txid);
-                }
-                if let Some(budget) = utxo.spent_budget {
-                    json["spent_budget"] = serde_json::json!(budget);
-                }
-                // Spend-time decoding: a P2SH spend reveals the program that ran.
-                if let Some(sig) = &utxo.spent_sig {
-                    if let Some(redeem) = kascov_decode::p2sh_reveal(&utxo.spk_script, sig) {
-                        let d = registry.decode(utxo.spk_version, &redeem);
-                        json["revealed_hex"] = serde_json::json!(hex::encode(&redeem));
-                        json["revealed_asm"] = serde_json::json!(
-                            d.instructions.iter().map(|i| i.to_string()).collect::<Vec<_>>()
-                        );
-                        json["revealed_uses_covenant_ops"] = serde_json::json!(d.uses_covenant_ops);
-                        json["revealed_uses_zk_ops"] = serde_json::json!(d.uses_zk_ops);
-                        if let Some(template) = d.template {
-                            json["revealed_template"] = serde_json::json!(template);
-                            json["revealed_fields"] = serde_json::json!(d.fields);
-                        }
-                    } else if sig.len() <= 520 {
-                        json["sig_hex"] = serde_json::json!(hex::encode(sig));
-                    } else {
-                        json["sig_len"] = serde_json::json!(sig.len());
-                    }
-                }
-                json
-            })
-            .collect();
-        exported.push(serde_json::json!({
-            "covenant_id": summary.covenant_id,
-            "status": if summary.live_utxos > 0 { "active" } else { "burned" },
-            "genesis_txid": summary.genesis_txid,
-            "genesis_daa": summary.genesis_daa,
-            "lineage_complete": summary.lineage_complete,
-            "event_count": summary.event_count,
-            "last_activity_daa": summary.last_activity_daa,
-            "live_utxos": summary.live_utxos,
-            "live_value": summary.live_value,
-            "events": events.iter().take(max_events as usize).map(|e| {
-                let mut v = serde_json::to_value(e).expect("event serializes");
-                // based-app payloads can be large; the snapshot inlines small ones only
-                if let Some(p) = &e.payload {
-                    if p.len() > 512 {
-                        v.as_object_mut().expect("event object").remove("payload");
-                        v["payload_len"] = serde_json::json!(p.len());
-                    }
-                }
-                v
-            }).collect::<Vec<_>>(),
-            "events_truncated": truncated_events,
-            "utxos": utxos,
-        }));
+        exported.push(covenant_json(store, &registry, summary, max_events)?);
     }
 
     let tip = store.tip()?;
@@ -281,7 +346,7 @@ fn build_snapshot(store: &Store, network: kascov_core::Network, max_events: u64)
         "generated_at_ms": now_ms(),
         "tip_daa": tip.map(|t| t.0),
         "tip_at_ms": tip.map(|t| t.1),
-        "stats": stats_json(&covenants, total_events),
+        "stats": stats_json(store)?,
         "covenants": exported,
     });
     Ok(snapshot)
@@ -635,11 +700,36 @@ fn abbrev(s: &str) -> String {
     }
 }
 
+/// A cached response body, pre-compressed once at build time so a popular
+/// endpoint never gzips the same megabytes per request.
+struct CachedBody {
+    raw: bytes::Bytes,
+    gzip: bytes::Bytes,
+}
+
+impl CachedBody {
+    fn new(json: String) -> Self {
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write;
+        let raw = bytes::Bytes::from(json);
+        let mut enc = GzEncoder::new(Vec::with_capacity(raw.len() / 4), Compression::new(6));
+        // write_all + finish on a Vec cannot fail
+        let _ = enc.write_all(&raw);
+        let gzip = bytes::Bytes::from(enc.finish().unwrap_or_default());
+        Self { raw, gzip }
+    }
+}
+
 struct ServeState {
     base_dir: std::path::PathBuf,
     networks: Vec<Network>,
     max_events: u64,
-    cache: tokio::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<String>)>>,
+    cache: tokio::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<CachedBody>)>>,
+    /// Per-key build locks: concurrent cold misses on the SAME key share one
+    /// rebuild instead of stampeding (at 42k covenants, N parallel grid
+    /// builds OOM-killed the container). Different keys still build in
+    /// parallel, so one slow network can't starve the others.
+    build_locks: tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 async fn serve(
@@ -673,12 +763,15 @@ async fn serve(
         networks,
         max_events,
         cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        build_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
     });
     let app = axum::Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/data/{file}", get(data_handler))
-        // multi-MB JSON snapshots shrink ~6x under gzip/brotli — without this
-        // the CDN passes them through raw and first paint pays for it
+        .route("/data/{network}/c/{id}", get(detail_handler))
+        .route("/data/{network}/tx/{txid}", get(tx_handler))
+        // compresses the small dynamic responses; the big cached bodies are
+        // pre-gzipped (Content-Encoding already set, so this layer skips them)
         .layer(tower_http::compression::CompressionLayer::new())
         .with_state(state);
 
@@ -756,17 +849,107 @@ async fn follow_forever(network: Network, rpc: Option<String>, db: std::path::Pa
     }
 }
 
-async fn data_handler(
-    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
-    axum::extract::Path(file): axum::extract::Path<String>,
+/// Serve a cached JSON body, building it (single-flight per key) when stale.
+/// `build` runs on the blocking pool against a fresh read-only store handle.
+async fn serve_cached(
+    state: &ServeState,
+    key: String,
+    ttl_secs: u64,
+    cache_control: &'static str,
+    gzip_ok: bool,
+    build: impl FnOnce() -> Result<Option<String>> + Send + 'static,
 ) -> axum::response::Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
+    let fresh_body = |cache: &std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<CachedBody>)>| {
+        cache
+            .get(&key)
+            .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(ttl_secs))
+            .map(|(_, body)| body.clone())
+    };
+
+    let mut body = { fresh_body(&*state.cache.lock().await) };
+    if body.is_none() {
+        // Single-flight: one build per key; latecomers wait, then re-check.
+        let key_lock = {
+            let mut locks = state.build_locks.lock().await;
+            locks.entry(key.clone()).or_default().clone()
+        };
+        let _building = key_lock.lock().await;
+        body = { fresh_body(&*state.cache.lock().await) };
+        if body.is_none() {
+            match tokio::task::spawn_blocking(build).await {
+                Ok(Ok(Some(json))) => {
+                    let built = std::sync::Arc::new(CachedBody::new(json));
+                    let mut cache = state.cache.lock().await;
+                    // Detail keys accumulate — drop expired entries before they
+                    // become a slow leak (grid/live keys are refreshed in place).
+                    if cache.len() > 2048 {
+                        cache.retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(300));
+                    }
+                    cache.insert(key.clone(), (std::time::Instant::now(), built.clone()));
+                    drop(cache);
+                    let mut locks = state.build_locks.lock().await;
+                    if locks.len() > 2048 {
+                        locks.retain(|_, l| std::sync::Arc::strong_count(l) > 1);
+                    }
+                    body = Some(built);
+                }
+                Ok(Ok(None)) => {
+                    return (StatusCode::NOT_FOUND, "not found").into_response();
+                }
+                Ok(Err(err)) => {
+                    tracing::error!("{key}: build failed: {err}");
+                    return (StatusCode::SERVICE_UNAVAILABLE, "snapshot unavailable").into_response();
+                }
+                Err(err) => {
+                    tracing::error!("{key}: build task panicked: {err}");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
+                }
+            }
+        }
+    }
+    let body = body.expect("cache hit or fresh build");
+
+    let gzipped = gzip_ok && !body.gzip.is_empty();
+    let bytes = if gzipped { body.gzip.clone() } else { body.raw.clone() };
+    let mut resp = (
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (header::CACHE_CONTROL, cache_control),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (header::VARY, "Accept-Encoding"),
+        ],
+        bytes,
+    )
+        .into_response();
+    if gzipped {
+        resp.headers_mut().insert(header::CONTENT_ENCODING, axum::http::HeaderValue::from_static("gzip"));
+    }
+    resp
+}
+
+fn accepts_gzip(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("gzip"))
+}
+
+async fn data_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(file): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
     let not_found = || (StatusCode::NOT_FOUND, "unknown network").into_response();
     let Some(name) = file.strip_suffix(".json") else { return not_found() };
-    // '<network>.json' is the full snapshot, '<network>-live.json' the small
-    // fast-changing feed (stats + tip + newest events).
+    // '<network>.json' is the explorer grid (summaries only), and
+    // '<network>-live.json' the small fast-changing feed. Full timelines live
+    // at /data/<network>/c/<id>.json, one covenant at a time.
     let (net_name, live) = match name.strip_suffix("-live") {
         Some(base) => (base, true),
         None => (name, false),
@@ -776,68 +959,114 @@ async fn data_handler(
         return not_found();
     }
 
-    let ttl = if live { 5 } else { 10 };
-    // Take a fresh cached body and release the lock immediately — never hold it
-    // across the rebuild below, or one cold miss serializes ALL /data traffic
-    // (a trivial DoS lever). A concurrent cold miss may rebuild redundantly;
-    // that's cheap and bounded by the short TTL, and no request blocks on
-    // another's rebuild.
-    let fresh = {
-        let cache = state.cache.lock().await;
-        cache
-            .get(name)
-            .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(ttl))
-            .map(|(_, body)| body.clone())
-    };
-    let body = match fresh {
-        Some(body) => body,
-        None => {
-            let db = state.base_dir.join(format!("{network}.db"));
-            let max_events = state.max_events;
-            let result = tokio::task::spawn_blocking(move || -> Result<String> {
-                let store = kascov_core::store::Store::open(&db, network)?;
-                let snapshot = if live {
-                    build_live_snapshot(&store, network)?
-                } else {
-                    build_snapshot(&store, network, max_events)?
-                };
-                Ok(serde_json::to_string(&snapshot)?)
-            })
-            .await;
-            match result {
-                Ok(Ok(json)) => {
-                    let body = std::sync::Arc::new(json);
-                    state
-                        .cache
-                        .lock()
-                        .await
-                        .insert(name.to_string(), (std::time::Instant::now(), body.clone()));
-                    body
-                }
-                Ok(Err(err)) => {
-                    tracing::error!("{network}: snapshot failed: {err}");
-                    return (StatusCode::SERVICE_UNAVAILABLE, "snapshot unavailable").into_response();
-                }
-                Err(err) => {
-                    tracing::error!("{network}: snapshot task panicked: {err}");
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
-                }
-            }
-        }
-    };
-
-    let cache_control = if live {
-        "public, max-age=5, s-maxage=10"
+    let db = state.base_dir.join(format!("{network}.db"));
+    let (ttl, cache_control) = if live {
+        // s-maxage lets the hosting CDN absorb the polling herd; SWR keeps
+        // pages responsive while the edge revalidates.
+        (5, "public, max-age=5, s-maxage=10, stale-while-revalidate=30")
     } else {
-        "public, max-age=15, s-maxage=30"
+        (20, "public, max-age=15, s-maxage=60, stale-while-revalidate=300")
     };
-    (
-        [
-            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
-            (header::CACHE_CONTROL, cache_control),
-            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
-        ],
-        body.as_str().to_owned(),
-    )
-        .into_response()
+    serve_cached(&state, name.to_string(), ttl, cache_control, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let snapshot = if live {
+            build_live_snapshot(&store, network)?
+        } else {
+            build_grid_snapshot(&store, network)?
+        };
+        Ok(Some(serde_json::to_string(&snapshot)?))
+    })
+    .await
+}
+
+async fn detail_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let Ok(network) = net_name.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    let id_hex = id.strip_suffix(".json").unwrap_or(&id);
+    let Ok(covenant_id) = id_hex.parse::<kascov_core::CovenantId>() else {
+        return (StatusCode::BAD_REQUEST, "bad covenant id").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    let max_events = state.max_events;
+    let key = format!("{network}/c/{covenant_id}");
+    let cc = "public, max-age=10, s-maxage=30, stale-while-revalidate=120";
+    serve_cached(&state, key, 10, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let registry = kascov_decode::Registry::default();
+        match store.summary(&covenant_id)? {
+            Some(summary) => Ok(Some(serde_json::to_string(&build_covenant_detail(
+                &store, &registry, network, &summary, max_events,
+            )?)?)),
+            None => Ok(None),
+        }
+    })
+    .await
+}
+
+async fn tx_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, txid)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let Ok(network) = net_name.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    let tx_hex = txid.strip_suffix(".json").unwrap_or(&txid);
+    let Ok(txid) = tx_hex.parse::<TxId>() else {
+        return (StatusCode::BAD_REQUEST, "bad txid").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+
+    // A point lookup on an indexed column — cheap enough to skip the cache.
+    let db = state.base_dir.join(format!("{network}.db"));
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<kascov_core::CovenantId>> {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        Ok(store.covenant_by_txid(&txid)?)
+    })
+    .await;
+    let ok_headers = [
+        (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+        (header::CACHE_CONTROL, "public, max-age=60, s-maxage=300"),
+        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+    ];
+    match result {
+        Ok(Ok(Some(covenant_id))) => (
+            ok_headers,
+            serde_json::json!({ "txid": tx_hex, "covenant_id": covenant_id }).to_string(),
+        )
+            .into_response(),
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            [
+                (header::CACHE_CONTROL, "public, max-age=10, s-maxage=10"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            "transaction not seen by kascov",
+        )
+            .into_response(),
+        Ok(Err(err)) => {
+            tracing::error!("{network}: tx lookup failed: {err}");
+            (StatusCode::SERVICE_UNAVAILABLE, "lookup unavailable").into_response()
+        }
+        Err(err) => {
+            tracing::error!("{network}: tx lookup panicked: {err}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
 }

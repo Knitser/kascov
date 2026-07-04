@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS covenant_events (
 );
 CREATE INDEX IF NOT EXISTS ev_by_accepting ON covenant_events(accepting_block);
 CREATE INDEX IF NOT EXISTS ev_by_daa ON covenant_events(accepting_daa);
+CREATE INDEX IF NOT EXISTS ev_by_txid ON covenant_events(txid);
 CREATE TABLE IF NOT EXISTS covenant_utxos (
     txid BLOB NOT NULL,
     output_index INTEGER NOT NULL,
@@ -85,6 +86,17 @@ fn opt_hex_ser<S: serde::Serializer>(bytes: &Option<Vec<u8>>, s: S) -> std::resu
         Some(b) => s.serialize_str(&hex::encode(b)),
         None => s.serialize_none(),
     }
+}
+
+/// Whole-index aggregates, computed inside SQLite.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct StoreStats {
+    pub covenants: u64,
+    pub active: u64,
+    pub burned: u64,
+    pub total_events: u64,
+    pub live_value: u64,
+    pub last_activity_daa: u64,
 }
 
 /// An event joined with its covenant, for cross-covenant feeds.
@@ -435,7 +447,99 @@ impl Store {
     }
 
     pub fn summary(&self, id: &CovenantId) -> Result<Option<CovenantSummary>> {
-        Ok(self.list(u64::MAX)?.into_iter().find(|c| c.covenant_id == *id))
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT c.covenant_id, c.genesis_txid, c.genesis_daa, c.lineage_complete,
+                        c.event_count, c.last_activity_daa,
+                        (SELECT COUNT(*) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL),
+                        (SELECT COALESCE(SUM(value), 0) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL)
+                 FROM covenants c WHERE c.covenant_id = ?1",
+            )
+            .map_err(db_err)?;
+        let row = stmt
+            .query_map([id.0.as_slice()], |row| {
+                Ok(CovenantSummary {
+                    covenant_id: CovenantId(row.get(0)?),
+                    genesis_txid: row.get::<_, Option<[u8; 32]>>(1)?.map(TxId),
+                    genesis_daa: row.get(2)?,
+                    lineage_complete: row.get(3)?,
+                    event_count: row.get(4)?,
+                    last_activity_daa: row.get(5)?,
+                    live_utxos: row.get(6)?,
+                    live_value: row.get(7)?,
+                })
+            })
+            .map_err(db_err)?
+            .next()
+            .transpose()
+            .map_err(db_err)?;
+        Ok(row)
+    }
+
+    /// Aggregate stats in pure SQL — never materializes 40k+ summary rows just
+    /// to count them (the live feed rebuilds every few seconds).
+    pub fn stats(&self) -> Result<StoreStats> {
+        let (covenants, total_events, last_activity_daa) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(event_count), 0), COALESCE(MAX(last_activity_daa), 0) FROM covenants",
+                [],
+                |r| Ok((r.get::<_, u64>(0)?, r.get::<_, u64>(1)?, r.get::<_, u64>(2)?)),
+            )
+            .map_err(db_err)?;
+        let (active, live_value) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(DISTINCT covenant_id), COALESCE(SUM(value), 0)
+                 FROM covenant_utxos WHERE spent_block IS NULL",
+                [],
+                |r| Ok((r.get::<_, u64>(0)?, r.get::<_, u64>(1)?)),
+            )
+            .map_err(db_err)?;
+        Ok(StoreStats {
+            covenants,
+            active,
+            burned: covenants.saturating_sub(active),
+            total_events,
+            live_value,
+            last_activity_daa,
+        })
+    }
+
+    /// Per-covenant birth amounts (sum of outputs created at the genesis DAA),
+    /// one query for the whole grid.
+    pub fn born_values(&self) -> Result<std::collections::HashMap<CovenantId, u64>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT u.covenant_id, COALESCE(SUM(u.value), 0)
+                 FROM covenant_utxos u
+                 JOIN covenants c ON c.covenant_id = u.covenant_id AND u.created_daa = c.genesis_daa
+                 GROUP BY u.covenant_id",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| Ok((CovenantId(row.get(0)?), row.get::<_, u64>(1)?)))
+            .map_err(db_err)?
+            .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Which covenant did this transaction touch? Covers genesis, transitions,
+    /// and burns (their txids are all event txids).
+    pub fn covenant_by_txid(&self, txid: &TxId) -> Result<Option<CovenantId>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT covenant_id FROM covenant_events WHERE txid = ?1 LIMIT 1",
+                [txid.0.as_slice()],
+                |r| Ok(CovenantId(r.get(0)?)),
+            )
+            .optional()
+            .map_err(db_err)?;
+        Ok(row)
     }
 
     pub fn events(&self, id: &CovenantId) -> Result<Vec<EventRow>> {

@@ -11,6 +11,8 @@ kascov-decode = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
+flate2 = { workspace = true }
+bytes = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

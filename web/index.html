@@ -221,11 +221,19 @@
           </div>
           <div class="endpoint">
             <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10.json</code></p>
-            <p class="endpoint-desc">the full snapshot — every covenant with its complete event timeline and UTXOs (scripts included, pre-disassembled). a few MB; fetch it when the live feed says something changed.</p>
+            <p class="endpoint-desc">the grid — stats plus one summary row per covenant (id, status, balances, event count, born/last-active DAA). one request tells you about every smart coin on the network.</p>
           </div>
           <div class="endpoint">
-            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/mainnet.json</code> <span class="dim">·</span> <code class="mono">/data/mainnet-live.json</code></p>
-            <p class="endpoint-desc">same, for mainnet — its first smart coins arrived July 2, 2026, and their complete history starts here. spend-time reveals and KIP-20-validated genesis exist for activity from that evening onward.</p>
+            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/c/&lt;covenant-id&gt;.json</code></p>
+            <p class="endpoint-desc">one covenant's whole life — the complete event timeline and every UTXO with decoded scripts, recognized templates, and spend-time reveals.</p>
+          </div>
+          <div class="endpoint">
+            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/tx/&lt;txid&gt;.json</code></p>
+            <p class="endpoint-desc">which smart coin did this transaction touch? answers <code class="mono">{"covenant_id": …}</code> or 404 — genesis, moves, and burns all resolve.</p>
+          </div>
+          <div class="endpoint">
+            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/mainnet-live.json</code> <span class="dim">·</span> <code class="mono">/data/mainnet.json</code> <span class="dim">·</span> <code class="mono">/data/mainnet/…</code></p>
+            <p class="endpoint-desc">same endpoints for mainnet — its first smart coins arrived July 2, 2026, and their complete history starts here. spend-time reveals and KIP-20-validated genesis exist for activity from that evening onward.</p>
           </div>
         </div>
         <p class="dim dev-note">base URL: <code class="mono">https://kascov-explorer.web.app</code> · <code class="mono">Access-Control-Allow-Origin: *</code> · served by an always-on indexer that follows the chain live</p>
@@ -237,9 +245,15 @@ curl -s https://kascov-explorer.web.app/data/testnet-10-live.json | jq .stats
 curl -s https://kascov-explorer.web.app/data/testnet-10-live.json \
   | jq '.recent_events[] | select(.kind == "genesis")'
 
-# one covenant's whole life
+# the ten richest living smart coins
 curl -s https://kascov-explorer.web.app/data/testnet-10.json \
-  | jq --arg id "&lt;covenant-id&gt;" '.covenants[] | select(.covenant_id == $id)'</code></pre>
+  | jq '[.covenants[] | select(.status == "active")] | sort_by(-.live_value)[:10]'
+
+# one covenant's whole life, scripts decoded
+curl -s https://kascov-explorer.web.app/data/testnet-10/c/&lt;covenant-id&gt;.json | jq .events
+
+# which coin did a transaction touch?
+curl -s https://kascov-explorer.web.app/data/testnet-10/tx/&lt;txid&gt;.json</code></pre>
       </section>
 
       <section class="dev-section">
@@ -247,7 +261,8 @@ curl -s https://kascov-explorer.web.app/data/testnet-10.json \
         <dl class="dev-dict">
           <div><dt class="mono">covenant_id</dt><dd>the smart coin's permanent 32-byte identity (KIP-20) — survives every move</dd></div>
           <div><dt class="mono">status</dt><dd><code>active</code> (has live UTXOs) or <code>burned</code> (retired)</dd></div>
-          <div><dt class="mono">events[]</dt><dd>the life story: <code>kind</code> is <code>genesis</code> | <code>transition</code> | <code>burn</code>, ordered by <code>seq</code>; <code>txid</code> is the transaction, <code>accepting_daa</code> when the chain accepted it</dd></div>
+          <div><dt class="mono">events[]</dt><dd>the life story (per-coin endpoint): <code>kind</code> is <code>genesis</code> | <code>transition</code> | <code>burn</code>, ordered by <code>seq</code>; <code>txid</code> is the transaction, <code>accepting_daa</code> when the chain accepted it</dd></div>
+          <div><dt class="mono">born_value</dt><dd>grid rows only — what the coin held at birth (sompi)</dd></div>
           <div><dt class="mono">accepting_daa / DAA</dt><dd>Kaspa's block-height-like clock — it ticks ~10 per second. <code>tip_daa</code> + <code>tip_at_ms</code> in each snapshot anchor it to wall-clock time</dd></div>
           <div><dt class="mono">genesis_txid, genesis_daa</dt><dd>where the coin was born — <code>null</code> if it was first seen mid-life (see <code>lineage_complete</code>)</dd></div>
           <div><dt class="mono">lineage_complete</dt><dd><code>false</code> means kascov started watching after the coin was born; earlier history is honestly missing</dd></div>

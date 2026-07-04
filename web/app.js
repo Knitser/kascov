@@ -251,6 +251,8 @@ const state = {
   nerd: false,
   sort: 'activity',
   live: {},           // network -> { supported, missedAt, data }
+  details: {},        // network -> Map(covenant id -> merged detail entry)
+  txLookup: {},       // 64-hex query -> 'pending' | 'miss' (server tx resolver)
   watch: new Set(),   // covenant ids starred on the current network
   watchNet: null,
 };
@@ -295,7 +297,9 @@ function balancesByEventDaa(c) {
   return out;
 }
 
-/* Build a derived index so rendering stays cheap. */
+/* Build a derived index so rendering stays cheap. The grid feed carries one
+   summary row per covenant (no timelines, no scripts — those come from the
+   per-coin detail endpoint), so this stays linear even at 40k+ coins. */
 function buildIndex(data) {
   /* friendly names can collide; count them so duplicates get a suffix */
   const nameCounts = new Map();
@@ -306,32 +310,20 @@ function buildIndex(data) {
   const covs = data.covenants.map((c) => {
     let name = friendlyName(c.covenant_id);
     if (nameCounts.get(name) > 1) name += `-${c.covenant_id.slice(0, 4)}`;
-    const moves = c.events.filter((e) => e.kind === 'transition').length;
-    const firstEvent = c.events[0] || null;
-    const lastEvent = c.events[c.events.length - 1] || null;
+    /* transitions = events minus the birth (if seen) and the burn (if retired) */
+    const moves = Math.max(0, c.event_count -
+      (c.genesis_daa != null ? 1 : 0) -
+      (c.status !== 'active' ? 1 : 0));
     const bornMs = c.genesis_daa != null ? daaToMs(c.genesis_daa, data)
-      : (firstEvent ? daaToMs(firstEvent.accepting_daa, data) : data.generated_at_ms);
-    const lastMs = lastEvent ? daaToMs(lastEvent.accepting_daa, data) : bornMs;
-    let birthValue = 0;
-    if (c.genesis_daa != null && Array.isArray(c.utxos)) {
-      for (const u of c.utxos) if (u.created_daa === c.genesis_daa) birthValue += u.value;
-    }
-    const balances = balancesByEventDaa(c);
-    const blob = (name + ' ' + c.covenant_id + ' ' + (c.genesis_txid || '') + ' ' +
-      c.events.map((e) => e.txid).join(' ')).toLowerCase();
-    return { c, name, moves, bornMs, lastMs, birthValue, balances, blob };
+      : (c.last_activity_daa ? daaToMs(c.last_activity_daa, data) : data.generated_at_ms);
+    const lastMs = c.last_activity_daa ? daaToMs(c.last_activity_daa, data) : bornMs;
+    const birthValue = c.born_value || 0;
+    const blob = (name + ' ' + c.covenant_id).toLowerCase();
+    return { c, name, moves, bornMs, lastMs, birthValue, blob };
   });
   covs.sort((a, b) => (b.c.last_activity_daa || 0) - (a.c.last_activity_daa || 0));
   const byId = new Map(covs.map((e) => [e.c.covenant_id, e]));
-  /* txid → covenant, so a pasted transaction id resolves straight to a coin */
-  const txToCov = new Map();
-  for (const e of covs) {
-    if (e.c.genesis_txid && !txToCov.has(e.c.genesis_txid)) txToCov.set(e.c.genesis_txid, e);
-    for (const ev of e.c.events) {
-      if (!txToCov.has(ev.txid)) txToCov.set(ev.txid, e);
-    }
-  }
-  return { covs, byId, txToCov };
+  return { covs, byId };
 }
 
 async function loadNetwork(network) {
@@ -343,6 +335,38 @@ async function loadNetwork(network) {
   const entry = { data, index: buildIndex(data) };
   state.cache[network] = entry;
   return entry;
+}
+
+/* One coin's full story, fetched on demand and merged over its grid row so
+   the detail renderer sees the same shape the all-in-one snapshot used to
+   provide. */
+async function loadDetail(network, covId) {
+  const map = state.details[network] || (state.details[network] = new Map());
+  const hit = map.get(covId);
+  if (hit) return hit;
+  const res = await fetch(`data/${network}/c/${covId}.json`, { cache: 'no-cache' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const detail = await res.json();
+  const entry = state.cache[network];
+  const gridRec = entry && entry.index.byId.get(covId);
+  const c = Object.assign({}, gridRec ? gridRec.c : {}, detail);
+  const data = entry ? entry.data : detail; /* anchor for daa→ms */
+  const name = gridRec ? gridRec.name : friendlyName(covId);
+  const moves = c.events.filter((e) => e.kind === 'transition').length;
+  const firstEvent = c.events[0] || null;
+  const lastEvent = c.events[c.events.length - 1] || null;
+  const bornMs = c.genesis_daa != null ? daaToMs(c.genesis_daa, data)
+    : (firstEvent ? daaToMs(firstEvent.accepting_daa, data) : data.generated_at_ms);
+  const lastMs = lastEvent ? daaToMs(lastEvent.accepting_daa, data) : bornMs;
+  let birthValue = c.born_value || 0;
+  if (c.genesis_daa != null && Array.isArray(c.utxos)) {
+    let v = 0;
+    for (const u of c.utxos) if (u.created_daa === c.genesis_daa) v += u.value;
+    if (v > 0) birthValue = v;
+  }
+  const rec = { c, name, moves, bornMs, lastMs, birthValue, balances: balancesByEventDaa(c) };
+  map.set(covId, rec);
+  return rec;
 }
 
 /* The tiny live feed, for instant first paint while the full snapshot
@@ -372,6 +396,19 @@ function liteMs(live, daa) {
   const aDaa = live.tip_daa != null ? live.tip_daa : live.stats.last_activity_daa;
   const aMs = live.tip_at_ms != null ? live.tip_at_ms : live.generated_at_ms;
   return aMs - (aDaa - daa) * MS_PER_DAA;
+}
+
+/* A burst of activity on one coin (10 burns in one tx wave) shouldn't fill
+   the whole feed — show each coin once, newest event wins. */
+function dedupByCovenant(events) {
+  const out = [];
+  const seen = new Set();
+  for (const ev of events || []) {
+    if (seen.has(ev.covenant_id)) continue;
+    seen.add(ev.covenant_id);
+    out.push(ev);
+  }
+  return out;
 }
 
 function liteStoryRow(ev, live, network) {
@@ -413,7 +450,7 @@ function renderLiteLanding(live, network) {
     $('#landing-empty').innerHTML = emptyCardHtml(network);
     return;
   }
-  $('#teaser-list').innerHTML = (live.recent_events || [])
+  $('#teaser-list').innerHTML = dedupByCovenant(live.recent_events)
     .slice(0, TEASER_COUNT)
     .map((ev) => liteStoryRow(ev, live, network))
     .join('');
@@ -442,7 +479,7 @@ function renderLiteExplore(live, network) {
     $('#empty-net').innerHTML = emptyCardHtml(network);
     return;
   }
-  $('#story-list').innerHTML = (live.recent_events || [])
+  $('#story-list').innerHTML = dedupByCovenant(live.recent_events)
     .slice(0, STORY_COUNT)
     .map((ev) => liteStoryRow(ev, live, network))
     .join('');
@@ -486,10 +523,13 @@ function cardStory(entry, network) {
 /* ------------------------------------------------------------ pulse chart */
 
 function renderPulse(entry) {
-  const { data, index } = entry;
+  const { index } = entry;
+  /* the grid feed carries one row per coin, not full timelines — the pulse
+     charts births and retirements (moves stream through "latest stories") */
   const events = [];
   for (const e of index.covs) {
-    for (const ev of e.c.events) events.push({ kind: ev.kind, ms: daaToMs(ev.accepting_daa, data) });
+    if (e.c.genesis_daa != null) events.push({ kind: 'genesis', ms: e.bornMs });
+    if (e.c.status !== 'active') events.push({ kind: 'burn', ms: e.lastMs });
   }
   const host = $('#pulse-chart');
   if (!events.length) { host.innerHTML = '<p class="dim">no life events yet.</p>'; return; }
@@ -556,7 +596,7 @@ function renderPulse(entry) {
     ticks += `<text x="${x.toFixed(1)}" y="${H - 8}" text-anchor="${anchor}" class="pulse-tick">${esc(fmtClock(centerMs, withSeconds, withDate))}</text>`;
   }
 
-  const caption = `${fmtInt(events.length)} life event${events.length === 1 ? '' : 's'} ` +
+  const caption = `${fmtInt(events.length)} birth${events.length === 1 ? '' : 's'} & retirement${events.length === 1 ? '' : 's'} ` +
     `over ${fmtSpan(span)} · the latest ${relTime(max)}`;
 
   host.innerHTML =
@@ -566,35 +606,49 @@ function renderPulse(entry) {
     bars + ticks + `</svg>` +
     `<div class="pulse-legend" aria-hidden="true">` +
     `<span><i class="dot dot-born"></i>born</span>` +
-    `<span><i class="dot dot-move"></i>moved</span>` +
     `<span><i class="dot dot-burn"></i>retired</span></div>`;
 }
 
 /* ---------------------------------------------------------------- stories */
 
-function buildFeed(entry) {
-  const feed = [];
-  for (const e of entry.index.covs) {
-    for (const ev of e.c.events) feed.push({ entry: e, ev, daa: ev.accepting_daa });
+/* Stories come from the live feed (the newest ~150 events across all coins);
+   the grid feed itself carries no per-event data. Falls back to a synthetic
+   feed from summaries when the live feed hasn't answered yet. */
+function buildFeed(entry, network) {
+  const live = state.live[network] && state.live[network].data;
+  if (live && Array.isArray(live.recent_events)) {
+    return { live, events: dedupByCovenant(live.recent_events) };
   }
-  feed.sort((a, b) => b.daa - a.daa);
-  return feed;
+  /* fallback: most recently active coins as one-line stories */
+  const events = entry.index.covs.slice(0, STORY_COUNT).map((e) => ({
+    covenant_id: e.c.covenant_id,
+    kind: e.c.status !== 'active' ? 'burn' : (e.moves > 0 ? 'transition' : 'genesis'),
+    accepting_daa: e.c.last_activity_daa,
+  }));
+  return { live: null, events };
 }
 
-function storyRow({ entry: e, ev }, data, network) {
+function storyRow(ev, entry, live, network) {
   const meta = KIND_META[ev.kind] || KIND_META.transition;
-  const ms = daaToMs(ev.accepting_daa, data);
-  return `<li><a class="story ${meta.cls}" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">` +
-    avatarSvg(e.c.covenant_id, 34) +
-    `<span class="story-text">${eventSentence(e, ev, network)} <span class="story-when" title="${esc(utcTitle(ms))}">— ${esc(relTime(ms))}</span></span>` +
+  const ms = live ? liteMs(live, ev.accepting_daa) : daaToMs(ev.accepting_daa, entry.data);
+  const rec = entry.index.byId.get(ev.covenant_id);
+  const name = rec ? rec.name : friendlyName(ev.covenant_id);
+  const sentence =
+    ev.kind === 'genesis' ? `<strong>${esc(name)}</strong> was born`
+    : ev.kind === 'burn' ? `<strong>${esc(name)}</strong> retired`
+    : `<strong>${esc(name)}</strong> moved`;
+  return `<li><a class="story ${meta.cls}" href="#/${esc(network)}/c/${esc(ev.covenant_id)}">` +
+    avatarSvg(ev.covenant_id, 34) +
+    `<span class="story-text">${sentence} <span class="story-when" title="${esc(utcTitle(ms))}">— ${esc(relTime(ms))}</span></span>` +
     `<span class="story-kind" aria-hidden="true">${ICONS[meta.icon]}</span>` +
     `</a></li>`;
 }
 
 function renderStories(entry, network) {
-  $('#story-list').innerHTML = buildFeed(entry)
+  const { live, events } = buildFeed(entry, network);
+  $('#story-list').innerHTML = events
     .slice(0, STORY_COUNT)
-    .map((f) => storyRow(f, entry.data, network))
+    .map((ev) => storyRow(ev, entry, live, network))
     .join('');
 }
 
@@ -629,11 +683,16 @@ function renderGrid(entry, network) {
   const foot = $('#grid-foot');
   if (!list.length) {
     if (/^[0-9a-f]{64}$/.test(state.query)) {
-      /* a full id that resolved nowhere — answer the tester's real question */
-      grid.innerHTML = `<div class="no-results">` +
-        `<p>kascov hasn’t seen <strong class="mono">${esc(shortHex(state.query, 12, 10))}</strong> in any covenant on ${esc(NETWORKS[network].label)}.</p>` +
-        `<p class="dim">it may be a regular (non-covenant) transaction, still unconfirmed, or on the other network — ` +
-        `<a href="${esc(txUrl(network, state.query))}" target="_blank" rel="noopener noreferrer">check it on the block explorer ↗</a></p></div>`;
+      if (state.txLookup[state.query] === 'pending') {
+        grid.innerHTML = `<div class="no-results">` +
+          `<p>checking whether <strong class="mono">${esc(shortHex(state.query, 12, 10))}</strong> touched a smart coin…</p></div>`;
+      } else {
+        /* a full id that resolved nowhere — answer the tester's real question */
+        grid.innerHTML = `<div class="no-results">` +
+          `<p>kascov hasn’t seen <strong class="mono">${esc(shortHex(state.query, 12, 10))}</strong> in any covenant on ${esc(NETWORKS[network].label)}.</p>` +
+          `<p class="dim">it may be a regular (non-covenant) transaction, still unconfirmed, or on the other network — ` +
+          `<a href="${esc(txUrl(network, state.query))}" target="_blank" rel="noopener noreferrer">check it on the block explorer ↗</a></p></div>`;
+      }
     } else if (state.filter === 'watch' && !state.watch.size) {
       grid.innerHTML = `<div class="no-results"><p>You’re not watching any coins yet.</p>` +
         `<p class="dim">tap the ★ on any coin to pin it here — it survives reloads.</p></div>`;
@@ -682,19 +741,8 @@ function suggestionItems(entry) {
     else if (e.c.covenant_id.startsWith(q)) push(e, 'coin id', null, 2);
     if (out.length >= 24) break;
   }
-  /* hex-looking input also suggests transaction matches (deep-linked) */
-  if (/^[0-9a-f]{4,}$/.test(q)) {
-    for (const e of entry.index.covs) {
-      if (seen.has(e.c.covenant_id)) continue;
-      if (e.c.genesis_txid && e.c.genesis_txid.startsWith(q)) {
-        push(e, 'genesis tx', e.c.genesis_txid, 3);
-      } else {
-        const ev = e.c.events.find((x) => x.txid.startsWith(q));
-        if (ev) push(e, 'transaction', ev.txid, 3);
-      }
-      if (out.length >= 32) break;
-    }
-  }
+  /* full transaction ids resolve through the server (the grid feed carries
+     no per-event txids) — the search handler routes those directly */
   out.sort((a, b) => a.score - b.score ||
     (b.e.c.last_activity_daa || 0) - (a.e.c.last_activity_daa || 0));
   return out.slice(0, 8);
@@ -863,9 +911,10 @@ function renderLanding(entry) {
     return;
   }
 
-  $('#teaser-list').innerHTML = buildFeed(entry)
+  const feed = buildFeed(entry, network);
+  $('#teaser-list').innerHTML = feed.events
     .slice(0, TEASER_COUNT)
-    .map((f) => storyRow(f, data, network))
+    .map((ev) => storyRow(ev, entry, feed.live, network))
     .join('');
 }
 
@@ -1015,20 +1064,63 @@ function renderDetail(entry, covId, flashTx) {
   const network = state.network;
   const { data, index } = entry;
   const view = $('#view-detail');
-  const rec = index.byId.get(covId);
+  const gridRec = index.byId.get(covId);
   if (state.detailId !== covId) {
     state.detailId = covId;
     state.storyAll = false;
     state.utxoAll = false;
   }
 
-  if (!rec) {
+  if (!gridRec) {
     document.title = 'smart coin not found — kascov';
     const other = network === 'mainnet' ? 'testnet-10' : 'mainnet';
     view.innerHTML = `<a class="back" href="#/explore">← all smart coins</a>` +
       `<div class="empty-card"><h2>We haven’t met this smart coin.</h2>` +
       `<p class="dim">It isn’t in the ${esc(NETWORKS[network].label)} snapshot — it may live on the other network, or the id might be mistyped.</p>` +
       `<button type="button" class="btn" data-action="network" data-network="${other}">look on ${other}</button></div>`;
+    return;
+  }
+
+  /* the life story and scripts come from the per-coin detail endpoint —
+     paint the header from the grid row instantly, fill in when it lands */
+  const detMap = state.details[network];
+  const rec = detMap && detMap.get(covId);
+  if (!rec) {
+    const alive0 = gridRec.c.status === 'active';
+    const watched0 = state.watch.has(covId);
+    document.title = `${gridRec.name} — kascov`;
+    const bits = [];
+    bits.push(`${gridRec.c.genesis_daa != null ? 'born' : 'first seen'} ${relTime(gridRec.bornMs)}`);
+    bits.push(gridRec.moves === 0 ? 'never moved' : gridRec.moves === 1 ? 'moved once' : `moved ${gridRec.moves} times`);
+    if (alive0) bits.push(`currently holds ${fmtAmount(gridRec.c.live_value, network)}`);
+    else bits.push(`retired ${relTime(gridRec.lastMs)}`);
+    view.innerHTML =
+      `<a class="back" href="#/explore">← all smart coins</a>` +
+      `<header class="detail-head">` +
+      `<span role="img" aria-label="avatar of ${esc(gridRec.name)}">${avatarSvg(covId, 88)}</span>` +
+      `<div class="detail-id"><h1>${esc(gridRec.name)}</h1>` +
+      `<p class="detail-tags"><span class="pill ${alive0 ? 'pill-alive' : 'pill-retired'}">${alive0 ? 'alive' : 'retired'}</span>` +
+      `<button type="button" class="star${watched0 ? ' starred' : ''}" data-action="watch" data-id="${esc(covId)}" aria-pressed="${watched0}" aria-label="watch this coin">★</button>` +
+      `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span></p>` +
+      `<p class="id-chip"><span class="mono">${esc(shortHex(covId, 10, 8))}</span>` +
+      `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(covId)}" aria-label="copy this coin’s full id">copy id</button></p>` +
+      `</div></header>` +
+      `<p class="detail-summary">${esc(bits.join(' · '))}.</p>` +
+      `<section aria-label="Life story"><h2>life story</h2>` +
+      `<p class="dim">reading this coin’s full story…</p></section>`;
+    loadDetail(network, covId)
+      .then(() => {
+        if (state.network === network && state.detailId === covId && parseRoute().view === 'detail') {
+          renderDetail(entry, covId, flashTx);
+        }
+      })
+      .catch(() => {
+        const story = view.querySelector('section[aria-label="Life story"]');
+        if (story && state.detailId === covId) {
+          story.innerHTML = `<h2>life story</h2><p class="dim">couldn’t load this coin’s story.</p>` +
+            `<button type="button" class="btn" data-action="retry-detail">try again</button>`;
+        }
+      });
     return;
   }
 
@@ -1353,6 +1445,11 @@ async function render() {
       })
       .catch(() => null);
 
+    /* deep links straight to a coin: warm its detail while the grid loads */
+    if (route.view === 'detail' && route.id) {
+      loadDetail(network, route.id).catch(() => { /* handled on render */ });
+    }
+
     /* instant first paint from the tiny live feed (landing/explorer only —
        a coin page needs the full snapshot) */
     if (route.view !== 'detail') {
@@ -1424,6 +1521,10 @@ async function refreshSnapshot() {
     if (old && data.generated_at_ms === old.data.generated_at_ms) return;
     data.__anchor = makeAnchor(data, network);
     state.cache[network] = { data, index: buildIndex(data) };
+    /* cached coin details are now stale — drop all but the one on screen
+       (yanking the open coin's story mid-read would collapse its sections) */
+    const dm = state.details[network];
+    if (dm) for (const k of [...dm.keys()]) { if (k !== state.detailId) dm.delete(k); }
     if (network === state.network && parseRoute().view !== 'detail') render();
   } catch (e) {
     /* transient — the next tick retries */
@@ -1638,6 +1739,8 @@ document.addEventListener('click', (e) => {
   } else if (action === 'retry') {
     delete state.cache[state.network];
     render();
+  } else if (action === 'retry-detail') {
+    render(); /* the detail map has no entry for a failed fetch — this refetches */
   }
 });
 
@@ -1657,23 +1760,50 @@ $('#search').addEventListener('input', (e) => {
   }
   const entry = state.cache[state.network];
   if (!entry) return;
-  /* a pasted 64-hex id resolves instantly — coin id or txid, straight to the coin */
+  /* a pasted 64-hex id resolves instantly — coin id straight away, txid via
+     the server's indexed lookup (the grid feed carries no per-event txids) */
   if (/^[0-9a-f]{64}$/.test(state.query)) {
     const byId = entry.index.byId.get(state.query);
-    const byTx = byId ? null : entry.index.txToCov.get(state.query);
-    if (byId || byTx) {
-      const target = byId || byTx;
-      const tx = byTx ? `?tx=${state.query}` : '';
+    if (byId) {
       e.target.value = '';
       state.query = '';
       closeSuggest();
-      location.hash = `#/${state.network}/c/${target.c.covenant_id}${tx}`;
+      location.hash = `#/${state.network}/c/${byId.c.covenant_id}`;
       return;
     }
+    resolveTxQuery(state.network, state.query, e.target);
   }
   renderGrid(entry, state.network);
   renderSuggest();
 });
+
+/* Ask the worker which covenant a transaction touched; navigate on a hit,
+   remember the miss so the grid can answer honestly. */
+async function resolveTxQuery(network, txid, input) {
+  if (state.txLookup[txid]) return; /* already pending or answered */
+  state.txLookup[txid] = 'pending';
+  try {
+    const res = await fetch(`data/${network}/tx/${txid}.json`, { cache: 'no-cache' });
+    if (res.ok) {
+      const { covenant_id } = await res.json();
+      delete state.txLookup[txid];
+      if (state.network === network && state.query === txid) {
+        if (input) input.value = '';
+        state.query = '';
+        closeSuggest();
+        location.hash = `#/${network}/c/${covenant_id}?tx=${txid}`;
+      }
+      return;
+    }
+    state.txLookup[txid] = 'miss';
+  } catch (err) {
+    state.txLookup[txid] = 'miss';
+  }
+  if (state.network === network && state.query === txid) {
+    const entry = state.cache[network];
+    if (entry) renderGrid(entry, network);
+  }
+}
 
 $('#search').addEventListener('keydown', (e) => {
   const open = suggest.items.length > 0 && !$('#search-suggest').hidden;
