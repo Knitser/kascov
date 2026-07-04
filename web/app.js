@@ -590,8 +590,11 @@ function renderLiteExplore(live, network) {
 function eventSentence(entry, ev, network, withBalance) {
   const name = entry.name;
   if (ev.kind === 'genesis') {
+    /* a coin can be born in several state pieces (one tx, many bound outputs) */
+    const pieces = (entry.c.utxos || []).filter((u) => u.created_daa === entry.c.genesis_daa).length;
+    const pieceBit = pieces > 1 ? ` in ${pieces} pieces` : '';
     return entry.birthValue > 0
-      ? `<strong>${esc(name)}</strong> was born, holding ${esc(fmtAmount(entry.birthValue, network))}`
+      ? `<strong>${esc(name)}</strong> was born, holding ${esc(fmtAmount(entry.birthValue, network))}${esc(pieceBit)}`
       : `<strong>${esc(name)}</strong> was born`;
   }
   if (ev.kind === 'transition') {
@@ -600,6 +603,15 @@ function eventSentence(entry, ev, network, withBalance) {
     const bal = withBalance ? entry.balances.get(ev.accepting_daa) : null;
     const balBit = bal ? ` — now holding ${esc(fmtAmount(bal, network))}` : '';
     return `<strong>${esc(name)}</strong> moved <span class="dim">(${ordinal(nth)} time)</span>${balBit}`;
+  }
+  /* burns: a multi-piece coin retires in stages — only the last spend ends
+     the story, earlier ones destroy a piece (each is a real, separate tx) */
+  const burns = entry.c.events.filter((e) => e.kind === 'burn');
+  const isFinal = !burns.length || ev.seq === burns[burns.length - 1].seq;
+  if (!isFinal) {
+    const bal = withBalance ? entry.balances.get(ev.accepting_daa) : null;
+    const balBit = bal ? ` — ${esc(fmtAmount(bal, network))} still lives on` : '';
+    return `<strong>${esc(name)}</strong> lost a piece <span class="dim">(one state destroyed)</span>${balBit}`;
   }
   const m = entry.moves;
   const tail = m === 0 ? 'without ever moving' : m === 1 ? 'after 1 move' : `after ${m} moves`;
