@@ -127,6 +127,25 @@ const KIND_META = {
   burn:       { icon: 'burn', cls: 'kind-burn' },
 };
 
+/* plain-words explanations, surfaced as hover/long-press titles wherever
+   jargon appears — the site should never assume the reader knows KIPs */
+const GLOSSARY = {
+  alive: 'this smart coin still has live (unspent) state on the network — its story can continue',
+  retired: 'every piece of this coin\u2019s state has been spent without continuing the covenant — its story ended (recorded here forever)',
+  genesis: 'born: a transaction created this coin\u2019s permanent identity (its KIP-20 covenant id)',
+  transition: 'moved: the coin\u2019s state was spent and continued under the same identity — same coin, new state',
+  burn: 'retired: the state was spent without continuing the covenant — the value left, the identity ended',
+  'p2pk state': 'the simplest state shape: a public key + OpCheckSig — whoever holds the key controls this piece of state',
+  'p2sh commitment': 'a 35-byte hash commitment (OpBlake2b <hash> OpEqual) — the actual program stays hidden until the coin is spent, then kascov captures and verifies it',
+  live_states: 'state pieces (UTXOs) with this shape that are unspent right now',
+  ever_seen: 'every state piece with this shape kascov has ever indexed, spent or not',
+  ran_at_spend: 'revealed programs: hidden P2SH programs this shape, seen and hash-verified when their coins were spent',
+  lineage: 'whether kascov saw this coin\u2019s whole life — \u201cno\u201d means it was born before we started watching, so earlier history is honestly missing',
+  digest_born: 'new smart coins created in the last 24 hours',
+  digest_moved: 'state transitions in the last 24 hours — coins changing hands or updating state',
+  digest_retired: 'coins whose story ended in the last 24 hours',
+};
+
 /* ----------------------------------------------------------------- utils */
 
 const $ = (sel) => document.querySelector(sel);
@@ -1062,7 +1081,7 @@ function renderGrid(entry, network) {
     return `<article class="card">` +
       `<div class="card-head">${avatarSvg(e.c.covenant_id, 40)}` +
       `<div class="card-id"><a class="card-link" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">${esc(e.name)}</a>` +
-      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}">${alive ? 'alive' : 'retired'}</span></div>` +
+      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span></div>` +
       `<button type="button" class="star${watched ? ' starred' : ''}" data-action="watch" data-id="${esc(e.c.covenant_id)}"` +
       ` aria-pressed="${watched}" aria-label="${watched ? 'stop watching' : 'watch'} ${esc(e.name)}">★</button></div>` +
       `<p class="card-story">${esc(cardStory(e, network))}</p>` +
@@ -1137,7 +1156,7 @@ function renderSuggest() {
       avatarSvg(s.e.c.covenant_id, 26) +
       `<span class="suggest-name">${markMatch(s.e.name, state.query)}</span>` +
       kind +
-      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}">${alive ? 'alive' : 'retired'}</span>` +
+      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>` +
       `</a>`;
   }).join('');
   host.hidden = false;
@@ -1262,9 +1281,14 @@ function renderTemplates(network) {
       `${fmtInt(r.covenants)} coin${r.covenants === 1 ? '' : 's'}`,
     ];
     if (r.revealed_runs > 0) bits.push(`ran ${fmtInt(r.revealed_runs)}× at spend`);
-    return `<div class="tpl-row"><span class="tpl-name">${esc(r.label)}</span>` +
+    const nameTip = GLOSSARY[r.label] ||
+      (r.unrec ? 'state scripts kascov doesn\u2019t recognize as a known shape yet — matching never guesses'
+        : `a compiled ${r.label} contract, recognized by its instruction skeleton with constructor arguments labeled`);
+    const countsTip = `live: unspent right now \u00b7 ever: all state pieces indexed with this shape \u00b7 coins: distinct smart coins` +
+      (r.revealed_runs > 0 ? ' \u00b7 ran at spend: hidden programs revealed and hash-verified when spent' : '');
+    return `<div class="tpl-row"><span class="tpl-name" title="${esc(nameTip)}">${esc(r.label)}</span>` +
       `<span class="tpl-track" aria-hidden="true"><span class="tpl-fill" style="width:${w}%;background:${color}"></span></span>` +
-      `<span class="tpl-counts dim">${esc(bits.join(' · '))}</span></div>`;
+      `<span class="tpl-counts dim" title="${esc(countsTip)}">${esc(bits.join(' · '))}</span></div>`;
   }).join('');
 }
 
@@ -1335,8 +1359,9 @@ function paintDigest(d, network) {
     { n: Number(d.moves) || 0, label: 'moved', cls: 'n-move' },
     { n: Number(d.burns) || 0, label: 'retired', cls: 'n-burn' },
   ];
+  const digestTips = { born: GLOSSARY.digest_born, moved: GLOSSARY.digest_moved, retired: GLOSSARY.digest_retired };
   $('#digest-counts').innerHTML = counts.map((st) =>
-    `<div class="stat"><span class="stat-n ${st.cls}" data-n="${st.n}">0</span>` +
+    `<div class="stat" title="${esc(digestTips[st.label] || '')}"><span class="stat-n ${st.cls}" data-n="${st.n}">0</span>` +
     `<span class="stat-label">${esc(st.label)}</span></div>`).join('');
   /* headline cards reuse the grid record when it's here; before the full
      snapshot lands the name falls back to friendlyName (same as liteStoryRow) */
@@ -1489,7 +1514,7 @@ function timelineItem(entry, ev, data, network, flashTx) {
   }
   const flash = flashTx && ev.txid === flashTx ? ' tl-flash' : '';
   return `<li class="tl-item ${meta.cls}${flash}" data-txid="${esc(ev.txid)}">` +
-    `<span class="tl-icon" aria-hidden="true">${ICONS[meta.icon]}</span>` +
+    `<span class="tl-icon" title="${esc(GLOSSARY[ev.kind] || '')}">${ICONS[meta.icon]}</span>` +
     `<div class="tl-body">` +
     `<p class="tl-text">${eventSentence(entry, ev, network, true)}</p>` +
     `<p class="tl-meta"><span title="${esc(utcTitle(ms))}">${esc(relTime(ms))}</span> · <a href="${esc(txUrl(network, ev.txid))}" target="_blank" rel="noopener noreferrer">view transaction ↗</a>${nerdBits}</p>` +
@@ -1612,7 +1637,7 @@ function renderDetail(entry, covId, flashTx) {
       `<header class="detail-head">` +
       `<span role="img" aria-label="avatar of ${esc(gridRec.name)}">${avatarSvg(covId, 88)}</span>` +
       `<div class="detail-id"><h1>${esc(gridRec.name)}</h1>` +
-      `<p class="detail-tags"><span class="pill ${alive0 ? 'pill-alive' : 'pill-retired'}">${alive0 ? 'alive' : 'retired'}</span>` +
+      `<p class="detail-tags"><span class="pill ${alive0 ? 'pill-alive' : 'pill-retired'}" title="${esc(alive0 ? GLOSSARY.alive : GLOSSARY.retired)}">${alive0 ? 'alive' : 'retired'}</span>` +
       `<button type="button" class="star${watched0 ? ' starred' : ''}" data-action="watch" data-id="${esc(covId)}" aria-pressed="${watched0}" aria-label="watch this coin">★</button>` +
       `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span></p>` +
       `<p class="id-chip"><span class="mono">${esc(shortHex(covId, 10, 8))}</span>` +
@@ -1903,7 +1928,7 @@ function renderAddress(route) {
     sb.push(c.controls_now ? 'this key controls it now' : 'this key owned it earlier');
     return `<article class="card"><div class="card-head">${avatarSvg(c.covenant_id, 40)}` +
       `<div class="card-id"><a class="card-link" href="#/${esc(network)}/c/${esc(c.covenant_id)}">${esc(name)}</a>` +
-      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}">${alive ? 'alive' : 'retired'}</span></div></div>` +
+      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span></div></div>` +
       `<p class="card-story">${esc(sb.join(' · '))}</p></article>`;
   }).join('');
   view.innerHTML = back + `<header class="page-head addr-head"><h1>address</h1>` +
@@ -2160,9 +2185,12 @@ function liveBadgeHtml(network) {
     if (Date.now() - tipAt < LIVE_FRESH_MS) {
       const lag = syncLag(network);
       if (lag != null && lag >= LAG_LIVE_DAA) {
-        return `<span class="live-badge live-lag" title="the indexer replays every block in order; nothing is skipped">` +
+        /* keep the visible text short — the full story lives in the tooltip */
+        const mins = Math.round((lag * MS_PER_DAA) / 60000);
+        const span = mins >= 90 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${mins}m`;
+        return `<span class="live-badge live-lag" title="the indexer is replaying ${esc(fmtSpan(lag * MS_PER_DAA))} of chain, every block in order — nothing is skipped">` +
           `<i class="live-dot" aria-hidden="true"></i>` +
-          `catching up — about ${esc(fmtSpan(lag * MS_PER_DAA))} of chain to replay</span>`;
+          `catching up · ${esc(span)} behind</span>`;
       }
       return '<span class="live-badge live-on"><i class="live-dot" aria-hidden="true"></i>watching live</span>';
     }

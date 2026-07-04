@@ -1437,16 +1437,31 @@ a.btn:hover { text-decoration: none; }
 
 .digest { max-width: 720px; margin: 0 auto 2.4rem; }
 .digest h2 { text-align: center; }
+/* one quiet card for the three counters — five mismatched boxes read as
+   clutter; a single strip reads as one fact about the day */
 .digest-counts {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 0.9rem;
-  margin-bottom: 0.9rem;
+  display: flex;
+  justify-content: space-evenly;
+  align-items: center;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.95rem 1rem 0.85rem;
+  margin-bottom: 0.6rem;
 }
-.digest-counts .stat-n { font-size: clamp(1.4rem, 3.5vw, 2rem); }
+.digest-counts .stat {
+  background: none;
+  border: 0;
+  padding: 0;
+  align-items: center;
+  text-align: center;
+}
+.digest-counts .stat-n { font-size: clamp(1.4rem, 3.5vw, 1.9rem); }
 .digest-counts .n-born { color: var(--born); }
 .digest-counts .n-move { color: var(--move); }
 .digest-counts .n-burn { color: var(--burn); }
+/* the two headliners split the same width evenly under the strip */
+.digest .mini-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 /* ================================= pulse v2: interactive activity chart */
 /* (the legacy .pulse-* SVG rules above still serve the 404 fallback chart) */
@@ -1628,9 +1643,10 @@ a.btn:hover { text-decoration: none; }
 
   /* digest: keep the 3 counters abreast, restack each tile vertically
      (overrides the row-flip the earlier 460 rule gives hero .stat tiles) */
-  .digest-counts { gap: 0.5rem; }
-  .digest-counts .stat { flex-direction: column; align-items: center; gap: 0.1rem; padding: 0.7rem 0.35rem; }
+  .digest-counts { gap: 0.5rem; padding: 0.75rem 0.5rem 0.65rem; }
+  .digest-counts .stat { flex-direction: column; align-items: center; gap: 0.1rem; padding: 0; }
   .digest-counts .stat-n { font-size: 1.35rem; }
+  .digest .mini-grid { grid-template-columns: 1fr; }
 
   /* page frames tighten */
   .page-head { padding: 1.7rem 0 1.1rem; }
