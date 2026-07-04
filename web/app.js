@@ -28,6 +28,12 @@ const PAGE_SIZE = 60;
 const STORY_COUNT = 15;
 const TEASER_COUNT = 3;
 const PULSE_BUCKETS = 12;
+const ACTIVITY_RANGES = ['1h', '6h', '24h', '48h', 'all'];
+const ACTIVITY_LABELS = { '1h': '1h', '6h': '6h', '24h': '24h', '48h': '2d', 'all': 'all' };
+const ACTIVITY_PHRASE = { '1h': 'in the last hour', '6h': 'in the last 6 hours', '24h': 'in the last 24 hours', '48h': 'in the last 2 days' };
+const ACTIVITY_TTL_MS = 30_000;          // mirrors the server ttl
+const ACTIVITY_MISS_TTL_MS = 5 * 60_000; // 404 (old worker) reprobe, mirrors LIVE_REPROBE_MS
+const ACTIVITY_MAX_COLS = 200;           // defensive DOM cap
 const ADDR_RE = /^(kaspa|kaspatest):[a-z0-9]{20,}$/i;
 const PUBKEY_RE = /^[0-9a-fA-F]{64}(?:[0-9a-fA-F]{2})?$/; // 32B x-only or 33B ECDSA
 
@@ -258,11 +264,17 @@ const state = {
   addrs: {},          // network -> Map(addressOrPubkey query -> /addr response)
   templates: {},      // network -> { data, at } (contract-type analytics)
   digest: {},         // network -> { data, at, animated }
+  activity: {},       // network -> { [range]: { data, at } } (data null = 404 miss)
+  pulseRange: '24h',
   watch: new Set(),   // covenant ids starred on the current network
   watchNet: null,
 };
 
 try { state.nerd = localStorage.getItem('kascov-nerd') === '1'; } catch (e) { /* private mode */ }
+try {
+  const r = localStorage.getItem('kascov-pulse-range');
+  if (ACTIVITY_RANGES.includes(r)) state.pulseRange = r;
+} catch (e) { /* private mode */ }
 
 /* ------------------------------------------------------------- watchlist */
 
@@ -431,6 +443,28 @@ async function loadTemplates(network) {
   }
 }
 
+/* the activity histogram behind the pulse chart — per (network, range)
+   cache mirroring the server ttl; a 404 from an older worker is remembered
+   (data: null) and reprobed after ACTIVITY_MISS_TTL_MS */
+async function loadActivity(network, range) {
+  const byRange = state.activity[network] || (state.activity[network] = {});
+  const hit = byRange[range];
+  const ttl = hit && hit.data === null ? ACTIVITY_MISS_TTL_MS : ACTIVITY_TTL_MS;
+  if (hit && Date.now() - hit.at < ttl) return hit.data;
+  try {
+    const res = await fetch(`data/${network}/activity.json?range=${range}`, { cache: 'no-cache' });
+    if (!res.ok) {
+      if (res.status === 404) byRange[range] = { data: null, at: Date.now() };
+      return hit ? hit.data : null;
+    }
+    const data = await res.json();
+    byRange[range] = { data, at: Date.now() };
+    return data;
+  } catch (e) {
+    return hit ? hit.data : null;   /* stale-ok; fallback only on a real 404 */
+  }
+}
+
 /* DAA → ms against the live feed's own tip anchor. */
 function liteMs(live, daa) {
   const aDaa = live.tip_daa != null ? live.tip_daa : live.stats.last_activity_daa;
@@ -565,7 +599,277 @@ function cardStory(entry, network) {
 
 /* ------------------------------------------------------------ pulse chart */
 
-function renderPulse(entry) {
+/* what the pointer/keyboard handlers need to know about the painted chart —
+   written by paintActivity, null while the fallback (or nothing) shows */
+let pulseView = null;
+let pulseHot = -1;
+
+/* DAA → ms against the activity response's own tip anchor (liteMs pattern) */
+function activityMs(data, daa) {
+  const aDaa = data.tip_daa != null ? data.tip_daa
+    : (data.buckets.length ? data.buckets[data.buckets.length - 1].daa : data.window_start_daa);
+  const aMs = data.tip_at_ms != null ? data.tip_at_ms : data.generated_at_ms;
+  return aMs - (aDaa - daa) * MS_PER_DAA;
+}
+
+/* build the chart scaffolding (range pills, plot, tooltip, legend) once per
+   network; repaints only touch the bars inside so height transitions live */
+function ensurePulseShell(network) {
+  const host = $('#pulse-chart');
+  if (!host) return; /* stale cached index.html */
+  if (host.dataset.net === network && host.dataset.mode === 'activity') return;
+  pulseView = null;
+  pulseHot = -1;
+  host.innerHTML =
+    `<div class="pulse-head"><p class="pulse-caption" id="pulse-caption">reading the pulse…</p>` +
+    `<div class="pulse-ranges" role="group" aria-label="chart time range">` +
+    ACTIVITY_RANGES.map((r) =>
+      `<button type="button" class="chip" data-action="pulse-range" data-range="${r}" aria-pressed="${r === state.pulseRange}">${ACTIVITY_LABELS[r]}</button>`
+    ).join('') +
+    `</div></div>` +
+    `<div class="pulse-plot" id="pulse-plot" role="img" tabindex="0" aria-label="bar chart of smart-coin life events over time">` +
+    `<div class="pulse-bars" id="pulse-bars"></div>` +
+    `<p class="dim pulse-none" id="pulse-none" hidden></p>` +
+    `<div class="pulse-ticks" id="pulse-ticks"></div>` +
+    `<div class="pulse-tip" id="pulse-tip" hidden></div>` +
+    `</div>` +
+    `<div class="pulse-legend" aria-hidden="true">` +
+    `<span><i class="dot dot-born"></i>born</span>` +
+    `<span><i class="dot dot-move"></i>moved</span>` +
+    `<span><i class="dot dot-burn"></i>retired</span></div>`;
+  host.dataset.net = network;
+  host.dataset.mode = 'activity';
+}
+
+/* paint one activity response into the shell — index-keyed columns so
+   heights transition in place between refetches */
+function paintActivity(data, network) {
+  const host = $('#pulse-chart');
+  const bars = $('#pulse-bars');
+  const ticksHost = $('#pulse-ticks');
+  const none = $('#pulse-none');
+  const caption = $('#pulse-caption');
+  const plot = $('#pulse-plot');
+  if (!host || !bars || !ticksHost || !none || !caption || !plot) return;
+
+  const showEmpty = (noneText, captionText) => {
+    hidePulseTip();
+    pulseView = null;
+    bars.hidden = true;
+    ticksHost.hidden = true;
+    none.hidden = false;
+    none.textContent = noneText;
+    caption.textContent = captionText;
+    plot.setAttribute('aria-label', `bar chart of smart-coin life events — ${captionText}`);
+    host.dataset.range = data.range;
+  };
+
+  const width = data.bucket_daa || 1;
+  const anchorDaa = data.tip_daa != null ? data.tip_daa
+    : (data.buckets.length ? data.buckets[data.buckets.length - 1].daa : null);
+  if (anchorDaa == null) {
+    /* an index with no tip and no events — nothing to anchor a window on */
+    showEmpty('no life events yet.', 'no life events yet');
+    return;
+  }
+  const last = Math.floor(anchorDaa / width);
+  let first = Math.floor((data.window_start_daa != null ? data.window_start_daa
+    : (data.buckets[0] ? data.buckets[0].daa : anchorDaa)) / width);
+  let n = last - first + 1;
+  if (n > ACTIVITY_MAX_COLS) { first = last - ACTIVITY_MAX_COLS + 1; n = ACTIVITY_MAX_COLS; }
+  if (n < 1) { first = last; n = 1; }
+
+  /* client-side zero-fill: the endpoint omits empty buckets */
+  const buckets = Array.from({ length: n }, () => ({ births: 0, moves: 0, burns: 0, total: 0 }));
+  for (const b of data.buckets) {
+    const i = Math.floor(b.daa / width) - first;
+    if (i < 0 || i >= n) continue;
+    const births = Number(b.births) || 0;
+    const moves = Number(b.moves) || 0;
+    const burns = Number(b.burns) || 0;
+    buckets[i] = { births, moves, burns, total: births + moves + burns };
+  }
+  const total = buckets.reduce((sum, b) => sum + b.total, 0);
+  const spanMs = n * width * MS_PER_DAA;
+  const windowStartMs = activityMs(data, first * width);
+  /* clock times alone mislead once the window is long or long past (the old
+     chart's rule); seconds are never needed at ≥1h spans */
+  const withDate = spanMs > 20 * 3600 * 1000 || (Date.now() - windowStartMs) > 20 * 3600 * 1000;
+  const phrase = data.range === 'all' ? `across ${fmtSpan(spanMs)}` : ACTIVITY_PHRASE[data.range];
+
+  if (total === 0) {
+    /* pills stay so the reader can widen the range */
+    showEmpty(
+      data.range === 'all' ? 'no life events yet.' : `nothing happened ${phrase} yet.`,
+      `no life events ${phrase}`
+    );
+    return;
+  }
+  bars.hidden = false;
+  ticksHost.hidden = false;
+  none.hidden = true;
+
+  /* y auto-scale: 92% headroom leaves room for the 2px gaps and the tooltip
+     lane; a 2% floor keeps a lone event visible */
+  const maxTotal = Math.max(1, ...buckets.map((b) => b.total));
+  const pct = (c) => (c ? Math.max((c / maxTotal) * 92, 2) : 0);
+
+  const rebuild = bars.children.length !== n || host.dataset.range !== data.range;
+  if (rebuild) {
+    hidePulseTip();
+    /* DOM order top→bottom burn/move/born + flex-end stacks born at the baseline */
+    bars.innerHTML = Array.from({ length: n }, () =>
+      '<div class="pulse-col"><div class="pulse-seg seg-burn"></div><div class="pulse-seg seg-move"></div><div class="pulse-seg seg-born"></div></div>'
+    ).join('');
+  }
+  const setHeights = () => {
+    for (let i = 0; i < n; i++) {
+      const col = bars.children[i];
+      if (!col) break;
+      const counts = [buckets[i].burns, buckets[i].moves, buckets[i].births];
+      let seen = false; /* a visible segment higher in the stack */
+      for (let k = 0; k < 3; k++) {
+        const el = col.children[k];
+        const c = counts[k];
+        el.style.height = pct(c) + '%';
+        /* 2px surface gap between visible segments */
+        el.style.marginTop = c && seen ? '2px' : '0px';
+        /* rounded data-end on the top-most visible segment only */
+        el.classList.toggle('seg-cap', Boolean(c) && !seen);
+        if (c) seen = true;
+      }
+    }
+  };
+  if (rebuild) requestAnimationFrame(setHeights); /* first paint grows from 0 */
+  else setHeights();
+
+  const tickIdx = [...new Set([0, n >> 2, n >> 1, (3 * n) >> 2, n - 1])];
+  ticksHost.innerHTML = tickIdx.map((i) =>
+    `<span>${esc(fmtClock(activityMs(data, (first + i) * width + width / 2), false, withDate))}</span>`
+  ).join('');
+
+  let latestIdx = 0;
+  for (let i = n - 1; i >= 0; i--) { if (buckets[i].total) { latestIdx = i; break; } }
+  const latestMs = activityMs(data, Math.min((first + latestIdx) * width + width, anchorDaa));
+  const captionText =
+    `${fmtInt(total)} event${total === 1 ? '' : 's'} ${phrase} · latest ${relTime(latestMs)}`;
+  caption.textContent = captionText;
+  plot.setAttribute('aria-label', `bar chart of smart-coin life events — ${captionText}`);
+
+  pulseView = {
+    n, first, width, buckets, anchorDaa,
+    anchorMs: data.tip_at_ms != null ? data.tip_at_ms : data.generated_at_ms,
+    withDate,
+    network,
+    range: data.range,
+  };
+  host.dataset.range = data.range;
+}
+
+/* fetch (through the client TTL) then paint the current range; a known 404
+   (older worker) falls back to the summaries-derived SVG chart */
+async function updatePulse(network) {
+  const range = state.pulseRange;
+  const d = await loadActivity(network, range);
+  if (state.network !== network || state.pulseRange !== range || parseRoute().view !== 'explore') return;
+  if (d) {
+    ensurePulseShell(network);
+    paintActivity(d, network);
+  } else {
+    const entry = state.cache[network];
+    const byRange = state.activity[network];
+    const known404 = byRange && byRange[range] && byRange[range].data === null;
+    if (known404 && entry) renderPulseFallback(entry);
+  }
+}
+
+/* renderExplore's entry point: instant paint from cache (or the shell's
+   loading note), then a TTL-guarded refetch */
+function renderPulse(entry, network) {
+  const hit = state.activity[network] && state.activity[network][state.pulseRange];
+  if (hit && hit.data === null) {
+    renderPulseFallback(entry);
+  } else {
+    ensurePulseShell(network);
+    if (hit && hit.data) paintActivity(hit.data, network);
+  }
+  updatePulse(network);
+}
+
+/* pollLive-detected changes refetch the chart, debounced — pollLive's 12s
+   cadence (SSE pokes fold into it) is the natural rate limit */
+let pulseRefreshTimer = 0;
+function schedulePulseRefresh() {
+  clearTimeout(pulseRefreshTimer);
+  pulseRefreshTimer = setTimeout(() => {
+    const byRange = state.activity[state.network];
+    if (byRange && byRange[state.pulseRange] && byRange[state.pulseRange].data !== null) {
+      byRange[state.pulseRange].at = 0; /* stamp stale; keep known 404s quiet */
+    }
+    if (parseRoute().view === 'explore' && document.visibilityState === 'visible') {
+      updatePulse(state.network);
+    }
+  }, 1500);
+}
+
+/* one pointer-driven tooltip for the whole plot — nearest-bucket model, so
+   4px-wide phone columns never need individual hit targets */
+function setPulseHot(i) {
+  if (!pulseView) return;
+  const bars = $('#pulse-bars');
+  const tip = $('#pulse-tip');
+  const plot = $('#pulse-plot');
+  if (!bars || !tip || !plot || bars.hidden) return;
+  i = Math.max(0, Math.min(pulseView.n - 1, i));
+  const col = bars.children[i];
+  if (!col) return;
+  pulseHot = i;
+  for (let k = 0; k < bars.children.length; k++) {
+    bars.children[k].classList.toggle('is-hot', k === i);
+  }
+  const b = pulseView.buckets[i];
+  const centerDaa = (pulseView.first + i) * pulseView.width + pulseView.width / 2;
+  const centerMs = pulseView.anchorMs - (pulseView.anchorDaa - centerDaa) * MS_PER_DAA;
+  const rows = [];
+  if (b.births) rows.push(`<i class="dot dot-born"></i> <strong>${esc(fmtInt(b.births))}</strong> born`);
+  if (b.moves) rows.push(`<i class="dot dot-move"></i> <strong>${esc(fmtInt(b.moves))}</strong> moved`);
+  if (b.burns) rows.push(`<i class="dot dot-burn"></i> <strong>${esc(fmtInt(b.burns))}</strong> retired`);
+  tip.innerHTML =
+    `<span class="tip-when">around ${esc(fmtClock(centerMs, false, pulseView.withDate))}</span><br>` +
+    (rows.length ? rows.join(' · ') : '<span class="dim">quiet</span>');
+  tip.hidden = false;
+  const plotRect = plot.getBoundingClientRect();
+  const colRect = col.getBoundingClientRect();
+  const center = colRect.left + colRect.width / 2 - plotRect.left;
+  tip.style.left =
+    Math.max(4, Math.min(center - tip.offsetWidth / 2, plotRect.width - tip.offsetWidth - 4)) + 'px';
+}
+
+function hidePulseTip() {
+  pulseHot = -1;
+  const tip = $('#pulse-tip');
+  if (tip) tip.hidden = true;
+  document.querySelectorAll('#pulse-bars .pulse-col.is-hot').forEach((el) => {
+    el.classList.remove('is-hot');
+  });
+}
+
+function onPulsePointer(e) {
+  if (!pulseView) return;
+  const bars = $('#pulse-bars');
+  if (!bars || bars.hidden) return;
+  const rect = bars.getBoundingClientRect();
+  if (!rect.width || e.clientY < rect.top - 12 || e.clientY > rect.bottom + 12) {
+    hidePulseTip();
+    return;
+  }
+  setPulseHot(Math.floor((e.clientX - rect.left) / rect.width * pulseView.n));
+}
+
+/* the old summaries-based SVG chart, kept verbatim — the fallback when the
+   activity endpoint 404s (older worker); ranges don't apply to grid-derived
+   data, so it has no pills */
+function renderPulseFallback(entry) {
   const { index } = entry;
   /* the grid feed carries one row per coin, not full timelines — the pulse
      charts births and retirements (moves stream through "latest stories") */
@@ -575,6 +879,9 @@ function renderPulse(entry) {
     if (e.c.status !== 'active') events.push({ kind: 'burn', ms: e.lastMs });
   }
   const host = $('#pulse-chart');
+  host.dataset.mode = 'fallback'; /* so ensurePulseShell rebuilds when the endpoint returns */
+  delete host.dataset.range;
+  pulseView = null;
   if (!events.length) { host.innerHTML = '<p class="dim">no life events yet.</p>'; return; }
 
   let min = Infinity, max = -Infinity;
@@ -1155,7 +1462,7 @@ function renderExplore(entry) {
 
   $('#pulse-title').textContent = net.pulseTitle;
   renderWatchStrip(entry, network);
-  renderPulse(entry);
+  renderPulse(entry, network);
   renderRecords(entry, network);
   renderTemplates(network);
   loadTemplates(network).then(() => {
@@ -1829,6 +2136,20 @@ setInterval(refreshSnapshot, REFRESH_MS);
 const LIVE_MS = 12_000;
 const LIVE_REPROBE_MS = 5 * 60_000;
 const LIVE_FRESH_MS = 3 * 60_000;
+const LAG_LIVE_DAA = 3000; /* < ~5 min behind the node's tip still reads as live */
+
+function syncLag(network) {
+  /* node tip DAA minus the last DAA the indexer actually applied.
+     Old workers don't send processed_daa — null means unknown, and the
+     badge falls back to its old behavior. Clamped at 0: a testnet reset
+     can briefly leave processed_daa ahead of the new chain's tip. */
+  const ls = state.live[network];
+  const entry = state.cache[network];
+  const src = [ls && ls.data, entry && entry.data].find(
+    (d) => d && d.tip_daa != null && d.processed_daa != null);
+  if (!src) return null;
+  return Math.max(0, src.tip_daa - src.processed_daa);
+}
 
 function liveBadgeHtml(network) {
   const ls = state.live[network];
@@ -1837,6 +2158,12 @@ function liveBadgeHtml(network) {
     : entry && entry.data.tip_at_ms != null ? entry.data.tip_at_ms : null;
   if (tipAt != null) {
     if (Date.now() - tipAt < LIVE_FRESH_MS) {
+      const lag = syncLag(network);
+      if (lag != null && lag >= LAG_LIVE_DAA) {
+        return `<span class="live-badge live-lag" title="the indexer replays every block in order; nothing is skipped">` +
+          `<i class="live-dot" aria-hidden="true"></i>` +
+          `catching up — about ${esc(fmtSpan(lag * MS_PER_DAA))} of chain to replay</span>`;
+      }
       return '<span class="live-badge live-on"><i class="live-dot" aria-hidden="true"></i>watching live</span>';
     }
     return `<span class="live-badge live-stale"><i class="live-dot" aria-hidden="true"></i>` +
@@ -1874,6 +2201,7 @@ async function pollLive() {
       live.stats.covenants !== cached.data.stats.covenants
     )) {
       refreshSnapshot();
+      schedulePulseRefresh();
     }
   } catch (e) {
     /* transient — the next tick retries */
@@ -1995,11 +2323,22 @@ document.addEventListener('click', (e) => {
   } else if (action === 'filter') {
     state.filter = el.dataset.filter;
     state.shown = PAGE_SIZE;
-    document.querySelectorAll('.chip').forEach((c) => {
+    /* scope to the filter chips — the pulse range pills are .chip too */
+    document.querySelectorAll('[data-action="filter"]').forEach((c) => {
       c.setAttribute('aria-pressed', String(c.dataset.filter === state.filter));
     });
     const entry = state.cache[state.network];
     if (entry) renderGrid(entry, state.network);
+  } else if (action === 'pulse-range') {
+    const r = el.dataset.range;
+    if (!ACTIVITY_RANGES.includes(r) || r === state.pulseRange) return;
+    state.pulseRange = r;
+    try { localStorage.setItem('kascov-pulse-range', r); } catch (err) { /* private mode */ }
+    document.querySelectorAll('[data-action="pulse-range"]').forEach((b) => {
+      b.setAttribute('aria-pressed', String(b.dataset.range === r));
+    });
+    hidePulseTip();
+    updatePulse(state.network);
   } else if (action === 'more') {
     state.shown += PAGE_SIZE;
     const entry = state.cache[state.network];
@@ -2210,6 +2549,27 @@ if (sortSelect) {
     const entry = state.cache[state.network];
     if (entry) renderGrid(entry, state.network);
   });
+}
+
+/* the pulse chart's pointer/keyboard layer attaches once to the static
+   #pulse-chart host (index.html — never replaced; its content is). arrow
+   keys give keyboard users tooltip parity without 61 tab stops. */
+const pulseHost = $('#pulse-chart');
+if (pulseHost) {
+  pulseHost.addEventListener('pointermove', onPulsePointer);
+  pulseHost.addEventListener('pointerdown', onPulsePointer);
+  pulseHost.addEventListener('pointerleave', hidePulseTip);
+  pulseHost.addEventListener('pointercancel', hidePulseTip);
+  pulseHost.addEventListener('keydown', (e) => {
+    if (!pulseView) return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      setPulseHot((pulseHot < 0 ? pulseView.n - 1 : pulseHot) + (e.key === 'ArrowRight' ? 1 : -1));
+    } else if (e.key === 'Escape') {
+      hidePulseTip();
+    }
+  });
+  pulseHost.addEventListener('focusout', hidePulseTip);
 }
 
 const decodeInput = $('#decode-input');

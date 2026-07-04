@@ -128,6 +128,16 @@ pub struct GlobalEventRow {
     pub accepting_daa: u64,
 }
 
+/// One fixed-width DAA bucket of covenant activity: kind counts inside
+/// [daa, daa + bucket width). Buckets with no events are never stored.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct ActivityBucket {
+    pub daa: u64,
+    pub births: u64,
+    pub moves: u64,
+    pub burns: u64,
+}
+
 /// A covenant a pubkey has appeared in as a p2pk-state owner, with role hints.
 #[derive(Clone, Debug, Serialize)]
 pub struct PubkeyCovenantRow {
@@ -327,6 +337,12 @@ impl Store {
         let daa: Option<u64> = self.meta("tip_daa")?.and_then(|s| s.parse().ok());
         let at_ms: Option<u64> = self.meta("tip_at_ms")?.and_then(|s| s.parse().ok());
         Ok(daa.zip(at_ms))
+    }
+
+    /// The DAA score of the last chain block the indexer actually applied —
+    /// unlike tip(), this can never run ahead of what the index contains.
+    pub fn processed_daa(&self) -> Result<Option<u64>> {
+        Ok(self.meta("processed_daa")?.and_then(|s| s.parse().ok()))
     }
 
     /// Point the cursor at a new chain block without touching indexed data —
@@ -563,6 +579,18 @@ impl Store {
             [new_cursor.to_string()],
         )
         .map_err(db_err)?;
+        // The indexer's own progress, distinct from the node tip: during a
+        // backlog replay the tip races ahead while this advances block by
+        // block. Skipped when the batch carries no DAA (BlockEvents::empty
+        // from reset_cursor / the fresh-index bootstrap) — a cursor repoint
+        // is not progress and must never stamp 0 over real progress.
+        if block.accepting_daa > 0 {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('processed_daa', ?1)",
+                [block.accepting_daa.to_string()],
+            )
+            .map_err(db_err)?;
+        }
         tx.commit().map_err(db_err)
     }
 
@@ -756,6 +784,51 @@ impl Store {
             )
             .map_err(db_err)?;
         Ok(DigestStats { births, moves, burns, value_born, active_now, busiest, biggest_birth })
+    }
+
+    /// Kind counts per fixed-width DAA bucket, ascending, for events at or
+    /// after `cutoff_daa`. Empty buckets are omitted — callers zero-fill.
+    /// ev_by_daa covers the range scan; the boolean-SUM idiom matches digest().
+    pub fn activity(&self, bucket_daa: u64, cutoff_daa: u64) -> Result<Vec<ActivityBucket>> {
+        let width = bucket_daa.max(1);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT accepting_daa / ?1 AS bucket,
+                        COALESCE(SUM(kind = 'genesis'), 0),
+                        COALESCE(SUM(kind = 'transition'), 0),
+                        COALESCE(SUM(kind = 'burn'), 0)
+                 FROM covenant_events
+                 WHERE accepting_daa >= ?2
+                 GROUP BY bucket ORDER BY bucket",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![width as i64, cutoff_daa as i64], |row| {
+                Ok(ActivityBucket {
+                    daa: row.get::<_, u64>(0)? * width,
+                    births: row.get(1)?,
+                    moves: row.get(2)?,
+                    burns: row.get(3)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// (MIN, MAX) accepting_daa over every indexed event — None while empty.
+    pub fn event_daa_bounds(&self) -> Result<Option<(u64, u64)>> {
+        let (min, max): (Option<u64>, Option<u64>) = self
+            .conn
+            .query_row(
+                "SELECT MIN(accepting_daa), MAX(accepting_daa) FROM covenant_events",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(db_err)?;
+        Ok(min.zip(max))
     }
 
     /// Per-covenant birth amounts (sum of outputs created at the genesis DAA),
@@ -1029,6 +1102,24 @@ mod tests {
     }
 
     #[test]
+    fn processed_daa_tracks_applies_and_skips_empty() {
+        let mut store = test_store("processed");
+        assert_eq!(store.processed_daa().unwrap(), None);
+        store
+            .apply(&block_with_events(1, 100, vec![(0xA1, EventKind::Genesis, 0x01)]), BlockHash([1; 32]))
+            .unwrap();
+        assert_eq!(store.processed_daa().unwrap(), Some(100));
+        // reset_cursor-style empty batch (accepting_daa = 0) must not touch it
+        store.reset_cursor(BlockHash([9; 32])).unwrap();
+        assert_eq!(store.processed_daa().unwrap(), Some(100));
+        // an event-less checkpoint carrying a DAA still advances it
+        let mut checkpoint = BlockEvents::empty(BlockHash([2; 32]));
+        checkpoint.accepting_daa = 250;
+        store.apply(&checkpoint, BlockHash([2; 32])).unwrap();
+        assert_eq!(store.processed_daa().unwrap(), Some(250));
+    }
+
+    #[test]
     fn recent_events_orders_newest_first_and_limits() {
         let mut store = test_store("recent");
         store
@@ -1103,6 +1194,50 @@ mod tests {
         assert_eq!(d.active_now, 1);
         assert_eq!(d.busiest, Some((CovenantId([0xB2; 32]), 3)));
         assert_eq!(d.biggest_birth, Some((CovenantId([0xB2; 32]), 5_000_000_000)));
+    }
+
+    #[test]
+    fn activity_buckets_and_bounds() {
+        // empty store: no bounds, no buckets
+        let empty = test_store("activity-empty");
+        assert_eq!(empty.event_daa_bounds().unwrap(), None);
+        assert!(empty.activity(14_400, 0).unwrap().is_empty());
+
+        let mut store = test_store("activity");
+        store
+            .apply(&block_with_events(1, 1_000, vec![(0xA1, EventKind::Genesis, 0x01)]), BlockHash([1; 32]))
+            .unwrap();
+        store
+            .apply(
+                &block_with_events(
+                    2,
+                    999_000,
+                    vec![
+                        (0xB2, EventKind::Genesis, 0x03),
+                        (0xB2, EventKind::Transition, 0x04),
+                        (0xB2, EventKind::Transition, 0x05),
+                        (0xA1, EventKind::Burn, 0x06),
+                    ],
+                ),
+                BlockHash([2; 32]),
+            )
+            .unwrap();
+
+        assert_eq!(store.event_daa_bounds().unwrap(), Some((1_000, 999_000)));
+
+        // 24h-range width: daa 1_000 → bucket 0, daa 999_000 → bucket 69 (993_600)
+        let rows = store.activity(14_400, 0).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].daa, rows[0].births, rows[0].moves, rows[0].burns), (0, 1, 0, 0));
+        assert_eq!(
+            (rows[1].daa, rows[1].births, rows[1].moves, rows[1].burns),
+            (69 * 14_400, 1, 2, 1)
+        );
+
+        // a cutoff at the newest bucket edge drops the old genesis
+        let tail = store.activity(14_400, 993_600).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!((tail[0].daa, tail[0].births, tail[0].moves, tail[0].burns), (993_600, 1, 2, 1));
     }
 
     #[test]

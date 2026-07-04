@@ -924,6 +924,9 @@ a.btn:hover { text-decoration: none; }
   .nerd-row { grid-template-columns: 1fr; gap: 0.15rem; padding: 0.55rem 0; }
   .result-count { flex-basis: 100%; margin-left: 0.2rem; }
   .story-when { white-space: normal; }
+  /* the amber "catching up — about …" badge copy cannot fit a phone in
+     one nowrap line; .live-dot's flex:none keeps the dot round on wrap */
+  .live-badge { white-space: normal; }
   /* 16px stops iOS Safari from auto-zooming the page on focus */
   #search { font-size: 1rem; }
   /* svg text scales down with the viewBox; bump it and thin out ticks */
@@ -1017,10 +1020,20 @@ a.btn:hover { text-decoration: none; }
 .live-off { color: var(--faint); }
 .live-off .live-dot { background: var(--faint); }
 
+/* healthy but replaying a backlog — amber, dot still pulsing */
+.live-lag { color: var(--burn); }
+.live-lag .live-dot { background: var(--burn); animation: livepulse-amber 2.2s ease-out infinite; }
+
 @keyframes livepulse {
   0% { box-shadow: 0 0 0 0 rgba(111, 217, 164, 0.45); }
   70% { box-shadow: 0 0 0 6px rgba(111, 217, 164, 0); }
   100% { box-shadow: 0 0 0 0 rgba(111, 217, 164, 0); }
+}
+
+@keyframes livepulse-amber {
+  0% { box-shadow: 0 0 0 0 rgba(242, 165, 102, 0.45); }
+  70% { box-shadow: 0 0 0 6px rgba(242, 165, 102, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(242, 165, 102, 0); }
 }
 
 /* ================================================== records + watch strip */
@@ -1379,10 +1392,16 @@ a.btn:hover { text-decoration: none; }
 /* one ripple on the live-badge dot per pushed (SSE) event; the global
    reduced-motion rule above already pins animations to 0.01ms */
 .live-on.live-flash .live-dot { animation: livepulse 2.2s ease-out infinite, liveflash 0.8s ease-out; }
+.live-lag.live-flash .live-dot { animation: livepulse-amber 2.2s ease-out infinite, liveflash-amber 0.8s ease-out; }
 
 @keyframes liveflash {
   0% { box-shadow: 0 0 0 0 rgba(111, 217, 164, 0.85); }
   100% { box-shadow: 0 0 0 14px rgba(111, 217, 164, 0); }
+}
+
+@keyframes liveflash-amber {
+  0% { box-shadow: 0 0 0 0 rgba(242, 165, 102, 0.85); }
+  100% { box-shadow: 0 0 0 14px rgba(242, 165, 102, 0); }
 }
 
 /* ================================================== what's running here */
@@ -1428,3 +1447,193 @@ a.btn:hover { text-decoration: none; }
 .digest-counts .n-born { color: var(--born); }
 .digest-counts .n-move { color: var(--move); }
 .digest-counts .n-burn { color: var(--burn); }
+
+/* ================================= pulse v2: interactive activity chart */
+/* (the legacy .pulse-* SVG rules above still serve the 404 fallback chart) */
+
+.pulse-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; margin-bottom: 0.7rem; }
+.pulse-head .pulse-caption { margin: 0; flex: 1 1 240px; }
+.pulse-ranges { display: inline-flex; gap: 0.3rem; margin-left: auto; }
+
+.pulse-plot { position: relative; outline-offset: 4px; }
+.pulse-bars {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 170px;
+  border-bottom: 1px solid var(--border);
+  cursor: crosshair;
+  touch-action: pan-y; /* horizontal scrub inspects buckets, vertical still scrolls */
+}
+/* display:flex would beat the UA [hidden] rule — pin the empty state */
+.pulse-bars[hidden], .pulse-ticks[hidden] { display: none; }
+.pulse-col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; justify-content: flex-end; }
+.pulse-col.is-hot .pulse-seg { filter: brightness(1.25); }
+.pulse-seg { width: 100%; height: 0%; border-radius: 1px 1px 0 0; transition: height 0.35s ease, margin-top 0.35s ease; }
+.pulse-seg.seg-cap { border-radius: 3px 3px 0 0; } /* rounded data-end, square baseline */
+.seg-born { background: var(--born); }
+.seg-move { background: var(--move); }
+.seg-burn { background: var(--burn); }
+
+.pulse-ticks { display: flex; justify-content: space-between; gap: 0.4rem; padding-top: 6px; color: var(--faint); font-family: var(--mono); font-size: 11px; }
+.pulse-ticks span { white-space: nowrap; }
+
+.pulse-tip {
+  position: absolute;
+  top: 4px;
+  left: 0;
+  z-index: 5;
+  pointer-events: none;
+  background: var(--bg-soft);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+  padding: 0.45rem 0.7rem;
+  font-size: 0.8rem;
+  line-height: 1.55;
+  white-space: nowrap;
+}
+.pulse-tip .tip-when { color: var(--faint); font-size: 0.74rem; }
+.pulse-tip .dot { width: 8px; height: 8px; }
+.pulse-tip strong { font-variant-numeric: tabular-nums; }
+
+.pulse-none { text-align: center; padding: 2.6rem 1rem; margin: 0; }
+
+/* --- mobile: tighter bars, fewer ticks, caption under the pills */
+@media (max-width: 720px) {
+  .pulse-bars { gap: 1px; height: 150px; }
+  .pulse-ticks span:nth-child(2), .pulse-ticks span:nth-child(4) { display: none; }
+  .pulse-head .pulse-caption { flex-basis: 100%; order: 2; }
+  .pulse-ranges { margin-left: 0; }
+}
+
+/* ================================================= mobile-perfect pass */
+/* phone-first rules grouped here on purpose; breakpoints reuse the file's
+   existing cuts: 720px (phones/small tablets), 460px (small phones).
+   default (desktop) styles above stay untouched. the interactive pulse
+   chart (pulse v2 above) already ships its own pointer tooltip, mobile
+   tick thinning, and range pills — this section only tops it up (taller
+   bars, an in-card tip clamp, scrollable pills); the legacy svg-font
+   rules in the first 720px block still serve the 404 fallback chart. */
+
+/* iOS safe areas — env() is 0 everywhere else; pairs with
+   viewport-fit=cover in index.html */
+.site-header {
+  padding-top: env(safe-area-inset-top);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+.site-footer { padding-bottom: calc(2.4rem + env(safe-area-inset-bottom)); }
+
+/* display:flex on .mini-grid (below) would beat the hidden attribute's UA
+   display:none (#digest-cards carries hidden directly on a .mini-grid) */
+.mini-grid[hidden] { display: none; }
+
+@media (max-width: 720px) {
+  /* last-ditch guard: nothing may pan the page sideways. clip (not
+     hidden) creates no scroll container, so the sticky header survives */
+  body { overflow-x: clip; }
+
+  /* the nav + tabs group sizes to max-content (flex: none), so its own
+     flex-wrap never engaged and the mainnet tab poked past a 320px screen
+     — capping it lets nav and tabs share a line and wrap when they must */
+  .header-right { max-width: 100%; }
+
+  /* tap targets ≥44px effective, visuals unchanged (no horizontal padding
+     on .nav-link: measured at 390px, +0.3rem/side tips nav + tabs past one
+     line — the 44px height is the win that matters) */
+  .nav-link { display: inline-flex; align-items: center; min-height: 44px; }
+  .network-tab { position: relative; }
+  .network-tab::after { content: ""; position: absolute; inset: -9px -2px; }
+  .copy-btn { position: relative; }
+  .copy-btn::after { content: ""; position: absolute; inset: -9px -6px; }
+  .star::after { content: ""; position: absolute; inset: -7px; border-radius: 50%; }
+  .suggest-item { padding: 0.7rem; }
+
+  /* explore toolbar: every filter chip stays visible */
+  .chips { flex-wrap: wrap; }
+  .chip { padding: 0.5rem 0.95rem; }
+
+  /* the long "catching up …" badge copy wraps instead of panning. the
+     same rule in the first 720px block is cascade-dead — the base
+     .live-badge { white-space: nowrap } sits LATER in the file and wins
+     at equal specificity; from down here it actually applies */
+  .live-badge { white-space: normal; flex-wrap: wrap; }
+  /* 16px stops iOS Safari zooming the page when these get focus
+     (#search already gets 1rem in the first 720px block above) */
+  #sort { font-size: 16px; padding-block: 0.45rem; }
+  #decode-input { font-size: 16px; }
+
+  /* records / watch / digest cards: horizontal scroll-snap strips */
+  .mini-grid {
+    display: flex;
+    gap: 0.7rem;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 0.4rem;
+    /* subtle right-edge fade as a "more this way" hint; floors at 35%
+       opacity so the last card never disappears */
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 26px), rgba(0, 0, 0, 0.35));
+    mask-image: linear-gradient(90deg, #000 calc(100% - 26px), rgba(0, 0, 0, 0.35));
+  }
+  .mini-card { flex: 0 0 min(76vw, 250px); scroll-snap-align: start; }
+
+  /* chart card: tighter frame so the bars get the width */
+  .pulse-chart { padding: 0.75rem 0.65rem 0.5rem; }
+  /* the mobile contract asks for ~220px of chart at 1:1 pixels — 194px
+     of bars + the ~26px tick row lands there (overrides the 150px above) */
+  .pulse-bars { height: 194px; }
+  /* the pointer tooltip may never poke past the chart card on a phone */
+  .pulse-tip { max-width: calc(100% - 8px); white-space: normal; }
+  /* range pills scroll instead of wrapping so the chart keeps its height
+     (five pills + the fatter tap padding can overflow a 320px screen) */
+  .pulse-ranges {
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .pulse-ranges::-webkit-scrollbar { display: none; }
+  .pulse-ranges .chip { flex: none; min-height: 44px; } /* comfortable thumb target */
+
+  /* stats line breathes when it wraps */
+  .stats-strip { line-height: 1.75; }
+
+  /* analytics bars: each row is 3 stacked lines here — space the rows */
+  .template-bars { gap: 0.85rem; }
+
+  /* decoder + dev: reachable buttons, momentum scrolling in code */
+  .decode-actions .btn, .example-row .chip { min-height: 44px; }
+  .inst-list, .codeblock, .script { -webkit-overflow-scrolling: touch; }
+  .codeblock { font-size: 0.72rem; padding: 0.75rem 0.8rem; }
+}
+
+@media (max-width: 460px) {
+  /* one comfortable column of coin cards (auto-fill already yields one
+     at this width — this makes it a decision, not an accident) */
+  .coin-grid { grid-template-columns: 1fr; }
+
+  /* detail: avatar above the name, everything tightens a notch */
+  .detail-head { flex-direction: column; align-items: flex-start; gap: 0.6rem; }
+  .id-chip { flex-wrap: wrap; max-width: 100%; row-gap: 0.25rem; }
+  .tl-item { gap: 0.75rem; }
+  .tl-text { font-size: 0.92rem; }
+  .tl-meta { font-size: 0.8rem; }
+  .nerd-panel { padding: 0.9rem 0.75rem 1.1rem; }
+  .script { font-size: 0.7rem; padding: 0.55rem 0.6rem; }
+  .utxo { padding: 0.7rem; }
+  .utxo-meta { flex-direction: column; gap: 0.15rem; }
+
+  /* digest: keep the 3 counters abreast, restack each tile vertically
+     (overrides the row-flip the earlier 460 rule gives hero .stat tiles) */
+  .digest-counts { gap: 0.5rem; }
+  .digest-counts .stat { flex-direction: column; align-items: center; gap: 0.1rem; padding: 0.7rem 0.35rem; }
+  .digest-counts .stat-n { font-size: 1.35rem; }
+
+  /* page frames tighten */
+  .page-head { padding: 1.7rem 0 1.1rem; }
+  .empty-card { padding: 2.1rem 1rem; }
+  .pulse-legend { gap: 0.8rem; flex-wrap: wrap; }
+}

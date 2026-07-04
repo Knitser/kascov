@@ -191,6 +191,7 @@ fn build_live_snapshot(store: &Store, network: kascov_core::Network) -> Result<s
         "generated_at_ms": now_ms(),
         "tip_daa": tip.map(|t| t.0),
         "tip_at_ms": tip.map(|t| t.1),
+        "processed_daa": store.processed_daa()?,
         "stats": stats_json(store)?,
         "recent_events": store.recent_events(LIVE_EVENTS)?,
     }))
@@ -217,6 +218,49 @@ fn build_digest(store: &Store, network: kascov_core::Network) -> Result<serde_js
         "active_now": d.active_now,
         "busiest": d.busiest.map(|(id, n)| serde_json::json!({ "covenant_id": id, "events": n })),
         "biggest_birth": d.biggest_birth.map(|(id, v)| serde_json::json!({ "covenant_id": id, "value": v })),
+    }))
+}
+
+/// (range, total window in DAA, bucket width in DAA) — ~60 buckets each
+/// (DAA ticks ~10/s). "all" derives its width from the index's own bounds.
+const ACTIVITY_RANGES: [(&str, u64, u64); 4] = [
+    ("1h", 36_000, 600),
+    ("6h", 216_000, 3_600),
+    ("24h", 864_000, 14_400),
+    ("48h", 1_728_000, 28_800),
+];
+
+/// Kind counts per DAA bucket for the activity chart. Bucket edges are
+/// absolute multiples of the width and the cutoff is aligned down to one,
+/// so consecutive rebuilds agree bucket-for-bucket (the CDN and the client
+/// can diff by `daa`). Empty buckets are omitted; the client zero-fills.
+fn build_activity_snapshot(
+    store: &Store,
+    network: kascov_core::Network,
+    range: &'static str,
+) -> Result<serde_json::Value> {
+    let tip = store.tip()?;
+    let bounds = store.event_daa_bounds()?;
+    // window anchor: the recorded tip, else the newest event (pre-tip DBs)
+    let anchor = tip.map(|t| t.0).or(bounds.map(|b| b.1)).unwrap_or(0);
+    let (bucket_daa, cutoff) = if range == "all" {
+        let min = bounds.map(|b| b.0).unwrap_or(anchor);
+        let width = (anchor.saturating_sub(min) / 64).max(1);
+        (width, (min / width) * width)
+    } else {
+        let &(_, total, width) =
+            ACTIVITY_RANGES.iter().find(|(r, ..)| *r == range).expect("range is whitelisted");
+        (width, (anchor.saturating_sub(total) / width) * width)
+    };
+    Ok(serde_json::json!({
+        "network": network.to_string(),
+        "range": range,
+        "bucket_daa": bucket_daa,
+        "window_start_daa": cutoff,
+        "generated_at_ms": now_ms(),
+        "tip_daa": tip.map(|t| t.0),
+        "tip_at_ms": tip.map(|t| t.1),
+        "buckets": store.activity(bucket_daa, cutoff)?,
     }))
 }
 
@@ -250,6 +294,7 @@ fn build_grid_snapshot(store: &Store, network: kascov_core::Network) -> Result<s
         "generated_at_ms": now_ms(),
         "tip_daa": tip.map(|t| t.0),
         "tip_at_ms": tip.map(|t| t.1),
+        "processed_daa": store.processed_daa()?,
         "stats": stats_json(store)?,
         "covenants": rows,
     }))
@@ -902,6 +947,7 @@ async fn serve(
         .route("/data/{network}/tx/{txid}", get(tx_handler))
         .route("/data/{network}/digest.json", get(digest_handler))
         .route("/data/{network}/templates.json", get(templates_handler))
+        .route("/data/{network}/activity.json", get(activity_handler))
         .route("/data/{network}/addr/{address}", get(addr_handler))
         .route("/data/{network}/stream", get(stream_handler))
         // compresses the small dynamic responses; the big cached bodies are
@@ -1277,6 +1323,50 @@ async fn templates_handler(
     serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
         Ok(Some(serde_json::to_string(&build_templates_snapshot(&store, network)?)?))
+    })
+    .await
+}
+
+/// Kind counts per DAA bucket for the interactive activity chart.
+/// ?range= is whitelisted; unknown values are a 400, absent means 24h.
+async fn activity_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let Ok(network) = net_name.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    // whitelist → &'static str, so the closure needs no owned copy
+    let range: &'static str = match q.get("range").map(String::as_str) {
+        None | Some("24h") => "24h",
+        Some("1h") => "1h",
+        Some("6h") => "6h",
+        Some("48h") => "48h",
+        Some("all") => "all",
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+                "unknown range — use 1h | 6h | 24h | 48h | all",
+            )
+                .into_response()
+        }
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/activity/{range}");
+    let cc = "public, max-age=15, s-maxage=60, stale-while-revalidate=300";
+    serve_cached(&state, key, 30, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        Ok(Some(serde_json::to_string(&build_activity_snapshot(&store, network, range)?)?))
     })
     .await
 }

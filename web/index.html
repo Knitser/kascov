@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>kascov — watch Kaspa's smart coins live their lives</title>
   <meta name="description" content="The first covenant explorer for Kaspa L1. kascov watches every smart coin on the Kaspa network get born, move, and retire — and saves the history the network deletes after ~3 days.">
   <meta property="og:title" content="kascov — watch Kaspa's smart coins live their lives">
@@ -258,6 +258,10 @@
             <p class="endpoint-desc">what runs on this network — recognized script templates aggregated over every state UTXO: <code class="mono">live_states</code> / <code class="mono">live_value</code> now, <code class="mono">ever_seen</code> all-time, distinct <code class="mono">covenants</code>, and <code class="mono">revealed_runs</code> (compiled contracts proven at spend time; a tx sweeping N states counts N). unrecognized scripts are counted, not hidden.</p>
           </div>
           <div class="endpoint">
+            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/activity.json?range=24h</code></p>
+            <p class="endpoint-desc">the histogram behind the activity chart — life-event counts (<code class="mono">births</code> / <code class="mono">moves</code> / <code class="mono">burns</code>) per DAA bucket. <code class="mono">range</code> is <code class="mono">1h | 6h | 24h | 48h | all</code> (default 24h); <code class="mono">bucket_daa</code> is the bucket width and each bucket's <code class="mono">daa</code> its start. buckets with nothing in them are omitted — treat them as zeros. refreshes about every 30s.</p>
+          </div>
+          <div class="endpoint">
             <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/stream</code></p>
             <p class="endpoint-desc">server-sent events — one JSON message per life event the moment the indexer sees it (<code class="mono">covenant_id</code>, <code class="mono">kind</code>, <code class="mono">txid</code>, <code class="mono">accepting_daa</code>), plus a <code class="mono">: ka</code> comment every 25s. treat messages as hints and confirm through the polled feeds — some CDNs buffer streams, so keep a poll running.</p>
           </div>
@@ -294,6 +298,9 @@ curl -s https://kascov-explorer.web.app/data/testnet-10/addr/&lt;address-or-pubk
 # what runs on this network, by recognized template
 curl -s https://kascov-explorer.web.app/data/testnet-10/templates.json | jq .templates
 
+# the activity histogram behind the chart
+curl -s 'https://kascov-explorer.web.app/data/testnet-10/activity.json?range=24h' | jq .buckets
+
 # push, not poll — every life event as it happens (SSE)
 curl -N https://kascov-explorer.web.app/data/testnet-10/stream</code></pre>
       </section>
@@ -306,6 +313,7 @@ curl -N https://kascov-explorer.web.app/data/testnet-10/stream</code></pre>
           <div><dt class="mono">events[]</dt><dd>the life story (per-coin endpoint): <code>kind</code> is <code>genesis</code> | <code>transition</code> | <code>burn</code>, ordered by <code>seq</code>; <code>txid</code> is the transaction, <code>accepting_daa</code> when the chain accepted it</dd></div>
           <div><dt class="mono">born_value</dt><dd>grid rows only — what the coin held at birth (sompi)</dd></div>
           <div><dt class="mono">accepting_daa / DAA</dt><dd>Kaspa's block-height-like clock — it ticks ~10 per second. <code>tip_daa</code> + <code>tip_at_ms</code> in each snapshot anchor it to wall-clock time</dd></div>
+          <div><dt class="mono">processed_daa</dt><dd>live + grid feeds — the DAA of the last chain block the indexer has actually applied. <code>tip_daa − processed_daa</code> is the honest sync lag: the indexer replays every block in order, so during a catch-up the tip runs ahead while nothing is skipped. <code>null</code> from indexes that haven't recorded it yet</dd></div>
           <div><dt class="mono">genesis_txid, genesis_daa</dt><dd>where the coin was born — <code>null</code> if it was first seen mid-life (see <code>lineage_complete</code>)</dd></div>
           <div><dt class="mono">lineage_complete</dt><dd><code>false</code> means kascov started watching after the coin was born; earlier history is honestly missing</dd></div>
           <div><dt class="mono">utxos[]</dt><dd>every state UTXO ever seen: <code>outpoint</code>, <code>value</code> (sompi, 1e8 = 1 KAS), <code>live</code>, <code>script_hex</code> + <code>script_asm</code> (pre-disassembled), <code>uses_covenant_ops</code>, <code>uses_zk_ops</code>; spent ones add <code>spent_txid</code></dd></div>

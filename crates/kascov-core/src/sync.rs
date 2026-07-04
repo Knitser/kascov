@@ -80,6 +80,7 @@ pub async fn sync_once(
 
     let mut since_checkpoint = 0u64;
     let mut last_seen: Option<BlockHash> = None;
+    let mut last_daa = 0u64;
 
     /* Prefetch accepting blocks concurrently (ordered) while the store work
        below stays strictly sequential per chain block. Items are moved into
@@ -97,6 +98,7 @@ pub async fn sync_once(
         last_seen = Some(accepted.accepting_block);
 
         let accepting = block?;
+        last_daa = accepting.daa_score;
         let wanted: HashSet<TxId> = accepted.accepted_tx_ids.iter().copied().collect();
 
         // Resolve accepted transaction bodies: the accepting block's own txs
@@ -177,10 +179,16 @@ pub async fn sync_once(
         }
     }
 
-    // Final checkpoint so the next run resumes at the tip.
+    // Final checkpoint so the next run resumes at the tip. It carries the
+    // last walked block's real DAA so processed_daa (the indexer's honest
+    // progress mark) advances every completed pass, even on stretches with
+    // no covenant events — steady-state passes walk ~20 blocks and never
+    // hit the mid-stream checkpoint above.
     if since_checkpoint > 0 {
         if let Some(cursor) = last_seen {
-            store.apply(&BlockEvents::empty(cursor), cursor)?;
+            let mut checkpoint = BlockEvents::empty(cursor);
+            checkpoint.accepting_daa = last_daa;
+            store.apply(&checkpoint, cursor)?;
         }
     }
     Ok(stats)
