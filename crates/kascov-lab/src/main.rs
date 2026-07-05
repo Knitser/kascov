@@ -55,6 +55,17 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         transitions: u32,
     },
+    /// Birth a compiled contract as a real covenant: its P2SH commitment
+    /// becomes the coin's state. Pairs with the generator on
+    /// kascov-explorer.web.app/decode ("make this yours").
+    Deploy {
+        /// Compiled contract hex (the generator's "compiled" block)
+        #[arg(long)]
+        program_hex: String,
+        /// Sompi the newborn coin holds (default 10 TKAS)
+        #[arg(long, default_value_t = 1_000_000_000)]
+        value: u64,
+    },
 }
 
 #[tokio::main]
@@ -64,6 +75,7 @@ async fn main() -> Result<()> {
         Command::Keygen => keygen(&cli),
         Command::Balance => balance(&cli).await,
         Command::Demo { transitions } => demo(&cli, transitions).await,
+        Command::Deploy { ref program_hex, value } => deploy(&cli, program_hex, value).await,
     }
 }
 
@@ -88,8 +100,17 @@ fn address_of(keypair: &Keypair) -> Address {
 
 fn keygen(cli: &Cli) -> Result<()> {
     let keypair = load_or_create_key(&cli.key, true)?;
-    println!("key file: {}", cli.key.display());
-    println!("address:  {}", address_of(&keypair));
+    let (xonly, _) = keypair.public_key().x_only_public_key();
+    let pk = xonly.serialize();
+    let pk_hash = blake2b_simd::Params::new().hash_length(32).hash(&pk);
+    println!("key file:        {}", cli.key.display());
+    println!("address:         {}", address_of(&keypair));
+    println!("pubkey (x-only): {}", hex::encode(pk));
+    println!("blake2b(pubkey): {}", hex::encode(pk_hash.as_bytes()));
+    println!();
+    println!("the pubkey and its blake2b fill the generator's key fields on");
+    println!("kascov-explorer.web.app/decode — fund the address at");
+    println!("https://faucet-testnet.kaspanet.io before deploying.");
     Ok(())
 }
 
@@ -202,6 +223,96 @@ async fn demo(cli: &Cli, transitions: u32) -> Result<()> {
     println!();
     println!("covenant lifecycle complete — trace it with:");
     println!("  kascov --network testnet-10 trace {id}");
+    Ok(())
+}
+
+/// Birth a compiled contract: the coin's state is the P2SH commitment of the
+/// program (OpBlake2b <blake2b-256> OpEqual — the exact shape the explorer
+/// recognizes and, at spend time, verifies against the revealed program).
+async fn deploy(cli: &Cli, program_hex: &str, value: u64) -> Result<()> {
+    let program = hex::decode(program_hex.trim()).context("--program-hex is not valid hex")?;
+    if program.is_empty() {
+        bail!("empty program");
+    }
+
+    // Name what we're deploying (warn-and-proceed on unknown shapes: the
+    // chain doesn't care, but the user should know kascov won't label it).
+    let decoded = kascov_decode::Registry::default().decode(0, &program);
+    match decoded.template {
+        Some(t) => println!("program:   {t} ({} bytes)", program.len()),
+        None => println!("program:   unrecognized shape ({} bytes) — deploying anyway; kascov will show it as a plain p2sh commitment", program.len()),
+    }
+    for f in &decoded.fields {
+        println!("           {} = {}", f.name, hex::encode(&f.value));
+    }
+
+    let commitment = blake2b_simd::Params::new().hash_length(32).hash(&program);
+    let mut spk_script = Vec::with_capacity(35);
+    spk_script.push(0xaa); // OpBlake2b
+    spk_script.push(0x20); // push 32
+    spk_script.extend_from_slice(commitment.as_bytes());
+    spk_script.push(0x87); // OpEqual
+    let p2sh_spk = kaspa_consensus_core::tx::ScriptPublicKey::from_vec(0, spk_script);
+
+    let keypair = load_or_create_key(&cli.key, false)?;
+    let address = address_of(&keypair);
+    let plain_spk = pay_to_address_script(&address);
+    let client = connect(cli).await?;
+
+    let utxos = client.get_utxos_by_addresses(vec![address.clone().into()]).await?;
+    let funding = utxos
+        .iter()
+        .filter(|u| u.utxo_entry.covenant_id.is_none())
+        .max_by_key(|u| u.utxo_entry.amount)
+        .with_context(|| format!("no spendable UTXOs on {address} — fund it via the faucet first"))?;
+    let needed = value + FEE;
+    if funding.utxo_entry.amount < needed {
+        bail!(
+            "largest UTXO holds {:.8} TKAS, need at least {:.8} (value + fee)",
+            funding.utxo_entry.amount as f64 / 1e8,
+            needed as f64 / 1e8
+        );
+    }
+    let funding_utxo = SpendableUtxo {
+        outpoint: TransactionOutpoint::new(funding.outpoint.transaction_id, funding.outpoint.index),
+        entry: UtxoEntry::new(
+            funding.utxo_entry.amount,
+            funding.utxo_entry.script_public_key.clone(),
+            funding.utxo_entry.block_daa_score,
+            funding.utxo_entry.is_coinbase,
+            None,
+        ),
+    };
+
+    // The covenant id commits to the funding outpoint + the authorized
+    // output (index 0 only — change at index 1 stays unbound).
+    let bound_plain = TransactionOutput::new(value, p2sh_spk.clone());
+    let id = covenant_id(funding_utxo.outpoint, std::iter::once((0u32, &bound_plain)));
+    let mut outputs = vec![TransactionOutput::with_covenant(
+        value,
+        p2sh_spk,
+        Some(CovenantBinding::new(0, id)),
+    )];
+    let change = funding_utxo.entry.amount - value - FEE;
+    if change >= 100_000 {
+        outputs.push(TransactionOutput::new(change, plain_spk));
+    } else if change > 0 {
+        bail!("change of {change} sompi is dust — pick a coin value that leaves ≥ 0.001 TKAS or exactly 0");
+    }
+
+    let tx = build_signed(&keypair, &funding_utxo, outputs)?;
+    let txid = submit(&client, &tx).await?;
+    println!();
+    println!("BIRTH      covenant {id}");
+    println!("           tx {txid}");
+    println!("           program blake2b {}", hex::encode(commitment.as_bytes()));
+    println!();
+    println!("watch it live (give the indexer ~a minute):");
+    println!("  https://kascov-explorer.web.app/testnet-10/c/{id}");
+    println!();
+    println!("honest note: the coin shows as a 'p2sh commitment' until a spend");
+    println!("reveals the program; spending means satisfying the contract's own");
+    println!("rules — this lab doesn't do that part (yet).");
     Ok(())
 }
 

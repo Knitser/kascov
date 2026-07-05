@@ -227,6 +227,13 @@ const SS_DUMPS = [
       ['pledge', '00e1f505'],
       ['period', 'e803'],
     ],
+    /* generator metadata: how each constructor arg is entered and encoded */
+    params: [
+      { name: 'recipient', kind: 'pubkey', source: 'recipient', hint: 'x-only public key that can claim each pledge' },
+      { name: 'funder_hash', kind: 'hash32', source: 'funder', hint: 'blake2b-256 of the funder’s public key (can reclaim)' },
+      { name: 'pledge', kind: 'amount', source: 'pledge', hint: 'how much the recipient may take per period' },
+      { name: 'period', kind: 'daa', source: 'period', hint: 'claim interval in DAA ticks (≈10 per second)' },
+    ],
   },
   {
     name: 'SilverScript · Escrow',
@@ -237,6 +244,11 @@ const SS_DUMPS = [
       ['buyer', '11'.repeat(32)],
       ['seller', '22'.repeat(32)],
     ],
+    params: [
+      { name: 'arbiter_hash', kind: 'hash32', source: 'arbiter', hint: 'blake2b-256 of the arbiter’s public key' },
+      { name: 'buyer', kind: 'pubkey', source: 'buyer', hint: 'the buyer’s x-only public key' },
+      { name: 'seller', kind: 'pubkey', source: 'seller', hint: 'the seller’s x-only public key' },
+    ],
   },
   {
     name: 'SilverScript · LastWill',
@@ -246,6 +258,11 @@ const SS_DUMPS = [
       ['inheritor_hash', '33'.repeat(32)],
       ['cold_hash', '44'.repeat(32)],
       ['hot_hash', '11'.repeat(32)],
+    ],
+    params: [
+      { name: 'inheritor_hash', kind: 'hash32', source: 'inheritor', hint: 'blake2b-256 of the inheritor’s public key' },
+      { name: 'cold_hash', kind: 'hash32', source: 'cold', hint: 'blake2b-256 of the cold-recovery public key' },
+      { name: 'hot_hash', kind: 'hash32', source: 'hot', hint: 'blake2b-256 of the everyday (hot) public key' },
     ],
   },
 ];
@@ -262,8 +279,68 @@ function pushValue(inst) {
 
 const sameBytes = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 
+/* ---- emit: rebuild a compiled contract with new constructor args ---- */
+
+/* Kaspa script-number encoding (mirror of kascov-decode's snum): minimal
+   little-endian sign-magnitude; a sign-guard 0x00 is appended when the top
+   byte's high bit is set. 180 → b4 00 · 1000 → e8 03 · 1e8 → 00 e1 f5 05 */
+function snumEncode(v) {
+  let n = typeof v === 'bigint' ? v : BigInt(v);
+  if (n === 0n) return [];
+  const neg = n < 0n;
+  if (neg) n = -n;
+  const out = [];
+  while (n > 0n) { out.push(Number(n & 0xffn)); n >>= 8n; }
+  if (out[out.length - 1] & 0x80) out.push(neg ? 0x80 : 0x00);
+  else if (neg) out[out.length - 1] |= 0x80;
+  return out;
+}
+
+function snumDecode(bytes) {
+  if (!bytes.length) return 0n;
+  let n = 0n;
+  for (let i = bytes.length - 1; i >= 0; i--) {
+    n = (n << 8n) | BigInt(i === bytes.length - 1 ? bytes[i] & 0x7f : bytes[i]);
+  }
+  return bytes[bytes.length - 1] & 0x80 ? -n : n;
+}
+
+/* Canonical push encoding — exactly what the SilverScript compiler's
+   ScriptBuilder emits for a pushed value. */
+function encodePush(value) {
+  if (value.length === 0) return [0x00];
+  if (value.length === 1 && value[0] === 0x81) return [0x4f];
+  if (value.length === 1 && value[0] >= 1 && value[0] <= 16) return [0x50 + value[0]];
+  if (value.length <= 75) return [value.length, ...value];
+  if (value.length <= 0xff) return [0x4c, value.length, ...value];
+  if (value.length <= 0xffff) return [0x4d, value.length & 0xff, value.length >> 8, ...value];
+  return [0x4e, value.length & 0xff, (value.length >> 8) & 0xff, (value.length >> 16) & 0xff, (value.length >>> 24), ...value];
+}
+
+/* Walk a skeleton, keeping fixed ops/consts byte-identical to dump A and
+   re-encoding only the slots. Returns Uint8Array or null on missing args. */
+function emitSkeleton(skel, args) {
+  const out = [];
+  for (const item of skel.items) {
+    if (item.slot !== undefined) {
+      const v = args[item.slot];
+      if (!v) return null;
+      out.push(...encodePush(Array.from(v)));
+    } else {
+      out.push(...item.raw);
+    }
+  }
+  return Uint8Array.from(out);
+}
+
+function emitFromSkeleton(name, args) {
+  const skel = skeletons().find((s) => s.name === name);
+  return skel ? emitSkeleton(skel, args) : null;
+}
+
 function deriveSkeleton(name, aHex, bHex, sentinels) {
-  const ia = disassemble(parseHex(aHex));
+  const aBytes = parseHex(aHex);
+  const ia = disassemble(aBytes);
   const ib = disassemble(parseHex(bHex));
   if (ia.truncated || ib.truncated) return null;
   const A = ia.instructions, B = ib.instructions;
@@ -271,14 +348,18 @@ function deriveSkeleton(name, aHex, bHex, sentinels) {
   const items = [];
   for (let i = 0; i < A.length; i++) {
     const x = A[i], y = B[i];
+    /* fixed items keep their raw bytes from dump A so emit is byte-perfect
+       even where the compiler chose a non-minimal push for a constant */
+    const end = i + 1 < A.length ? A[i + 1].offset : aBytes.length;
+    const raw = Array.from(aBytes.slice(x.offset, end));
     const px = x.group === 'push', py = y.group === 'push';
     if (!px && !py) {
       if (x.opcode !== y.opcode) return null;
-      items.push({ op: x.opcode });
+      items.push({ op: x.opcode, raw });
     } else if (px && py) {
       const vx = pushValue(x), vy = pushValue(y);
       if (!vx || !vy) return null;
-      if (sameBytes(vx, vy)) items.push({ const: vx });
+      if (sameBytes(vx, vy)) items.push({ const: vx, raw });
       else {
         const hit = sentinels.find(([, s]) => sameBytes(vx, Array.from(parseHex(s) || [])));
         if (!hit) return null;
@@ -293,7 +374,18 @@ let SS_SKELETONS = null;
 function skeletons() {
   if (!SS_SKELETONS) {
     SS_SKELETONS = SS_DUMPS
-      .map((d) => deriveSkeleton(d.name, d.a, d.b, d.sentinels))
+      .map((d) => {
+        const skel = deriveSkeleton(d.name, d.a, d.b, d.sentinels);
+        if (!skel) return null;
+        /* self-check: emitting with the sentinel args must reproduce dump A
+           byte-for-byte — the generator only offers itself when this holds */
+        const args = {};
+        for (const [label, hex] of d.sentinels) args[label] = Array.from(parseHex(hex));
+        const emitted = emitSkeleton(skel, args);
+        skel.emitVerified = !!emitted && toHex(emitted) === d.a;
+        skel.params = d.params || [];
+        return skel;
+      })
       .filter(Boolean);
   }
   return SS_SKELETONS;
@@ -341,6 +433,12 @@ function matchTemplates(instructions, bytes) {
   return null;
 }
 
-window.kascovDisasm = { disassemble, opcodeInfo, parseHex, toAsm, toHex, matchTemplates, SS_DUMPS };
+window.kascovDisasm = {
+  disassemble, opcodeInfo, parseHex, toAsm, toHex, matchTemplates, SS_DUMPS,
+  emitFromSkeleton, snumEncode, snumDecode, skeletonInfo: (name) => {
+    const s = skeletons().find((x) => x.name === name);
+    return s ? { params: s.params, emitVerified: s.emitVerified } : null;
+  },
+};
 
 })();

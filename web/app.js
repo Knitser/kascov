@@ -263,6 +263,17 @@ function utcTitle(ms) {
   return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
 }
 
+/* compact absolute time, always UTC: "Jul 5, 14:32 UTC" (year only when
+   it isn't this year) — shown inline so nobody has to hover, mobile included */
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function absShort(ms) {
+  const d = new Date(ms);
+  const year = d.getUTCFullYear() === new Date().getUTCFullYear() ? '' : ` ${d.getUTCFullYear()}`;
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}${year}, ${hh}:${mm} UTC`;
+}
+
 function txUrl(network, txid) {
   return NETWORKS[network].txBase + txid;
 }
@@ -514,7 +525,7 @@ function liteStoryRow(ev, live, network) {
     : `<strong>${esc(name)}</strong> moved`;
   return `<li><a class="story ${meta.cls}" href="#/${esc(network)}/c/${esc(ev.covenant_id)}">` +
     avatarSvg(ev.covenant_id, 34) +
-    `<span class="story-text">${sentence} <span class="story-when" title="${esc(utcTitle(ms))}">— ${esc(relTime(ms))}</span></span>` +
+    `<span class="story-text">${sentence} <span class="story-when" title="${esc(utcTitle(ms))}">— ${esc(relTime(ms))} <span class="abs-t">· ${esc(absShort(ms))}</span></span></span>` +
     `<span class="story-kind" aria-hidden="true">${ICONS[meta.icon]}</span>` +
     `</a></li>`;
 }
@@ -1043,7 +1054,7 @@ function storyRow(ev, entry, live, network) {
     : `<strong>${esc(name)}</strong> moved`;
   return `<li><a class="story ${meta.cls}" href="#/${esc(network)}/c/${esc(ev.covenant_id)}">` +
     avatarSvg(ev.covenant_id, 34) +
-    `<span class="story-text">${sentence} <span class="story-when" title="${esc(utcTitle(ms))}">— ${esc(relTime(ms))}</span></span>` +
+    `<span class="story-text">${sentence} <span class="story-when" title="${esc(utcTitle(ms))}">— ${esc(relTime(ms))} <span class="abs-t">· ${esc(absShort(ms))}</span></span></span>` +
     `<span class="story-kind" aria-hidden="true">${ICONS[meta.icon]}</span>` +
     `</a></li>`;
 }
@@ -1567,7 +1578,7 @@ function timelineItem(entry, ev, data, network, flashTx) {
     `<span class="tl-icon" title="${esc(GLOSSARY[ev.kind] || '')}">${ICONS[meta.icon]}</span>` +
     `<div class="tl-body">` +
     `<p class="tl-text">${eventSentence(entry, ev, network, true)}</p>` +
-    `<p class="tl-meta"><span title="${esc(utcTitle(ms))}">${esc(relTime(ms))}</span> · <a href="${esc(txUrl(network, ev.txid))}" target="_blank" rel="noopener noreferrer">view transaction ↗</a>${nerdBits}</p>` +
+    `<p class="tl-meta"><span title="${esc(utcTitle(ms))}">${esc(relTime(ms))}</span> · <span class="abs-t" title="${esc(utcTitle(ms))}">${esc(absShort(ms))}</span> · <a href="${esc(txUrl(network, ev.txid))}" target="_blank" rel="noopener noreferrer">view transaction ↗</a>${nerdBits}</p>` +
     withBits +
     `</div></li>`;
 }
@@ -1723,12 +1734,12 @@ function renderDetail(entry, covId, flashTx) {
   document.title = `${rec.name} — kascov`;
 
   const summaryBits = [];
-  summaryBits.push(`${c.genesis_daa != null ? 'born' : 'first seen'} ${relTime(rec.bornMs)}`);
+  summaryBits.push(`${c.genesis_daa != null ? 'born' : 'first seen'} ${relTime(rec.bornMs)} (${absShort(rec.bornMs)})`);
   summaryBits.push(rec.moves === 0 ? 'never moved' : rec.moves === 1 ? 'moved once' : `moved ${rec.moves} times`);
   if (alive) {
     summaryBits.push(`currently holds ${fmtAmount(c.live_value, network)}${c.live_utxos > 1 ? ` in ${c.live_utxos} pieces` : ''}`);
   } else {
-    summaryBits.push(`retired ${relTime(rec.lastMs)}`);
+    summaryBits.push(`retired ${relTime(rec.lastMs)} (${absShort(rec.lastMs)})`);
   }
 
   const preface = c.genesis_txid == null
@@ -1814,6 +1825,104 @@ const DECODE_SHARE_MAX = 8192;
 let decodeShowAll = false;
 let lastDecodeKey = '';
 
+/* ------------------------ contract generator ("make this yours") -------- */
+
+/* open state + the user's edits; reset whenever the pasted script changes */
+let genState = null;
+
+function genCta(tpl) {
+  if (!tpl || !tpl.name.startsWith('SilverScript · ')) return '';
+  const info = window.kascovDisasm.skeletonInfo(tpl.name);
+  if (!info || !info.emitVerified) return ''; /* generator only offers itself when emit is proven */
+  const open = genState && genState.open;
+  return `<p class="gen-cta-row"><button type="button" class="btn btn-accent gen-cta" data-action="gen-toggle">` +
+    `${open ? 'close the generator ↑' : 'make this yours →'}</button>` +
+    `<span class="dim gen-cta-hint">edit the parameters, get your own deployable contract</span></p>`;
+}
+
+function genPanelHtml(tpl, bytes) {
+  if (!tpl || !genState || !genState.open) return '';
+  const info = window.kascovDisasm.skeletonInfo(tpl.name);
+  if (!info) return '';
+  const decoded = new Map(tpl.fields.map((f) => [f.name, f.value]));
+  if (!genState.values) {
+    genState.values = {};
+    for (const p of info.params) {
+      genState.values[p.name] = window.kascovGen.prefillFor(p.kind, decoded.get(p.name) || '');
+    }
+    genState.coinValue = '10';
+    genState.sourceHex = window.kascovDisasm.toHex(bytes);
+  }
+  const kindLabel = { pubkey: 'x-only pubkey · 32 bytes hex', hash32: 'blake2b-256 · 32 bytes hex', amount: 'TKAS', daa: 'DAA ticks' };
+  const fields = info.params.map((p) => {
+    const v = genState.values[p.name] || '';
+    const check = window.kascovGen.validateField(p.kind, v);
+    return `<label class="gen-field">` +
+      `<span class="gen-label">${esc(p.source)} <span class="dim">(${esc(kindLabel[p.kind] || p.kind)})</span></span>` +
+      `<input type="text" data-gen-field="${esc(p.name)}" value="${esc(v)}" spellcheck="false" autocomplete="off">` +
+      `<span class="gen-hint dim">${esc(p.hint || '')}</span>` +
+      (check.ok ? '' : `<span class="gen-err">${esc(check.err)}</span>`) +
+      `</label>`;
+  }).join('');
+  const valueField = `<label class="gen-field">` +
+    `<span class="gen-label">coin value <span class="dim">(TKAS the newborn coin holds)</span></span>` +
+    `<input type="text" data-gen-field="__value" value="${esc(genState.coinValue)}" spellcheck="false" autocomplete="off">` +
+    `<span class="gen-hint dim">comes from your faucet-funded lab wallet, not from thin air</span>` +
+    `</label>`;
+  return `<div class="gen-panel" id="gen-panel">` +
+    `<p class="gen-head">your <strong>${esc(tpl.name.replace('SilverScript · ', ''))}</strong> — same contract, your parameters` +
+    `<span class="gen-keyhint dim">need keys? <code>cargo run -p kascov-lab -- keygen</code> prints your address, pubkey and its blake2b</span></p>` +
+    `<div class="gen-fields">${fields}${valueField}</div>` +
+    `<div id="gen-out">${genOutputsHtml(tpl)}</div>` +
+    `</div>`;
+}
+
+function genOutputsHtml(tpl) {
+  const info = window.kascovDisasm.skeletonInfo(tpl.name);
+  const args = {};
+  const values = {};
+  for (const p of info.params) {
+    const check = window.kascovGen.validateField(p.kind, genState.values[p.name] || '');
+    if (!check.ok) {
+      return `<p class="gen-wait dim">fix the highlighted field${info.params.length > 1 ? 's' : ''} above to generate your contract.</p>`;
+    }
+    args[p.name] = check.value;
+    values[p.name] = check;
+  }
+  const valCheck = window.kascovGen.validateField('amount', genState.coinValue || '');
+  if (!valCheck.ok) return `<p class="gen-wait dim">coin value: ${esc(valCheck.err)}</p>`;
+
+  const emitted = window.kascovDisasm.emitFromSkeleton(tpl.name, args);
+  if (!emitted) return `<p class="gen-err">could not rebuild the script — this should not happen; please report it.</p>`;
+  const hex = window.kascovDisasm.toHex(emitted);
+
+  /* self-verify: the emitted bytes must decode back to exactly these args */
+  const redecoded = window.kascovDisasm.disassemble(emitted);
+  const back = window.kascovDisasm.matchTemplates(redecoded.instructions, emitted);
+  const roundTrips = !!back && back.name === tpl.name && info.params.every((p) => {
+    const got = (back.fields.find((f) => f.name === p.name) || {}).value;
+    return got === window.kascovDisasm.toHex(Uint8Array.from(args[p.name]));
+  });
+  const identical = hex === genState.sourceHex;
+  const verify = roundTrips
+    ? `<p class="gen-verify-ok">re-decodes as ${esc(tpl.name)} with your args ✓${identical ? ' · byte-identical to the pasted script' : ''}</p>`
+    : `<p class="gen-err">round-trip failed — not offering this script. please report it.</p>`;
+  if (!roundTrips) return verify;
+
+  const source = window.kascovGen.buildSource(tpl.name, info.params, values,
+    { date: new Date().toISOString().slice(0, 10) });
+  const deploy = window.kascovGen.buildDeployCommand(hex, String(valCheck.sompi));
+  const block = (title, body, hint) =>
+    `<div class="gen-block"><div class="gen-block-head"><span>${esc(title)}</span>` +
+    (hint ? `<span class="dim">${esc(hint)}</span>` : '') +
+    `<button type="button" class="copy-btn" data-action="copy-block">copy</button></div>` +
+    `<pre>${esc(body)}</pre></div>`;
+  return verify +
+    block('the contract, readable', source, 'canonical SilverScript source') +
+    block('the contract, compiled', hex, `${emitted.length} bytes — paste it back into the decoder any time`) +
+    block('birth it on testnet-10', deploy, 'copy-paste; your coin appears on kascov ~a minute later');
+}
+
 function runDecode(updateHash) {
   const raw = $('#decode-input').value;
   const out = $('#decode-out');
@@ -1835,6 +1944,7 @@ function runDecode(updateHash) {
   if (cleanKey !== lastDecodeKey) {
     lastDecodeKey = cleanKey;
     decodeShowAll = false;
+    genState = null; /* a new script gets a fresh generator panel */
     /* huge paste: fold the input away so the result is what you see */
     const input = $('#decode-input');
     const big = cleanKey.length > DECODE_COLLAPSE_INPUT;
@@ -1859,7 +1969,9 @@ function runDecode(updateHash) {
     (groups.includes('zk') ? '<span class="flag flag-ops">zk ops</span>' : '') +
     (truncated ? '<span class="flag flag-no">truncated / malformed tail</span>' : '') +
     `</p>` +
-    (tpl ? templateLine(tpl.name, tpl.fields) : '');
+    (tpl ? templateLine(tpl.name, tpl.fields) : '') +
+    genCta(tpl) +
+    genPanelHtml(tpl, bytes);
   const shown = decodeShowAll ? instructions : instructions.slice(0, DECODE_WINDOW);
   const rows = shown.map((inst) => {
     const dataBit = inst.data && inst.data.length
@@ -2460,6 +2572,22 @@ document.addEventListener('click', (e) => {
   } else if (action === 'decode-all') {
     decodeShowAll = !decodeShowAll;
     runDecode(false);
+  } else if (action === 'gen-toggle') {
+    genState = genState && genState.open ? null : { open: true };
+    runDecode(false);
+    if (genState) {
+      const panel = $('#gen-panel');
+      if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  } else if (action === 'copy-block') {
+    const pre = el.closest('.gen-block');
+    const text = pre && pre.querySelector('pre') ? pre.querySelector('pre').textContent : '';
+    copyToClipboard(text).then((ok) => {
+      const orig = el.textContent;
+      el.textContent = ok ? 'copied!' : 'copy failed';
+      el.classList.add('copied');
+      setTimeout(() => { el.textContent = orig; el.classList.remove('copied'); }, 1400);
+    });
   } else if (action === 'decode-download') {
     downloadDisassembly();
   } else if (action === 'decode-input-toggle') {
@@ -2585,6 +2713,28 @@ async function resolveTxQuery(network, txid, input) {
   }
 }
 
+/* generator fields: live output refresh while typing (caret-safe — only
+   #gen-out re-renders), full panel refresh on blur so error hints settle */
+document.addEventListener('input', (e) => {
+  const field = e.target.closest && e.target.closest('#gen-panel') ? e.target : null;
+  if (!field || !genState) return;
+  const key = field.dataset.genField;
+  if (!key) return;
+  if (key === '__value') genState.coinValue = field.value;
+  else genState.values[key] = field.value;
+  const out = $('#gen-out');
+  const raw = $('#decode-input') ? $('#decode-input').value : '';
+  const bytes = window.kascovDisasm.parseHex(raw);
+  if (out && bytes) {
+    const { instructions } = window.kascovDisasm.disassemble(bytes);
+    const tpl = window.kascovDisasm.matchTemplates(instructions, bytes);
+    if (tpl) out.innerHTML = genOutputsHtml(tpl);
+  }
+});
+document.addEventListener('change', (e) => {
+  if (e.target.closest && e.target.closest('#gen-panel') && genState) runDecode(false);
+});
+
 $('#search').addEventListener('keydown', (e) => {
   const open = suggest.items.length > 0 && !$('#search-suggest').hidden;
   if (e.key === 'ArrowDown' && open) {
@@ -2667,6 +2817,124 @@ document.querySelectorAll('.guide-icon').forEach((el) => {
   el.innerHTML = ICONS[el.dataset.icon] || '';
 });
 
+/* ------------------------------------------------ first-visit story tour */
+
+/* Six steps over the LIVE page: watch → understand → touch. Vanilla,
+   dismissible everywhere, never nags twice (localStorage flag), replay via
+   ?tour=1 or the landing's "take the tour" link. */
+const tour = { step: -1, el: null };
+
+const TOUR_STEPS = [
+  {
+    target: () => document.querySelector('.live-badge'),
+    text: 'kascov is watching the Kaspa chain <strong>right now</strong> — green means it saw the tip seconds ago.',
+  },
+  {
+    target: () => document.querySelector('#story-list .story'),
+    text: 'smart coins are <strong>born</strong>, they <strong>move</strong>, they <strong>retire</strong>. these are real events, moments old.',
+  },
+  {
+    target: () => document.querySelector('#story-list .story'),
+    text: 'let’s follow this one…',
+    enter: (el) => { if (el) location.hash = el.getAttribute('href'); },
+    autoAdvanceMs: 1100,
+  },
+  {
+    target: () => document.querySelector('#view-detail .timeline'),
+    text: 'this is its <strong>life story</strong> — complete, permanent, in plain words. every line is a real transaction you can verify on chain.',
+  },
+  {
+    target: () => document.querySelector('.nerd-toggle'),
+    text: 'the raw scripts live under <strong>nerd mode</strong> — decoded, labeled, and hash-verified when a spend reveals a hidden program.',
+  },
+  {
+    target: () => document.querySelector('.nav-link[data-nav="decode"]'),
+    text: 'the decoder reads <strong>any</strong> script — and if it’s a known contract, you can <strong>make your own from it</strong> and birth it on the testnet. enjoy the telescope 🔭',
+    last: true,
+  },
+];
+
+function endTour(finished) {
+  if (tour.el) tour.el.remove();
+  tour.el = null;
+  tour.step = -1;
+  try { localStorage.setItem('kascov-tour', 'done'); } catch (e) { /* private mode */ }
+  if (finished) location.hash = '#/decode?s=' + (DECODE_EXAMPLES.mecenas || '');
+}
+
+function showTourStep(i) {
+  const step = TOUR_STEPS[i];
+  if (!step) { endTour(false); return; }
+  const target = step.target();
+  if (!target) {
+    /* element not on screen (data still loading, view changed) — try the
+       next step rather than stranding the visitor */
+    if (i + 1 < TOUR_STEPS.length) showTourStep(i + 1);
+    else endTour(false);
+    return;
+  }
+  tour.step = i;
+  if (!tour.el) {
+    tour.el = document.createElement('div');
+    tour.el.id = 'tour-root';
+    document.body.appendChild(tour.el);
+  }
+  target.scrollIntoView({ block: 'center', behavior: 'instant' });
+  const r = target.getBoundingClientRect();
+  const below = r.bottom + 200 < window.innerHeight;
+  const cardTop = (below ? r.bottom + 14 : Math.max(12, r.top - 160)) + window.scrollY;
+  tour.el.innerHTML =
+    `<div class="tour-spot" style="top:${r.top + window.scrollY - 6}px;left:${Math.max(0, r.left - 6)}px;width:${Math.min(r.width + 12, window.innerWidth)}px;height:${r.height + 12}px"></div>` +
+    `<div class="tour-card" style="top:${cardTop}px;left:${Math.max(12, Math.min(r.left, window.innerWidth - 348))}px">` +
+    `<p class="tour-text">${step.text}</p>` +
+    `<div class="tour-nav">` +
+    `<span class="dim tour-count">${i + 1}/${TOUR_STEPS.length}</span>` +
+    `<button type="button" class="btn tour-skip" data-tour="skip">skip</button>` +
+    `<button type="button" class="btn btn-accent" data-tour="${step.last ? 'finish' : 'next'}">${step.last ? 'try the decoder →' : 'next →'}</button>` +
+    `</div></div>`;
+  if (step.enter) {
+    step.enter(target);
+    if (step.autoAdvanceMs) setTimeout(() => { if (tour.step === i) showTourStep(i + 1); }, step.autoAdvanceMs);
+  }
+}
+
+function maybeStartTour() {
+  let seen = 'done';
+  try { seen = localStorage.getItem('kascov-tour') || ''; } catch (e) { /* private mode: never nag */ }
+  const forced = /[?&]tour=1/.test(location.hash) || /[?&]tour=1/.test(location.search);
+  if (seen === 'done' && !forced) return;
+  const view = parseRoute().view;
+  if (view !== 'explore' && view !== 'landing') return;
+  if (view === 'landing') location.hash = `#/${state.network}/explore`;
+  const tryStart = (attempt) => {
+    if (tour.step >= 0) return;
+    if (document.querySelector('#story-list .story') && document.querySelector('.live-badge')) {
+      showTourStep(0);
+    } else if (attempt < 40) {
+      setTimeout(() => tryStart(attempt + 1), 250);
+    }
+  };
+  tryStart(0);
+}
+
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-tour]');
+  if (!b) return;
+  const act = b.dataset.tour;
+  if (act === 'skip') endTour(false);
+  else if (act === 'finish') endTour(true);
+  else showTourStep(tour.step + 1);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && tour.step >= 0) endTour(false);
+});
+window.addEventListener('resize', () => { if (tour.step >= 0) showTourStep(tour.step); });
+/* the "take the tour" link changes the hash on an already-loaded page —
+   arm the tour then too, not just at boot */
+window.addEventListener('hashchange', () => {
+  if (tour.step < 0 && /[?&]tour=1/.test(location.hash)) setTimeout(maybeStartTour, 400);
+});
+
 /* pasted clean URLs (hosting rewrites everything to this page):
    /explore, /decode?s=…, /testnet-10/c/<id> → the same hash routes */
 if (location.pathname !== '/' && location.pathname !== '/index.html' && !location.hash) {
@@ -2676,5 +2944,6 @@ if (location.pathname !== '/' && location.pathname !== '/index.html' && !locatio
 
 render();
 pollLive();
+setTimeout(maybeStartTour, 900);
 
 })();

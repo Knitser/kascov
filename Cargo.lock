@@ -2112,8 +2112,10 @@ name = "kascov-lab"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake2b_simd",
  "clap",
  "hex",
+ "kascov-decode",
  "kaspa-addresses",
  "kaspa-consensus-core",
  "kaspa-rpc-core",
