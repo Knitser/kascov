@@ -920,6 +920,81 @@ impl Store {
         Ok(rows)
     }
 
+    /// The chain block that accepted this transaction, per the index.
+    pub fn accepting_block_of(&self, txid: &TxId) -> Result<Option<BlockHash>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT accepting_block FROM covenant_events WHERE txid = ?1 LIMIT 1",
+                [txid.0.as_slice()],
+                |r| Ok(BlockHash(r.get(0)?)),
+            )
+            .optional()
+            .map_err(db_err)?;
+        Ok(row)
+    }
+
+    /// Which covenant owns this state outpoint, if we track it.
+    pub fn utxo_covenant(&self, outpoint: &Outpoint) -> Result<Option<CovenantId>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT covenant_id FROM covenant_utxos WHERE txid = ?1 AND output_index = ?2",
+                params![outpoint.txid.0.as_slice(), outpoint.index],
+                |r| Ok(CovenantId(r.get(0)?)),
+            )
+            .optional()
+            .map_err(db_err)?;
+        Ok(row)
+    }
+
+    /// Every covenant this transaction touched — multi-covenant transactions
+    /// (one tx moving several coins) are first-class post-Toccata.
+    pub fn covenants_by_txid(&self, txid: &TxId) -> Result<Vec<CovenantId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT covenant_id FROM covenant_events WHERE txid = ?1")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([txid.0.as_slice()], |r| Ok(CovenantId(r.get(0)?)))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Recognized template per covenant — the most specific (non-p2pk/p2sh)
+    /// name wins so a SilverScript coin is labeled by its contract, not by
+    /// the generic shape of its commitment.
+    pub fn covenant_templates(&self) -> Result<std::collections::HashMap<CovenantId, String>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT covenant_id,
+                        MAX(CASE WHEN revealed_template IS NOT NULL AND revealed_template <> '' AND revealed_template NOT LIKE 'p2%' THEN revealed_template
+                                 WHEN template NOT LIKE 'p2%' THEN template END),
+                        MAX(COALESCE(NULLIF(revealed_template, ''), template))
+                 FROM covenant_utxos WHERE (template IS NOT NULL AND template <> '') OR (revealed_template IS NOT NULL AND revealed_template <> '')
+                 GROUP BY covenant_id",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| {
+                let named: Option<String> = r.get(1)?;
+                let any: Option<String> = r.get(2)?;
+                Ok((CovenantId(r.get(0)?), named.or(any)))
+            })
+            .map_err(db_err)?
+            .filter_map(|row| match row {
+                Ok((id, Some(t))) => Some(Ok((id, t))),
+                Ok((_, None)) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
     /// Which covenant did this transaction touch? Covers genesis, transitions,
     /// and burns (their txids are all event txids).
     pub fn covenant_by_txid(&self, txid: &TxId) -> Result<Option<CovenantId>> {

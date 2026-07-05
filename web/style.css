@@ -1653,3 +1653,7 @@ a.btn:hover { text-decoration: none; }
   .empty-card { padding: 2.1rem 1rem; }
   .pulse-legend { gap: 0.8rem; flex-wrap: wrap; }
 }
+
+/* multi-covenant mentions under timeline rows */
+.tl-with { margin: 0.25rem 0 0; font-size: 0.86rem; }
+.tl-with a { color: var(--accent); }

@@ -587,6 +587,18 @@ function renderLiteExplore(live, network) {
 
 /* ------------------------------------------------------------- sentences */
 
+/* what one event did to the coin's pieces — derived from the utxo set */
+function eventShape(entry, ev) {
+  const utxos = entry.c.utxos || [];
+  const consumed = utxos.filter((u) => u.spent_txid === ev.txid);
+  const created = utxos.filter((u) => u.outpoint.startsWith(ev.txid + ':'));
+  return {
+    consumedN: consumed.length,
+    createdN: created.length,
+    consumedValue: consumed.reduce((sum, u) => sum + u.value, 0),
+  };
+}
+
 function eventSentence(entry, ev, network, withBalance) {
   const name = entry.name;
   if (ev.kind === 'genesis') {
@@ -602,20 +614,29 @@ function eventSentence(entry, ev, network, withBalance) {
     const nth = entry.c.events.filter((e) => e.kind === 'transition' && e.seq <= ev.seq).length;
     const bal = withBalance ? entry.balances.get(ev.accepting_daa) : null;
     const balBit = bal ? ` — now holding ${esc(fmtAmount(bal, network))}` : '';
-    return `<strong>${esc(name)}</strong> moved <span class="dim">(${ordinal(nth)} time)</span>${balBit}`;
+    const shape = eventShape(entry, ev);
+    let shapeBit = '';
+    if (shape.consumedN && shape.createdN && shape.consumedN !== shape.createdN) {
+      shapeBit = shape.createdN > shape.consumedN
+        ? ` <span class="dim">(split ${shape.consumedN} → ${shape.createdN} pieces)</span>`
+        : ` <span class="dim">(merged ${shape.consumedN} → ${shape.createdN})</span>`;
+    }
+    return `<strong>${esc(name)}</strong> moved <span class="dim">(${ordinal(nth)} time)</span>${shapeBit}${balBit}`;
   }
   /* burns: a multi-piece coin retires in stages — only the last spend ends
      the story, earlier ones destroy a piece (each is a real, separate tx) */
   const burns = entry.c.events.filter((e) => e.kind === 'burn');
   const isFinal = !burns.length || ev.seq === burns[burns.length - 1].seq;
+  const gone = eventShape(entry, ev).consumedValue;
+  const goneBit = gone > 0 ? ` — ${esc(fmtAmount(gone, network))} left the covenant` : '';
   if (!isFinal) {
     const bal = withBalance ? entry.balances.get(ev.accepting_daa) : null;
-    const balBit = bal ? ` — ${esc(fmtAmount(bal, network))} still lives on` : '';
-    return `<strong>${esc(name)}</strong> lost a piece <span class="dim">(one state destroyed)</span>${balBit}`;
+    const balBit = bal ? `, ${esc(fmtAmount(bal, network))} lives on` : '';
+    return `<strong>${esc(name)}</strong> lost a piece${goneBit}${balBit}`;
   }
   const m = entry.moves;
   const tail = m === 0 ? 'without ever moving' : m === 1 ? 'after 1 move' : `after ${m} moves`;
-  return `<strong>${esc(name)}</strong> retired ${tail}`;
+  return `<strong>${esc(name)}</strong> retired ${tail}${goneBit}`;
 }
 
 function cardStory(entry, network) {
@@ -1090,10 +1111,13 @@ function renderGrid(entry, network) {
   grid.innerHTML = list.slice(0, state.shown).map((e) => {
     const alive = e.c.status === 'active';
     const watched = state.watch.has(e.c.covenant_id);
+    const namedTpl = e.c.template && !/^p2(pk|sh)/.test(e.c.template) ? e.c.template : null;
     return `<article class="card">` +
       `<div class="card-head">${avatarSvg(e.c.covenant_id, 40)}` +
       `<div class="card-id"><a class="card-link" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">${esc(e.name)}</a>` +
-      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span></div>` +
+      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>` +
+      (namedTpl ? `<span class="flag flag-tpl" title="recognized contract: a compiled ${esc(namedTpl)} — constructor arguments labeled on the coin page">${esc(namedTpl)}</span>` : '') +
+      `</div>` +
       `<button type="button" class="star${watched ? ' starred' : ''}" data-action="watch" data-id="${esc(e.c.covenant_id)}"` +
       ` aria-pressed="${watched}" aria-label="${watched ? 'stop watching' : 'watch'} ${esc(e.name)}">★</button></div>` +
       `<p class="card-story">${esc(cardStory(e, network))}</p>` +
@@ -1524,12 +1548,25 @@ function timelineItem(entry, ev, data, network, flashTx) {
   } else if (state.nerd && ev.payload_len) {
     nerdBits += ` · <span class="dim">payload ${esc(fmtInt(ev.payload_len))}B</span>`;
   }
+  /* KIP-21 user lane: 4-byte app namespace + 16 zero bytes */
+  if (ev.payload && ev.payload.length >= 40 && /^0{32}$/.test(ev.payload.slice(8, 40))) {
+    nerdBits += ` · <span class="flag flag-tpl" title="KIP-21 based-app lane — this transaction carries app-sequencing data">lane 0x${esc(ev.payload.slice(0, 8))}</span>`;
+  }
+  /* multi-covenant transactions: this tx moved other coins too */
+  let withBits = '';
+  if (Array.isArray(ev.with_covenants) && ev.with_covenants.length) {
+    withBits = `<p class="tl-with dim">in the same transaction as ` +
+      ev.with_covenants.map((id) =>
+        `<a href="#/${esc(network)}/c/${esc(id)}" title="${esc(id)}">${esc(friendlyName(id))}</a>`
+      ).join(', ') + `</p>`;
+  }
   const flash = flashTx && ev.txid === flashTx ? ' tl-flash' : '';
   return `<li class="tl-item ${meta.cls}${flash}" data-txid="${esc(ev.txid)}">` +
     `<span class="tl-icon" title="${esc(GLOSSARY[ev.kind] || '')}">${ICONS[meta.icon]}</span>` +
     `<div class="tl-body">` +
     `<p class="tl-text">${eventSentence(entry, ev, network, true)}</p>` +
     `<p class="tl-meta"><span title="${esc(utcTitle(ms))}">${esc(relTime(ms))}</span> · <a href="${esc(txUrl(network, ev.txid))}" target="_blank" rel="noopener noreferrer">view transaction ↗</a>${nerdBits}</p>` +
+    withBits +
     `</div></li>`;
 }
 

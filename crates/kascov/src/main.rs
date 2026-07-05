@@ -63,6 +63,10 @@ enum Command {
     },
     /// Print a covenant's full lineage (genesis → tip).
     Trace { covenant_id: CovenantId },
+    /// Fetch a transaction from the node (via its accepting block, known to
+    /// the index) and print its full covenant anatomy — bindings, budgets,
+    /// payload lanes. The truth tool for classification disputes.
+    InspectTx { txid: TxId },
     /// Follow the chain live and print covenant events as they are accepted.
     Watch,
     /// Export the index as a JSON snapshot for the web dashboard.
@@ -109,6 +113,7 @@ async fn main() -> Result<()> {
         Command::List { limit } => list(&cli, limit),
         Command::Show { covenant_id, decode } => show(&cli, covenant_id, decode),
         Command::Trace { covenant_id } => trace(&cli, covenant_id),
+        Command::InspectTx { txid } => inspect_tx(&cli, txid).await,
         Command::Watch => sync(&cli, None, true, true).await,
         Command::Export { ref out, max_events } => export(&cli, out.clone(), max_events),
         Command::Serve { ref listen, ref networks, ref db_dir, max_events } => {
@@ -271,6 +276,7 @@ fn build_activity_snapshot(
 fn build_grid_snapshot(store: &Store, network: kascov_core::Network) -> Result<serde_json::Value> {
     let covenants = store.list(u64::MAX)?;
     let born = store.born_values()?;
+    let templates = store.covenant_templates()?;
     let tip = store.tip()?;
     let rows: Vec<_> = covenants
         .iter()
@@ -285,6 +291,7 @@ fn build_grid_snapshot(store: &Store, network: kascov_core::Network) -> Result<s
                 "live_utxos": c.live_utxos,
                 "live_value": c.live_value,
                 "born_value": born.get(&c.covenant_id).copied().unwrap_or(0),
+                "template": templates.get(&c.covenant_id),
             })
         })
         .collect();
@@ -461,6 +468,13 @@ fn covenant_json(
                     v["payload_len"] = serde_json::json!(p.len());
                 }
             }
+            // multi-covenant transactions: name the other coins this tx moved
+            if let Ok(others) = store.covenants_by_txid(&e.txid) {
+                let with: Vec<_> = others.into_iter().filter(|c| c != &summary.covenant_id).take(4).collect();
+                if !with.is_empty() {
+                    v["with_covenants"] = serde_json::json!(with);
+                }
+            }
             v
         }).collect::<Vec<_>>(),
         "events_truncated": truncated_events,
@@ -498,6 +512,70 @@ fn db_path(cli: &Cli) -> std::path::PathBuf {
 
 fn open_store(cli: &Cli) -> Result<Store> {
     Ok(Store::open(&db_path(cli), cli.network)?)
+}
+
+/// Ground truth for one transaction: bindings, budgets, payload/lane.
+async fn inspect_tx(cli: &Cli, txid: TxId) -> Result<()> {
+    let store = open_store(cli)?;
+    let Some(block) = store.accepting_block_of(&txid)? else {
+        anyhow::bail!("{txid} is not in this index — kascov only knows blocks it has walked");
+    };
+    let node = NodeHandle::connect(cli.network, cli.rpc.as_deref()).await?;
+    let accepting = node.block_with_txs(block).await.context("accepting block no longer on the node (pruned?)")?;
+    // the accepting chain block ACCEPTS the tx; its body lives in the
+    // accepting block itself or one of its mergeset blocks (same walk the
+    // sync engine does)
+    let mut found = accepting.transactions.iter().find(|t| t.txid == txid).cloned();
+    if found.is_none() {
+        for &hash in &accepting.mergeset {
+            if let Ok(b) = node.block_with_txs(hash).await {
+                if let Some(t) = b.transactions.iter().find(|t| t.txid == txid) {
+                    found = Some(t.clone());
+                    break;
+                }
+            }
+        }
+    }
+    let Some(tx) = found else {
+        anyhow::bail!("tx not found in accepting block or its mergeset (pruned or reorged since indexing)");
+    };
+    let tx = &tx;
+
+    println!("tx {txid}");
+    if !tx.payload.is_empty() {
+        // KIP-21 user lanes: 4-byte namespace + 16 zero bytes prefix
+        let lane = tx.payload.len() >= 20 && tx.payload[4..20].iter().all(|&b| b == 0);
+        let lane_note = if lane {
+            format!("  (KIP-21 lane, namespace 0x{})", hex::encode(&tx.payload[..4]))
+        } else {
+            String::new()
+        };
+        println!("payload: {} bytes{lane_note}", tx.payload.len());
+    }
+    println!("inputs:");
+    for (i, input) in tx.inputs.iter().enumerate() {
+        let known = store
+            .utxo_covenant(&input.previous_outpoint)?
+            .map(|c| format!("  <- state of covenant {c}"))
+            .unwrap_or_default();
+        println!(
+            "  #{i} spends {} (budget {}){known}",
+            input.previous_outpoint, input.compute_budget
+        );
+    }
+    println!("outputs:");
+    for (i, o) in tx.outputs.iter().enumerate() {
+        let bind = o
+            .covenant
+            .map(|b| format!("  BOUND to {} (authorizing input #{})", b.covenant_id, b.authorizing_input))
+            .unwrap_or_default();
+        println!(
+            "  #{i} value {} script {}…{bind}",
+            o.value,
+            hex::encode(&o.spk_script[..o.spk_script.len().min(12)])
+        );
+    }
+    Ok(())
 }
 
 async fn sync(cli: &Cli, from: Option<BlockHash>, follow: bool, watch: bool) -> Result<()> {
@@ -1236,9 +1314,9 @@ async fn tx_handler(
 
     // A point lookup on an indexed column — cheap enough to skip the cache.
     let db = state.base_dir.join(format!("{network}.db"));
-    let result = tokio::task::spawn_blocking(move || -> Result<Option<kascov_core::CovenantId>> {
+    let result = tokio::task::spawn_blocking(move || -> Result<Vec<kascov_core::CovenantId>> {
         let store = kascov_core::store::Store::open(&db, network)?;
-        Ok(store.covenant_by_txid(&txid)?)
+        Ok(store.covenants_by_txid(&txid)?)
     })
     .await;
     let ok_headers = [
@@ -1247,12 +1325,13 @@ async fn tx_handler(
         (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
     ];
     match result {
-        Ok(Ok(Some(covenant_id))) => (
+        Ok(Ok(ids)) if !ids.is_empty() => (
             ok_headers,
-            serde_json::json!({ "txid": tx_hex, "covenant_id": covenant_id }).to_string(),
+            // covenant_id stays for existing consumers; covenant_ids is the full set
+            serde_json::json!({ "txid": tx_hex, "covenant_id": ids[0], "covenant_ids": ids }).to_string(),
         )
             .into_response(),
-        Ok(Ok(None)) => (
+        Ok(Ok(_)) => (
             StatusCode::NOT_FOUND,
             [
                 (header::CACHE_CONTROL, "public, max-age=10, s-maxage=10"),
