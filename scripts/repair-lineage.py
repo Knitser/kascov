@@ -139,7 +139,10 @@ if not APPLY:
 n = len(events)
 cur = db.cursor()
 cur.execute("BEGIN")
-cur.execute("UPDATE covenant_events SET seq = seq + ? WHERE covenant_id = ?", (n, cid_blob))
+# two-step shift via negative temp values: an in-place seq+n UPDATE can
+# transiently collide with its own unshifted rows (PK covenant_id+seq)
+cur.execute("UPDATE covenant_events SET seq = -(seq + ?) - 1 WHERE covenant_id = ?", (n, cid_blob))
+cur.execute("UPDATE covenant_events SET seq = -seq - 1 WHERE covenant_id = ? AND seq < 0", (cid_blob,))
 for seq, kind, txid, ab, daa in events:
     cur.execute(
         "INSERT INTO covenant_events (covenant_id, seq, kind, txid, accepting_block, accepting_daa, payload) VALUES (?,?,?,?,?,?,NULL)",
