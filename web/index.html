@@ -205,7 +205,7 @@
     <section id="view-decode" class="view-fade" aria-label="Script decoder" hidden>
       <header class="page-head">
         <h1>script decoder</h1>
-        <p class="page-sub">paste any Kaspa script as hex and read it as opcodes — including the post-Toccata set: transaction introspection (KIP-17), covenant ops (KIP-20), zk verification (KIP-16). decoding happens in your browser; nothing leaves the page.</p>
+        <p class="page-sub">paste any Kaspa script as hex and read it as opcodes — including the post-Toccata set: transaction introspection (KIP-17), covenant ops (KIP-20), zk verification (KIP-16). decoding happens in your browser; nothing leaves the page. recognized contracts can be <strong>re-made with your own parameters</strong> and deployed on testnet-10.</p>
       </header>
       <div class="decode-box">
         <textarea id="decode-input" rows="4" spellcheck="false" autocomplete="off" placeholder="script hex — e.g. 20a39404…82faac · whitespace and 0x prefixes are fine"></textarea>
@@ -224,6 +224,7 @@
           <button type="button" class="chip" data-action="decode-load" data-example="escrow">SilverScript · Escrow</button>
           <button type="button" class="chip" data-action="decode-load" data-example="lastwill">SilverScript · LastWill</button>
           <button type="button" class="chip" data-action="decode-load" data-example="zk">mainnet ZK covenant</button>
+          <button type="button" class="chip chip-make" data-action="gen-example">🛠 make your own contract</button>
         </div>
       </div>
       <div id="decode-out" class="decode-out" aria-live="polite"></div>

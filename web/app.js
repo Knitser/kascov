@@ -2572,6 +2572,19 @@ document.addEventListener('click', (e) => {
   } else if (action === 'decode-all') {
     decodeShowAll = !decodeShowAll;
     runDecode(false);
+  } else if (action === 'gen-example') {
+    const input = $('#decode-input');
+    if (input && DECODE_EXAMPLES.mecenas) {
+      input.value = DECODE_EXAMPLES.mecenas;
+      /* decode first (a fresh script resets genState), THEN open the panel */
+      runDecode(true);
+      genState = { open: true };
+      runDecode(false);
+      setTimeout(() => {
+        const panel = $('#gen-panel');
+        if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 120);
+    }
   } else if (action === 'gen-toggle') {
     genState = genState && genState.open ? null : { open: true };
     runDecode(false);

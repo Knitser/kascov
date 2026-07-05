@@ -1765,3 +1765,12 @@ a.btn:hover { text-decoration: none; }
 #tour-root .tour-skip { padding: 0.35rem 0.8rem; font-size: 0.82rem; }
 
 .guide-tourline { text-align: center; margin: 1rem 0 0; }
+
+/* the generator entry chip stands out from the plain examples */
+.chip-make {
+  border-color: var(--border-strong);
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 650;
+}
+.chip-make:hover { background: var(--accent); color: #06211d; }
