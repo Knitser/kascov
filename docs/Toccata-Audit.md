@@ -18,7 +18,12 @@ Sample: 18 coins across both networks (biased toward multi-event lives), 47 even
 
 Notable: `2dd9f945…` is a **multi-covenant transaction** — it moves `09ef275e…` (quiet-pearl-zebra) *and* `901be…` in a single tx (input 0 → output 0 continues zebra; input 2 → output 1 continues/creates 901be). This is the first "complex stateful multi-contract flow" observed on mainnet, and exactly the shape where a genesis-vs-continuation edge case could hide — in ours or in the community API's back-fill (both cannot be right: an id cannot both pre-exist and hash-validate as fresh genesis, so one indexer is mislabeling).
 
-**Action items:**
+**RESOLVED (July 5):** `scripts/repair-lineage.py` walks a coin's chain backwards through archival REST data (every hop verified: bound outputs must match, and the root must recompute the covenant id via the consensus function — the `covid` example). Both coins repaired with their full pre-history:
+
+- `901be291…`: true genesis `abcb028d…` at DAA **474,337,859** — ~29 minutes after Toccata activation, **the earliest covenant known on Kaspa mainnet**
+- `09ef275e…` (quiet-pearl-zebra): true genesis `5a08eb1b…` at DAA 474,340,547, ~5 minutes later; 7 chain-verified events end to end
+
+Original action items, all done:
 1. `kascov inspect-tx <txid>` debug command — fetch a tx via our own node connection and print inputs/outputs with bindings; removes third-party APIs from the truth loop.
 2. Re-validate `901be…` from node data; if our classifier prefers genesis-hash over known-continuation in multi-covenant txs, fix the precedence (continuation must win when the authorizing input demonstrably spends the same id).
 3. Add the derived rule to `sync_replay` tests with a synthetic multi-covenant tx.
