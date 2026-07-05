@@ -333,6 +333,26 @@ h2 {
 .howto-link { font-size: 0.82rem; color: var(--faint); white-space: nowrap; }
 .howto-link:hover { color: var(--accent); text-decoration: none; }
 
+/* the "what IS a smart coin" expander under the landing guide */
+.guide-more { max-width: 720px; margin: 1rem auto 0; }
+.guide-more summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.95rem;
+  padding: 0.55rem 0.8rem;
+  border-radius: var(--radius);
+  list-style-position: inside;
+}
+.guide-more summary:hover { color: var(--accent); background: var(--card); }
+.guide-more[open] summary { color: var(--accent); }
+.guide-more-body {
+  padding: 0.9rem 1.1rem 0.4rem;
+  border-left: 2px solid var(--border);
+  margin: 0.4rem 0 0 0.6rem;
+}
+.guide-more-body p { margin: 0 0 0.85rem; line-height: 1.65; color: var(--text); font-size: 0.95rem; }
+.guide-more-body strong { color: var(--accent); }
+
 /* --------------------------------------------------------------- pulse */
 
 .pulse { margin-bottom: 2.6rem; }

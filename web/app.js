@@ -623,10 +623,12 @@ function eventSentence(entry, ev, network, withBalance) {
     }
     return `<strong>${esc(name)}</strong> moved <span class="dim">(${ordinal(nth)} time)</span>${shapeBit}${balBit}`;
   }
-  /* burns: a multi-piece coin retires in stages — only the last spend ends
-     the story, earlier ones destroy a piece (each is a real, separate tx) */
-  const burns = entry.c.events.filter((e) => e.kind === 'burn');
-  const isFinal = !burns.length || ev.seq === burns[burns.length - 1].seq;
+  /* burns: a multi-piece coin retires in stages. "retired" is reserved for
+     the burn that actually ends the story — the coin's LAST event on a coin
+     that is burned now. A burn followed by more life (the other piece kept
+     moving) is "lost a piece", even when it's the only burn so far. */
+  const lastEvent = entry.c.events[entry.c.events.length - 1];
+  const isFinal = entry.c.status !== 'active' && lastEvent && ev.seq === lastEvent.seq;
   const gone = eventShape(entry, ev).consumedValue;
   const goneBit = gone > 0 ? ` — ${esc(fmtAmount(gone, network))} left the covenant` : '';
   if (!isFinal) {
