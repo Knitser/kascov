@@ -1655,6 +1655,46 @@ function verifyProgramAgainstUtxo(u, programHex) {
   return { ok: true, tpl, hex: window.kascovDisasm.toHex(bytes) };
 }
 
+/* Verified Contract — the "verified source" for covenants. Given a program's
+   bytes, if it matches a known SilverScript skeleton we (1) show the readable
+   canonical source, (2) label the on-chain constructor args, and (3) PROVE it
+   by re-emitting from those args and confirming the bytes are byte-identical
+   (BLAKE2b). Not "we think this is a Mecenas" — "this provably compiles to
+   exactly these bytes." Nobody has a verified-contract layer for Kaspa. */
+function verifiedContractHtml(programHex) {
+  const D = window.kascovDisasm, G = window.kascovGen;
+  if (!D || !G || !programHex) return '';
+  const bytes = D.parseHex(programHex);
+  if (!bytes) return '';
+  const dec = D.disassemble(bytes);
+  const tpl = D.matchTemplates(dec.instructions, bytes);
+  const info = tpl && D.skeletonInfo(tpl.name);
+  if (!tpl || !info || !info.emitVerified || !G.SOURCES[tpl.name]) return '';
+  const args = {};
+  tpl.fields.forEach((f) => { args[f.name] = Array.from(D.parseHex(f.value)); });
+  const emitted = D.emitFromSkeleton(tpl.name, args);
+  const identical = !!emitted && D.toHex(emitted) === programHex.toLowerCase();
+  const hash = window.kascovBlake2b256 ? D.toHex(window.kascovBlake2b256(bytes)) : '';
+  const argRows = info.params.map((p) => {
+    const f = tpl.fields.find((x) => x.name === p.name);
+    if (!f) return '';
+    let val;
+    if (p.kind === 'amount') val = G.sompiToTkas(D.snumDecode(Array.from(D.parseHex(f.value)))) + ' TKAS';
+    else if (p.kind === 'daa') val = String(D.snumDecode(Array.from(D.parseHex(f.value)))) + ' DAA';
+    else val = shortHex(f.value, 8, 6);
+    return `<div class="vc-arg"><span class="dim">${esc(p.source)}</span><span class="mono">${esc(val)}</span></div>`;
+  }).join('');
+  return `<div class="verified-contract">` +
+    `<div class="vc-head"><span class="vc-badge">✓ verified contract</span>` +
+    `<strong>${esc(tpl.name)}</strong>` +
+    (identical ? `<span class="vc-proof" title="the published source re-emits to exactly these on-chain bytes">recompiles byte-identical${hash ? ' · blake2b ' + esc(hash.slice(0, 10)) + '…' : ''} ✓</span>` : '') +
+    `</div>` +
+    (argRows ? `<div class="vc-args">${argRows}</div>` : '') +
+    `<details class="vc-source"><summary>readable SilverScript source</summary>` +
+    `<pre class="script">${esc(G.SOURCES[tpl.name])}</pre></details>` +
+    `</div>`;
+}
+
 function revealPreviewHtml(u, program) {
   if (u.template !== 'p2sh commitment' || u.revealed_asm || !u.live) return '';
   let result = '';
@@ -1663,7 +1703,8 @@ function revealPreviewHtml(u, program) {
     if (v.ok) {
       result = `<p class="gen-verify-ok">✓ hash-verified — this coin commits to ` +
         `<strong>${esc(v.tpl ? v.tpl.name : 'an unrecognized program')}</strong></p>` +
-        (v.tpl ? templateLine(v.tpl.name, v.tpl.fields) : '') +
+        verifiedContractHtml(v.hex) +
+        (v.tpl ? '' : templateLine(v.tpl ? v.tpl.name : '', v.tpl ? v.tpl.fields : [])) +
         `<a class="decode-open" href="#/decode?s=${esc(v.hex)}">open the program in the decoder →</a>`;
     } else if (program) {
       result = `<p class="gen-err">${esc(v.err)}</p>`;
@@ -1710,7 +1751,7 @@ function nerdPanel(entry, network, program) {
       reveal = `<p class="reveal-label">revealed at spend — the program this state actually ran` +
         (u.spent_txid ? ` <a href="${esc(txUrl(network, u.spent_txid))}" target="_blank" rel="noopener noreferrer">(tx ↗)</a>` : '') +
         `:</p>` +
-        templateLine(u.revealed_template, u.revealed_fields) +
+        (verifiedContractHtml(u.revealed_hex) || templateLine(u.revealed_template, u.revealed_fields)) +
         `<pre class="script script-reveal">${esc(u.revealed_asm.join('\n'))}</pre>` +
         (u.revealed_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.revealed_hex)}">open revealed program in decoder →</a>` : '');
     } else if (u.sig_hex || u.spent_txid) {
@@ -2059,7 +2100,7 @@ function runDecode(updateHash) {
     (groups.includes('zk') ? '<span class="flag flag-ops">zk ops</span>' : '') +
     (truncated ? '<span class="flag flag-no">truncated / malformed tail</span>' : '') +
     `</p>` +
-    (tpl ? templateLine(tpl.name, tpl.fields) : '') +
+    (tpl ? verifiedContractHtml(window.kascovDisasm.toHex(bytes)) || templateLine(tpl.name, tpl.fields) : '') +
     genCta(tpl) +
     genPanelHtml(tpl, bytes);
   const shown = decodeShowAll ? instructions : instructions.slice(0, DECODE_WINDOW);

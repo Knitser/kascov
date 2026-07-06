@@ -2406,3 +2406,15 @@ a.build-card:hover { transform: translateY(-3px); border-color: var(--border-str
   .api-nav-group { width: 100%; margin: 0.5rem 0 0; }
   .ep-cols { grid-template-columns: 1fr; }
 }
+
+/* verified contract — Etherscan-style "verified source", for covenants */
+.verified-contract { margin: 0.7rem 0; border: 1px solid rgba(91,228,155,0.28); border-radius: var(--radius-sm); background: linear-gradient(180deg, rgba(91,228,155,0.05), transparent 60%), var(--card); padding: 0.9rem 1rem; box-shadow: var(--hairline); }
+.vc-head { display: flex; align-items: center; flex-wrap: wrap; gap: 0.55rem; }
+.vc-head strong { font-family: var(--display); font-weight: 700; }
+.vc-badge { font-family: var(--mono); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--born); background: var(--born-soft); border: 1px solid rgba(91,228,155,0.4); border-radius: 6px; padding: 0.22rem 0.5rem; }
+.vc-proof { font-family: var(--mono); font-size: 0.76rem; color: var(--born); margin-left: auto; }
+.vc-args { display: flex; flex-wrap: wrap; gap: 0.5rem 1.4rem; margin: 0.7rem 0; }
+.vc-arg { display: flex; gap: 0.4rem; font-size: 0.85rem; }
+.vc-arg .mono { color: var(--text); }
+.vc-source summary { cursor: pointer; color: var(--accent); font-size: 0.85rem; }
+.vc-source pre.script { margin-top: 0.5rem; max-height: 340px; overflow: auto; }
