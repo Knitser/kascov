@@ -2444,3 +2444,12 @@ a.build-card:hover { transform: translateY(-3px); border-color: var(--border-str
 .dbg-op-off { color: var(--faint); }
 .dbg-footnote { padding: 0.6rem 0.9rem; margin: 0; font-size: 0.78rem; border-top: 1px solid var(--border); }
 @media (max-width: 640px) { .dbg-stacks { grid-template-columns: 1fr; } }
+
+/* KIP-16 ZK-app panel */
+.zk-panel { margin: 0.7rem 0; border: 1px solid rgba(138,180,255,0.34); border-radius: var(--radius-sm); background: linear-gradient(180deg, rgba(138,180,255,0.06), transparent 60%), var(--card); padding: 0.9rem 1rem; box-shadow: var(--hairline); }
+.zk-head { display: flex; align-items: center; flex-wrap: wrap; gap: 0.55rem; margin-bottom: 0.4rem; }
+.zk-head strong { font-family: var(--display); font-weight: 700; }
+.zk-badge { font-family: var(--mono); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.05em; color: var(--move); background: var(--move-soft); border: 1px solid rgba(138,180,255,0.45); border-radius: 6px; padding: 0.22rem 0.55rem; }
+.zk-sys { margin-left: auto; font-family: var(--mono); font-size: 0.8rem; color: var(--move); }
+.zk-desc { color: var(--muted); line-height: 1.55; margin: 0; font-size: 0.92rem; }
+.zk-desc code { color: var(--move); }

@@ -1695,6 +1695,38 @@ function verifiedContractHtml(programHex) {
     `</div>`;
 }
 
+/* KIP-16 ZK-app detection. A covenant that calls OpZkPrecompile verifies a
+   zero-knowledge proof ON-CHAIN — Kaspa's precompile checks BOTH Groth16
+   (verifier tag 0x20) and RISC Zero zkVM (tag 0x21) proofs. No explorer in
+   any ecosystem surfaces on-chain ZK verification; this is the flagship. */
+function zkInfo(instructions) {
+  const idx = instructions.findIndex((i) => i.name === 'OpZkPrecompile');
+  if (idx < 0) return null;
+  // the verifier tag is a 1-byte push (0x20/0x21) among the args feeding the op
+  let tag = null;
+  for (let j = idx - 1; j >= 0 && j >= idx - 6; j--) {
+    const d = instructions[j].data;
+    if (d && d.length === 1 && (d[0] === 0x20 || d[0] === 0x21)) { tag = d[0]; break; }
+  }
+  const system = tag === 0x20 ? 'Groth16' : tag === 0x21 ? 'RISC Zero (zkVM)' : 'a zero-knowledge proof';
+  // count how many pushes precede the op (proof / verification key / public inputs)
+  const pushesBefore = instructions.slice(0, idx).filter((i) => i.group === 'push' && i.data && i.data.length > 2).length;
+  return { system, tag, pushesBefore };
+}
+
+function zkPanelHtml(instructions) {
+  const z = zkInfo(instructions);
+  if (!z) return '';
+  return `<div class="zk-panel">` +
+    `<div class="zk-head"><span class="zk-badge">⬡ ZK covenant</span>` +
+    `<strong>on-chain zero-knowledge verification</strong>` +
+    `<span class="zk-sys">${esc(z.system)}</span></div>` +
+    `<p class="zk-desc">This contract calls <code class="mono">OpZkPrecompile</code> (KIP-16) — Kaspa's L1 verifies a ` +
+    `${esc(z.system)} proof <em>inside the script</em>, so the coin only moves if a valid zero-knowledge proof is supplied. ` +
+    `Verified computation, settled on a ~10-blocks/sec BlockDAG.</p>` +
+    `</div>`;
+}
+
 /* ---- the visual script debugger (symbolic stepper) ---- */
 let dbg = null; // { steps, i }
 
@@ -1809,6 +1841,7 @@ function nerdPanel(entry, network, program) {
         (u.spent_txid ? ` <a href="${esc(txUrl(network, u.spent_txid))}" target="_blank" rel="noopener noreferrer">(tx ↗)</a>` : '') +
         `:</p>` +
         (verifiedContractHtml(u.revealed_hex) || templateLine(u.revealed_template, u.revealed_fields)) +
+        (u.revealed_hex ? zkPanelHtml(window.kascovDisasm.disassemble(window.kascovDisasm.parseHex(u.revealed_hex) || []).instructions) : '') +
         `<pre class="script script-reveal">${esc(u.revealed_asm.join('\n'))}</pre>` +
         (u.revealed_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.revealed_hex)}">open revealed program in decoder →</a>` : '');
     } else if (u.sig_hex || u.spent_txid) {
@@ -2157,6 +2190,7 @@ function runDecode(updateHash) {
     (groups.includes('zk') ? '<span class="flag flag-ops">zk ops</span>' : '') +
     (truncated ? '<span class="flag flag-no">truncated / malformed tail</span>' : '') +
     `</p>` +
+    zkPanelHtml(instructions) +
     (tpl ? verifiedContractHtml(window.kascovDisasm.toHex(bytes)) || templateLine(tpl.name, tpl.fields) : '') +
     genCta(tpl) +
     genPanelHtml(tpl, bytes) +
