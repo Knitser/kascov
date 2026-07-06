@@ -91,6 +91,30 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         compute_budget: u16,
     },
+    /// Settle a deployed Escrow ON ITS OWN TERMS: the arbiter (your key)
+    /// signs, and the contract's introspection rules force output 0 to pay
+    /// the buyer or the seller exactly value − 1000 sompi. A second plain
+    /// input funds the real network fee, so the contract's hardcoded
+    /// 1000-sompi fee and the node's compute-mass fee can both hold.
+    SettleEscrow {
+        /// Compiled Escrow hex (arbiter must be your keygen blake2b)
+        #[arg(long)]
+        program_hex: String,
+        /// Who gets the funds: buyer | seller
+        #[arg(long, default_value = "buyer")]
+        release_to: String,
+        /// Which covenant to settle, when several share this program
+        #[arg(long)]
+        covenant: Option<String>,
+    },
+    /// Escrow, end to end: emit one (arbiter = you, buyer = you, seller = a
+    /// throwaway), deploy it, then settle it to the buyer — a real dispute
+    /// resolution playing out on testnet-10 in one command.
+    EscrowDemo {
+        /// Sompi held in escrow (default 10 TKAS)
+        #[arg(long, default_value_t = 1_000_000_000)]
+        value: u64,
+    },
     /// The whole loop in one command: emit a Mecenas reclaimable by YOUR key,
     /// deploy it, then reclaim it — so you watch a coin get born and reveal
     /// itself as SilverScript · Mecenas on kascov.
@@ -121,6 +145,15 @@ async fn main() -> Result<()> {
             spend(&cli, &program, entrypoint, target, to.as_deref(), compute_budget).await
         }
         Command::ContractDemo { value } => contract_demo(&cli, value).await,
+        Command::SettleEscrow { ref program_hex, ref release_to, ref covenant } => {
+            let program = hex::decode(program_hex.trim()).context("--program-hex is not valid hex")?;
+            let target = covenant
+                .as_deref()
+                .map(|c| c.parse::<kaspa_consensus_core::Hash>().context("bad --covenant id"))
+                .transpose()?;
+            settle_escrow(&cli, &program, release_to, target).await
+        }
+        Command::EscrowDemo { value } => escrow_demo(&cli, value).await,
     }
 }
 
@@ -377,8 +410,9 @@ async fn deploy(cli: &Cli, program: &[u8], value: u64) -> Result<kaspa_consensus
     println!("           tx {txid}");
     println!("           program blake2b {}", hex::encode(commitment));
     println!();
-    println!("watch it live (give the indexer ~a minute):");
-    println!("  https://kascov-explorer.web.app/testnet-10/c/{id}");
+    println!("watch it live (give the indexer ~a minute) — this link proves the");
+    println!("commitment in the browser, no spend needed:");
+    println!("  https://kascov-explorer.web.app/testnet-10/c/{id}?program={}", hex::encode(program));
     println!();
     println!("the coin shows as a 'p2sh commitment' (the program is hidden) until");
     println!("you SPEND it — that reveals the program on-chain and kascov names it:");
@@ -386,6 +420,177 @@ async fn deploy(cli: &Cli, program: &[u8], value: u64) -> Result<kaspa_consensus
     println!("(reclaim needs the coin's funder_hash to be your key's blake2b —");
     println!(" `kascov-lab keygen` prints it. Or just run `kascov-lab contract-demo`.)");
     Ok(id)
+}
+
+/// Settle an Escrow: input 0 = the covenant state (witness satisfies
+/// `spend(pk, s)` with the ARBITER key), input 1 = a plain UTXO paying the
+/// network fee. The contract forces outputs[0] = P2PK(buyer|seller) with
+/// exactly state.value − 1000; change from the fee input rides at index 1.
+async fn settle_escrow(
+    cli: &Cli,
+    program: &[u8],
+    release_to: &str,
+    target_covenant: Option<kaspa_consensus_core::Hash>,
+) -> Result<()> {
+    let decoded = kascov_decode::Registry::default().decode(0, program);
+    let template = decoded.template.context("not a recognized contract")?;
+    if template != "SilverScript · Escrow" {
+        bail!("settle-escrow works on Escrow programs; this is {template}");
+    }
+    let field = |n: &str| {
+        decoded.fields.iter().find(|f| f.name == n).map(|f| f.value.clone())
+            .with_context(|| format!("missing {n}"))
+    };
+    let arbiter_hash = field("arbiter_hash")?;
+    let buyer_pk = field("buyer")?;
+    let seller_pk = field("seller")?;
+
+    let keypair = load_or_create_key(&cli.key, false)?;
+    let pk = xonly(&keypair);
+    if blake2b32(&pk).to_vec() != arbiter_hash {
+        bail!(
+            "the arbiter of this escrow is {}, not your key ({}) — only the arbiter can settle it",
+            hex::encode(&arbiter_hash),
+            hex::encode(blake2b32(&pk))
+        );
+    }
+    let recipient_pk = match release_to {
+        "buyer" => buyer_pk,
+        "seller" => seller_pk,
+        other => bail!("--release-to must be buyer or seller, not {other}"),
+    };
+    let recipient_addr = Address::new(Prefix::Testnet, AddrVersion::PubKey, &recipient_pk);
+    let recipient_spk = pay_to_address_script(&recipient_addr);
+
+    // The escrow state UTXO…
+    let spk = p2sh_spk(program);
+    let p2sh_addr = extract_script_pub_key_address(&spk, Prefix::Testnet)
+        .map_err(|e| anyhow::anyhow!("cannot derive P2SH address: {e:?}"))?;
+    let client = connect(cli).await?;
+    let states = client.get_utxos_by_addresses(vec![p2sh_addr.clone().into()]).await?;
+    let state = match target_covenant {
+        Some(t) => states.iter().find(|u| u.utxo_entry.covenant_id == Some(t)),
+        None => states.iter().find(|u| u.utxo_entry.covenant_id.is_some()).or_else(|| states.first()),
+    }
+    .with_context(|| format!("no live escrow state at {p2sh_addr}"))?;
+
+    // …and a plain UTXO of ours to pay the real network fee.
+    let my_addr = address_of(&keypair);
+    let mine = client.get_utxos_by_addresses(vec![my_addr.clone().into()]).await?;
+    // escrow input ≈ 100k script units (2 P2PK rebuilds + introspection);
+    // the fee input runs its own p2pk checksig (~100k) — both need real budget.
+    let budget: u16 = 40;
+    let fee = 100 * (2 * budget as u64 * 100 + 5000) + 200_000;
+    let funding = mine
+        .iter()
+        .filter(|u| u.utxo_entry.covenant_id.is_none() && u.utxo_entry.amount > fee + 100_000)
+        .max_by_key(|u| u.utxo_entry.amount)
+        .with_context(|| format!("no fee-funding UTXO on {my_addr} — faucet it first"))?;
+
+    // Contract math: outputs[0].value == state.value − 1000 (its hardcoded fee).
+    let state_value = state.utxo_entry.amount;
+    let out0 = TransactionOutput::new(state_value - 1000, recipient_spk);
+    // change: everything from the fee input minus the real network fee − the 1000
+    // the contract already "spent" (the tx must balance: in − out == network fee).
+    let change_value = funding.utxo_entry.amount + 1000 - fee;
+    let out1 = TransactionOutput::new(change_value, pay_to_address_script(&my_addr));
+
+    let covenant_input = TransactionInput::new_with_mass(
+        TransactionOutpoint::new(state.outpoint.transaction_id, state.outpoint.index),
+        vec![],
+        0,
+        ComputeCommit::ComputeBudget(ComputeBudget(budget)),
+    );
+    let fee_input = TransactionInput::new_with_mass(
+        TransactionOutpoint::new(funding.outpoint.transaction_id, funding.outpoint.index),
+        vec![],
+        0,
+        ComputeCommit::ComputeBudget(ComputeBudget(budget)),
+    );
+    let tx = Transaction::new(
+        TX_VERSION_TOCCATA,
+        vec![covenant_input, fee_input],
+        vec![out0, out1],
+        0,
+        SUBNETWORK_ID_NATIVE,
+        0,
+        vec![],
+    );
+    let entries = vec![
+        UtxoEntry::new(
+            state_value,
+            state.utxo_entry.script_public_key.clone(),
+            state.utxo_entry.block_daa_score,
+            state.utxo_entry.is_coinbase,
+            state.utxo_entry.covenant_id,
+        ),
+        UtxoEntry::new(
+            funding.utxo_entry.amount,
+            funding.utxo_entry.script_public_key.clone(),
+            funding.utxo_entry.block_daa_score,
+            funding.utxo_entry.is_coinbase,
+            None,
+        ),
+    ];
+    let mut mtx = MutableTransaction::with_entries(tx, entries);
+
+    let reused = SigHashReusedValuesUnsync::new();
+    // input 0: the arbiter satisfies Escrow.spend(pk, s) + reveals the program
+    let h0 = calc_schnorr_signature_hash(&mtx.as_verifiable(), 0, SIG_HASH_ALL, &reused);
+    let sig0 = keypair.sign_schnorr(secp256k1::Message::from_digest_slice(h0.as_bytes().as_slice())?);
+    let mut sig0_arg = sig0.as_ref().to_vec();
+    sig0_arg.push(SIG_HASH_ALL.to_u8());
+    let mut witness = Vec::new();
+    witness.extend_from_slice(&kascov_decode::encode_push(&pk));
+    witness.extend_from_slice(&kascov_decode::encode_push(&sig0_arg));
+    // Escrow has a single entrypoint — no selector.
+    witness.extend_from_slice(&kascov_decode::encode_push(program));
+    mtx.tx.inputs[0].signature_script = witness;
+    // input 1: plain p2pk spend of our fee UTXO
+    let h1 = calc_schnorr_signature_hash(&mtx.as_verifiable(), 1, SIG_HASH_ALL, &reused);
+    let sig1 = keypair.sign_schnorr(secp256k1::Message::from_digest_slice(h1.as_bytes().as_slice())?);
+    let mut sig1_full = sig1.as_ref().to_vec();
+    sig1_full.push(SIG_HASH_ALL.to_u8());
+    mtx.tx.inputs[1].signature_script = kascov_decode::encode_push(&sig1_full);
+
+    let covenant_id_opt = state.utxo_entry.covenant_id;
+    let txid = submit(&client, &mtx.tx).await?;
+    println!("SETTLED    Escrow → {release_to} ({:.8} TKAS released)", (state_value - 1000) as f64 / 1e8);
+    println!("           tx {txid}");
+    if let Some(id) = covenant_id_opt {
+        println!();
+        println!("the escrow revealed itself on-chain. watch the story:");
+        println!("  https://kascov-explorer.web.app/testnet-10/c/{id}");
+    }
+    Ok(())
+}
+
+/// Escrow end-to-end: emit (arbiter = you, buyer = you, seller = throwaway),
+/// deploy, settle to the buyer.
+async fn escrow_demo(cli: &Cli, value: u64) -> Result<()> {
+    let keypair = load_or_create_key(&cli.key, true)?;
+    let pk = xonly(&keypair);
+    let pk_hash = blake2b32(&pk);
+    let seller = [0x5eu8; 32]; // a throwaway "seller" — the demo releases to the buyer (you)
+    let skels = kascov_decode::silverscript_skeletons();
+    let escrow = skels.iter().find(|s| s.name == "SilverScript · Escrow").context("no Escrow skeleton")?;
+    let args: Vec<(&str, &[u8])> = vec![
+        ("arbiter_hash", &pk_hash),
+        ("buyer", &pk),
+        ("seller", &seller),
+    ];
+    let program = escrow.emit(&args).context("emit failed")?;
+
+    println!("=== escrow-demo: deploy → arbiter settles → buyer paid ===");
+    println!("[1/2] deploying the escrow…");
+    let id = deploy(cli, &program, value).await?;
+    println!();
+    println!("[2/2] waiting ~15s, then settling to the buyer…");
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    settle_escrow(cli, &program, "buyer", Some(id)).await?;
+    println!();
+    println!("done — a real escrow lived and settled by its own rules on testnet-10.");
+    Ok(())
 }
 
 fn build_signed(keypair: &Keypair, from: &SpendableUtxo, outputs: Vec<TransactionOutput>) -> Result<Transaction> {

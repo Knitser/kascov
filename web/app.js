@@ -1590,7 +1590,44 @@ const templateLine = (name, fields) => name
   ? `<p class="tpl-line"><span class="flag flag-tpl">${esc(name)}</span>${(fields || []).map(fieldRow).join('')}</p>`
   : '';
 
-function nerdPanel(entry, network) {
+/* client-side reveal preview: a live p2sh-commitment coin shows its
+   contract the moment someone who HOLDS the program proves it (blake2b
+   match) — no spend needed. Auto-runs from ?program= deep links. */
+function verifyProgramAgainstUtxo(u, programHex) {
+  if (!window.kascovBlake2b256) return { err: 'hash unavailable in this browser' };
+  const bytes = window.kascovDisasm.parseHex(programHex);
+  if (!bytes) return { err: 'that is not valid hex' };
+  const committed = ((u.state_fields || []).find((f) => f.name === 'program_hash') || {}).value;
+  if (!committed) return { err: 'no committed hash on this state' };
+  const got = window.kascovDisasm.toHex(window.kascovBlake2b256(bytes));
+  if (got !== committed) return { err: 'blake2b mismatch — this is not the committed program' };
+  const dec = window.kascovDisasm.disassemble(bytes);
+  const tpl = window.kascovDisasm.matchTemplates(dec.instructions, bytes);
+  return { ok: true, tpl, hex: window.kascovDisasm.toHex(bytes) };
+}
+
+function revealPreviewHtml(u, program) {
+  if (u.template !== 'p2sh commitment' || u.revealed_asm || !u.live) return '';
+  let result = '';
+  if (program) {
+    const v = verifyProgramAgainstUtxo(u, program);
+    if (v.ok) {
+      result = `<p class="gen-verify-ok">✓ hash-verified — this coin commits to ` +
+        `<strong>${esc(v.tpl ? v.tpl.name : 'an unrecognized program')}</strong></p>` +
+        (v.tpl ? templateLine(v.tpl.name, v.tpl.fields) : '') +
+        `<a class="decode-open" href="#/decode?s=${esc(v.hex)}">open the program in the decoder →</a>`;
+    } else if (program) {
+      result = `<p class="gen-err">${esc(v.err)}</p>`;
+    }
+  }
+  return `<div class="reveal-preview" data-outpoint="${esc(u.outpoint)}">` +
+    (result || `<p class="dim reveal-hint" title="${esc(GLOSSARY['p2sh commitment'] || '')}">know the program behind this hash? paste it to preview the contract (nothing leaves your browser):</p>` +
+      `<div class="reveal-row"><input type="text" class="reveal-input" placeholder="program hex…" spellcheck="false">` +
+      `<button type="button" class="btn" data-action="reveal-check">verify</button></div>`) +
+    `</div>`;
+}
+
+function nerdPanel(entry, network, program) {
   const c = entry.c;
   const rows = [
     ['covenant id', `<span class="mono break">${esc(c.covenant_id)}</span> <button type="button" class="copy-btn" data-action="copy" data-copy="${esc(c.covenant_id)}">copy</button>`],
@@ -1648,6 +1685,7 @@ function nerdPanel(entry, network) {
       `<pre class="script">${esc((u.script_asm || []).join('\n'))}</pre>` +
       (u.script_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.script_hex)}">open in decoder →</a>` : '') +
       reveal +
+      revealPreviewHtml(u, program) +
       `</div>`;
   }).join('');
   return `<dl class="nerd-rows">${rows.map(([k, v]) => `<div class="nerd-row"><dt>${esc(k)}</dt><dd>${v}</dd></div>`).join('')}</dl>` +
@@ -1660,7 +1698,7 @@ function nerdPanel(entry, network) {
 const STORY_WINDOW = 8;
 const UTXO_WINDOW = 8;
 
-function renderDetail(entry, covId, flashTx) {
+function renderDetail(entry, covId, flashTx, program) {
   const network = state.network;
   const { data, index } = entry;
   const view = $('#view-detail');
@@ -1711,7 +1749,7 @@ function renderDetail(entry, covId, flashTx) {
     loadDetail(network, covId)
       .then(() => {
         if (state.network === network && state.detailId === covId && parseRoute().view === 'detail') {
-          renderDetail(entry, covId, flashTx);
+          renderDetail(entry, covId, flashTx, program);
         }
       })
       .catch(() => {
@@ -1788,7 +1826,7 @@ function renderDetail(entry, covId, flashTx) {
     `<button type="button" class="nerd-toggle" data-action="nerd" aria-expanded="${state.nerd}">` +
     `<span class="nerd-switch" aria-hidden="true"></span><span>nerd mode</span>` +
     `<span class="dim nerd-hint">raw ids, DAA scores, UTXOs &amp; scripts</span></button>` +
-    `<div id="nerd-panel" class="nerd-panel" ${state.nerd ? '' : 'hidden'}>${state.nerd ? nerdPanel(rec, network) : ''}</div>` +
+    `<div id="nerd-panel" class="nerd-panel" ${state.nerd ? '' : 'hidden'}>${state.nerd ? nerdPanel(rec, network, program) : ''}</div>` +
     `</section>`;
 
   if (flashTx) {
@@ -2124,6 +2162,10 @@ function parseRoute() {
       network: m[1] || null,
       id: m[2].toLowerCase(),
       tx: /^[0-9a-f]{64}$/.test(tx) ? tx : null,
+      program: (() => {
+        const pr = (params.get('program') || '').toLowerCase().replace(/^0x/, '');
+        return /^[0-9a-f]+$/.test(pr) && pr.length % 2 === 0 && pr.length >= 8 ? pr : null;
+      })(),
     };
   }
   /* '#/<network>/addr/<address-or-pubkey>' and bare '#/addr/…' (current network) */
@@ -2276,7 +2318,7 @@ async function render() {
   for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
 
   if (route.view === 'detail') {
-    renderDetail(entry, route.id, route.tx);
+    renderDetail(entry, route.id, route.tx, route.program);
   } else {
     views.detail.innerHTML = '';
     if (route.view === 'explore') renderExplore(entry);
@@ -2544,7 +2586,7 @@ document.addEventListener('click', (e) => {
     const entry = state.cache[state.network];
     if (route.view === 'detail' && entry) {
       const y = window.scrollY;
-      renderDetail(entry, route.id);
+      renderDetail(entry, route.id, route.tx, route.program);
       window.scrollTo({ top: y, behavior: 'instant' });
     }
   } else if (action === 'watch') {
@@ -2651,6 +2693,15 @@ document.addEventListener('click', (e) => {
   } else if (action === 'retry') {
     delete state.cache[state.network];
     render();
+  } else if (action === 'reveal-check') {
+    const box = el.closest('.reveal-preview');
+    const val = box && box.querySelector('.reveal-input') ? box.querySelector('.reveal-input').value.trim().replace(/^0x/, '') : '';
+    if (val) {
+      const route = parseRoute();
+      if (route.view === 'detail') {
+        location.hash = `#/${state.network}/c/${route.id}?program=${val}`;
+      }
+    }
   } else if (action === 'retry-detail') {
     render(); /* the detail map has no entry for a failed fetch — this refetches */
   } else if (action === 'retry-addr') {

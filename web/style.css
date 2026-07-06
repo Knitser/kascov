@@ -1777,3 +1777,13 @@ a.btn:hover { text-decoration: none; }
 
 .gen-note { margin: 0 0 0.8rem; line-height: 1.55; }
 .gen-note strong { color: var(--accent); }
+
+/* reveal preview on unspent commitment states */
+.reveal-preview { margin-top: 0.6rem; }
+.reveal-row { display: flex; gap: 0.5rem; margin-top: 0.35rem; }
+.reveal-input {
+  flex: 1; min-width: 0; font-family: var(--mono); font-size: 16px;
+  background: var(--bg-soft); color: var(--text);
+  border: 1px solid var(--border); border-radius: 10px; padding: 0.45rem 0.6rem;
+}
+.reveal-hint { margin: 0; font-size: 0.85rem; }
