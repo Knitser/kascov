@@ -963,6 +963,38 @@ impl Store {
         Ok(rows)
     }
 
+    /// Based-app activity, classified: covenant events that carried a v1 tx
+    /// payload, grouped by what the payload actually IS — JSON inscriptions
+    /// (raw `{"…` and hex-encoded) folded together, everything else keyed by
+    /// its leading 4-byte tag. Returns (key, event_count, distinct_covenants);
+    /// key is `json` / `jsonhex` / `tag:<hex>`. The worker turns these into
+    /// human labels. Busiest first.
+    pub fn based_app_namespaces(&self) -> Result<Vec<(String, u64, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT CASE
+                          WHEN substr(payload, 1, 2) = x'7b22' THEN 'json'
+                          WHEN substr(payload, 1, 4) = x'37623232' THEN 'jsonhex'
+                          ELSE 'tag:' || lower(hex(substr(payload, 1, 4)))
+                        END AS k,
+                        COUNT(*) AS events,
+                        COUNT(DISTINCT covenant_id) AS coins
+                 FROM covenant_events
+                 WHERE payload IS NOT NULL AND length(payload) >= 4
+                 GROUP BY k
+                 ORDER BY events DESC
+                 LIMIT 200",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64)))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
     /// Transactions that touched more than one covenant, with the covenants
     /// they moved together — the raw edges of multi-contract "apps".
     /// (A single tx moving several covenants is a Toccata multi-contract flow.)

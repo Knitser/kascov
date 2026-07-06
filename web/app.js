@@ -294,6 +294,7 @@ const state = {
   addrs: {},          // network -> Map(addressOrPubkey query -> /addr response)
   templates: {},      // network -> { data, at } (contract-type analytics)
   families: {},       // network -> { data, at } (multi-contract apps)
+  lanes: {},          // network -> { data, at } (based-app namespaces)
   digest: {},         // network -> { data, at, animated }
   activity: {},       // network -> { [range]: { data, at } } (data null = 404 miss)
   pulseRange: '24h',
@@ -474,6 +475,60 @@ async function loadTemplates(network) {
   }
 }
 
+async function loadLanes(network) {
+  const t = state.lanes[network];
+  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
+  try {
+    const res = await fetch(`data/${network}/lanes.json`, { cache: 'no-cache' });
+    if (!res.ok) { state.lanes[network] = { data: null, at: Date.now() }; return null; }
+    const data = await res.json();
+    state.lanes[network] = { data, at: Date.now() };
+    return data;
+  } catch (e) {
+    return t ? t.data : null;
+  }
+}
+
+/* a namespace is 4 bytes — show its ASCII when printable ("KASP"), else hex */
+function nsLabel(hex) {
+  const bytes = hex.match(/../g) || [];
+  const printable = bytes.length > 0 && bytes.every((b) => { const c = parseInt(b, 16); return c >= 0x20 && c <= 0x7e; });
+  if (printable) {
+    const ascii = bytes.map((b) => String.fromCharCode(parseInt(b, 16))).join('');
+    return `<span class="ns-ascii">${esc(ascii)}</span> <span class="dim mono">0x${esc(hex)}</span>`;
+  }
+  return `<span class="mono">0x${esc(hex)}</span>`;
+}
+
+function renderLanes(network) {
+  const section = $('#section-lanes');
+  const host = $('#lanes-row');
+  if (!section || !host) return;
+  const cached = state.lanes[network];
+  if (!cached) {
+    loadLanes(network).then((d) => {
+      if (d && state.network === network && parseRoute().view === 'explore') renderLanes(network);
+    });
+    section.hidden = true;
+    return;
+  }
+  const lanes = (cached.data && cached.data.lanes) || [];
+  if (!lanes.length) { section.hidden = true; return; }
+  section.hidden = false;
+  const max = Math.max(1, ...lanes.map((l) => l.events));
+  host.innerHTML = lanes.slice(0, 14).map((l) => {
+    const w = Math.max((l.events / max) * 100, 3).toFixed(1);
+    const name = l.kind === 'inscription'
+      ? `<span class="ns-ascii">${esc(l.label)}</span> <span class="dim">KRC-20 · JSON</span>`
+      : l.ascii
+        ? `<span class="ns-ascii">${esc(l.label)}</span> <span class="dim mono">0x${esc(l.hex)}</span>`
+        : `<span class="mono">${esc(l.label)}</span>`;
+    return `<div class="lane-row"><span class="lane-ns">${name}</span>` +
+      `<span class="lane-track"><span class="lane-fill" style="width:${w}%"></span></span>` +
+      `<span class="lane-counts dim">${fmtInt(l.events)} tx${l.events === 1 ? '' : 's'} · ${fmtInt(l.covenants)} coin${l.covenants === 1 ? '' : 's'}</span></div>`;
+  }).join('');
+}
+
 async function loadFamilies(network) {
   const t = state.families[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
@@ -625,6 +680,9 @@ function renderLiteExplore(live, network) {
   $('#watch-strip').hidden = true;
   $('#section-records').hidden = true;
   if ($('#section-families')) $('#section-families').hidden = true;
+  /* lanes fetch their own small endpoint — render even before the big
+     snapshot lands so based-app activity shows immediately */
+  renderLanes(network);
   const tpl = $('#section-templates');
   if (tpl) tpl.hidden = true; /* appears when the full snapshot render runs */
   $('#section-pulse').hidden = true;
@@ -1588,6 +1646,7 @@ function renderExplore(entry) {
   renderRecords(entry, network);
   renderTemplates(network);
   renderFamilies(network);
+  renderLanes(network);
   loadTemplates(network).then(() => {
     if (state.network === network && parseRoute().view === 'explore') renderTemplates(network);
   });

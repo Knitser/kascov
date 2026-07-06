@@ -1024,6 +1024,7 @@ async fn serve(
         .route("/data/{network}/c/{id}", get(detail_handler))
         .route("/data/{network}/tx/{txid}", get(tx_handler))
         .route("/data/{network}/families.json", get(families_handler))
+        .route("/data/{network}/lanes.json", get(lanes_handler))
         .route("/data/{network}/digest.json", get(digest_handler))
         .route("/data/{network}/templates.json", get(templates_handler))
         .route("/data/{network}/activity.json", get(activity_handler))
@@ -1336,6 +1337,69 @@ fn build_families(store: &Store, network: kascov_core::Network) -> Result<serde_
         "tip_at_ms": tip.map(|t| t.1),
         "families": out,
     }))
+}
+
+async fn lanes_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let net = net_name.strip_suffix("/lanes.json").unwrap_or(&net_name);
+    let Ok(network) = net.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+    let db = state.base_dir.join(format!("{network}.db"));
+    let cc = "public, max-age=30, s-maxage=120, stale-while-revalidate=600";
+    serve_cached(&state, format!("{network}/lanes"), 60, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let mut json_events = 0u64;
+        let mut json_coins = 0u64;
+        let mut lanes: Vec<serde_json::Value> = Vec::new();
+        for (key, events, coins) in store.based_app_namespaces()? {
+            if key == "json" || key == "jsonhex" {
+                json_events += events;
+                json_coins += coins;
+                continue;
+            }
+            // key = "tag:<hex>" — a 4-byte app tag; decode printable ASCII
+            let hex = key.strip_prefix("tag:").unwrap_or(&key);
+            let bytes = hex::decode(hex).unwrap_or_default();
+            let printable = !bytes.is_empty() && bytes.iter().all(|&b| (0x20..=0x7e).contains(&b));
+            let label = if printable { String::from_utf8_lossy(&bytes).into_owned() } else { format!("0x{hex}") };
+            lanes.push(serde_json::json!({
+                "label": label,
+                "hex": hex,
+                "ascii": printable,
+                "kind": "tag",
+                "events": events,
+                "covenants": coins,
+            }));
+        }
+        if json_events > 0 {
+            lanes.push(serde_json::json!({
+                "label": "JSON inscriptions",
+                "hex": serde_json::Value::Null,
+                "ascii": false,
+                "kind": "inscription",
+                "events": json_events,
+                "covenants": json_coins,
+            }));
+        }
+        lanes.sort_by(|a, b| b["events"].as_u64().cmp(&a["events"].as_u64()));
+        let tip = store.tip()?;
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "tip_daa": tip.map(|t| t.0),
+            "lanes": lanes,
+        }))?))
+    })
+    .await
 }
 
 async fn families_handler(

@@ -2453,3 +2453,13 @@ a.build-card:hover { transform: translateY(-3px); border-color: var(--border-str
 .zk-sys { margin-left: auto; font-family: var(--mono); font-size: 0.8rem; color: var(--move); }
 .zk-desc { color: var(--muted); line-height: 1.55; margin: 0; font-size: 0.92rem; }
 .zk-desc code { color: var(--move); }
+
+/* based-app lanes — activity by payload namespace */
+.lanes { margin-bottom: 2.4rem; }
+.lane-row { display: grid; grid-template-columns: minmax(140px, 200px) 1fr auto; align-items: center; gap: 1rem; padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
+.lane-ns { font-size: 0.92rem; }
+.ns-ascii { font-family: var(--mono); font-weight: 600; color: var(--accent); }
+.lane-track { height: 8px; border-radius: 99px; background: var(--bg-soft); overflow: hidden; }
+.lane-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--move), var(--accent)); border-radius: 99px; }
+.lane-counts { font-size: 0.82rem; white-space: nowrap; }
+@media (max-width: 640px) { .lane-row { grid-template-columns: 1fr auto; } .lane-track { display: none; } }
