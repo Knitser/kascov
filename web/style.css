@@ -2418,3 +2418,29 @@ a.build-card:hover { transform: translateY(-3px); border-color: var(--border-str
 .vc-arg .mono { color: var(--text); }
 .vc-source summary { cursor: pointer; color: var(--accent); font-size: 0.85rem; }
 .vc-source pre.script { margin-top: 0.5rem; max-height: 340px; overflow: auto; }
+
+/* visual script debugger — the symbolic stepper */
+.dbg-cta { margin: 1rem 0 0.4rem; display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.dbg-open-btn { border-color: var(--border-strong); }
+.dbg { margin-top: 0.8rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); overflow: hidden; box-shadow: var(--hairline); }
+.dbg-controls { display: flex; align-items: center; gap: 0.7rem; padding: 0.7rem 0.9rem; border-bottom: 1px solid var(--border); background: var(--bg-soft); }
+.dbg-btn { padding: 0.3rem 0.7rem; }
+.dbg-slider { flex: 1; accent-color: var(--accent); }
+.dbg-count { font-size: 0.82rem; color: var(--muted); white-space: nowrap; }
+.dbg-close { margin-left: 0.2rem; font-size: 0.8rem; }
+.dbg-now { padding: 0.8rem 0.9rem; display: flex; gap: 0.7rem; align-items: baseline; border-bottom: 1px solid var(--border); }
+.dbg-now-op { font-size: 1.05rem; font-weight: 600; color: var(--accent); }
+.dbg-now-note { color: var(--muted); }
+.dbg-stacks { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border); }
+.dbg-col { background: #06120f; padding: 0.7rem 0.9rem; min-height: 130px; }
+.dbg-col-h { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); margin-bottom: 0.5rem; }
+.dbg-item { font-family: var(--mono); font-size: 0.85rem; color: var(--muted); padding: 0.28rem 0.55rem; margin-bottom: 0.28rem; border-radius: 7px; background: var(--bg-soft); border: 1px solid var(--border); word-break: break-all; }
+.dbg-top { color: var(--text); border-color: var(--border-strong); background: var(--accent-soft); }
+.dbg-empty { font-family: var(--mono); font-size: 0.82rem; color: var(--faint); font-style: italic; }
+.dbg-oplist { max-height: 260px; overflow: auto; border-top: 1px solid var(--border); font-family: var(--mono); font-size: 0.8rem; }
+.dbg-op { display: flex; gap: 0.9rem; padding: 0.24rem 0.9rem; cursor: pointer; color: var(--muted); }
+.dbg-op:hover { background: var(--bg-soft); }
+.dbg-active { background: var(--accent-soft); color: var(--text); }
+.dbg-op-off { color: var(--faint); }
+.dbg-footnote { padding: 0.6rem 0.9rem; margin: 0; font-size: 0.78rem; border-top: 1px solid var(--border); }
+@media (max-width: 640px) { .dbg-stacks { grid-template-columns: 1fr; } }

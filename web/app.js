@@ -1695,6 +1695,63 @@ function verifiedContractHtml(programHex) {
     `</div>`;
 }
 
+/* ---- the visual script debugger (symbolic stepper) ---- */
+let dbg = null; // { steps, i }
+
+function debugCtaHtml(bytes) {
+  if (!window.kascovVm) return '';
+  const hex = window.kascovDisasm.toHex(bytes);
+  return `<div class="dbg-cta">` +
+    `<button type="button" class="btn dbg-open-btn" data-action="dbg-open" data-prog="${esc(hex)}">⧉ step through the stack</button>` +
+    `<span class="dim"> — watch the contract's logic run, opcode by opcode</span></div>` +
+    `<div id="dbg-panel"></div>`;
+}
+
+function openDebugger(hex) {
+  const D = window.kascovDisasm;
+  const bytes = D.parseHex(hex);
+  if (!bytes || !window.kascovVm) return;
+  const dec = D.disassemble(bytes);
+  dbg = { steps: window.kascovVm.symbolicTrace(dec.instructions), i: 0 };
+  renderDebugger();
+}
+
+function dbgStep(delta, abs) {
+  if (!dbg) return;
+  dbg.i = abs != null ? abs : dbg.i + delta;
+  dbg.i = Math.max(0, Math.min(dbg.steps.length - 1, dbg.i));
+  renderDebugger();
+}
+
+function renderDebugger() {
+  const host = document.getElementById('dbg-panel');
+  if (!host || !dbg) return;
+  const n = dbg.steps.length;
+  const i = Math.max(0, Math.min(n - 1, dbg.i));
+  const s = dbg.steps[i];
+  const col = (title, arr) => `<div class="dbg-col"><div class="dbg-col-h">${title} <span class="dim">${arr.length}</span></div>` +
+    (arr.length ? arr.slice().reverse().map((x, k) => `<div class="dbg-item${k === 0 ? ' dbg-top' : ''}">${esc(x)}</div>`).join('') : '<div class="dbg-empty">empty</div>') +
+    `</div>`;
+  const ops = dbg.steps.map((st, k) =>
+    `<div class="dbg-op${k === i ? ' dbg-active' : ''}" style="padding-left:${(0.6 + st.indent * 0.9).toFixed(2)}rem" data-action="dbg-seek" data-i="${k}">` +
+    `<span class="dbg-op-off">${st.offset.toString(16).padStart(4, '0')}</span>` +
+    `<span class="dbg-op-name g-${esc(st.group)}">${esc(st.name)}</span></div>`).join('');
+  host.innerHTML = `<div class="dbg">` +
+    `<div class="dbg-controls">` +
+    `<button type="button" class="btn dbg-btn" data-action="dbg-prev"${i === 0 ? ' disabled' : ''}>◀</button>` +
+    `<input type="range" class="dbg-slider" min="0" max="${n - 1}" value="${i}" data-action="dbg-slider" aria-label="step">` +
+    `<button type="button" class="btn dbg-btn" data-action="dbg-next"${i === n - 1 ? ' disabled' : ''}>▶</button>` +
+    `<span class="dbg-count mono">step ${i + 1} / ${n}</span>` +
+    `<button type="button" class="btn dbg-close" data-action="dbg-close">close</button></div>` +
+    `<div class="dbg-now"><span class="dbg-now-op mono">${esc(s.name)}</span> <span class="dbg-now-note">${esc(s.note)}</span></div>` +
+    `<div class="dbg-stacks">${col('data stack', s.dstack)}${col('alt stack', s.astack)}</div>` +
+    `<div class="dbg-oplist">${ops}</div>` +
+    `<p class="dim dbg-footnote">symbolic trace — concrete for pushes &amp; stack ops, ‹symbolic› where a value only resolves against a real spend</p>` +
+    `</div>`;
+  const act = host.querySelector('.dbg-active');
+  if (act) act.scrollIntoView({ block: 'nearest' });
+}
+
 function revealPreviewHtml(u, program) {
   if (u.template !== 'p2sh commitment' || u.revealed_asm || !u.live) return '';
   let result = '';
@@ -2102,7 +2159,8 @@ function runDecode(updateHash) {
     `</p>` +
     (tpl ? verifiedContractHtml(window.kascovDisasm.toHex(bytes)) || templateLine(tpl.name, tpl.fields) : '') +
     genCta(tpl) +
-    genPanelHtml(tpl, bytes);
+    genPanelHtml(tpl, bytes) +
+    debugCtaHtml(bytes);
   const shown = decodeShowAll ? instructions : instructions.slice(0, DECODE_WINDOW);
   const rows = shown.map((inst) => {
     const dataBit = inst.data && inst.data.length
@@ -2830,11 +2888,29 @@ document.addEventListener('click', (e) => {
         location.hash = `#/${state.network}/c/${route.id}?program=${val}`;
       }
     }
+  } else if (action === 'dbg-open') {
+    openDebugger(el.dataset.prog || '');
+  } else if (action === 'dbg-prev') {
+    dbgStep(-1);
+  } else if (action === 'dbg-next') {
+    dbgStep(1);
+  } else if (action === 'dbg-seek') {
+    dbgStep(0, parseInt(el.dataset.i, 10));
+  } else if (action === 'dbg-close') {
+    dbg = null;
+    const host = document.getElementById('dbg-panel');
+    if (host) host.innerHTML = '';
   } else if (action === 'retry-detail') {
     render(); /* the detail map has no entry for a failed fetch — this refetches */
   } else if (action === 'retry-addr') {
     render(); /* failed lookups are never cached — this refetches */
   }
+});
+
+/* the debugger scrubber (range input) — separate from click delegation */
+document.addEventListener('input', (e) => {
+  const el = e.target.closest('[data-action="dbg-slider"]');
+  if (el) dbgStep(0, parseInt(el.value, 10));
 });
 
 $('#search').addEventListener('input', (e) => {
