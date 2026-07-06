@@ -77,7 +77,7 @@ impl NodeHandle {
 
     pub async fn block_with_txs(&self, hash: BlockHash) -> Result<Block> {
         let block = self.client.get_block(to_hash(hash), true).await.map_err(rpc_err)?;
-        Ok(map_block(block))
+        map_block(block)
     }
 
     /// Virtual selected chain changes since `cursor`, with accepted tx ids.
@@ -117,7 +117,7 @@ fn to_hash(hash: BlockHash) -> RpcHash {
     RpcHash::from_bytes(hash.0)
 }
 
-fn map_block(block: RpcBlock) -> Block {
+fn map_block(block: RpcBlock) -> std::result::Result<Block, crate::Error> {
     let mergeset = block
         .verbose_data
         .as_ref()
@@ -130,23 +130,23 @@ fn map_block(block: RpcBlock) -> Block {
                 .collect()
         })
         .unwrap_or_default();
-    Block {
+    Ok(Block {
         hash: from_hash(block.header.hash),
         daa_score: block.header.daa_score,
         timestamp_ms: block.header.timestamp,
         parents: block.header.direct_parents().iter().map(|h| from_hash(*h)).collect(),
         mergeset,
-        transactions: block.transactions.into_iter().map(map_tx).collect(),
-    }
+        transactions: block.transactions.into_iter().map(map_tx).collect::<std::result::Result<Vec<_>, _>>()?,
+    })
 }
 
-fn map_tx(tx: RpcTransaction) -> Transaction {
+fn map_tx(tx: RpcTransaction) -> std::result::Result<Transaction, crate::Error> {
     let txid = tx
         .verbose_data
         .as_ref()
         .map(|v| TxId(v.transaction_id.as_bytes()))
-        .unwrap_or(TxId([0; 32]));
-    Transaction {
+        .ok_or_else(|| crate::Error::Rpc("transaction missing verbose_data — cannot determine txid".into()))?;
+    Ok(Transaction {
         txid,
         version: tx.version,
         inputs: tx
