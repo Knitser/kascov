@@ -2041,34 +2041,11 @@ html { scrollbar-color: rgba(112, 199, 186, 0.28) transparent; }
 
 
 /* ================================================================
-   overhaul v2b — "it's alive": ticker, dossier, LEDs, instrument
+   overhaul v2b — "it's alive": dossier, LEDs, instrument
    chart, radar states, breathing logo, palette flash
    ================================================================ */
 
-/* 1. live ticker tape */
-.ticker {
-  height: 0; overflow: hidden; opacity: 0;
-  border-bottom: 1px solid transparent;
-  transition: height 0.4s, opacity 0.6s;
-  background: rgba(10, 16, 15, 0.7);
-}
-.ticker-on { height: 34px; opacity: 1; border-bottom-color: rgba(255,255,255,0.05); }
-.ticker-track {
-  display: flex; gap: 1.6rem; align-items: center; height: 34px;
-  padding: 0 1.2rem; overflow: hidden; white-space: nowrap;
-  font-family: var(--mono); font-size: 0.74rem;
-  -webkit-mask-image: linear-gradient(90deg, #000 82%, transparent);
-  mask-image: linear-gradient(90deg, #000 82%, transparent);
-}
-.ticker-item { color: var(--muted); flex: none; animation: tick-in 0.5s cubic-bezier(0.2,0.7,0.2,1); }
-.ticker-item:hover { color: var(--text); text-decoration: none; }
-@keyframes tick-in { from { opacity: 0; transform: translateX(-14px); } to { opacity: 1; } }
-.ticker-dot { display: inline-block; width: 7px; height: 7px; border-radius: 99px; margin-right: 0.45rem; vertical-align: 1px; }
-.ticker-born { background: var(--born); box-shadow: 0 0 8px var(--born); }
-.ticker-move { background: var(--move); box-shadow: 0 0 8px var(--move); }
-.ticker-burn { background: var(--burn); box-shadow: 0 0 8px var(--burn); }
-
-/* 2. instrument chart bezel */
+/* instrument chart bezel */
 .pulse-chart {
   position: relative;
   border-radius: var(--radius);
@@ -2134,7 +2111,7 @@ html { scrollbar-color: rgba(112, 199, 186, 0.28) transparent; }
 @keyframes pal-flash { 0% { box-shadow: 0 0 0 3px rgba(112, 199, 186, 0.5); } 100% { box-shadow: none; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .ticker-item, .radar::after, .wordmark-eye circle:last-child { animation: none; }
+  .radar::after, .wordmark-eye circle:last-child { animation: none; }
   .detail-head:has(.pill-alive) [role="img"]::after { animation: none; opacity: 0.5; }
   .pill-alive::before { animation: none; }
 }
@@ -2178,12 +2155,6 @@ html { scrollbar-color: rgba(112, 199, 186, 0.28) transparent; }
   .record-card:hover, .card:hover { transform: none; }
 }
 
-
-/* ticker is a desktop delight — on phones it just eats vertical space */
-.ticker { position: relative; z-index: 1; }
-@media (max-width: 640px) {
-  .ticker, .ticker.ticker-on { display: none; height: 0; }
-}
 
 /* ================================================================
    REDESIGN — "GHOSTDAG": the living block-lattice

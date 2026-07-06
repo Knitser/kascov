@@ -3309,52 +3309,6 @@ if (location.pathname !== '/' && location.pathname !== '/index.html' && !locatio
   history.replaceState(null, '', `/#/${path}${location.search}`);
 }
 
-/* ------------------------------------------------- live ticker + palette */
-/* A thin tape under the header streaming life events as they happen. Own
-   EventSource, only while visible on landing/explore; errors just hide it. */
-const ticker = { es: null, net: null, el: null, track: null, seen: 0 };
-function tickerEnsureDom() {
-  if (ticker.el) return;
-  const strip = document.createElement('div');
-  strip.className = 'ticker';
-  strip.setAttribute('aria-hidden', 'true');
-  strip.innerHTML = '<div class="ticker-track" id="ticker-track"></div>';
-  document.querySelector('.site-header').insertAdjacentElement('afterend', strip);
-  ticker.el = strip;
-  ticker.track = strip.querySelector('.ticker-track');
-}
-function tickerPush(ev) {
-  if (!ticker.track) return;
-  const kind = ev.kind === 'genesis' ? 'born' : ev.kind === 'burn' ? 'retired' : 'moved';
-  const cls = ev.kind === 'genesis' ? 'born' : ev.kind === 'burn' ? 'burn' : 'move';
-  const item = document.createElement('a');
-  item.className = 'ticker-item';
-  item.href = `#/${state.network}/c/${ev.covenant_id}`;
-  item.innerHTML = `<span class="ticker-dot ticker-${cls}"></span>${esc(friendlyName(ev.covenant_id))} <span class="dim">${kind}</span>`;
-  ticker.track.prepend(item);
-  ticker.seen++;
-  while (ticker.track.children.length > 30) ticker.track.lastChild.remove();
-}
-function tickerSync() {
-  const want = streamWanted();
-  tickerEnsureDom();
-  ticker.el.classList.toggle('ticker-on', want && ticker.seen > 0);
-  if (want && (!ticker.es || ticker.net !== state.network)) {
-    if (ticker.es) { ticker.es.close(); ticker.es = null; }
-    try {
-      ticker.net = state.network;
-      ticker.es = new EventSource(`data/${state.network}/stream`);
-      ticker.es.onmessage = (m) => { try { tickerPush(JSON.parse(m.data)); ticker.el.classList.add('ticker-on'); } catch (e) { /* skip */ } };
-      ticker.es.onerror = () => { /* quiet; polling covers us */ };
-    } catch (e) { /* no EventSource — fine */ }
-  } else if (!want && ticker.es) {
-    ticker.es.close(); ticker.es = null; ticker.net = null;
-  }
-}
-setInterval(tickerSync, 4000);
-document.addEventListener('visibilitychange', tickerSync);
-setTimeout(tickerSync, 1500);
-
 /* cmd-K / ctrl-K focuses the search — the search IS the command palette */
 document.addEventListener('keydown', (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
