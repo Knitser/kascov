@@ -162,11 +162,13 @@
   ro.observe(cv);
   resize();
   if (!REDUCE) {
-    last = performance.now();
-    raf = requestAnimationFrame(tick);
-    document.addEventListener('visibilitychange', () => {
-      if (document.hidden) { cancelAnimationFrame(raf); raf = 0; }
-      else if (!raf) { last = performance.now(); raf = requestAnimationFrame(tick); }
-    });
+    const start = () => { if (!raf) { last = performance.now(); raf = requestAnimationFrame(tick); } };
+    const stop = () => { if (raf) { cancelAnimationFrame(raf); raf = 0; } };
+    start();
+    document.addEventListener('visibilitychange', () => (document.hidden ? stop() : start()));
+    // a normal reload / back-navigation restores from bfcache with the loop
+    // frozen — resume it (previously only a hard refresh re-ran the script)
+    window.addEventListener('pageshow', start);
+    window.addEventListener('focus', start);
   }
 })();

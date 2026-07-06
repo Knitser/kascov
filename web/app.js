@@ -2117,7 +2117,42 @@ function renderDecode(route) {
 }
 
 function renderDev() {
-  document.title = 'for developers — kascov';
+  document.title = 'API — kascov';
+  wireApiSidebar();
+}
+
+function renderBuild() {
+  document.title = 'make your own smart coin — kascov';
+}
+
+/* API docs: scroll-spy that highlights the sidebar entry for the endpoint
+   currently in view. Idempotent — safe to call on every dev render. */
+function wireApiSidebar() {
+  const nav = document.querySelector('.api-nav');
+  if (!nav || nav.dataset.wired) return;
+  nav.dataset.wired = '1';
+  const links = [...nav.querySelectorAll('a')];
+  const byId = new Map(links.map((a) => [a.getAttribute('href').slice(1), a]));
+  /* these hrefs are bare in-page anchors (#ep-live), not SPA routes — clicking
+     them would set an unrecognized hash and bounce to the landing page. Scroll
+     to the target instead and leave the route on #/dev. */
+  links.forEach((a) => a.addEventListener('click', (e) => {
+    const target = document.getElementById(a.getAttribute('href').slice(1));
+    if (target) {
+      e.preventDefault();
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }));
+  const spy = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting) {
+        links.forEach((l) => l.removeAttribute('aria-current'));
+        const a = byId.get(e.target.id);
+        if (a) a.setAttribute('aria-current', 'true');
+      }
+    }
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  document.querySelectorAll('.api-endpoint[id], .api-block[id]').forEach((el) => spy.observe(el));
 }
 
 /* ---------------------------------------------------------------- address */
@@ -2224,6 +2259,7 @@ function parseRoute() {
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
   if (m) return { view: 'explore', network: m[1] || null };
   if (/^#\/decode\/?$/.test(path)) return { view: 'decode', network: null, s: params.get('s') || '' };
+  if (/^#\/build\/?$/.test(path)) return { view: 'build', network: null };
   if (/^#\/dev\/?$/.test(path)) return { view: 'dev', network: null };
   /* old home links '#/<network>' were data views — send them to the explorer */
   m = path.match(/^#\/(testnet-10|mainnet)\/?$/);
@@ -2237,7 +2273,7 @@ function routeHash(view, id) {
   if (view === 'address') return `#/${state.network}/addr/${id}`;
   if (view === 'explore') return `#/${state.network}/explore`;
   /* decode/dev are network-free — switching networks keeps the page (and its query) */
-  if (view === 'decode' || view === 'dev') return location.hash || `#/${view}`;
+  if (view === 'decode' || view === 'dev' || view === 'build') return location.hash || `#/${view}`;
   return '#/';
 }
 
@@ -2279,6 +2315,7 @@ async function render() {
     detail: $('#view-detail'),
     address: $('#view-address'),
     decode: $('#view-decode'),
+    build: $('#view-build'),
     dev: $('#view-dev'),
   };
   /* a stale cached index.html may predate newer views — never crash on them */
@@ -2296,12 +2333,13 @@ async function render() {
 
   /* the decoder, dev docs, and address pages never need a snapshot — don't
      block them on data (address pages fetch from their own endpoint) */
-  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'address') && views[route.view]) {
+  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'build' || route.view === 'address') && views[route.view]) {
     panel.hidden = true;
     for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
     views.detail.innerHTML = '';
     if (route.view === 'decode') renderDecode(route);
     else if (route.view === 'address') renderAddress(route);
+    else if (route.view === 'build') renderBuild();
     else renderDev();
     fadeIn(views[route.view]);
     if (route.view !== lastView) {
@@ -3115,6 +3153,17 @@ document.addEventListener('keydown', (e) => {
   }
 });
 (() => { const s2 = document.querySelector('#search'); if (s2 && navigator.platform.includes('Mac')) s2.placeholder += '  ⌘K'; })();
+
+/* click any [data-copy] (build-page commands) to copy it */
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-copy]');
+  if (!el) return;
+  const text = el.dataset.copy;
+  navigator.clipboard?.writeText(text).then(() => {
+    el.classList.add('copied');
+    setTimeout(() => el.classList.remove('copied'), 1100);
+  }).catch(() => {});
+});
 
 render();
 pollLive();

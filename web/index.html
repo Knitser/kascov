@@ -45,7 +45,8 @@
         <nav class="site-nav" aria-label="Pages">
           <a class="nav-link" href="#/explore" data-nav="explore">explore</a>
           <a class="nav-link" href="#/decode" data-nav="decode">decode</a>
-          <a class="nav-link" href="#/dev" data-nav="dev">for devs</a>
+          <a class="nav-link" href="#/build" data-nav="build">build</a>
+          <a class="nav-link" href="#/dev" data-nav="dev">API</a>
         </nav>
         <nav class="network-tabs" aria-label="Network">
           <button type="button" class="network-tab" data-action="network" data-network="testnet-10" aria-pressed="true">testnet-10</button>
@@ -254,170 +255,324 @@
       </details>
     </section>
 
-    <!-- ============ FOR DEVELOPERS ============ -->
-    <section id="view-dev" class="view-fade" aria-label="For developers" hidden>
-      <header class="page-head">
-        <h1>for developers</h1>
-        <p class="page-sub">kascov indexes every covenant on Kaspa and keeps the history nodes prune. all of it is yours as plain JSON — CORS is on, no keys, no rate cards. build something.</p>
+    <!-- ============ BUILD — MAKE YOUR OWN SMART COIN ============ -->
+    <section id="view-build" class="view-fade" aria-label="Make your own smart coin" hidden>
+      <header class="page-head build-head">
+        <p class="page-eyebrow">the lab</p>
+        <h1>Make your own <span class="grad">smart coin</span>.</h1>
+        <p class="page-sub">Deploy a real covenant on Kaspa testnet-10 and watch it run itself — no Solidity, no VM bytecode, just Kaspa script. One command births a contract and spends it under its own rules, and it reveals itself right here on kascov.</p>
+        <div class="build-cta-row">
+          <code class="build-hero-cmd" data-copy="cargo run -p kascov-lab -- escrow-demo">cargo run -p kascov-lab -- escrow-demo <span class="copy-hint">click to copy</span></code>
+        </div>
       </header>
 
-      <section class="dev-section">
-        <h2>the JSON API</h2>
-        <div class="dev-endpoints">
-          <div class="endpoint">
-            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10-live.json</code></p>
-            <p class="endpoint-desc">the small fast feed — stats, chain tip, and the ~150 newest life events. refreshes every few seconds; poll this.</p>
+      <!-- the flow -->
+      <section class="build-section">
+        <h2>the whole loop</h2>
+        <ol class="flow">
+          <li class="flow-step"><span class="flow-n">1</span><div><strong>Decode</strong><span>read any covenant on-chain as SilverScript — its rules, its parameters, labeled.</span></div></li>
+          <li class="flow-step"><span class="flow-n">2</span><div><strong>Edit</strong><span>change the constructor arguments in your browser; verified byte-for-byte on every keystroke.</span></div></li>
+          <li class="flow-step flow-born"><span class="flow-n">3</span><div><strong>Deploy</strong><span>one command births it on testnet — a real coin, its rules committed as a P2SH state.</span></div></li>
+          <li class="flow-step flow-move"><span class="flow-n">4</span><div><strong>Spend</strong><span>satisfy the contract's own rules; the transaction reveals the program on-chain.</span></div></li>
+          <li class="flow-step flow-burn"><span class="flow-n">5</span><div><strong>Revealed</strong><span>kascov names the coin its contract, forever — for everyone, hash-verified.</span></div></li>
+        </ol>
+      </section>
+
+      <!-- one-command demos -->
+      <section class="build-section">
+        <h2>start here — one command</h2>
+        <p class="build-lead">You need the <a href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">repo</a> and a faucet-funded key. Then a single command runs the entire loop and prints a kascov link so you can watch it happen.</p>
+        <div class="build-cards">
+          <div class="build-card">
+            <div class="build-card-head"><span class="bc-icon bc-escrow"></span><h3>escrow-demo</h3></div>
+            <p>An escrow is deployed with you as the arbiter, then <strong>you settle it</strong> — the contract itself forces the payout to the buyer. A real dispute resolution, on-chain.</p>
+            <code class="build-cmd" data-copy="cargo run -p kascov-lab -- escrow-demo">cargo run -p kascov-lab -- escrow-demo</code>
           </div>
-          <div class="endpoint">
-            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10.json</code></p>
-            <p class="endpoint-desc">the grid — stats plus one summary row per covenant (id, status, balances, event count, born/last-active DAA). one request tells you about every smart coin on the network.</p>
+          <div class="build-card">
+            <div class="build-card-head"><span class="bc-icon bc-mecenas"></span><h3>contract-demo</h3></div>
+            <p>A Mecenas is deployed reclaimable by your key, then reclaimed — it <strong>reveals itself</strong> as SilverScript · Mecenas on kascov, with every argument labeled.</p>
+            <code class="build-cmd" data-copy="cargo run -p kascov-lab -- contract-demo">cargo run -p kascov-lab -- contract-demo</code>
           </div>
-          <div class="endpoint">
-            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/c/&lt;covenant-id&gt;.json</code></p>
-            <p class="endpoint-desc">one covenant's whole life — the complete event timeline and every UTXO with decoded scripts, recognized templates, and spend-time reveals.</p>
-          </div>
-          <div class="endpoint">
-            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/tx/&lt;txid&gt;.json</code></p>
-            <p class="endpoint-desc">which smart coin did this transaction touch? answers <code class="mono">{"covenant_id": …}</code> or 404 — genesis, moves, and burns all resolve.</p>
-          </div>
-          <div class="endpoint">
-            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/families.json</code></p>
-            <p class="endpoint-desc">covenant <em>apps</em> — clusters of coins that moved together in a transaction (multi-contract flows), union-found over shared txids. Each family lists its members with their recognized template.</p>
-          </div>
-          <div class="endpoint">
-            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/digest.json</code></p>
-            <p class="endpoint-desc">the last 24 hours in one object — births, moves, burns, value born (sompi), the busiest coin, the biggest birth, and how many coins are alive right now. refreshes about once a minute.</p>
-          </div>
-          <div class="endpoint">
-            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/addr/&lt;address-or-pubkey&gt;.json</code></p>
-            <p class="endpoint-desc">which smart coins has this address touched? accepts <code class="mono">kaspa:…</code> / <code class="mono">kaspatest:…</code> or raw 32/33-byte pubkey hex. answers the canonical address, the pubkey, and grid-style rows with role hints (<code class="mono">controls_now</code>, <code class="mono">states_seen</code>). matches p2pk covenant states only.</p>
-          </div>
-          <div class="endpoint">
-            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/templates.json</code></p>
-            <p class="endpoint-desc">what runs on this network — recognized script templates aggregated over every state UTXO: <code class="mono">live_states</code> / <code class="mono">live_value</code> now, <code class="mono">ever_seen</code> all-time, distinct <code class="mono">covenants</code>, and <code class="mono">revealed_runs</code> (compiled contracts proven at spend time; a tx sweeping N states counts N). unrecognized scripts are counted, not hidden.</p>
-          </div>
-          <div class="endpoint">
-            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/activity.json?range=24h</code></p>
-            <p class="endpoint-desc">the histogram behind the activity chart — life-event counts (<code class="mono">births</code> / <code class="mono">moves</code> / <code class="mono">burns</code>) per DAA bucket. <code class="mono">range</code> is <code class="mono">1h | 6h | 24h | 48h | all</code> (default 24h); <code class="mono">bucket_daa</code> is the bucket width and each bucket's <code class="mono">daa</code> its start. buckets with nothing in them are omitted — treat them as zeros. refreshes about every 30s.</p>
-          </div>
-          <div class="endpoint">
-            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/stream</code></p>
-            <p class="endpoint-desc">server-sent events — one JSON message per life event the moment the indexer sees it (<code class="mono">covenant_id</code>, <code class="mono">kind</code>, <code class="mono">txid</code>, <code class="mono">accepting_daa</code>), plus a <code class="mono">: ka</code> comment every 25s. treat messages as hints and confirm through the polled feeds — some CDNs buffer streams, so keep a poll running.</p>
-          </div>
-          <div class="endpoint">
-            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/mainnet-live.json</code> <span class="dim">·</span> <code class="mono">/data/mainnet.json</code> <span class="dim">·</span> <code class="mono">/data/mainnet/…</code></p>
-            <p class="endpoint-desc">same endpoints for mainnet — its first smart coins arrived July 2, 2026, and their complete history starts here. spend-time reveals and KIP-20-validated genesis exist for activity from that evening onward.</p>
+          <div class="build-card">
+            <div class="build-card-head"><span class="bc-icon bc-examples"></span><h3>examples</h3></div>
+            <p>Prints every copy-paste recipe — setup, the demos, and the manual decode → deploy → spend flow with your own parameters. Needs no key or network.</p>
+            <code class="build-cmd" data-copy="cargo run -p kascov-lab -- examples">cargo run -p kascov-lab -- examples</code>
           </div>
         </div>
-        <p class="dim dev-note">base URL: <code class="mono">https://kascov-explorer.web.app</code> · <code class="mono">Access-Control-Allow-Origin: *</code> · served by an always-on indexer that follows the chain live</p>
-        <h3>try it</h3>
-        <pre class="codeblock"><code># the pulse of the testnet, one request
-curl -s https://kascov-explorer.web.app/data/testnet-10-live.json | jq .stats
-
-# coins born in the last few minutes
-curl -s https://kascov-explorer.web.app/data/testnet-10-live.json \
-  | jq '.recent_events[] | select(.kind == "genesis")'
-
-# the ten richest living smart coins
-curl -s https://kascov-explorer.web.app/data/testnet-10.json \
-  | jq '[.covenants[] | select(.status == "active")] | sort_by(-.live_value)[:10]'
-
-# one covenant's whole life, scripts decoded
-curl -s https://kascov-explorer.web.app/data/testnet-10/c/&lt;covenant-id&gt;.json | jq .events
-
-# which coin did a transaction touch?
-curl -s https://kascov-explorer.web.app/data/testnet-10/tx/&lt;txid&gt;.json
-
-# the last 24 hours, one object
-curl -s https://kascov-explorer.web.app/data/testnet-10/digest.json | jq
-
-# every smart coin an address has touched (p2pk states)
-curl -s https://kascov-explorer.web.app/data/testnet-10/addr/&lt;address-or-pubkey&gt;.json | jq .covenants
-
-# what runs on this network, by recognized template
-curl -s https://kascov-explorer.web.app/data/testnet-10/templates.json | jq .templates
-
-# the activity histogram behind the chart
-curl -s 'https://kascov-explorer.web.app/data/testnet-10/activity.json?range=24h' | jq .buckets
-
-# push, not poll — every life event as it happens (SSE)
-curl -N https://kascov-explorer.web.app/data/testnet-10/stream</code></pre>
       </section>
 
-      <section class="dev-section">
-        <h2>the lab — make your own smart coin</h2>
-        <p class="dev-lab-intro">Don't just read covenants — <em>run</em> one. From a clone of <a href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">the repo</a> with a faucet-funded key, one command deploys a real contract on testnet-10 and spends it under its own rules, so the coin reveals itself here (named, args labeled, permanent).</p>
-        <pre class="codeblock"><code># first run: make a key, fund the printed address at faucet-testnet.kaspanet.io
-cargo run -p kascov-lab -- keygen
-
-# an escrow deploys, then the arbiter settles it to the buyer — one command
-cargo run -p kascov-lab -- escrow-demo
-
-# a Mecenas deploys, then reclaims itself → revealed on kascov — one command
-cargo run -p kascov-lab -- contract-demo
-
-# every copy-paste recipe (deploy / spend / settle your own parameters)
-cargo run -p kascov-lab -- examples</code></pre>
-        <p class="dim dev-note">choose the parameters yourself with the <a href="#/decode">generator on /decode</a> ("make a Mecenas / Escrow / LastWill"), then <code class="mono">deploy</code> → <code class="mono">spend</code>. full guide in <code class="mono">docs/Covenant Lab.md</code>.</p>
+      <!-- the three contracts -->
+      <section class="build-section">
+        <h2>the contracts you can make</h2>
+        <p class="build-lead">Three canonical SilverScript covenants ship with the decoder. Open one, put your own keys and amounts in, and it compiles to deployable hex in your browser.</p>
+        <div class="build-cards">
+          <a class="build-card contract-card" href="#/decode">
+            <div class="build-card-head"><span class="bc-icon bc-mecenas"></span><h3>Mecenas</h3></div>
+            <p>A recurring allowance. A recipient may claim a fixed <em>pledge</em> every <em>period</em>; the funder can reclaim the rest at any time.</p>
+            <span class="build-make">🛠 make a Mecenas →</span>
+          </a>
+          <a class="build-card contract-card" href="#/decode">
+            <div class="build-card-head"><span class="bc-icon bc-escrow"></span><h3>Escrow</h3></div>
+            <p>Funds held for a trade. An <em>arbiter</em> releases them to the <em>buyer</em> or the <em>seller</em> — and the script enforces that the money can only go to one of them.</p>
+            <span class="build-make">🛠 make an Escrow →</span>
+          </a>
+          <a class="build-card contract-card" href="#/decode">
+            <div class="build-card-head"><span class="bc-icon bc-lastwill"></span><h3>LastWill</h3></div>
+            <p>An inheritance switch. A <em>hot</em> key refreshes it; if it goes quiet long enough, an <em>inheritor</em> can claim — with a <em>cold</em> key as the override.</p>
+            <span class="build-make">🛠 make a LastWill →</span>
+          </a>
+        </div>
       </section>
 
-      <section class="dev-section">
-        <h2>field dictionary</h2>
-        <dl class="dev-dict">
-          <div><dt class="mono">covenant_id</dt><dd>the smart coin's permanent 32-byte identity (KIP-20) — survives every move</dd></div>
-          <div><dt class="mono">status</dt><dd><code>active</code> (has live UTXOs) or <code>burned</code> (retired)</dd></div>
-          <div><dt class="mono">events[]</dt><dd>the life story (per-coin endpoint): <code>kind</code> is <code>genesis</code> | <code>transition</code> | <code>burn</code>, ordered by <code>seq</code>; <code>txid</code> is the transaction, <code>accepting_daa</code> when the chain accepted it</dd></div>
-          <div><dt class="mono">born_value</dt><dd>grid rows only — what the coin held at birth (sompi)</dd></div>
-          <div><dt class="mono">accepting_daa / DAA</dt><dd>Kaspa's block-height-like clock — it ticks ~10 per second. <code>tip_daa</code> + <code>tip_at_ms</code> in each snapshot anchor it to wall-clock time</dd></div>
-          <div><dt class="mono">processed_daa</dt><dd>live + grid feeds — the DAA of the last chain block the indexer has actually applied. <code>tip_daa − processed_daa</code> is the honest sync lag: the indexer replays every block in order, so during a catch-up the tip runs ahead while nothing is skipped. <code>null</code> from indexes that haven't recorded it yet</dd></div>
-          <div><dt class="mono">genesis_txid, genesis_daa</dt><dd>where the coin was born — <code>null</code> if it was first seen mid-life (see <code>lineage_complete</code>)</dd></div>
-          <div><dt class="mono">lineage_complete</dt><dd><code>false</code> means kascov started watching after the coin was born; earlier history is honestly missing</dd></div>
-          <div><dt class="mono">utxos[]</dt><dd>every state UTXO ever seen: <code>outpoint</code>, <code>value</code> (sompi, 1e8 = 1 KAS), <code>live</code>, <code>script_hex</code> + <code>script_asm</code> (pre-disassembled), <code>uses_covenant_ops</code>, <code>uses_zk_ops</code>; spent ones add <code>spent_txid</code></dd></div>
-          <div><dt class="mono">revealed_hex / revealed_asm</dt><dd>spend-time decoding — when a P2SH state is spent, the unlocking script reveals the program it actually ran, verified against the committed blake2b hash (plus <code>revealed_uses_covenant_ops</code>/<code>_zk_ops</code>; non-P2SH spends carry <code>sig_hex</code> instead)</dd></div>
-          <div><dt class="mono">template / state_fields</dt><dd>recognized script shapes with labeled fields — <code>p2pk state</code> (owner_pubkey), <code>p2sh commitment</code> (program_hash), and compiled SilverScript contracts (Mecenas, Escrow, LastWill) once seen; revealed programs get <code>revealed_template</code>/<code>revealed_fields</code></dd></div>
-          <div><dt class="mono">templates[] / unrecognized</dt><dd>templates endpoint — per script shape: <code>live_states</code>/<code>live_value</code> held now, <code>ever_seen</code> state UTXOs all-time, <code>covenants</code> distinct coins, <code>revealed_runs</code> spends whose verified P2SH reveal matched the template; <code>unrecognized</code> buckets everything else</dd></div>
-          <div><dt class="mono">controls_now / states_seen</dt><dd>address endpoint — <code>true</code> while the key still owns a live state of that coin (vs a past owner only), plus how many of the coin's states have carried the key; <code>first_seen_daa</code>/<code>last_seen_daa</code> bracket the relationship</dd></div>
-          <div><dt class="mono">events[].payload / spent_budget</dt><dd>v1 extras, captured per event/spend: the transaction payload (hex when ≤512 B, else <code>payload_len</code>) and the spending input's compute-budget commitment</dd></div>
-          <div><dt class="mono">live_value, live_utxos</dt><dd>what the coin holds right now</dd></div>
-          <div><dt class="mono">events_truncated</dt><dd>the full snapshot caps events per covenant (default 500); <code>true</code> means the tail was cut</dd></div>
-          <div><dt class="mono">generated_at_ms</dt><dd>when this JSON was built — your freshness check</dd></div>
-        </dl>
-      </section>
-
-      <section class="dev-section">
-        <h2>run kascov yourself</h2>
-        <p>the whole indexer is a small open-source Rust workspace. your own node, your own index, your own rules.</p>
-        <pre class="codeblock"><code>git clone https://github.com/Knitser/kascov &amp;&amp; cd kascov
-
-# follow testnet-10 live (public resolver, zero setup)
-cargo run -rp kascov -- --network testnet-10 sync --follow
-
-# print covenant events as they happen (great for testing your own covenant)
-cargo run -rp kascov -- --network testnet-10 watch
-
-# machine-readable event stream
-cargo run -rp kascov -- --network testnet-10 --json watch
-
-# export the snapshots this site serves
-cargo run -rp kascov -- --network testnet-10 export</code></pre>
-      </section>
-
-      <section class="dev-section">
-        <h2>make your own smart coin on testnet-10</h2>
-        <p>the repo ships <code class="mono">kascov-lab</code> — a covenant lifecycle lab that births, moves, and retires a real covenant on testnet-10 with faucet funds. launch one, then paste your txid into the search box here and watch kascov tell its story.</p>
-        <pre class="codeblock"><code>cargo run -rp kascov-lab -- --help</code></pre>
-      </section>
-
-      <section class="dev-section">
-        <h2>links</h2>
-        <ul class="dev-links">
-          <li><a href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov ↗</a> — source, issues, ideas</li>
-          <li><a href="https://github.com/kaspanet/kips/blob/master/kip-0020.md" target="_blank" rel="noopener noreferrer">KIP-20 ↗</a> — the covenant spec these coins live by</li>
-          <li><a href="https://docs.kaspa.org/toccata" target="_blank" rel="noopener noreferrer">Toccata ↗</a> — the hardfork that switched this on</li>
-          <li><a href="https://tn10.kaspa.stream/" target="_blank" rel="noopener noreferrer">tn10.kaspa.stream ↗</a> — general block explorer for testnet-10 (blocks, addresses, mempool)</li>
-        </ul>
+      <!-- manual steps -->
+      <section class="build-section">
+        <h2>do it yourself, step by step</h2>
+        <div class="build-steps">
+          <div class="build-stepblock">
+            <div class="bs-num">01</div>
+            <div class="bs-body">
+              <h3>Get a key, fund it</h3>
+              <p>Make a throwaway testnet key and fund the address it prints at the <a href="https://faucet-testnet.kaspanet.io" target="_blank" rel="noopener noreferrer">faucet</a>.</p>
+              <code class="build-cmd" data-copy="cargo run -p kascov-lab -- keygen">cargo run -p kascov-lab -- keygen</code>
+            </div>
+          </div>
+          <div class="build-stepblock">
+            <div class="bs-num">02</div>
+            <div class="bs-body">
+              <h3>Generate your contract</h3>
+              <p>On <a href="#/decode">the decoder</a>, click <strong>make a Mecenas / Escrow / LastWill</strong>, edit the fields (use the pubkey and blake2b that <code class="mono">keygen</code> printed), and copy the compiled hex.</p>
+            </div>
+          </div>
+          <div class="build-stepblock">
+            <div class="bs-num">03</div>
+            <div class="bs-body">
+              <h3>Deploy it</h3>
+              <p>Births the coin as a hidden P2SH commitment. It appears on kascov within a minute.</p>
+              <code class="build-cmd" data-copy="cargo run -p kascov-lab -- deploy --program-hex <hex> --value 1000000000">cargo run -p kascov-lab -- deploy --program-hex &lt;hex&gt; --value 1000000000</code>
+            </div>
+          </div>
+          <div class="build-stepblock">
+            <div class="bs-num">04</div>
+            <div class="bs-body">
+              <h3>Reveal it — spend it</h3>
+              <p>Satisfy the contract to reveal its program on-chain, so kascov names it your contract forever.</p>
+              <code class="build-cmd" data-copy="cargo run -p kascov-lab -- spend --program-hex <hex> --entrypoint reclaim">cargo run -p kascov-lab -- spend --program-hex &lt;hex&gt; --entrypoint reclaim</code>
+              <p class="bs-alt">Escrow instead? <code class="mono">settle-escrow --program-hex &lt;hex&gt; --release-to buyer</code></p>
+            </div>
+          </div>
+        </div>
+        <p class="build-foot">Full walkthrough in <a href="https://github.com/Knitser/kascov/blob/main/docs/Covenant%20Lab.md" target="_blank" rel="noopener noreferrer"><code class="mono">docs/Covenant Lab.md</code></a>. Every command has <code class="mono">--help</code>.</p>
       </section>
     </section>
+
+    <!-- ============ API DOCS ============ -->
+    <section id="view-dev" class="view-fade api-docs" aria-label="API reference" hidden>
+      <header class="page-head">
+        <p class="page-eyebrow">reference</p>
+        <h1>The kascov <span class="grad">API</span>.</h1>
+        <p class="page-sub">Every covenant on Kaspa, indexed live and kept long after nodes prune it — as plain JSON. No keys, no rate cards, CORS open to everyone. Build a bot, a chart, a better explorer.</p>
+      </header>
+
+      <div class="api-layout">
+        <nav class="api-nav" aria-label="API endpoints">
+          <div class="api-nav-group">Start</div>
+          <a href="#api-intro">Overview</a>
+          <a href="#api-networks">Networks</a>
+          <div class="api-nav-group">Feeds</div>
+          <a href="#ep-live">Live feed</a>
+          <a href="#ep-snapshot">Full snapshot</a>
+          <a href="#ep-stream">Event stream</a>
+          <div class="api-nav-group">Coins</div>
+          <a href="#ep-coin">One coin</a>
+          <a href="#ep-tx">Transaction</a>
+          <a href="#ep-addr">Address</a>
+          <div class="api-nav-group">Analytics</div>
+          <a href="#ep-digest">24h digest</a>
+          <a href="#ep-templates">Templates</a>
+          <a href="#ep-activity">Activity</a>
+          <a href="#ep-families">Apps</a>
+        </nav>
+
+        <div class="api-main">
+          <div class="api-block" id="api-intro">
+            <h2>Overview</h2>
+            <p>The indexer follows Kaspa's chain tip live, classifies every covenant event (born / moved / retired), decodes spend-time script reveals, and serves the whole index as static JSON from a CDN. Reads are cheap and cacheable — poll as often as you like.</p>
+            <table class="api-meta">
+              <tbody>
+                <tr><th>Base URL</th><td><code class="mono">https://kascov-explorer.web.app</code></td></tr>
+                <tr><th>Format</th><td>JSON · <code class="mono">application/json</code></td></tr>
+                <tr><th>Auth</th><td>None — public</td></tr>
+                <tr><th>CORS</th><td><code class="mono">Access-Control-Allow-Origin: *</code></td></tr>
+                <tr><th>Caching</th><td>CDN <code class="mono">s-maxage</code> + <code class="mono">stale-while-revalidate</code>; responses carry <code class="mono">tip_daa</code> + <code class="mono">tip_at_ms</code> so you always know how fresh they are</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="api-block" id="api-networks">
+            <h3>Networks</h3>
+            <p>Every path takes a network segment. Swap <code class="mono">testnet-10</code> for <code class="mono">mainnet</code> anywhere. Mainnet's first smart coins arrived July 2, 2026; their full history starts there.</p>
+          </div>
+
+          <article class="api-endpoint" id="ep-live">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}-live.json</code></div>
+            <p class="ep-desc">The small, fast feed — network stats, the chain tip, and the ~150 newest life events. This is the one to poll (a few KB, refreshes every few seconds).</p>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -s https://kascov-explorer.web.app/data/testnet-10-live.json</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "stats": { "covenants": 89747, "active": 6566, "events": 403794 },
+  "tip_daa": 509571904,
+  "tip_at_ms": 1751799000000,
+  "processed_daa": 509571904,
+  "recent_events": [
+    { "covenant_id": "b11acf6c…459c6",
+      "kind": "genesis", "txid": "a86041…e684",
+      "accepting_daa": 508951007 }
+  ]
+}</code></pre></div>
+            </div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">stats.covenants</td><td>int</td><td>distinct smart coins ever seen</td></tr>
+              <tr><td class="mono">stats.active</td><td>int</td><td>coins with a live UTXO right now</td></tr>
+              <tr><td class="mono">tip_daa · processed_daa</td><td>int</td><td>chain tip vs. last block applied — the gap is the honest sync lag</td></tr>
+              <tr><td class="mono">recent_events[].kind</td><td>string</td><td><code class="mono">genesis</code> · <code class="mono">transition</code> · <code class="mono">burn</code></td></tr>
+            </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-snapshot">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}.json</code></div>
+            <p class="ep-desc">The grid — stats plus one summary row per covenant. One request tells you about every smart coin on the network (can be multiple MB; cache it).</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "stats": { … },
+  "covenants": [
+    { "covenant_id": "b11acf6c…459c6", "name": "nimble-teal-newt-b11a",
+      "status": "active", "born_value": 1000000000, "live_value": 1000000000,
+      "event_count": 1, "genesis_daa": 508951007, "last_daa": 508951007,
+      "template": "SilverScript · Mecenas" }
+  ]
+}</code></pre></div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">status</td><td>string</td><td><code class="mono">active</code> or <code class="mono">burned</code></td></tr>
+              <tr><td class="mono">born_value · live_value</td><td>int</td><td>sompi held at birth / right now</td></tr>
+              <tr><td class="mono">template</td><td>string?</td><td>recognized contract, or a state shape like <code class="mono">p2sh commitment</code></td></tr>
+            </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-stream">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/stream</code></div>
+            <p class="ep-desc">Server-sent events — one JSON message the moment the indexer sees each life event, plus a <code class="mono">: ka</code> keep-alive every 25s. Treat messages as hints and confirm through the polled feeds (some CDNs buffer streams).</p>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -N https://kascov-explorer.web.app/data/testnet-10/stream</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Each message</div><pre class="codeblock"><code>data: {"covenant_id":"b11acf6c…","kind":"genesis",
+       "txid":"a86041…","accepting_daa":508951007}</code></pre></div>
+            </div>
+          </article>
+
+          <article class="api-endpoint" id="ep-coin">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/c/{covenant_id}.json</code></div>
+            <p class="ep-desc">One coin's whole life — the complete event timeline and every UTXO with decoded scripts, recognized templates, and spend-time reveals. <code class="mono">404</code> if the id is unknown.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "covenant_id": "da2fe117…5d6d7", "name": "lively-slate-urchin-da2f",
+  "status": "burned", "event_count": 2, "lineage_complete": true,
+  "genesis_txid": "823d33…80c5", "genesis_daa": 509571333,
+  "events": [
+    { "seq": 0, "kind": "genesis", "txid": "823d33…80c5", "accepting_daa": 509571333 },
+    { "seq": 1, "kind": "burn",    "txid": "1461f8…07ed", "accepting_daa": 509571520 }
+  ],
+  "utxos": [
+    { "outpoint": "823d33…80c5:0", "value": 500000000, "live": false,
+      "template": "p2sh commitment",
+      "state_fields": [ { "name": "program_hash", "value": "d9a9e982…f475d17" } ],
+      "revealed_template": "SilverScript · Escrow",
+      "revealed_fields": [ { "name": "arbiter_hash", "value": "f4445661…" } ] }
+  ]
+}</code></pre></div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">lineage_complete</td><td>bool</td><td><code class="mono">false</code> means kascov started watching mid-life; earlier history is honestly missing</td></tr>
+              <tr><td class="mono">utxos[].revealed_template</td><td>string?</td><td>the contract a P2SH state actually ran, decoded and hash-verified when it was spent</td></tr>
+              <tr><td class="mono">…_fields[]</td><td>array</td><td><code class="mono">{ name, value }</code> — labeled constructor arguments</td></tr>
+            </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-tx">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/tx/{txid}.json</code></div>
+            <p class="ep-desc">Which smart coin did this transaction touch? Genesis, moves and burns all resolve.</p>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{ "covenant_id": "b11acf6c…459c6" }</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Not covenant traffic · <span class="warn">404</span></div><pre class="codeblock"><code>{ "error": "not found" }</code></pre></div>
+            </div>
+          </article>
+
+          <article class="api-endpoint" id="ep-addr">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/addr/{address-or-pubkey}.json</code></div>
+            <p class="ep-desc">Which smart coins has this address touched? Accepts <code class="mono">kaspa:…</code> / <code class="mono">kaspatest:…</code> or raw 32/33-byte pubkey hex. Matches p2pk covenant states.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "address": "kaspatest:qp9…hzy0",
+  "pubkey": "4b3402be…e9f2",
+  "covenants": [
+    { "covenant_id": "…", "name": "…", "role": "controls_now" }
+  ]
+}</code></pre></div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">covenants[].role</td><td>string</td><td><code class="mono">controls_now</code> · <code class="mono">states_seen</code></td></tr>
+            </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-digest">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/digest.json</code></div>
+            <p class="ep-desc">The last 24 hours in one object — births, moves, burns, value born, the busiest coin, the biggest birth, and how many coins are alive. Refreshes about once a minute.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "births": 24762, "moves": 25948, "burns": 55074,
+  "value_born": 4831200000000, "alive": 6566,
+  "busiest": { "covenant_id": "…", "name": "curious-jade-zebra-6366", "events": 1185 },
+  "biggest_birth": { "covenant_id": "…", "name": "rapid-violet-seal-b788", "value": 937465200000000 }
+}</code></pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-templates">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/templates.json</code></div>
+            <p class="ep-desc">What runs on this network — recognized script templates aggregated over every state UTXO. Unrecognized scripts are counted, never hidden.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "templates": [
+    { "name": "p2sh commitment", "live_states": 6297, "live_value": 62970000000,
+      "ever_seen": 14459, "covenants": 5990, "revealed_runs": 3 }
+  ],
+  "unrecognized": { "ever_seen": 12, "live_states": 4 }
+}</code></pre></div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">revealed_runs</td><td>int</td><td>compiled contracts proven at spend time; a tx sweeping N states counts N</td></tr>
+            </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-activity">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/activity.json</code><span class="ep-q">?range=24h</span></div>
+            <p class="ep-desc">The histogram behind the activity chart — life-event counts per DAA bucket. Empty buckets are omitted; treat them as zeros.</p>
+            <table class="ep-params"><thead><tr><th>Query</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">range</td><td>enum</td><td><code class="mono">1h · 6h · 24h · 48h · all</code> (default <code class="mono">24h</code>)</td></tr>
+            </tbody></table>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "range": "24h", "bucket_daa": 6000,
+  "buckets": [ { "daa": 509540000, "births": 812, "moves": 903, "burns": 1740 } ]
+}</code></pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-families">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/families.json</code></div>
+            <p class="ep-desc">Covenant <em>apps</em> — clusters of coins that moved together in a transaction (multi-contract flows), union-found over shared txids. Each family lists its members with their recognized template.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "families": [
+    { "size": 2, "members": [
+        { "covenant_id": "09ef275e…", "template": "p2sh commitment", "shared_txs": 8 },
+        { "covenant_id": "901be291…", "template": "p2sh commitment", "shared_txs": 8 }
+    ] }
+  ]
+}</code></pre></div>
+          </article>
+
+          <p class="api-foot dim">Served by an always-on indexer that follows the chain live. Want the raw index or to run your own? <a href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov</a>.</p>
+        </div>
+      </div>
+    </section>
+
   </main>
 
   <footer class="site-footer">
