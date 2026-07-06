@@ -12,3 +12,4 @@ video/.remotion/
 # local editor/agent config and internal audit notes — not for the public repo
 .claude/
 HANDOFF-AUDIT.md
+video/public/devtour/

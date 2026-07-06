@@ -6,6 +6,7 @@ import {UpdateVideoV4, V4_TOTAL} from './VideoV4';
 import {GeneratorVideoV5, V5_TOTAL} from './VideoV5';
 import {RunVideoV6, V6_TOTAL} from './VideoV6';
 import {GhostDagVideoV7, V7_TOTAL} from './VideoV7';
+import {DevTourVideoV8, V8_TOTAL} from './VideoV8';
 import {LaunchVideoV3, V3_TOTAL} from './VideoV3';
 
 export const Root: React.FC = () => {
@@ -47,6 +48,14 @@ export const Root: React.FC = () => {
         id="GhostDagV7"
         component={GhostDagVideoV7}
         durationInFrames={V7_TOTAL}
+        fps={60}
+        width={1920}
+        height={1080}
+      />
+      <Composition
+        id="DevTourV8"
+        component={DevTourVideoV8}
+        durationInFrames={V8_TOTAL}
         fps={60}
         width={1920}
         height={1080}
