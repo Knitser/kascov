@@ -22,7 +22,10 @@ use kaspa_consensus_core::{
     },
 };
 use kaspa_rpc_core::api::rpc::RpcApi;
-use kaspa_txscript::{extract_script_pub_key_address, pay_to_address_script, pay_to_script_hash_script};
+use kaspa_txscript::{
+    caches::Cache, extract_script_pub_key_address, pay_to_address_script, pay_to_script_hash_script,
+    EngineCtx, EngineFlags, TxScriptEngine,
+};
 use kaspa_wrpc_client::{
     client::{ConnectOptions, ConnectStrategy},
     prelude::{NetworkId, NetworkType},
@@ -121,6 +124,10 @@ enum Command {
         /// a signature spend needs only a handful. Fee scales with it.
         #[arg(long, default_value_t = 20)]
         compute_budget: u16,
+        /// Don't broadcast — run the spend through the real script engine and
+        /// report whether the contract would accept it (a "what-if" test).
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Settle a deployed Escrow ON ITS OWN TERMS: the arbiter (your key)
     /// signs, and the contract's introspection rules force output 0 to pay
@@ -137,6 +144,9 @@ enum Command {
         /// Which covenant to settle, when several share this program
         #[arg(long)]
         covenant: Option<String>,
+        /// Don't broadcast — simulate the settlement through the script engine.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -152,22 +162,22 @@ async fn main() -> Result<()> {
             let program = hex::decode(program_hex.trim()).context("--program-hex is not valid hex")?;
             deploy(&cli, &program, value).await.map(|_| ())
         }
-        Command::Spend { ref program_hex, ref entrypoint, ref covenant, ref to, compute_budget } => {
+        Command::Spend { ref program_hex, ref entrypoint, ref covenant, ref to, compute_budget, dry_run } => {
             let program = hex::decode(program_hex.trim()).context("--program-hex is not valid hex")?;
             let target = covenant
                 .as_deref()
                 .map(|c| c.parse::<kaspa_consensus_core::Hash>().context("bad --covenant id"))
                 .transpose()?;
-            spend(&cli, &program, entrypoint, target, to.as_deref(), compute_budget).await
+            spend(&cli, &program, entrypoint, target, to.as_deref(), compute_budget, dry_run).await
         }
         Command::ContractDemo { value } => contract_demo(&cli, value).await,
-        Command::SettleEscrow { ref program_hex, ref release_to, ref covenant } => {
+        Command::SettleEscrow { ref program_hex, ref release_to, ref covenant, dry_run } => {
             let program = hex::decode(program_hex.trim()).context("--program-hex is not valid hex")?;
             let target = covenant
                 .as_deref()
                 .map(|c| c.parse::<kaspa_consensus_core::Hash>().context("bad --covenant id"))
                 .transpose()?;
-            settle_escrow(&cli, &program, release_to, target).await
+            settle_escrow(&cli, &program, release_to, target, dry_run).await
         }
         Command::EscrowDemo { value } => escrow_demo(&cli, value).await,
     }
@@ -210,6 +220,29 @@ Full guide: docs/Covenant Lab.md
 "#
     );
     Ok(())
+}
+
+/// Dry-run one input of a built transaction through the real Kaspa script
+/// engine — the exact validation a node performs — WITHOUT broadcasting.
+/// Returns (passed, human verdict). This is "what-if spend": test a covenant
+/// spend before you send it, or simulate a spend you can't even sign.
+fn simulate_input(mtx: &MutableTransaction<Transaction>, idx: usize) -> (bool, String) {
+    let reused = SigHashReusedValuesUnsync::new();
+    let vtx = mtx.as_verifiable();
+    let sig_cache = Cache::new(10_000);
+    let entry = mtx.entries[idx].clone().expect("entry present");
+    let mut vm = TxScriptEngine::from_transaction_input(
+        &vtx,
+        &mtx.tx.inputs[idx],
+        idx,
+        &entry,
+        EngineCtx::new(&sig_cache).with_reused(&reused),
+        EngineFlags { covenants_enabled: true, ..Default::default() },
+    );
+    match vm.execute() {
+        Ok(()) => (true, "the spend SATISFIES the contract — a node would accept it".to_string()),
+        Err(e) => (false, format!("the contract REJECTS this spend: {e}")),
+    }
 }
 
 /// Blake2b-256, the covenant P2SH commitment hash.
@@ -486,6 +519,7 @@ async fn settle_escrow(
     program: &[u8],
     release_to: &str,
     target_covenant: Option<kaspa_consensus_core::Hash>,
+    dry_run: bool,
 ) -> Result<()> {
     let decoded = kascov_decode::Registry::default().decode(0, program);
     let template = decoded.template.context("not a recognized contract")?;
@@ -609,6 +643,13 @@ async fn settle_escrow(
     mtx.tx.inputs[1].signature_script = kascov_decode::encode_push(&sig1_full);
 
     let covenant_id_opt = state.utxo_entry.covenant_id;
+    if dry_run {
+        let (pass, verdict) = simulate_input(&mtx, 0);
+        println!("SIMULATE   Escrow → {release_to}  (not broadcast)");
+        println!("           {}  {verdict}", if pass { "✓ PASS —" } else { "✗ FAIL —" });
+        println!("           would release {:.8} TKAS to the {release_to}", (state_value - 1000) as f64 / 1e8);
+        return Ok(());
+    }
     let txid = submit(&client, &mtx.tx).await?;
     println!("SETTLED    Escrow → {release_to} ({:.8} TKAS released)", (state_value - 1000) as f64 / 1e8);
     println!("           tx {txid}");
@@ -642,7 +683,7 @@ async fn escrow_demo(cli: &Cli, value: u64) -> Result<()> {
     println!();
     println!("[2/2] waiting ~15s, then settling to the buyer…");
     tokio::time::sleep(Duration::from_secs(15)).await;
-    settle_escrow(cli, &program, "buyer", Some(id)).await?;
+    settle_escrow(cli, &program, "buyer", Some(id), false).await?;
     println!();
     println!("done — a real escrow lived and settled by its own rules on testnet-10.");
     Ok(())
@@ -668,6 +709,7 @@ async fn spend(
     target_covenant: Option<kaspa_consensus_core::Hash>,
     to: Option<&str>,
     compute_budget: u16,
+    dry_run: bool,
 ) -> Result<()> {
     if program.is_empty() {
         bail!("empty program");
@@ -689,12 +731,22 @@ async fn spend(
         .map(|f| f.value.clone())
         .with_context(|| format!("{template} has no {signer_field} field"))?;
     if committed != pk_hash {
-        bail!(
-            "this coin's {signer_field} is {}, but your key's blake2b is {} — you can't {entrypoint} it.\n\
-             deploy a coin whose {signer_field} = your `kascov-lab keygen` blake2b, then spend that one.",
-            hex::encode(&committed),
-            hex::encode(pk_hash)
-        );
+        if dry_run {
+            // simulate anyway — the whole point is to see the rejection honestly
+            println!(
+                "note: your key's blake2b ({}) isn't this coin's {signer_field} ({}) —\n\
+                 the checksig will fail; simulating so you can see exactly where.\n",
+                hex::encode(pk_hash),
+                hex::encode(&committed)
+            );
+        } else {
+            bail!(
+                "this coin's {signer_field} is {}, but your key's blake2b is {} — you can't {entrypoint} it.\n\
+                 deploy a coin whose {signer_field} = your `kascov-lab keygen` blake2b, then spend that one.",
+                hex::encode(&committed),
+                hex::encode(pk_hash)
+            );
+        }
     }
 
     // Find the coin's live state UTXO from the node, via its P2SH address.
@@ -769,6 +821,15 @@ async fn spend(
     mtx.tx.inputs[0].signature_script = witness;
 
     let covenant_id = state.utxo_entry.covenant_id;
+    if dry_run {
+        let (pass, verdict) = simulate_input(&mtx, 0);
+        println!("SIMULATE   {template} . {entrypoint}  (not broadcast)");
+        println!("           {}  {verdict}", if pass { "✓ PASS —" } else { "✗ FAIL —" });
+        println!();
+        println!("this ran the exact spend through Kaspa's real script engine — the same");
+        println!("validation a node performs — without sending anything on-chain.");
+        return Ok(());
+    }
     let txid = submit(&client, &mtx.tx).await?;
     println!("SPEND      {template} . {entrypoint}");
     println!("           tx {txid}");
@@ -815,7 +876,7 @@ async fn contract_demo(cli: &Cli, value: u64) -> Result<()> {
     println!();
     println!("[2/2] waiting ~15s for confirmation, then reclaiming…");
     tokio::time::sleep(Duration::from_secs(15)).await;
-    spend(cli, &program, "reclaim", Some(id), None, 20).await?;
+    spend(cli, &program, "reclaim", Some(id), None, 20, false).await?;
     println!();
     println!("done — the coin was born as a p2sh commitment and revealed itself as");
     println!("SilverScript · Mecenas when you reclaimed it. watch its story on kascov.");
