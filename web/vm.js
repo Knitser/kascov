@@ -42,6 +42,9 @@
     let d = [];       // data stack (labels)
     let a = [];       // alt stack
     let depth = 0;    // if/else nesting, for indentation
+    const saved = []; // stack snapshots at each OpIf — so we walk ONE branch,
+                      // not both (a linear walk would otherwise run the if-body
+                      // AND the else-body and corrupt the stack)
     const pop = (n = 1) => { const o = []; for (let i = 0; i < n; i++) o.unshift(d.length ? d.pop() : '∅'); return o; };
     const bin = (sym) => { const [x, y] = pop(2); d.push(`(${x} ${sym} ${y})`); };
 
@@ -71,9 +74,9 @@
           case 'OpToAltStack': { const [x] = pop(1); a.push(x); note = '→ alt stack'; break; }
           case 'OpFromAltStack': { d.push(a.length ? a.pop() : '∅'); note = '← alt stack'; break; }
           case 'OpDepth': d.push(String(d.length)); note = 'push stack depth'; break;
-          case 'OpPick': { const [k] = pop(1); d.push(`pick(${k})`); note = 'copy nth item'; break; }
-          case 'OpRoll': { const [k] = pop(1); d.push(`roll(${k})`); note = 'move nth item up'; break; }
-          case 'OpIfDup': note = 'dup if top ≠ 0'; break;
+          case 'OpPick': { const [k] = pop(1); d.push(`‹item ${k} deep›`); note = 'copy nth item to top'; break; }
+          case 'OpRoll': { const [k] = pop(1); note = `move item ${k} deep to top`; break; }
+          case 'OpIfDup': note = 'dup top if it is ≠ 0'; break;
           case 'OpBlake2b': case 'OpBlake3': case 'OpSHA256': { const [x] = pop(1); d.push(`${n.replace('Op', '').toLowerCase()}(${x})`); note = 'hash top'; break; }
           case 'OpCat': { const [x, y] = pop(2); d.push(`${x}‖${y}`); note = 'concatenate'; break; }
           case 'OpSize': d.push(`len(${d[d.length - 1] || '∅'})`); note = 'push byte length'; break;
@@ -111,10 +114,21 @@
           case 'OpCheckLockTimeVerify': note = 'require tx.lockTime ≥ top'; break;
           case 'OpCheckSequenceVerify': note = 'require the coin is old enough (relative timelock)'; break;
           case 'OpZkPrecompile': { const [proof, inputs, vk, tag] = pop(4); d.push('‹zk verified›'); note = 'verify a zero-knowledge proof on-chain (KIP-16)'; break; }
-          case 'OpIf': { const [c] = pop(1); depth += 1; note = `if ${c} …`; break; }
-          case 'OpNotIf': { const [c] = pop(1); depth += 1; note = `if not ${c} …`; break; }
-          case 'OpElse': note = '… else …'; break;
-          case 'OpEndIf': depth = Math.max(0, depth - 1); note = 'end if'; break;
+          case 'OpIf': case 'OpNotIf': {
+            const [c] = pop(1);
+            depth += 1;
+            saved.push({ d: d.slice(), a: a.slice() }); // remember the pre-branch stack
+            note = `${n === 'OpNotIf' ? 'if not ' : 'if '}${c} …`;
+            break;
+          }
+          case 'OpElse': {
+            // only one branch runs — rewind to the fork so the else-body
+            // starts from the same stack the if-body did
+            if (saved.length) { const s = saved[saved.length - 1]; d = s.d.slice(); a = s.a.slice(); }
+            note = '… else …';
+            break;
+          }
+          case 'OpEndIf': { depth = Math.max(0, depth - 1); saved.pop(); note = 'end if'; break; }
           case 'OpNop': note = 'no-op'; break;
           default:
             note = 'runtime opcode';
