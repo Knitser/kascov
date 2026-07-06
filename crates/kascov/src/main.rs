@@ -1570,9 +1570,16 @@ async fn stream_handler(
     let Some((_, channel)) = state.live.iter().find(|(n, _)| *n == network) else {
         return (StatusCode::NOT_FOUND, "unknown network").into_response();
     };
-    // Reserve a subscriber slot; back out over the cap.
-    if channel.subscribers.fetch_add(1, Ordering::AcqRel) >= MAX_STREAM_SUBSCRIBERS {
-        channel.subscribers.fetch_sub(1, Ordering::AcqRel);
+    // Reserve a subscriber slot atomically; back out over the cap.
+    // fetch_update with CAS prevents the TOCTOU race between fetch_add
+    // and the cap check that would allow N+ subscribers through.
+    if channel
+        .subscribers
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            (current < MAX_STREAM_SUBSCRIBERS).then_some(current + 1)
+        })
+        .is_err()
+    {
         return (StatusCode::SERVICE_UNAVAILABLE, "stream full — use the polling feeds").into_response();
     }
     let slot = SubscriberSlot(channel.subscribers.clone());
