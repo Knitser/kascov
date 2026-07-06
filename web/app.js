@@ -3059,12 +3059,6 @@ if (location.pathname !== '/' && location.pathname !== '/index.html' && !locatio
   history.replaceState(null, '', `/#/${path}${location.search}`);
 }
 
-render();
-pollLive();
-setTimeout(maybeStartTour, 900);
-
-})();
-
 /* ------------------------------------------------- live ticker + palette */
 /* A thin tape under the header streaming life events as they happen. Own
    EventSource, only while visible on landing/explore; errors just hide it. */
@@ -3121,3 +3115,9 @@ document.addEventListener('keydown', (e) => {
   }
 });
 (() => { const s2 = document.querySelector('#search'); if (s2 && navigator.platform.includes('Mac')) s2.placeholder += '  ⌘K'; })();
+
+render();
+pollLive();
+setTimeout(maybeStartTour, 900);
+
+})();

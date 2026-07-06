@@ -2184,3 +2184,110 @@ html { scrollbar-color: rgba(112, 199, 186, 0.28) transparent; }
 @media (max-width: 640px) {
   .ticker, .ticker.ticker-on { display: none; height: 0; }
 }
+
+/* ================================================================
+   REDESIGN — "GHOSTDAG": the living block-lattice
+   Deeper luminous abyss, Bricolage display, the BlockDAG as the hero.
+   This layer intentionally overrides the earlier mission-control passes.
+   ================================================================ */
+
+:root {
+  --bg: #05100e;
+  --bg-soft: #081613;
+  --card: #0b1a17;
+  --card-hover: #0f231e;
+  --border: rgba(120, 220, 200, 0.09);
+  --border-strong: rgba(73, 234, 203, 0.36);
+  --text: #eaf6f2;
+  --muted: #9fb8b2;
+  --faint: #7f9a94;
+  --accent: #49eacb;
+  --accent-soft: rgba(73, 234, 203, 0.12);
+  --born: #5be49b; --born-soft: rgba(91, 228, 155, 0.15);
+  --move: #8ab4ff; --move-soft: rgba(138, 180, 255, 0.15);
+  --burn: #ffb067; --burn-soft: rgba(255, 176, 103, 0.15);
+  --display: "Bricolage Grotesque", "Space Grotesk", system-ui, sans-serif;
+}
+
+body {
+  background:
+    radial-gradient(1200px 620px at 50% -220px, rgba(73, 234, 203, 0.10), transparent 68%),
+    radial-gradient(1000px 800px at 92% 4%, rgba(91, 228, 155, 0.04), transparent 64%),
+    radial-gradient(900px 720px at 4% 24%, rgba(138, 180, 255, 0.035), transparent 64%),
+    var(--bg);
+}
+
+/* ---- the DAG hero ---- */
+.hero {
+  position: relative;
+  padding: 5.4rem 0 2.2rem;
+  min-height: 540px;
+  overflow: hidden;
+  background-image: none !important;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+}
+.hero::before,          /* kill the old speck/grid layer */
+.hero::after {          /* kill the old radar sweep */
+  display: none !important;
+}
+.dag-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  -webkit-mask-image: radial-gradient(130% 108% at 50% -8%, #000 42%, transparent 94%);
+  mask-image: radial-gradient(130% 108% at 50% -8%, #000 42%, transparent 94%);
+}
+/* legibility scrim behind the headline, so the lattice reads as depth */
+.hero > *:not(.dag-canvas) { position: relative; z-index: 1; }
+.hero-title {
+  position: relative;
+  font-family: var(--display);
+  font-optical-sizing: auto;
+  font-size: clamp(2.6rem, 7vw, 4.6rem);
+  font-weight: 700;
+  line-height: 0.98;
+  letter-spacing: -0.035em;
+  max-width: 18ch;
+  text-shadow: 0 2px 40px rgba(5, 16, 14, 0.9);
+}
+.hero-title em {
+  font-style: normal;
+  background: linear-gradient(96deg, var(--accent), var(--born) 60%, #b7f5e6);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.hero-sub {
+  font-size: clamp(1.02rem, 2.3vw, 1.2rem);
+  color: var(--muted);
+  text-shadow: 0 2px 30px rgba(5, 16, 14, 0.85);
+}
+
+/* stat cards: luminous glass on the abyss */
+.hero-stats .stat {
+  background: linear-gradient(180deg, rgba(73,234,203,0.05), rgba(11,26,23,0.55));
+  border-color: var(--border);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.hero-stats .stat::before { background: linear-gradient(90deg, var(--accent), transparent 72%); opacity: 0.7; }
+.stat b, .stat strong, .stat-n { color: #b7f5e6; }
+
+/* section labels pick up the electric accent */
+h2::before { color: var(--accent); }
+
+/* the wordmark eye + display users adopt Bricolage's weight */
+.wordmark { font-family: var(--display); font-weight: 800; letter-spacing: -0.03em; }
+.detail-head h1 { font-family: var(--display); font-weight: 700; letter-spacing: -0.03em; }
+.devcard h3 { font-family: var(--display); font-weight: 700; }
+
+/* guide steps: the lifecycle as luminous stages */
+.guide-step { background: linear-gradient(180deg, rgba(255,255,255,0.015), transparent 60%), var(--card); }
+.guide-step:nth-child(1) { box-shadow: -2px 0 16px -8px var(--born); }
+.guide-step:nth-child(2) { box-shadow: -2px 0 16px -8px var(--move); }
+.guide-step:nth-child(3) { box-shadow: -2px 0 16px -8px var(--burn); }
+
+@media (max-width: 640px) {
+  .hero { min-height: 440px; padding-top: 3.4rem; }
+}
