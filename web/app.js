@@ -1083,7 +1083,7 @@ const SORTS = {
   activity: (a, b) => (b.c.last_activity_daa || 0) - (a.c.last_activity_daa || 0),
   newest: (a, b) => b.bornMs - a.bornMs,
   oldest: (a, b) => a.bornMs - b.bornMs,
-  richest: (a, b) => b.c.live_value - a.c.live_value,
+  richest: (a, b) => (b.c.live_value || 0) - (a.c.live_value || 0),
   moves: (a, b) => b.moves - a.moves,
 };
 
