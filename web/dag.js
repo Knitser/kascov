@@ -65,8 +65,10 @@
 
   function resize() {
     dpr = Math.min(2, window.devicePixelRatio || 1);
-    W = cv.clientWidth || cv.parentElement.clientWidth;
-    H = cv.clientHeight || 360;
+    W = cv.clientWidth || cv.parentElement.clientWidth || 0;
+    H = cv.clientHeight || cv.parentElement.clientHeight || 0;
+    // hero not laid out yet (SPA view hidden) — wait, keep cols empty
+    if (W < 40 || H < 40) { cols = []; return; }
     cv.width = Math.round(W * dpr);
     cv.height = Math.round(H * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -136,6 +138,12 @@
   }
 
   function tick(now) {
+    // build lazily once the hero is actually visible (survives SPA view
+    // switches where the ResizeObserver may not have fired yet)
+    if (!cols.length || !W) {
+      resize();
+      if (!cols.length) { last = now; raf = requestAnimationFrame(tick); return; }
+    }
     const dt = Math.min(0.05, (now - last) / 1000 || 0);
     last = now;
     offset += SPEED * dt;
