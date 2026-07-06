@@ -1917,10 +1917,13 @@ function genOutputsHtml(tpl) {
     (hint ? `<span class="dim">${esc(hint)}</span>` : '') +
     `<button type="button" class="copy-btn" data-action="copy-block">copy</button></div>` +
     `<pre>${esc(body)}</pre></div>`;
-  return verify +
+  const note = `<p class="gen-note dim">deploying commits your contract as a <strong>hidden p2sh state</strong> — ` +
+    `the coin shows a hash until you <strong>spend</strong> it, which reveals the program on-chain and makes ` +
+    `kascov name it your contract, permanently.</p>`;
+  return verify + note +
     block('the contract, readable', source, 'canonical SilverScript source') +
     block('the contract, compiled', hex, `${emitted.length} bytes — paste it back into the decoder any time`) +
-    block('birth it on testnet-10', deploy, 'copy-paste; your coin appears on kascov ~a minute later');
+    block('birth it, then reveal it on testnet-10', deploy, 'copy-paste; born in ~a minute, revealed when you spend');
 }
 
 function runDecode(updateHash) {
@@ -2574,8 +2577,9 @@ document.addEventListener('click', (e) => {
     runDecode(false);
   } else if (action === 'gen-example') {
     const input = $('#decode-input');
-    if (input && DECODE_EXAMPLES.mecenas) {
-      input.value = DECODE_EXAMPLES.mecenas;
+    const which = el.dataset.example || 'mecenas';
+    if (input && DECODE_EXAMPLES[which]) {
+      input.value = DECODE_EXAMPLES[which];
       /* decode first (a fresh script resets genState), THEN open the panel */
       runDecode(true);
       genState = { open: true };

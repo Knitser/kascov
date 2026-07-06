@@ -113,10 +113,45 @@ impl StateDecoder for P2shCommitmentDecoder {
 enum SkelItem {
     /// A non-push instruction that must match exactly.
     Op(u8),
-    /// A push whose bytes are part of the template itself.
-    ConstPush(Vec<u8>),
+    /// A push whose bytes are part of the template itself. `raw` keeps the
+    /// original encoding so re-emitting a contract is byte-identical even
+    /// where the compiler chose a non-minimal push.
+    ConstPush { value: Vec<u8>, raw: Vec<u8> },
     /// A push carrying a constructor argument.
     Slot(&'static str),
+}
+
+/// Canonical push encoding — the bytes the SilverScript compiler's
+/// ScriptBuilder emits for a pushed value. Mirrors `encodePush` in
+/// `web/disasm.js`; used to re-encode argument slots when emitting a contract.
+pub fn encode_push(value: &[u8]) -> Vec<u8> {
+    match value {
+        [] => vec![0x00],                              // OpFalse
+        [0x81] => vec![0x4f],                          // Op1Negate
+        [v] if (1..=16).contains(v) => vec![0x50 + v], // Op1..Op16
+        _ if value.len() <= 75 => {
+            let mut out = Vec::with_capacity(value.len() + 1);
+            out.push(value.len() as u8);
+            out.extend_from_slice(value);
+            out
+        }
+        _ if value.len() <= 0xff => {
+            let mut out = vec![0x4c, value.len() as u8];
+            out.extend_from_slice(value);
+            out
+        }
+        _ if value.len() <= 0xffff => {
+            let mut out = vec![0x4d, (value.len() & 0xff) as u8, (value.len() >> 8) as u8];
+            out.extend_from_slice(value);
+            out
+        }
+        _ => {
+            let n = value.len() as u32;
+            let mut out = vec![0x4e, (n & 0xff) as u8, (n >> 8 & 0xff) as u8, (n >> 16 & 0xff) as u8, (n >> 24) as u8];
+            out.extend_from_slice(value);
+            out
+        }
+    }
 }
 
 pub struct Skeleton {
@@ -162,7 +197,7 @@ impl Skeleton {
             return None;
         }
         let mut items = Vec::with_capacity(ia.len());
-        for (x, y) in ia.iter().zip(&ib) {
+        for (i, (x, y)) in ia.iter().zip(&ib).enumerate() {
             match (is_push(x), is_push(y)) {
                 (false, false) => {
                     if x.opcode != y.opcode {
@@ -174,7 +209,9 @@ impl Skeleton {
                     let vx = push_value(x)?;
                     let vy = push_value(y)?;
                     if vx == vy {
-                        items.push(SkelItem::ConstPush(vx));
+                        // raw span of this push in dump A, for byte-perfect emit
+                        let end = ia.get(i + 1).map_or(a.len(), |n| n.offset);
+                        items.push(SkelItem::ConstPush { value: vx, raw: a[x.offset..end].to_vec() });
                     } else {
                         let (label, _) = sentinels.iter().find(|(_, s)| *s == vx)?;
                         items.push(SkelItem::Slot(label));
@@ -188,6 +225,31 @@ impl Skeleton {
             items,
             param_order: sentinels.iter().map(|(l, _)| *l).collect(),
         })
+    }
+
+    /// Constructor parameter labels, in order.
+    pub fn params(&self) -> &[&'static str] {
+        &self.param_order
+    }
+
+    /// Re-emit this contract's compiled bytes with new constructor arguments.
+    /// Fixed ops and constant pushes stay byte-identical to the original
+    /// build; each slot is re-encoded from `args` (looked up by label).
+    /// Returns None if an argument is missing. The inverse of `match_script`:
+    /// `match_script(disassemble(emit(args))) == args`.
+    pub fn emit(&self, args: &[(&str, &[u8])]) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        for item in &self.items {
+            match item {
+                SkelItem::Op(op) => out.push(*op),
+                SkelItem::ConstPush { raw, .. } => out.extend_from_slice(raw),
+                SkelItem::Slot(label) => {
+                    let (_, value) = args.iter().find(|(l, _)| l == label)?;
+                    out.extend_from_slice(&encode_push(value));
+                }
+            }
+        }
+        Some(out)
     }
 
     /// Match a script against this skeleton; on success return its fields in
@@ -204,8 +266,8 @@ impl Skeleton {
                         return None;
                     }
                 }
-                SkelItem::ConstPush(bytes) => {
-                    if push_value(inst).as_ref() != Some(bytes) {
+                SkelItem::ConstPush { value, .. } => {
+                    if push_value(inst).as_ref() != Some(value) {
                         return None;
                     }
                 }
@@ -284,7 +346,10 @@ const LASTWILL_A: &str = "6b6c76009c637502b400b178aa2033333333333333333333333333
 const LASTWILL_B: &str = "6b6c76009c637502b400b178aa2044444444444444444444444444444444444444444444444444444444444444448769765279ac697575516776519c637578aa2033333333333333333333333333333333333333333333333333333333333333338769765279ac697575516776529c637578aa2022222222222222222222222222222222222222222222222222222222222222228769765279ac6900c2b9be02e803949c6900c3b9bf876975755167750069686868";
 
 /// Minimal script-number encoding of the sentinel ints used in the dumps.
-fn snum(v: i64) -> Vec<u8> {
+/// Minimal script-number (little-endian, sign-guard) encoding of a
+/// non-negative integer — used for pledge/period args and entrypoint
+/// selectors when emitting a contract or building a spend witness.
+pub fn snum(v: i64) -> Vec<u8> {
     let mut out = Vec::new();
     let mut abs = v.unsigned_abs();
     while abs > 0 {
@@ -299,7 +364,7 @@ fn snum(v: i64) -> Vec<u8> {
     out
 }
 
-fn silverscript_skeletons() -> Vec<Skeleton> {
+pub fn silverscript_skeletons() -> Vec<Skeleton> {
     let hex2 = |s: &str| hex::decode(s).expect("template dump hex");
     let mut out = Vec::new();
     // contract Mecenas(pubkey recipient, byte[32] funder, int pledge, int period)
@@ -470,6 +535,70 @@ mod tests {
         broken[last] = 0x51;
         let d = reg.decode(0, &broken);
         assert_eq!(d.template, None);
+    }
+
+    #[test]
+    fn emit_with_sentinel_args_reproduces_each_dump() {
+        // emitting with the sentinel args must reproduce dump A byte-for-byte
+        let cases: &[(&str, &str, &[(&str, Vec<u8>)])] = &[
+            (
+                "SilverScript · Mecenas",
+                MECENAS_A,
+                &[
+                    ("recipient", vec![0x11; 32]),
+                    ("funder_hash", vec![0x33; 32]),
+                    ("pledge", snum(100_000_000)),
+                    ("period", snum(1000)),
+                ],
+            ),
+            (
+                "SilverScript · Escrow",
+                ESCROW_A,
+                &[("arbiter_hash", vec![0x33; 32]), ("buyer", vec![0x11; 32]), ("seller", vec![0x22; 32])],
+            ),
+            (
+                "SilverScript · LastWill",
+                LASTWILL_A,
+                &[("inheritor_hash", vec![0x33; 32]), ("cold_hash", vec![0x44; 32]), ("hot_hash", vec![0x11; 32])],
+            ),
+        ];
+        let skels = silverscript_skeletons();
+        for (name, dump, args) in cases {
+            let skel = skels.iter().find(|s| s.name == *name).expect("skeleton");
+            let args_ref: Vec<(&str, &[u8])> = args.iter().map(|(l, v)| (*l, v.as_slice())).collect();
+            let emitted = skel.emit(&args_ref).expect("emit");
+            assert_eq!(hex::encode(&emitted), *dump, "{name} emit != dump");
+        }
+    }
+
+    #[test]
+    fn emit_round_trips_fresh_args_including_small_int_selector() {
+        let reg = Registry::default();
+        let skels = silverscript_skeletons();
+        let mecenas = skels.iter().find(|s| s.name == "SilverScript · Mecenas").unwrap();
+        // fresh args, pledge with a sign-guard byte (180 -> b4 00), period a small int (6 -> Op6)
+        let recipient = vec![0xab; 32];
+        let funder = vec![0xcd; 32];
+        let pledge = snum(180);
+        let period = snum(6);
+        let args: Vec<(&str, &[u8])> = vec![
+            ("recipient", &recipient),
+            ("funder_hash", &funder),
+            ("pledge", &pledge),
+            ("period", &period),
+        ];
+        let emitted = mecenas.emit(&args).expect("emit");
+        let d = reg.decode(0, &emitted);
+        assert_eq!(d.template, Some("SilverScript · Mecenas"));
+        let get = |n: &str| d.fields.iter().find(|f| f.name == n).map(|f| f.value.clone());
+        assert_eq!(get("recipient"), Some(recipient));
+        assert_eq!(get("funder_hash"), Some(funder));
+        assert_eq!(get("pledge"), Some(snum(180)));
+        assert_eq!(get("period"), Some(snum(6)));
+        // period=6 must encode to Op6 (0x56), the canonical small-int push
+        assert_eq!(encode_push(&snum(6)), vec![0x56]);
+        // and a 32-byte value uses a direct length-prefixed push
+        assert_eq!(encode_push(&[0xab; 32])[0], 0x20);
     }
 
     #[test]

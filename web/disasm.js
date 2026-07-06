@@ -230,7 +230,7 @@ const SS_DUMPS = [
     /* generator metadata: how each constructor arg is entered and encoded */
     params: [
       { name: 'recipient', kind: 'pubkey', source: 'recipient', hint: 'x-only public key that can claim each pledge' },
-      { name: 'funder_hash', kind: 'hash32', source: 'funder', hint: 'blake2b-256 of the funder’s public key (can reclaim)' },
+      { name: 'funder_hash', kind: 'hash32', source: 'funder', hint: 'blake2b-256 of the funder — set to YOUR keygen blake2b to reclaim the coin yourself' },
       { name: 'pledge', kind: 'amount', source: 'pledge', hint: 'how much the recipient may take per period' },
       { name: 'period', kind: 'daa', source: 'period', hint: 'claim interval in DAA ticks (≈10 per second)' },
     ],
@@ -261,7 +261,7 @@ const SS_DUMPS = [
     ],
     params: [
       { name: 'inheritor_hash', kind: 'hash32', source: 'inheritor', hint: 'blake2b-256 of the inheritor’s public key' },
-      { name: 'cold_hash', kind: 'hash32', source: 'cold', hint: 'blake2b-256 of the cold-recovery public key' },
+      { name: 'cold_hash', kind: 'hash32', source: 'cold', hint: 'blake2b-256 of the cold key — set to YOUR keygen blake2b to spend it back yourself' },
       { name: 'hot_hash', kind: 'hash32', source: 'hot', hint: 'blake2b-256 of the everyday (hot) public key' },
     ],
   },

@@ -1774,3 +1774,6 @@ a.btn:hover { text-decoration: none; }
   font-weight: 650;
 }
 .chip-make:hover { background: var(--accent); color: #06211d; }
+
+.gen-note { margin: 0 0 0.8rem; line-height: 1.55; }
+.gen-note strong { color: var(--accent); }

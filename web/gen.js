@@ -162,14 +162,16 @@ contract LastWill(byte[32] inheritor, byte[32] cold, byte[32] hot) {
 
   function buildDeployCommand(programHex, valueSompi) {
     return [
-      '# one-time setup: create a key, then fund the printed address at',
-      '#   https://faucet-testnet.kaspanet.io',
+      '# 1. make a key, fund the printed address at https://faucet-testnet.kaspanet.io',
       'cargo run -p kascov-lab -- keygen',
       '',
-      '# birth your contract as a real smart coin on testnet-10:',
-      `cargo run -p kascov-lab -- deploy \\`,
-      `  --program-hex ${programHex} \\`,
-      `  --value ${valueSompi}`,
+      '# 2. birth your contract (its state is a hidden p2sh commitment):',
+      `cargo run -p kascov-lab -- deploy --program-hex ${programHex} --value ${valueSompi}`,
+      '',
+      '# 3. REVEAL it — spend it so kascov names it your contract, on-chain, forever:',
+      'cargo run -p kascov-lab -- spend --program-hex <same hex> --entrypoint reclaim',
+      '#    (reclaim needs funder = your keygen blake2b. or do it all in one command:)',
+      'cargo run -p kascov-lab -- contract-demo',
     ].join('\n');
   }
 

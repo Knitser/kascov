@@ -45,4 +45,23 @@ cargo run -p kascov-lab -- keygen          # prints address, pubkey, blake2b(pub
 cargo run -p kascov-lab -- deploy --program-hex <hex> --value 1000000000
 ```
 
-The coin is born with a **P2SH commitment** state (`OpBlake2b <blake2b-256(program)> OpEqual`) bound to a fresh covenant id, and appears on the explorer within ~a minute. Honesty note: it shows as `p2sh commitment` until a spend reveals the program — and spending means satisfying the contract's own rules, which the lab doesn't automate (yet).
+The coin is born with a **P2SH commitment** state (`OpBlake2b <blake2b-256(program)> OpEqual`) bound to a fresh covenant id, and appears on the explorer within ~a minute — as a `p2sh commitment` (the program is hidden behind the hash).
+
+## Revealing it — spend the contract on-chain
+
+Spending the coin reveals the program, so kascov shows it as your named contract *for everyone, permanently* (`revealed at spend — SilverScript · Mecenas`, with your args labeled). The lab satisfies the **pure-signature** entrypoints (Mecenas `reclaim`, LastWill `cold`/`inherit`) — they need only a signature from the matching key:
+
+```sh
+# the coin's funder/cold/inheritor hash must be YOUR key's blake2b (keygen prints it)
+cargo run -p kascov-lab -- spend --program-hex <same hex> --entrypoint reclaim
+```
+
+The whole loop — emit a reclaimable Mecenas, deploy it, reclaim it — in one command:
+
+```sh
+cargo run -p kascov-lab -- contract-demo
+```
+
+**How the spend works:** the unlocking script is `push(pubkey) ++ push(sig) ++ [push(selector)] ++ push(program)` — the revealed contract program as the final push. The signature is the standard Schnorr sighash (`SIG_HASH_ALL`) computed over the P2SH UTXO; the entrypoint selector is a small-int push (Mecenas `reclaim`=1). The per-input compute budget is committed via `ComputeBudget` (1 unit = 10 000 script units; a signature spend needs ~1, and the fee scales as 100 sompi × compute mass).
+
+**Out of scope (v1):** entrypoints that constrain the transaction *outputs* via introspection (Mecenas `receive`, Escrow `spend`, LastWill `refresh`) — they need a constructed output structure the lab doesn't build yet.
