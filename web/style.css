@@ -2463,3 +2463,18 @@ a.build-card:hover { transform: translateY(-3px); border-color: var(--border-str
 .lane-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--move), var(--accent)); border-radius: 99px; }
 .lane-counts { font-size: 0.82rem; white-space: nowrap; }
 @media (max-width: 640px) { .lane-row { grid-template-columns: 1fr auto; } .lane-track { display: none; } }
+
+/* ---- fixes: debugger stability, uniform lanes, family member chips ---- */
+
+/* debugger: fixed-height stacks so the panel never grows/jumps between steps */
+.dbg-col { height: 200px; min-height: 0; overflow-y: auto; }
+
+/* lanes: one uniform label per row, no teal/hex split, no wrapping */
+.lane-ns { font-family: var(--mono); font-weight: 600; font-size: 0.9rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* family cards: every member is a clickable named chip (not anonymous bubbles) */
+.family-card { display: block; }
+.family-head { display: flex; flex-direction: column; gap: 0.15rem; margin-bottom: 0.75rem; }
+.family-members { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.fam-member { display: inline-flex; align-items: center; gap: 0.45rem; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 999px; padding: 0.28rem 0.75rem 0.28rem 0.32rem; font-size: 0.9rem; color: var(--text); transition: border-color 0.15s, transform 0.15s; }
+.fam-member:hover { border-color: var(--border-strong); transform: translateY(-1px); text-decoration: none; }

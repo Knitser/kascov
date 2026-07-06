@@ -518,12 +518,9 @@ function renderLanes(network) {
   const max = Math.max(1, ...lanes.map((l) => l.events));
   host.innerHTML = lanes.slice(0, 14).map((l) => {
     const w = Math.max((l.events / max) * 100, 3).toFixed(1);
-    const name = l.kind === 'inscription'
-      ? `<span class="ns-ascii">${esc(l.label)}</span> <span class="dim">KRC-20 · JSON</span>`
-      : l.ascii
-        ? `<span class="ns-ascii">${esc(l.label)}</span> <span class="dim mono">0x${esc(l.hex)}</span>`
-        : `<span class="mono">${esc(l.label)}</span>`;
-    return `<div class="lane-row"><span class="lane-ns">${name}</span>` +
+    const name = l.kind === 'inscription' ? 'JSON inscriptions' : esc(l.label);
+    const title = l.ascii ? ` title="0x${esc(l.hex)}"` : '';
+    return `<div class="lane-row"><span class="lane-ns"${title}>${name}</span>` +
       `<span class="lane-track"><span class="lane-fill" style="width:${w}%"></span></span>` +
       `<span class="lane-counts dim">${fmtInt(l.events)} tx${l.events === 1 ? '' : 's'} · ${fmtInt(l.covenants)} coin${l.covenants === 1 ? '' : 's'}</span></div>`;
   }).join('');
@@ -565,12 +562,14 @@ function renderFamilies(network) {
     const label = named.length
       ? [...new Set(named.map((m) => m.template.replace('SilverScript · ', '')))].join(' + ')
       : `${f.size} smart coins`;
-    const avatars = f.members.slice(0, 5).map((m) =>
-      `<a href="#/${esc(network)}/c/${esc(m.covenant_id)}" title="${esc(friendlyName(m.covenant_id))}">${avatarSvg(m.covenant_id, 34)}</a>`
+    const members = f.members.slice(0, 6).map((m) =>
+      `<a class="fam-member" href="#/${esc(network)}/c/${esc(m.covenant_id)}">` +
+      `${avatarSvg(m.covenant_id, 26)}<span>${esc(friendlyName(m.covenant_id))}</span></a>`
     ).join('');
-    return `<div class="family-card"><div class="family-avatars">${avatars}</div>` +
-      `<div class="family-body"><span class="family-label">${esc(label)}</span>` +
-      `<span class="family-sub dim">${f.size} coins · moved together</span></div></div>`;
+    return `<div class="family-card">` +
+      `<div class="family-head"><span class="family-label">${esc(label)}</span>` +
+      `<span class="family-sub dim">${f.size} coins moved together in a transaction</span></div>` +
+      `<div class="family-members">${members}</div></div>`;
   }).join('');
 }
 
@@ -1839,8 +1838,11 @@ function renderDebugger() {
     `<div class="dbg-oplist">${ops}</div>` +
     `<p class="dim dbg-footnote">symbolic trace — concrete for pushes &amp; stack ops, ‹symbolic› where a value only resolves against a real spend</p>` +
     `</div>`;
+  // scroll the active op into view WITHIN the op-list only — never the page
+  // (scrollIntoView would bubble up and jump the whole document)
+  const list = host.querySelector('.dbg-oplist');
   const act = host.querySelector('.dbg-active');
-  if (act) act.scrollIntoView({ block: 'nearest' });
+  if (list && act) list.scrollTop = act.offsetTop - list.clientHeight / 2 + act.offsetHeight / 2;
 }
 
 function revealPreviewHtml(u, program) {
