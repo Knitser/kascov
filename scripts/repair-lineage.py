@@ -123,7 +123,7 @@ for hop, txid in enumerate(chain):
             sys.exit(f"output {txid[:12]}:{oidx} not spent by expected next hop — refusing")
         utxos.append({
             'txid': txid, 'oidx': oidx, 'value': int(o['amount']),
-            'script': o['script_public_key'], 'created_block': t['block_hash'][0],
+            'script': o['script_public_key'],         'created_block': t['accepting_block_hash'],
             'created_daa': daa, 'spent_block': st['accepting_block_hash'],
             'spent_txid': spender, 'spent_sig': sin.get('signature_script') or '',
             'spent_budget': sin.get('compute_budget'),
