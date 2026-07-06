@@ -243,6 +243,43 @@ fn db_err(e: rusqlite::Error) -> Error {
     Error::Rpc(format!("store: {e}"))
 }
 
+/// Safely convert a BLOB from SQLite to a 32-byte hash. Returns an error
+/// if the blob length doesn't match, instead of panicking via `[u8; 32]`
+/// deserialization.
+fn blob_to_hash32(blob: Vec<u8>) -> Result<[u8; 32]> {
+    let bytes: &[u8] = &blob;
+    <[u8; 32]>::try_from(bytes).map_err(|_| Error::Invalid {
+        what: "database blob",
+        value: format!("expected 32 bytes, got {}", blob.len()),
+    })
+}
+
+/// Read a 32-byte hash BLOB from a SQLite row. Returns a `rusqlite::Error`
+/// compatible with `.optional()` and `.map_err(db_err)`.
+fn row_hash32(row: &rusqlite::Row, idx: usize) -> std::result::Result<[u8; 32], rusqlite::Error> {
+    let blob: Vec<u8> = row.get(idx)?;
+    <[u8; 32]>::try_from(blob.as_slice()).map_err(|_| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "expected 32-byte hash BLOB",
+        )))
+    })
+}
+
+/// Read an optional 32-byte hash BLOB from a SQLite row.
+fn row_hash32_opt(row: &rusqlite::Row, idx: usize) -> std::result::Result<Option<[u8; 32]>, rusqlite::Error> {
+    let blob: Option<Vec<u8>> = row.get(idx)?;
+    match blob {
+        None => Ok(None),
+        Some(v) => Ok(Some(<[u8; 32]>::try_from(v.as_slice()).map_err(|_| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "expected 32-byte hash BLOB",
+            )))
+        })?)),
+    }
+}
+
 /// Process-wide decode registry for write-time template recognition —
 /// construction derives the SilverScript skeletons once, and Registry is
 /// Send + Sync (its decoders are `Box<dyn StateDecoder: Send + Sync>`).
@@ -451,7 +488,7 @@ impl Store {
                 "SELECT covenant_id FROM covenant_utxos
                  WHERE txid = ?1 AND output_index = ?2 AND spent_block IS NULL",
                 params![outpoint.txid.0.as_slice(), outpoint.index],
-                |row| row.get::<_, [u8; 32]>(0).map(CovenantId),
+                |row| row_hash32(row, 0).map(CovenantId),
             )
             .optional()
             .map_err(db_err)
@@ -637,8 +674,8 @@ impl Store {
         let rows = stmt
             .query_map([limit], |row| {
                 Ok(CovenantSummary {
-                    covenant_id: CovenantId(row.get(0)?),
-                    genesis_txid: row.get::<_, Option<[u8; 32]>>(1)?.map(TxId),
+                    covenant_id: CovenantId(row_hash32(row, 0)?),
+                    genesis_txid: row_hash32_opt(row, 1)?.map(TxId),
                     genesis_daa: row.get(2)?,
                     lineage_complete: row.get(3)?,
                     event_count: row.get(4)?,
@@ -667,8 +704,8 @@ impl Store {
         let row = stmt
             .query_map([id.0.as_slice()], |row| {
                 Ok(CovenantSummary {
-                    covenant_id: CovenantId(row.get(0)?),
-                    genesis_txid: row.get::<_, Option<[u8; 32]>>(1)?.map(TxId),
+                    covenant_id: CovenantId(row_hash32(row, 0)?),
+                    genesis_txid: row_hash32_opt(row, 1)?.map(TxId),
                     genesis_daa: row.get(2)?,
                     lineage_complete: row.get(3)?,
                     event_count: row.get(4)?,
@@ -757,7 +794,7 @@ impl Store {
                  WHERE accepting_daa >= ?1
                  GROUP BY covenant_id ORDER BY n DESC, covenant_id LIMIT 1",
                 params![cutoff],
-                |r| Ok((CovenantId(r.get(0)?), r.get::<_, u64>(1)?)),
+                |r| Ok((CovenantId(row_hash32(r, 0)?), r.get::<_, u64>(1)?)),
             )
             .optional()
             .map_err(db_err)?;
@@ -770,7 +807,7 @@ impl Store {
                  WHERE c.genesis_daa >= ?1
                  GROUP BY c.covenant_id ORDER BY v DESC, c.covenant_id LIMIT 1",
                 params![cutoff],
-                |r| Ok((CovenantId(r.get(0)?), r.get::<_, u64>(1)?)),
+                |r| Ok((CovenantId(row_hash32(r, 0)?), r.get::<_, u64>(1)?)),
             )
             .optional()
             .map_err(db_err)?;
@@ -844,7 +881,7 @@ impl Store {
             )
             .map_err(db_err)?;
         let rows = stmt
-            .query_map([], |row| Ok((CovenantId(row.get(0)?), row.get::<_, u64>(1)?)))
+            .query_map([], |row| Ok((CovenantId(row_hash32(row, 0)?), row.get::<_, u64>(1)?)))
             .map_err(db_err)?
             .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()
             .map_err(db_err)?;
@@ -941,7 +978,7 @@ impl Store {
             .query_row(
                 "SELECT covenant_id FROM covenant_utxos WHERE txid = ?1 AND output_index = ?2",
                 params![outpoint.txid.0.as_slice(), outpoint.index],
-                |r| Ok(CovenantId(r.get(0)?)),
+                |r| Ok(CovenantId(row_hash32(r, 0)?)),
             )
             .optional()
             .map_err(db_err)?;
@@ -956,7 +993,7 @@ impl Store {
             .prepare("SELECT DISTINCT covenant_id FROM covenant_events WHERE txid = ?1")
             .map_err(db_err)?;
         let rows = stmt
-            .query_map([txid.0.as_slice()], |r| Ok(CovenantId(r.get(0)?)))
+            .query_map([txid.0.as_slice()], |r| Ok(CovenantId(row_hash32(r, 0)?)))
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
@@ -982,7 +1019,7 @@ impl Store {
             .query_map([], |r| {
                 let named: Option<String> = r.get(1)?;
                 let any: Option<String> = r.get(2)?;
-                Ok((CovenantId(r.get(0)?), named.or(any)))
+                Ok((CovenantId(row_hash32(r, 0)?), named.or(any)))
             })
             .map_err(db_err)?
             .filter_map(|row| match row {
@@ -1003,7 +1040,7 @@ impl Store {
             .query_row(
                 "SELECT covenant_id FROM covenant_events WHERE txid = ?1 LIMIT 1",
                 [txid.0.as_slice()],
-                |r| Ok(CovenantId(r.get(0)?)),
+                |r| Ok(CovenantId(row_hash32(r, 0)?)),
             )
             .optional()
             .map_err(db_err)?;
@@ -1042,7 +1079,7 @@ impl Store {
         let rows = stmt
             .query_map([expected.as_slice()], |row| {
                 Ok(PubkeyCovenantRow {
-                    covenant_id: CovenantId(row.get(0)?),
+                    covenant_id: CovenantId(row_hash32(row, 0)?),
                     controls_now: row.get(1)?,
                     states_seen: row.get(2)?,
                     first_seen_daa: row.get(3)?,
@@ -1068,8 +1105,8 @@ impl Store {
                 Ok(EventRow {
                     seq: row.get(0)?,
                     kind: row.get(1)?,
-                    txid: TxId(row.get(2)?),
-                    accepting_block: BlockHash(row.get(3)?),
+                    txid: TxId(row_hash32(row, 2)?),
+                    accepting_block: BlockHash(row_hash32(row, 3)?),
                     accepting_daa: row.get(4)?,
                     payload: row.get(5)?,
                 })
@@ -1093,10 +1130,10 @@ impl Store {
         let rows = stmt
             .query_map([limit], |row| {
                 Ok(GlobalEventRow {
-                    covenant_id: CovenantId(row.get(0)?),
+                    covenant_id: CovenantId(row_hash32(row, 0)?),
                     seq: row.get(1)?,
                     kind: row.get(2)?,
-                    txid: TxId(row.get(3)?),
+                    txid: TxId(row_hash32(row, 3)?),
                     accepting_daa: row.get(4)?,
                 })
             })
@@ -1119,13 +1156,13 @@ impl Store {
         let rows = stmt
             .query_map(params![id.0.as_slice(), live_only as i64], |row| {
                 Ok(UtxoRow {
-                    outpoint: Outpoint { txid: TxId(row.get(0)?), index: row.get(1)? },
+                    outpoint: Outpoint { txid: TxId(row_hash32(row, 0)?), index: row.get(1)? },
                     value: row.get(2)?,
                     spk_version: row.get(3)?,
                     spk_script: row.get(4)?,
                     created_daa: row.get(5)?,
                     live: row.get(6)?,
-                    spent_txid: row.get::<_, Option<[u8; 32]>>(7)?.map(TxId),
+                    spent_txid: row_hash32_opt(row, 7)?.map(TxId),
                     spent_sig: row.get(8)?,
                     spent_budget: row.get(9)?,
                 })
