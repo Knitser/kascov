@@ -19,6 +19,9 @@
   --move-soft: rgba(152, 168, 255, 0.14);
   --burn: #f2a566;
   --burn-soft: rgba(242, 165, 102, 0.14);
+  --watch: #ffd479;
+  --watch-soft: rgba(255, 212, 121, 0.1);
+  --watch-border: rgba(255, 212, 121, 0.35);
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --radius: 14px;
@@ -1130,11 +1133,11 @@ a.btn:hover { text-decoration: none; }
   cursor: pointer;
   transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease, transform 0.12s ease;
 }
-.star:hover { color: #ffd479; border-color: var(--border-strong); background: var(--bg-soft); transform: scale(1.08); }
-.star.starred { color: #ffd479; }
+.star:hover { color: var(--watch); border-color: var(--border-strong); background: var(--bg-soft); transform: scale(1.08); }
+.star.starred { color: var(--watch); }
 
 .detail-tags .star { width: 28px; height: 28px; }
-.chip-watch[aria-pressed="true"] { color: #ffd479; background: rgba(255, 212, 121, 0.1); border-color: rgba(255, 212, 121, 0.35); }
+.chip-watch[aria-pressed="true"] { color: var(--watch); background: var(--watch-soft); border-color: var(--watch-border); }
 
 /* ======================================================= toolbar sorting */
 
@@ -1151,7 +1154,7 @@ a.btn:hover { text-decoration: none; }
   border-radius: 999px;
   padding: 0.3rem 1.7rem 0.3rem 0.8rem;
   cursor: pointer;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' stroke='%238fa19d' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' stroke='%238fa19d' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E"); /* %238fa19d = var(--faint) */
   background-repeat: no-repeat;
   background-position: right 0.7rem center;
 }
