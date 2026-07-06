@@ -5,7 +5,9 @@ import {DagBg, GHOST} from '../v7/DagBg';
 import {ScrollFootage} from './ScrollFootage';
 
 export const TITLE_DUR = 160;
-export const DASH_DUR = 360;
+export const DASH_DUR = 300;
+export const DECODE_DUR = 300;
+export const BUILD_DUR = 300;
 export const API_DUR = 540;
 
 const Chip: React.FC<{at: number; children: React.ReactNode}> = ({at, children}) => {
@@ -76,7 +78,33 @@ export const DashScene: React.FC = () => {
       <div style={{opacity: seg(f, 0, 14)}}>
         <ScrollFootage dir="dash" count={150} dur={DASH_DUR} url="kascov-explorer.web.app/#/explore" />
       </div>
-      <Chip at={20}>the live dashboard — the pulse, records, what&rsquo;s running</Chip>
+      <Chip at={20}>explore — the live pulse, records, what&rsquo;s running</Chip>
+    </AbsoluteFill>
+  );
+};
+
+export const DecodeScene: React.FC = () => {
+  const f = useCurrentFrame();
+  return (
+    <AbsoluteFill style={{alignItems: 'center', justifyContent: 'center'}}>
+      <DagBg dim={0.22} />
+      <div style={{opacity: seg(f, 0, 14)}}>
+        <ScrollFootage dir="decode" count={150} dur={DECODE_DUR} url="kascov-explorer.web.app/#/decode" />
+      </div>
+      <Chip at={20}>decode any contract — then remake it with your own parameters</Chip>
+    </AbsoluteFill>
+  );
+};
+
+export const BuildScene: React.FC = () => {
+  const f = useCurrentFrame();
+  return (
+    <AbsoluteFill style={{alignItems: 'center', justifyContent: 'center'}}>
+      <DagBg dim={0.22} />
+      <div style={{opacity: seg(f, 0, 14)}}>
+        <ScrollFootage dir="build" count={150} dur={BUILD_DUR} url="kascov-explorer.web.app/#/build" />
+      </div>
+      <Chip at={20}>build — deploy your own smart coin in one command</Chip>
     </AbsoluteFill>
   );
 };

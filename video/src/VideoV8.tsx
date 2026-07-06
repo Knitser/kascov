@@ -3,7 +3,18 @@ import {AbsoluteFill, Sequence, useCurrentFrame} from 'remotion';
 import {EndCardV2, END_DUR} from './scenes/v2/EndCardV2';
 import {Shell} from './scenes/v2/shared';
 import {GHOST} from './scenes/v7/DagBg';
-import {ApiScene, API_DUR, DashScene, DASH_DUR, TitleCard, TITLE_DUR} from './scenes/v8/DevTourScenes';
+import {
+  ApiScene,
+  API_DUR,
+  BuildScene,
+  BUILD_DUR,
+  DashScene,
+  DASH_DUR,
+  DecodeScene,
+  DECODE_DUR,
+  TitleCard,
+  TITLE_DUR,
+} from './scenes/v8/DevTourScenes';
 import {T} from './theme';
 
 /* =====================================================================
@@ -18,6 +29,8 @@ const OVERLAP = 12;
 const SCENES = [
   {name: 'title', dur: TITLE_DUR, el: TitleCard, fadeIn: 0, fadeOut: OVERLAP},
   {name: 'dash', dur: DASH_DUR, el: DashScene, fadeIn: OVERLAP, fadeOut: OVERLAP},
+  {name: 'decode', dur: DECODE_DUR, el: DecodeScene, fadeIn: OVERLAP, fadeOut: OVERLAP},
+  {name: 'build', dur: BUILD_DUR, el: BuildScene, fadeIn: OVERLAP, fadeOut: OVERLAP},
   {name: 'api', dur: API_DUR, el: ApiScene, fadeIn: OVERLAP, fadeOut: OVERLAP},
   {name: 'end', dur: END_DUR, el: EndCardV2, fadeIn: OVERLAP, fadeOut: 0},
 ];
