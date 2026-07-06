@@ -1162,7 +1162,7 @@ a.btn:hover { text-decoration: none; }
 
 .devcards {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: 0.9rem;
   margin-bottom: 3rem;
 }
@@ -1798,3 +1798,6 @@ a.btn:hover { text-decoration: none; }
 .family-body { display: flex; flex-direction: column; min-width: 0; }
 .family-label { font-weight: 650; }
 .family-sub { font-size: 0.82rem; }
+
+.dev-lab-intro { max-width: 68ch; line-height: 1.6; margin: 0 0 1rem; }
+.dev-lab-intro a { color: var(--accent); }

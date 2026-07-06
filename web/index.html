@@ -132,6 +132,10 @@
           <h3>JSON API</h3>
           <p>everything kascov sees, as plain JSON with CORS on. build a bot, a chart, a better explorer.</p>
         </a>
+        <a class="devcard" href="#/decode">
+          <h3>make a smart coin</h3>
+          <p>deploy a real contract on testnet and watch it run itself — one command, no Rust knowledge needed. it reveals itself here, named forever.</p>
+        </a>
       </section>
     </section>
 
@@ -337,6 +341,23 @@ curl -s 'https://kascov-explorer.web.app/data/testnet-10/activity.json?range=24h
 
 # push, not poll — every life event as it happens (SSE)
 curl -N https://kascov-explorer.web.app/data/testnet-10/stream</code></pre>
+      </section>
+
+      <section class="dev-section">
+        <h2>the lab — make your own smart coin</h2>
+        <p class="dev-lab-intro">Don't just read covenants — <em>run</em> one. From a clone of <a href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">the repo</a> with a faucet-funded key, one command deploys a real contract on testnet-10 and spends it under its own rules, so the coin reveals itself here (named, args labeled, permanent).</p>
+        <pre class="codeblock"><code># first run: make a key, fund the printed address at faucet-testnet.kaspanet.io
+cargo run -p kascov-lab -- keygen
+
+# an escrow deploys, then the arbiter settles it to the buyer — one command
+cargo run -p kascov-lab -- escrow-demo
+
+# a Mecenas deploys, then reclaims itself → revealed on kascov — one command
+cargo run -p kascov-lab -- contract-demo
+
+# every copy-paste recipe (deploy / spend / settle your own parameters)
+cargo run -p kascov-lab -- examples</code></pre>
+        <p class="dim dev-note">choose the parameters yourself with the <a href="#/decode">generator on /decode</a> ("make a Mecenas / Escrow / LastWill"), then <code class="mono">deploy</code> → <code class="mono">spend</code>. full guide in <code class="mono">docs/Covenant Lab.md</code>.</p>
       </section>
 
       <section class="dev-section">

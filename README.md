@@ -48,6 +48,18 @@ cargo run -p kascov -- --json scan --last 500 | jq .covenant_id
 - **[/decode](https://kascov-explorer.web.app/decode)** — paste any script hex, get the post-Toccata disassembly (KIP-17 introspection, KIP-20 covenant ops, KIP-16 zk) in the browser, with a downloadable .txt and an example gallery. It **names compiled SilverScript contracts** (Mecenas, Escrow, LastWill) and labels their constructor arguments — as does the indexer for on-chain states and spend-time reveals. Recognized contracts can be **re-instantiated with your own parameters** ("make this yours"): readable source + rebuilt hex + a one-command testnet deploy via `kascov-lab deploy`.
 - **[/dev](https://kascov-explorer.web.app/dev)** — the JSON API documented with curl examples
 
+## Make your own smart coin
+
+Not just watch — *run* a contract. One command deploys a real covenant on testnet-10 and then spends it under its own rules, so the coin reveals itself on kascov (named, args labeled, permanent):
+
+```sh
+cargo run -p kascov-lab -- escrow-demo     # an escrow settles itself to the buyer
+cargo run -p kascov-lab -- contract-demo   # a Mecenas is deployed, then reveals itself
+cargo run -p kascov-lab -- examples        # every copy-paste recipe
+```
+
+Open the `kascov-explorer.web.app/…` link it prints and flip on *nerd mode*. To choose the parameters yourself, use the generator on [/decode](https://kascov-explorer.web.app/decode) ("make a Mecenas / Escrow / LastWill"), then `deploy` → `spend`. Full guide: [`docs/Covenant Lab.md`](docs/Covenant%20Lab.md).
+
 ## The JSON API
 
 An always-on worker (Cloud Run) follows the chain and serves the index as JSON, CORS `*`, no keys:
@@ -64,7 +76,7 @@ Field-by-field docs live on the [for developers page](https://kascov-explorer.we
 
 ## Design notes
 
-- Rust workspace: `kascov-core` (node client, detection, sync, storage), `kascov` (CLI + serve worker), `kascov-decode` (post-Toccata disassembler; `web/disasm.js` is its verified JS port), `kascov-lab` (make real covenants on TN10).
+- Rust workspace: `kascov-core` (node client, detection, sync, storage), `kascov` (CLI + serve worker), `kascov-decode` (post-Toccata disassembler; `web/disasm.js` is its verified JS port), `kascov-lab` (make real covenants on TN10 — `deploy`/`spend`/`settle-escrow` plus one-command `contract-demo`/`escrow-demo`).
 - Kaspa RPC types never leave one module (`node/wrpc.rs`) — the rest of the code uses kascov's own stable model.
 - Kaspa crates on crates.io are frozen pre-Toccata; deps are pinned to a single [rusty-kaspa](https://github.com/kaspanet/rusty-kaspa) git rev in the workspace manifest. The pin must be wire-compatible (borsh) with the node you connect to.
 - Index storage is SQLite — single file per network, disposable and rebuildable. The hosted worker restores/backs up its DBs via GCS so history survives restarts; `sync` records the chain tip so exports can date events exactly, and prefetches accepting blocks concurrently to outrun busy testnets.

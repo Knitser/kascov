@@ -2,6 +2,32 @@
 
 `kascov-lab` — we don't just observe covenants, we make them. The lab creates a real covenant lifecycle on **testnet-10** that the explorer then indexes and traces: the end-to-end proof. (Proven July 2: covenant `3af0fffe…` — genesis → 2 transitions → burn, fully traced.)
 
+## Start here — one command
+
+Deploy a real contract *and* run it on-chain in a single command; open the kascov link it prints (turn on *nerd mode*) to watch the coin reveal itself as its named contract:
+
+```sh
+cargo run -p kascov-lab -- escrow-demo     # an escrow deploys, then the arbiter settles it to the buyer
+cargo run -p kascov-lab -- contract-demo   # a Mecenas deploys, then reclaims itself → revealed on kascov
+cargo run -p kascov-lab -- examples        # print every copy-paste recipe
+```
+
+First run only: `cargo run -p kascov-lab -- keygen`, fund the printed address at <https://faucet-testnet.kaspanet.io>, then any demo works. Every command has `--help`.
+
+### Commands at a glance
+
+| command | what it does |
+|---|---|
+| `keygen` | make/print a throwaway testnet key + address |
+| `balance` | show the address balance |
+| `examples` | print all the recipes (no key/network needed) |
+| `contract-demo` | deploy a Mecenas + reclaim it → revealed on kascov (one command) |
+| `escrow-demo` | deploy an escrow + settle it to the buyer (one command) |
+| `demo` | raw covenant lifecycle: genesis → N transitions → burn |
+| `deploy` | birth a compiled contract as a real covenant (hidden p2sh state) |
+| `spend` | satisfy a pure-signature entrypoint → reveal the program on-chain |
+| `settle-escrow` | satisfy Escrow.spend as arbiter, forcing the payout to a party |
+
 ## Why no SilverScript needed
 
 A covenant is a *consensus* construct (KIP-20), not a language construct. Any v1 transaction output carrying a `CovenantBinding` forms one — the script can be a plain pay-to-pubkey. The lab:
@@ -64,4 +90,21 @@ cargo run -p kascov-lab -- contract-demo
 
 **How the spend works:** the unlocking script is `push(pubkey) ++ push(sig) ++ [push(selector)] ++ push(program)` — the revealed contract program as the final push. The signature is the standard Schnorr sighash (`SIG_HASH_ALL`) computed over the P2SH UTXO; the entrypoint selector is a small-int push (Mecenas `reclaim`=1). The per-input compute budget is committed via `ComputeBudget` (1 unit = 10 000 script units; a signature spend needs ~1, and the fee scales as 100 sompi × compute mass).
 
-**Out of scope (v1):** entrypoints that constrain the transaction *outputs* via introspection (Mecenas `receive`, Escrow `spend`, LastWill `refresh`) — they need a constructed output structure the lab doesn't build yet.
+## Settling an escrow — an output-constrained spend
+
+`Escrow.spend` also checks the transaction's *outputs* (`tx.outputs[0]` must pay the buyer or seller exactly `value − 1000`), so the lab both satisfies the arbiter signature **and** builds those outputs, funding the real network fee from a second plain input:
+
+```sh
+# arbiter (your key) releases the escrowed funds to a party
+cargo run -p kascov-lab -- settle-escrow --program-hex <hex> --release-to buyer
+```
+
+The whole loop — deploy an escrow, then settle it — in one command:
+
+```sh
+cargo run -p kascov-lab -- escrow-demo
+```
+
+Proven on TN10: covenant `da2fe117…` deployed, then settled 4.99999 TKAS to the buyer — now shows `revealed at spend — SilverScript · Escrow` with arbiter/buyer/seller labeled.
+
+**Still out of scope (v1):** the other output-constrained entrypoints (Mecenas `receive`, LastWill `refresh`) — same technique as `settle-escrow`, not yet wired up.

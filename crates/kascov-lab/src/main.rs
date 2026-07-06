@@ -33,7 +33,20 @@ use secp256k1::{Keypair, SECP256K1};
 const FEE: u64 = 500_000; // 0.005 KAS per tx — TN10's post-Toccata minimum relay fee is ~0.00166 for 1-in-1-out
 
 #[derive(Parser)]
-#[command(name = "kascov-lab", about = "Covenant lab: create real covenants on testnet-10")]
+#[command(
+    name = "kascov-lab",
+    about = "Covenant lab: create real covenants on testnet-10",
+    long_about = "Covenant lab: create real covenants on testnet-10.
+
+NEW HERE? one command does the whole loop — deploy a contract and watch
+it run itself on-chain:
+
+    cargo run -p kascov-lab -- escrow-demo      # an escrow settles itself
+    cargo run -p kascov-lab -- contract-demo    # a Mecenas reveals itself
+
+Then open the kascov link it prints. `kascov-lab examples` shows every
+copy-paste recipe; each subcommand also has its own --help."
+)]
 struct Cli {
     /// wRPC (borsh) url; defaults to the public resolver
     #[arg(long)]
@@ -53,6 +66,24 @@ enum Command {
     Keygen,
     /// Show the address and its current UTXO balance.
     Balance,
+    /// Print every copy-paste recipe (needs no key or network).
+    Examples,
+    /// ★ START HERE — the whole loop in one command: emit a Mecenas
+    /// reclaimable by YOUR key, deploy it, then reclaim it — you watch a coin
+    /// get born and reveal itself as SilverScript · Mecenas on kascov.
+    ContractDemo {
+        /// Sompi the coin holds while it lives (default 10 TKAS)
+        #[arg(long, default_value_t = 1_000_000_000)]
+        value: u64,
+    },
+    /// ★ START HERE — an escrow, end to end: emit one (arbiter = you, buyer =
+    /// you, seller = a throwaway), deploy it, then settle it to the buyer — a
+    /// real dispute resolution playing out on testnet-10 in one command.
+    EscrowDemo {
+        /// Sompi held in escrow (default 10 TKAS)
+        #[arg(long, default_value_t = 1_000_000_000)]
+        value: u64,
+    },
     /// Run the full covenant lifecycle: genesis → N transitions → burn.
     Demo {
         #[arg(long, default_value_t = 2)]
@@ -107,22 +138,6 @@ enum Command {
         #[arg(long)]
         covenant: Option<String>,
     },
-    /// Escrow, end to end: emit one (arbiter = you, buyer = you, seller = a
-    /// throwaway), deploy it, then settle it to the buyer — a real dispute
-    /// resolution playing out on testnet-10 in one command.
-    EscrowDemo {
-        /// Sompi held in escrow (default 10 TKAS)
-        #[arg(long, default_value_t = 1_000_000_000)]
-        value: u64,
-    },
-    /// The whole loop in one command: emit a Mecenas reclaimable by YOUR key,
-    /// deploy it, then reclaim it — so you watch a coin get born and reveal
-    /// itself as SilverScript · Mecenas on kascov.
-    ContractDemo {
-        /// Sompi the coin holds while it lives (default 10 TKAS)
-        #[arg(long, default_value_t = 1_000_000_000)]
-        value: u64,
-    },
 }
 
 #[tokio::main]
@@ -131,6 +146,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Keygen => keygen(&cli),
         Command::Balance => balance(&cli).await,
+        Command::Examples => examples(),
         Command::Demo { transitions } => demo(&cli, transitions).await,
         Command::Deploy { ref program_hex, value } => {
             let program = hex::decode(program_hex.trim()).context("--program-hex is not valid hex")?;
@@ -155,6 +171,45 @@ async fn main() -> Result<()> {
         }
         Command::EscrowDemo { value } => escrow_demo(&cli, value).await,
     }
+}
+
+/// Copy-paste cheat sheet — the fastest way to see everything the lab does.
+fn examples() -> Result<()> {
+    println!(
+        r#"kascov-lab — make real smart coins on Kaspa testnet-10
+======================================================
+
+★ FASTEST: one command deploys a contract AND runs it on-chain.
+  Open the kascov link it prints (flip on "nerd mode") to see the coin
+  reveal itself as its named contract, for everyone, forever.
+
+    cargo run -p kascov-lab -- escrow-demo
+        an escrow is deployed, then the arbiter settles it — the contract
+        itself forces the payout to the buyer.
+
+    cargo run -p kascov-lab -- contract-demo
+        a Mecenas is deployed, then reclaimed — it reveals itself on-chain.
+
+SETUP (only once):
+    cargo run -p kascov-lab -- keygen          # makes a key, prints your address
+    # fund that address at https://faucet-testnet.kaspanet.io (open in a browser)
+    cargo run -p kascov-lab -- balance         # check it arrived
+
+MAKE YOUR OWN (choose the parameters yourself):
+    1. https://kascov-explorer.web.app/decode  → "make a Mecenas / Escrow / LastWill"
+       edit the fields (use your keygen pubkey / blake2b), copy the compiled hex.
+    2. deploy it (born as a hidden p2sh commitment):
+       cargo run -p kascov-lab -- deploy --program-hex <hex> --value 1000000000
+    3. reveal it by spending it (names the coin on kascov, permanently):
+       cargo run -p kascov-lab -- spend --program-hex <hex> --entrypoint reclaim
+       # escrow instead? settle it to a party:
+       cargo run -p kascov-lab -- settle-escrow --program-hex <hex> --release-to buyer
+
+Every command has its own help, e.g.:  cargo run -p kascov-lab -- spend --help
+Full guide: docs/Covenant Lab.md
+"#
+    );
+    Ok(())
 }
 
 /// Blake2b-256, the covenant P2SH commitment hash.
