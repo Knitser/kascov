@@ -53,6 +53,42 @@ const BrowserFootage: React.FC<{dir: string; count: number; dur: number; url: st
   );
 };
 
+/* ------- a single still with a smooth Ken Burns zoom (true 60fps, no
+   scroll-jank) — anchored near the top so the key panel stays put ------- */
+const StillShot: React.FC<{name: string; url: string; dur: number}> = ({name, url, dur}) => {
+  const f = useCurrentFrame();
+  const scale = interpolate(f, [0, dur], [1.0, 1.05], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+  const src = staticFile(`v9update/still/${name}.png`);
+  const W = 1520;
+  const H = Math.round((W * 850) / 1440);
+  return (
+    <div
+      style={{
+        width: W,
+        borderRadius: 16,
+        overflow: 'hidden',
+        border: `1px solid rgba(120,220,200,0.16)`,
+        boxShadow: '0 44px 130px -32px rgba(0,0,0,0.85), 0 0 0 1px rgba(0,0,0,0.4)',
+        background: '#05100e',
+      }}
+    >
+      <div style={{height: 40, display: 'flex', alignItems: 'center', gap: 16, padding: '0 18px', background: '#0a1613', borderBottom: '1px solid rgba(120,220,200,0.1)'}}>
+        <div style={{display: 'flex', gap: 8}}>
+          {['#e0655f', '#e0b95f', '#5be49b'].map((c) => (
+            <span key={c} style={{width: 12, height: 12, borderRadius: 99, background: c}} />
+          ))}
+        </div>
+        <div style={{flex: 1, textAlign: 'center', fontFamily: GHOST.mono, fontSize: 16, color: GHOST.faint, background: '#06120f', borderRadius: 8, padding: '5px 0', margin: '0 60px'}}>
+          {url}
+        </div>
+      </div>
+      <div style={{width: W, height: H, overflow: 'hidden'}}>
+        <Img src={src} style={{display: 'block', width: W, height: H, transform: `scale(${scale})`, transformOrigin: 'center 20%'}} />
+      </div>
+    </div>
+  );
+};
+
 /* ------- step badge + caption at the bottom ------- */
 const StepChip: React.FC<{at: number; step: number; children: React.ReactNode}> = ({at, step, children}) => {
   const f = useCurrentFrame();
@@ -227,17 +263,33 @@ const FootageScene: React.FC<{dir: string; count: number; dur: number; url: stri
   );
 };
 
+/* still shot + gentle Ken Burns — smooth at 60fps (no scroll footage) */
+const StillScene: React.FC<{name: string; dur: number; url: string; step: number; caption: React.ReactNode}> = ({name, dur, url, step, caption}) => {
+  const f = useCurrentFrame();
+  return (
+    <AbsoluteFill style={{alignItems: 'center', justifyContent: 'center'}}>
+      <DagBg dim={0.2} />
+      <div style={{opacity: seg(f, 0, 14)}}>
+        <StillShot name={name} url={url} dur={dur} />
+      </div>
+      <StepChip at={16} step={step}>
+        {caption}
+      </StepChip>
+    </AbsoluteFill>
+  );
+};
+
 export const VerifiedScene: React.FC = () => (
-  <FootageScene dir="verified" count={64} dur={VERIFIED_DUR} url="kascov-explorer.web.app/#/decode" step={2} caption={<>verified contracts — proven to recompile <b style={{color: GHOST.accent}}>byte-identical</b> to their source</>} />
+  <StillScene name="verified" dur={VERIFIED_DUR} url="kascov-explorer.web.app/#/decode" step={2} caption={<>verified contracts — proven to recompile <b style={{color: GHOST.accent}}>byte-identical</b> to their source</>} />
 );
 export const DebuggerScene: React.FC = () => (
   <FootageScene dir="debugger" count={46} dur={DEBUG_DUR} url="kascov-explorer.web.app/#/decode" step={3} hold={10} caption={<>a visual debugger — <b style={{color: GHOST.accent}}>watch a covenant run</b>, opcode by opcode</>} />
 );
 export const LanesScene: React.FC = () => (
-  <FootageScene dir="lanes" count={60} dur={LANES_DUR} url="kascov-explorer.web.app/#/explore" step={4} caption={<>based-app activity — Kaspa&rsquo;s apps, <b style={{color: GHOST.accent}}>by namespace</b></>} />
+  <StillScene name="lanes" dur={LANES_DUR} url="kascov-explorer.web.app/#/explore" step={4} caption={<>based-app activity — Kaspa&rsquo;s apps, <b style={{color: GHOST.accent}}>by namespace</b></>} />
 );
 export const ZkScene: React.FC = () => (
-  <FootageScene dir="zk" count={60} dur={ZK_DUR} url="kascov-explorer.web.app/#/decode" step={5} caption={<>on-chain <b style={{color: GHOST.move}}>zero-knowledge</b> verification, decoded — a real mainnet coin</>} />
+  <StillScene name="zk" dur={ZK_DUR} url="kascov-explorer.web.app/#/decode" step={5} caption={<>on-chain <b style={{color: GHOST.move}}>zero-knowledge</b> verification, decoded — a real mainnet coin</>} />
 );
 
 /* ================================ END =============================== */
@@ -254,33 +306,23 @@ export const EndCardV9: React.FC = () => {
   return (
     <AbsoluteFill style={{alignItems: 'center', justifyContent: 'center'}}>
       <DagBg dim={0.5} />
-      <div
-        style={{
-          fontFamily: GHOST.display,
-          fontSize: 84,
-          fontWeight: 800,
-          letterSpacing: -3,
-          opacity: seg(f, 6, 24),
-          background: `linear-gradient(96deg, ${GHOST.accent}, ${GHOST.born})`,
-          WebkitBackgroundClip: 'text',
-          backgroundClip: 'text',
-          color: 'transparent',
-        }}
-      >
-        five, all live.
+      <div style={{fontFamily: GHOST.mono, fontSize: 22, letterSpacing: 4, textTransform: 'uppercase', color: GHOST.accent, opacity: seg(f, 6, 20)}}>
+        what&rsquo;s new in kascov
       </div>
-      <div style={{marginTop: 34, display: 'flex', flexDirection: 'column', gap: 14}}>
+      <div style={{marginTop: 30, display: 'flex', flexDirection: 'column', gap: 16, width: 780}}>
         {FEATURES.map((t, i) => {
-          const at = 30 + i * 14;
+          const at = 22 + i * 12;
           return (
-            <div key={i} style={{display: 'flex', alignItems: 'center', gap: 16, fontSize: 30, color: GHOST.text, opacity: seg(f, at, at + 12), transform: `translateX(${(1 - seg(f, at, at + 14)) * -18}px)`, fontFamily: 'Inter, sans-serif'}}>
-              <span style={{color: GHOST.accent, fontFamily: GHOST.mono, fontSize: 22}}>{String(i + 1).padStart(2, '0')}</span>
+            <div key={i} style={{display: 'flex', alignItems: 'center', gap: 18, fontSize: 29, color: GHOST.text, opacity: seg(f, at, at + 12), transform: `translateY(${(1 - seg(f, at, at + 14)) * 10}px)`, fontFamily: 'Inter, sans-serif'}}>
+              <span style={{width: 8, height: 8, borderRadius: 99, background: GHOST.accent, flexShrink: 0}} />
               {t}
             </div>
           );
         })}
       </div>
-      <div style={{marginTop: 46, fontSize: 36, fontFamily: GHOST.mono, color: GHOST.accent, opacity: seg(f, 120, 140)}}>kascov-explorer.web.app</div>
+      <div style={{marginTop: 44, fontSize: 30, fontFamily: GHOST.mono, color: GHOST.faint, opacity: seg(f, 96, 116)}}>
+        <span style={{color: GHOST.accent}}>▸ </span>kascov-explorer.web.app
+      </div>
     </AbsoluteFill>
   );
 };
