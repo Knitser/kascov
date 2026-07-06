@@ -4,6 +4,7 @@ import {LaunchVideo} from './Video';
 import {LaunchVideoV2, V2_TOTAL} from './VideoV2';
 import {UpdateVideoV4, V4_TOTAL} from './VideoV4';
 import {GeneratorVideoV5, V5_TOTAL} from './VideoV5';
+import {RunVideoV6, V6_TOTAL} from './VideoV6';
 import {LaunchVideoV3, V3_TOTAL} from './VideoV3';
 
 export const Root: React.FC = () => {
@@ -29,6 +30,14 @@ export const Root: React.FC = () => {
         id="GeneratorV5"
         component={GeneratorVideoV5}
         durationInFrames={V5_TOTAL}
+        fps={60}
+        width={1920}
+        height={1080}
+      />
+      <Composition
+        id="RunV6"
+        component={RunVideoV6}
+        durationInFrames={V6_TOTAL}
         fps={60}
         width={1920}
         height={1080}
