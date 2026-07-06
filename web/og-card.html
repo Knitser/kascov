@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1200px; height: 630px; overflow: hidden; }
+  body {
+    background:
+      radial-gradient(900px 480px at 50% -120px, rgba(112,199,186,0.14), transparent 70%),
+      radial-gradient(700px 500px at 92% 8%, rgba(111,217,164,0.05), transparent 65%),
+      #0a100f;
+    font-family: "Instrument Sans", system-ui, sans-serif;
+    color: #e9f1ef;
+    position: relative;
+  }
+  /* blueprint grid, masked to the top like the site hero */
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(112,199,186,0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(112,199,186,0.05) 1px, transparent 1px);
+    background-size: 48px 48px;
+    -webkit-mask-image: radial-gradient(80% 78% at 50% 22%, #000 32%, transparent 100%);
+  }
+  /* one radar sweep line, static, in the headline zone */
+  .sweep {
+    position: absolute; left: 74%; top: 0; height: 340px; width: 1.5px;
+    background: linear-gradient(180deg, transparent, rgba(112,199,186,0.5), transparent);
+    box-shadow: 0 0 22px rgba(112,199,186,0.4);
+  }
+  .frame { position: relative; height: 100%; padding: 64px 72px; display: flex; flex-direction: column; }
+  .top { display: flex; align-items: center; gap: 16px; }
+  .eye { width: 40px; height: 40px; }
+  .mark { font-family: "Space Grotesk", sans-serif; font-weight: 700; font-size: 40px; letter-spacing: -0.02em; }
+  .tag {
+    margin-left: auto; font-family: "JetBrains Mono", monospace; font-size: 17px;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #8fa19d;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 99px; background: #6fd9a4; box-shadow: 0 0 10px #6fd9a4; }
+  h1 {
+    font-family: "Space Grotesk", sans-serif; font-weight: 700; font-size: 84px;
+    line-height: 1.02; letter-spacing: -0.03em; margin-top: auto; max-width: 20ch;
+  }
+  .accent { background: linear-gradient(92deg, #70c7ba, #6fd9a4); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .sub { font-size: 27px; color: #a7b8b4; margin-top: 22px; max-width: 60ch; line-height: 1.4; }
+  .foot { margin-top: auto; padding-top: 40px; display: flex; align-items: center; gap: 30px; }
+  .lifecycle { display: flex; gap: 26px; font-family: "JetBrains Mono", monospace; font-size: 19px; }
+  .lc { display: flex; align-items: center; gap: 9px; color: #b9cac6; }
+  .lc i { width: 11px; height: 11px; border-radius: 99px; display: inline-block; }
+  .born { background: #6fd9a4; box-shadow: 0 0 9px #6fd9a4; }
+  .move { background: #98a8ff; box-shadow: 0 0 9px #98a8ff; }
+  .burn { background: #f2a566; box-shadow: 0 0 9px #f2a566; }
+  .url { margin-left: auto; font-family: "JetBrains Mono", monospace; font-size: 21px; color: #70c7ba; letter-spacing: -0.01em; }
+</style>
+</head>
+<body>
+  <div class="grid"></div>
+  <div class="sweep"></div>
+  <div class="frame">
+    <div class="top">
+      <svg class="eye" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="24" fill="none" stroke="#70c7ba" stroke-width="7"/><circle cx="32" cy="32" r="9" fill="#70c7ba"/></svg>
+      <span class="mark">kascov</span>
+      <span class="tag"><span class="dot"></span>WATCHING LIVE</span>
+    </div>
+    <h1>Kaspa coins just learned to <span class="accent">carry rules.</span></h1>
+    <p class="sub">The first covenant explorer for Kaspa L1 — every smart coin born, moving, retiring, recorded live and remembered after the network forgets.</p>
+    <div class="foot">
+      <div class="lifecycle">
+        <span class="lc"><i class="born"></i>born</span>
+        <span class="lc"><i class="move"></i>moves</span>
+        <span class="lc"><i class="burn"></i>retired</span>
+      </div>
+      <span class="url">kascov-explorer.web.app</span>
+    </div>
+  </div>
+</body>
+</html>
