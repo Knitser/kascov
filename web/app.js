@@ -589,10 +589,11 @@ function renderLiteLanding(live, network) {
     { n: s.active, label: 'alive right now' },
     { n: s.events, label: 'life events recorded' },
   ].map((st) => `<div class="stat"><span class="stat-n">${esc(fmtInt(st.n))}</span><span class="stat-label">${esc(st.label)}</span></div>`).join('');
-  const bits = ['<span class="radar" aria-hidden="true"></span>scanning the chain…'];
-  if (s.live_value > 0) bits.unshift(`together they hold ${fmtAmount(s.live_value, network)}`);
+  const bits = [];
+  if (s.live_value > 0) bits.push(`together they hold ${fmtAmount(s.live_value, network)}`);
+  const scan = '<span class="radar" aria-hidden="true"></span>scanning the chain…';
   $('#freshness').innerHTML =
-    `<span class="live-badge-slot">${liveBadgeHtml(network)}</span> · ${bits.map(esc).join(' · ')}`;
+    `<span class="live-badge-slot">${liveBadgeHtml(network)}</span> · ${[...bits.map(esc), scan].join(' · ')}`;
   const empty = s.covenants === 0;
   $('#landing-empty').hidden = !empty;
   $('#section-teaser').hidden = empty;
@@ -615,10 +616,10 @@ function renderLiteExplore(live, network) {
     `${fmtInt(s.covenants)} smart coin${s.covenants === 1 ? '' : 's'}`,
     `${fmtInt(s.active)} alive`,
     `${fmtInt(s.events)} event${s.events === 1 ? '' : 's'}`,
-    '<span class="radar" aria-hidden="true"></span>scanning the chain…',
   ];
+  const scan = '<span class="radar" aria-hidden="true"></span>scanning the chain…';
   $('#explore-stats').innerHTML =
-    `<span class="live-badge-slot">${liveBadgeHtml(network)}</span> · ${bits.map(esc).join(' · ')}`;
+    `<span class="live-badge-slot">${liveBadgeHtml(network)}</span> · ${[...bits.map(esc), scan].join(' · ')}`;
   const empty = s.covenants === 0;
   $('#empty-net').hidden = !empty;
   $('#watch-strip').hidden = true;
