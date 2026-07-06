@@ -11,7 +11,7 @@ kaspa-consensus-core = { workspace = true }
 kaspa-addresses = { workspace = true }
 kaspa-txscript = { workspace = true }
 secp256k1 = { workspace = true }
-kascov-decode = { path = "../kascov-decode" }
+kascov-decode = { workspace = true }
 blake2b_simd = { workspace = true }
 
 tokio = { workspace = true }
