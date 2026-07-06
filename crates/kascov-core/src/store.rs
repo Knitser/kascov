@@ -599,6 +599,17 @@ impl Store {
         let tx = self.conn.transaction().map_err(db_err)?;
         for hash in removed {
             let hash = hash.0.as_slice();
+            // Collect covenant IDs affected by this block before deleting,
+            // so we can recompute last_activity_daa from remaining events.
+            let affected: Vec<Vec<u8>> = {
+                let mut stmt = tx
+                    .prepare("SELECT DISTINCT covenant_id FROM covenant_events WHERE accepting_block = ?1")
+                    .map_err(db_err)?;
+                stmt.query_map([hash], |r| r.get::<_, Vec<u8>>(0))
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?
+            };
             // revealed_template goes back to NULL (not ''): with spent_sig
             // NULL the reveal-todo index predicate no longer matches, so the
             // backfill won't re-decode. `template` stays — it derives from the
@@ -616,6 +627,14 @@ impl Store {
             )
             .map_err(db_err)?;
             tx.execute("DELETE FROM covenant_events WHERE accepting_block = ?1", [hash]).map_err(db_err)?;
+            // Recompute last_activity_daa for affected covenants — the
+            // rolled-back block's DAA may have been the most recent activity.
+            for cid in &affected {
+                tx.execute(
+                    "UPDATE covenants SET last_activity_daa = COALESCE((SELECT MAX(accepting_daa) FROM covenant_events WHERE covenant_id = ?1), 0) WHERE covenant_id = ?1",
+                    [cid],
+                ).map_err(db_err)?;
+            }
         }
         // Covenants whose genesis was rolled back disappear entirely.
         tx.execute("DELETE FROM covenants WHERE event_count <= 0", []).map_err(db_err)?;
