@@ -1787,3 +1787,14 @@ a.btn:hover { text-decoration: none; }
   border: 1px solid var(--border); border-radius: 10px; padding: 0.45rem 0.6rem;
 }
 .reveal-hint { margin: 0; font-size: 0.85rem; }
+
+/* apps · covenant families */
+.families { margin-bottom: 2.4rem; }
+.families-sub { margin: -0.4rem 0 0.9rem; font-size: 0.88rem; }
+.family-card { display: flex; align-items: center; gap: 0.9rem; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.8rem 1rem; }
+.family-avatars { display: flex; }
+.family-avatars a { margin-left: -8px; border-radius: 999px; }
+.family-avatars a:first-child { margin-left: 0; }
+.family-body { display: flex; flex-direction: column; min-width: 0; }
+.family-label { font-weight: 650; }
+.family-sub { font-size: 0.82rem; }

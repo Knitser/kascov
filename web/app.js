@@ -293,6 +293,7 @@ const state = {
   txLookup: {},       // 64-hex query -> 'pending' | 'miss' (server tx resolver)
   addrs: {},          // network -> Map(addressOrPubkey query -> /addr response)
   templates: {},      // network -> { data, at } (contract-type analytics)
+  families: {},       // network -> { data, at } (multi-contract apps)
   digest: {},         // network -> { data, at, animated }
   activity: {},       // network -> { [range]: { data, at } } (data null = 404 miss)
   pulseRange: '24h',
@@ -473,6 +474,51 @@ async function loadTemplates(network) {
   }
 }
 
+async function loadFamilies(network) {
+  const t = state.families[network];
+  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
+  try {
+    const res = await fetch(`data/${network}/families.json`, { cache: 'no-cache' });
+    if (!res.ok) { state.families[network] = { data: null, at: Date.now() }; return null; }
+    const data = await res.json();
+    state.families[network] = { data, at: Date.now() };
+    return data;
+  } catch (e) {
+    return t ? t.data : null;
+  }
+}
+
+/* covenant apps: coins that moved together in a transaction. Renders the
+   biggest few clusters; hidden when none (single-covenant networks). */
+function renderFamilies(network) {
+  const section = $('#section-families');
+  const host = $('#families-row');
+  if (!section || !host) return;
+  const cached = state.families[network];
+  if (!cached) {
+    loadFamilies(network).then((d) => {
+      if (d && state.network === network && parseRoute().view === 'explore') renderFamilies(network);
+    });
+    section.hidden = true;
+    return;
+  }
+  const fams = (cached.data && cached.data.families) || [];
+  if (!fams.length) { section.hidden = true; return; }
+  section.hidden = false;
+  host.innerHTML = fams.slice(0, 6).map((f) => {
+    const named = f.members.filter((m) => m.template && !/^p2(pk|sh)/.test(m.template));
+    const label = named.length
+      ? [...new Set(named.map((m) => m.template.replace('SilverScript · ', '')))].join(' + ')
+      : `${f.size} smart coins`;
+    const avatars = f.members.slice(0, 5).map((m) =>
+      `<a href="#/${esc(network)}/c/${esc(m.covenant_id)}" title="${esc(friendlyName(m.covenant_id))}">${avatarSvg(m.covenant_id, 34)}</a>`
+    ).join('');
+    return `<div class="family-card"><div class="family-avatars">${avatars}</div>` +
+      `<div class="family-body"><span class="family-label">${esc(label)}</span>` +
+      `<span class="family-sub dim">${f.size} coins · moved together</span></div></div>`;
+  }).join('');
+}
+
 /* the activity histogram behind the pulse chart — per (network, range)
    cache mirroring the server ttl; a 404 from an older worker is remembered
    (data: null) and reprobed after ACTIVITY_MISS_TTL_MS */
@@ -577,6 +623,7 @@ function renderLiteExplore(live, network) {
   $('#empty-net').hidden = !empty;
   $('#watch-strip').hidden = true;
   $('#section-records').hidden = true;
+  if ($('#section-families')) $('#section-families').hidden = true;
   const tpl = $('#section-templates');
   if (tpl) tpl.hidden = true; /* appears when the full snapshot render runs */
   $('#section-pulse').hidden = true;
@@ -1539,6 +1586,7 @@ function renderExplore(entry) {
   renderPulse(entry, network);
   renderRecords(entry, network);
   renderTemplates(network);
+  renderFamilies(network);
   loadTemplates(network).then(() => {
     if (state.network === network && parseRoute().view === 'explore') renderTemplates(network);
   });

@@ -963,6 +963,41 @@ impl Store {
         Ok(rows)
     }
 
+    /// Transactions that touched more than one covenant, with the covenants
+    /// they moved together — the raw edges of multi-contract "apps".
+    /// (A single tx moving several covenants is a Toccata multi-contract flow.)
+    pub fn multi_covenant_txs(&self) -> Result<Vec<(TxId, Vec<CovenantId>)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT txid, covenant_id FROM covenant_events
+                 WHERE txid IN (
+                   SELECT txid FROM covenant_events
+                   GROUP BY txid HAVING COUNT(DISTINCT covenant_id) > 1
+                 )
+                 ORDER BY txid",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((TxId(r.get(0)?), CovenantId(r.get(1)?))))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        // group consecutive rows by txid (query is ordered)
+        let mut out: Vec<(TxId, Vec<CovenantId>)> = Vec::new();
+        for (txid, cov) in rows {
+            match out.last_mut() {
+                Some((t, covs)) if *t == txid => {
+                    if !covs.contains(&cov) {
+                        covs.push(cov);
+                    }
+                }
+                _ => out.push((txid, vec![cov])),
+            }
+        }
+        Ok(out)
+    }
+
     /// Recognized template per covenant — the most specific (non-p2pk/p2sh)
     /// name wins so a SilverScript coin is labeled by its contract, not by
     /// the generic shape of its commitment.

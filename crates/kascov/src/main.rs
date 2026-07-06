@@ -1023,6 +1023,7 @@ async fn serve(
         .route("/data/{file}", get(data_handler))
         .route("/data/{network}/c/{id}", get(detail_handler))
         .route("/data/{network}/tx/{txid}", get(tx_handler))
+        .route("/data/{network}/families.json", get(families_handler))
         .route("/data/{network}/digest.json", get(digest_handler))
         .route("/data/{network}/templates.json", get(templates_handler))
         .route("/data/{network}/activity.json", get(activity_handler))
@@ -1254,6 +1255,108 @@ async fn data_handler(
             build_grid_snapshot(&store, network)?
         };
         Ok(Some(serde_json::to_string(&snapshot)?))
+    })
+    .await
+}
+
+/// Cluster covenants that moved together into "apps" (multi-contract flows):
+/// union-find over transactions that touched more than one covenant.
+fn build_families(store: &Store, network: kascov_core::Network) -> Result<serde_json::Value> {
+    let edges = store.multi_covenant_txs()?;
+    let templates = store.covenant_templates()?;
+
+    // union-find over covenant ids
+    let mut parent: std::collections::HashMap<kascov_core::CovenantId, kascov_core::CovenantId> =
+        std::collections::HashMap::new();
+    fn find(
+        parent: &mut std::collections::HashMap<kascov_core::CovenantId, kascov_core::CovenantId>,
+        x: kascov_core::CovenantId,
+    ) -> kascov_core::CovenantId {
+        let p = *parent.get(&x).unwrap_or(&x);
+        if p == x {
+            return x;
+        }
+        let root = find(parent, p);
+        parent.insert(x, root);
+        root
+    }
+    let mut shared_txs: std::collections::HashMap<kascov_core::CovenantId, u64> =
+        std::collections::HashMap::new();
+    for (_txid, covs) in &edges {
+        for c in covs {
+            parent.entry(*c).or_insert(*c);
+            *shared_txs.entry(*c).or_insert(0) += 1;
+        }
+        // union all covenants in this tx to the first
+        if let Some(first) = covs.first() {
+            for c in &covs[1..] {
+                let (ra, rb) = (find(&mut parent, *first), find(&mut parent, *c));
+                if ra != rb {
+                    parent.insert(ra, rb);
+                }
+            }
+        }
+    }
+
+    // gather members per cluster root
+    let members: Vec<kascov_core::CovenantId> = parent.keys().copied().collect();
+    let mut clusters: std::collections::HashMap<kascov_core::CovenantId, Vec<kascov_core::CovenantId>> =
+        std::collections::HashMap::new();
+    for m in members {
+        let root = find(&mut parent, m);
+        clusters.entry(root).or_default().push(m);
+    }
+
+    let mut out: Vec<serde_json::Value> = clusters
+        .into_values()
+        .filter(|c| c.len() >= 2)
+        .map(|mut covs| {
+            covs.sort_by(|a, b| a.0.cmp(&b.0));
+            let members: Vec<_> = covs
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "covenant_id": c,
+                        "template": templates.get(c),
+                        "shared_txs": shared_txs.get(c).copied().unwrap_or(0),
+                    })
+                })
+                .collect();
+            serde_json::json!({ "size": covs.len(), "members": members })
+        })
+        .collect();
+    // biggest apps first
+    out.sort_by(|a, b| b["size"].as_u64().cmp(&a["size"].as_u64()));
+
+    let tip = store.tip()?;
+    Ok(serde_json::json!({
+        "network": network.to_string(),
+        "generated_at_ms": now_ms(),
+        "tip_daa": tip.map(|t| t.0),
+        "tip_at_ms": tip.map(|t| t.1),
+        "families": out,
+    }))
+}
+
+async fn families_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let net = net_name.strip_suffix("/families.json").unwrap_or(&net_name);
+    let Ok(network) = net.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+    let db = state.base_dir.join(format!("{network}.db"));
+    let cc = "public, max-age=30, s-maxage=120, stale-while-revalidate=600";
+    serve_cached(&state, format!("{network}/families"), 60, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        Ok(Some(serde_json::to_string(&build_families(&store, network)?)?))
     })
     .await
 }

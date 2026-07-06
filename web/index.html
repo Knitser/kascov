@@ -164,6 +164,12 @@
         <div id="template-bars" class="template-bars"></div>
       </section>
 
+      <section class="families" id="section-families" aria-label="Apps" hidden>
+        <h2>apps · coins that move together</h2>
+        <p class="dim families-sub">a single transaction moving several smart coins is a multi-contract flow — a covenant <em>app</em>.</p>
+        <div id="families-row" class="mini-grid"></div>
+      </section>
+
       <section class="stories" id="section-stories" aria-label="Latest stories">
         <h2>latest stories</h2>
         <ol class="story-list" id="story-list"></ol>
@@ -268,6 +274,10 @@
           <div class="endpoint">
             <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/tx/&lt;txid&gt;.json</code></p>
             <p class="endpoint-desc">which smart coin did this transaction touch? answers <code class="mono">{"covenant_id": …}</code> or 404 — genesis, moves, and burns all resolve.</p>
+          </div>
+          <div class="endpoint">
+            <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/families.json</code></p>
+            <p class="endpoint-desc">covenant <em>apps</em> — clusters of coins that moved together in a transaction (multi-contract flows), union-found over shared txids. Each family lists its members with their recognized template.</p>
           </div>
           <div class="endpoint">
             <p class="endpoint-line"><span class="method">GET</span> <code class="mono">/data/testnet-10/digest.json</code></p>
