@@ -589,7 +589,7 @@ function renderLiteLanding(live, network) {
     { n: s.active, label: 'alive right now' },
     { n: s.events, label: 'life events recorded' },
   ].map((st) => `<div class="stat"><span class="stat-n">${esc(fmtInt(st.n))}</span><span class="stat-label">${esc(st.label)}</span></div>`).join('');
-  const bits = ['loading the full picture…'];
+  const bits = ['<span class="radar" aria-hidden="true"></span>scanning the chain…'];
   if (s.live_value > 0) bits.unshift(`together they hold ${fmtAmount(s.live_value, network)}`);
   $('#freshness').innerHTML =
     `<span class="live-badge-slot">${liveBadgeHtml(network)}</span> · ${bits.map(esc).join(' · ')}`;
@@ -615,7 +615,7 @@ function renderLiteExplore(live, network) {
     `${fmtInt(s.covenants)} smart coin${s.covenants === 1 ? '' : 's'}`,
     `${fmtInt(s.active)} alive`,
     `${fmtInt(s.events)} event${s.events === 1 ? '' : 's'}`,
-    'loading the full picture…',
+    '<span class="radar" aria-hidden="true"></span>scanning the chain…',
   ];
   $('#explore-stats').innerHTML =
     `<span class="live-badge-slot">${liveBadgeHtml(network)}</span> · ${bits.map(esc).join(' · ')}`;
@@ -1353,7 +1353,7 @@ function renderTemplates(network) {
   const cached = state.templates[network];
   if (!cached) {
     section.hidden = false;
-    host.innerHTML = '<p class="dim">reading contract types…</p>';
+    host.innerHTML = '<p class="dim"><span class="radar" aria-hidden="true"></span>reading contract types…</p>';
     return;
   }
   if (!cached.data) { section.hidden = true; return; } /* older worker (404) */
@@ -3063,3 +3063,60 @@ pollLive();
 setTimeout(maybeStartTour, 900);
 
 })();
+
+/* ------------------------------------------------- live ticker + palette */
+/* A thin tape under the header streaming life events as they happen. Own
+   EventSource, only while visible on landing/explore; errors just hide it. */
+const ticker = { es: null, net: null, el: null, track: null, seen: 0 };
+function tickerEnsureDom() {
+  if (ticker.el) return;
+  const strip = document.createElement('div');
+  strip.className = 'ticker';
+  strip.setAttribute('aria-hidden', 'true');
+  strip.innerHTML = '<div class="ticker-track" id="ticker-track"></div>';
+  document.querySelector('.site-header').insertAdjacentElement('afterend', strip);
+  ticker.el = strip;
+  ticker.track = strip.querySelector('.ticker-track');
+}
+function tickerPush(ev) {
+  if (!ticker.track) return;
+  const kind = ev.kind === 'genesis' ? 'born' : ev.kind === 'burn' ? 'retired' : 'moved';
+  const cls = ev.kind === 'genesis' ? 'born' : ev.kind === 'burn' ? 'burn' : 'move';
+  const item = document.createElement('a');
+  item.className = 'ticker-item';
+  item.href = `#/${state.network}/c/${ev.covenant_id}`;
+  item.innerHTML = `<span class="ticker-dot ticker-${cls}"></span>${esc(friendlyName(ev.covenant_id))} <span class="dim">${kind}</span>`;
+  ticker.track.prepend(item);
+  ticker.seen++;
+  while (ticker.track.children.length > 30) ticker.track.lastChild.remove();
+}
+function tickerSync() {
+  const want = streamWanted();
+  tickerEnsureDom();
+  ticker.el.classList.toggle('ticker-on', want && ticker.seen > 0);
+  if (want && (!ticker.es || ticker.net !== state.network)) {
+    if (ticker.es) { ticker.es.close(); ticker.es = null; }
+    try {
+      ticker.net = state.network;
+      ticker.es = new EventSource(`data/${state.network}/stream`);
+      ticker.es.onmessage = (m) => { try { tickerPush(JSON.parse(m.data)); ticker.el.classList.add('ticker-on'); } catch (e) { /* skip */ } };
+      ticker.es.onerror = () => { /* quiet; polling covers us */ };
+    } catch (e) { /* no EventSource — fine */ }
+  } else if (!want && ticker.es) {
+    ticker.es.close(); ticker.es = null; ticker.net = null;
+  }
+}
+setInterval(tickerSync, 4000);
+document.addEventListener('visibilitychange', tickerSync);
+setTimeout(tickerSync, 1500);
+
+/* cmd-K / ctrl-K focuses the search — the search IS the command palette */
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    const s2 = document.querySelector('#search');
+    if (s2) { s2.focus(); s2.select(); s2.closest('.search-wrap').classList.add('palette-flash');
+      setTimeout(() => s2.closest('.search-wrap').classList.remove('palette-flash'), 700); }
+  }
+});
+(() => { const s2 = document.querySelector('#search'); if (s2 && navigator.platform.includes('Mac')) s2.placeholder += '  ⌘K'; })();
