@@ -296,6 +296,7 @@ const state = {
   families: {},       // network -> { data, at } (multi-contract apps)
   lanes: {},          // network -> { data, at } (based-app namespaces)
   inscriptions: {},   // network -> { data, at } (decoded JSON inscriptions)
+  lifespans: {},      // network -> { data, at } (retired-coin lifespans)
   digest: {},         // network -> { data, at, animated }
   activity: {},       // network -> { [range]: { data, at } } (data null = 404 miss)
   pulseRange: '24h',
@@ -569,6 +570,51 @@ function renderInscriptions(network) {
   }).join('');
 }
 
+async function loadLifespans(network) {
+  const t = state.lifespans[network];
+  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
+  try {
+    const res = await fetch(`data/${network}/lifespans.json`, { cache: 'no-cache' });
+    if (!res.ok) { state.lifespans[network] = { data: null, at: Date.now() }; return null; }
+    const data = await res.json();
+    state.lifespans[network] = { data, at: Date.now() };
+    return data;
+  } catch (e) {
+    return t ? t.data : null;
+  }
+}
+
+function renderLifespans(network) {
+  const section = $('#section-lifespans');
+  const host = $('#lifespans-row');
+  if (!section || !host) return;
+  const cached = state.lifespans[network];
+  if (!cached) {
+    loadLifespans(network).then((d) => {
+      if (d && state.network === network && parseRoute().view === 'explore') renderLifespans(network);
+    });
+    section.hidden = true;
+    return;
+  }
+  const data = cached.data;
+  const buckets = (data && data.buckets) || [];
+  if (!buckets.length || !data.total) { section.hidden = true; return; }
+  section.hidden = false;
+  const medMin = data.median_ms / 60000;
+  const medLabel = medMin >= 1 ? `${medMin.toFixed(1)} min` : `${Math.round(data.median_ms / 1000)} s`;
+  const cnt = $('#lifespans-count');
+  if (cnt) cnt.textContent = `median ${medLabel}`;
+  const med = $('#lifespans-median');
+  if (med) med.textContent = `median lifespan ${medLabel}, across ${fmtInt(data.total)} retired coins.`;
+  const max = Math.max(1, ...buckets.map((b) => b.count));
+  host.innerHTML = buckets.map((b) => {
+    const w = Math.max((b.count / max) * 100, 2).toFixed(1);
+    return `<div class="lane-row"><span class="lane-ns">${esc(b.label)}</span>` +
+      `<span class="lane-track"><span class="lane-fill" style="width:${w}%"></span></span>` +
+      `<span class="lane-counts dim">${fmtInt(b.count)} coin${b.count === 1 ? '' : 's'}</span></div>`;
+  }).join('');
+}
+
 async function loadFamilies(network) {
   const t = state.families[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
@@ -728,6 +774,7 @@ function renderLiteExplore(live, network) {
      snapshot lands so based-app activity shows immediately */
   renderLanes(network);
   renderInscriptions(network);
+  renderLifespans(network);
   const tpl = $('#section-templates');
   if (tpl) tpl.hidden = true; /* appears when the full snapshot render runs */
   $('#section-pulse').hidden = true;
@@ -1693,6 +1740,7 @@ function renderExplore(entry) {
   renderFamilies(network);
   renderLanes(network);
   renderInscriptions(network);
+  renderLifespans(network);
   loadTemplates(network).then(() => {
     if (state.network === network && parseRoute().view === 'explore') renderTemplates(network);
   });

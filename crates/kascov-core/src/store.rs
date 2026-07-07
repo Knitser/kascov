@@ -901,6 +901,50 @@ impl Store {
 
     /// Per-covenant birth amounts (sum of outputs created at the genesis DAA),
     /// one query for the whole grid.
+    /// Lifespan distribution of retired coins: for every covenant with a
+    /// genesis and a burn, life = burn_daa − genesis_daa. Returns a fixed
+    /// time-bucket histogram (10 DAA ≈ 1 s), the median lifespan in DAA, and
+    /// the total sampled. The "how long do smart coins live?" analytic.
+    pub fn lifespan_stats(&self) -> Result<(Vec<(&'static str, u64)>, u64, u64)> {
+        let cte = "WITH lifespans AS (
+            SELECT (bb.b - gg.g) AS life FROM
+              (SELECT covenant_id, MIN(accepting_daa) g FROM covenant_events WHERE kind='genesis' GROUP BY covenant_id) gg
+              JOIN (SELECT covenant_id, accepting_daa b FROM covenant_events WHERE kind='burn') bb ON gg.covenant_id = bb.covenant_id
+            WHERE (bb.b - gg.g) >= 0)";
+        let labels = ["< 10 s", "10 s – 1 min", "1 – 10 min", "10 min – 1 h", "1 – 6 h", "6 h +"];
+        let hist_sql = format!(
+            "{cte} SELECT CASE
+               WHEN life < 100 THEN 0 WHEN life < 600 THEN 1 WHEN life < 6000 THEN 2
+               WHEN life < 36000 THEN 3 WHEN life < 216000 THEN 4 ELSE 5 END AS b, COUNT(*)
+             FROM lifespans GROUP BY b"
+        );
+        let mut counts = [0u64; 6];
+        {
+            let mut stmt = self.conn.prepare(&hist_sql).map_err(db_err)?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)? as usize, r.get::<_, i64>(1)? as u64)))
+                .map_err(db_err)?;
+            for row in rows {
+                let (b, c) = row.map_err(db_err)?;
+                if b < 6 {
+                    counts[b] = c;
+                }
+            }
+        }
+        let total: u64 = counts.iter().sum();
+        let median = if total > 0 {
+            let med_sql = format!("{cte} SELECT life FROM lifespans ORDER BY life LIMIT 1 OFFSET ?");
+            self.conn
+                .query_row(&med_sql, [(total / 2) as i64], |r| r.get::<_, i64>(0))
+                .map(|v| v as u64)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let buckets = labels.iter().zip(counts.iter()).map(|(l, c)| (*l, *c)).collect();
+        Ok((buckets, median, total))
+    }
+
     pub fn born_values(&self) -> Result<std::collections::HashMap<CovenantId, u64>> {
         let mut stmt = self
             .conn

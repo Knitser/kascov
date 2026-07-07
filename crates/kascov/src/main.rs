@@ -1027,6 +1027,7 @@ async fn serve(
         .route("/data/{network}/families.json", get(families_handler))
         .route("/data/{network}/lanes.json", get(lanes_handler))
         .route("/data/{network}/inscriptions.json", get(inscriptions_handler))
+        .route("/data/{network}/lifespans.json", get(lifespans_handler))
         .route("/data/{network}/digest.json", get(digest_handler))
         .route("/data/{network}/templates.json", get(templates_handler))
         .route("/data/{network}/activity.json", get(activity_handler))
@@ -1362,6 +1363,41 @@ async fn simulate_handler(
             .into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "simulation failed").into_response(),
     }
+}
+
+async fn lifespans_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let net = net_name.strip_suffix("/lifespans.json").unwrap_or(&net_name);
+    let Ok(network) = net.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+    let db = state.base_dir.join(format!("{network}.db"));
+    let cc = "public, max-age=120, s-maxage=300, stale-while-revalidate=900";
+    serve_cached(&state, format!("{network}/lifespans"), 180, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let (buckets, median_daa, total) = store.lifespan_stats()?;
+        let items: Vec<_> = buckets
+            .into_iter()
+            .map(|(label, count)| serde_json::json!({ "label": label, "count": count }))
+            .collect();
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "buckets": items,
+            "median_daa": median_daa,
+            "median_ms": median_daa * 100, // 10 DAA ≈ 1 s
+            "total": total,
+        }))?))
+    })
+    .await
 }
 
 async fn inscriptions_handler(
