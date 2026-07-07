@@ -22,7 +22,12 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregi
 echo "==> ensuring backup bucket gs://$BUCKET"
 gcloud storage buckets create "gs://$BUCKET" --project $PROJECT --location=$REGION 2>/dev/null || true
 
-echo "==> deploying $SERVICE to Cloud Run ($REGION) — first build takes ~15 min"
+# the image now also builds + bundles the silverc compiler (a second, heavy
+# build stage cloning kaspanet/silverscript), so give Cloud Build more room.
+echo "==> extending Cloud Build timeout for the silverc bundling stage"
+gcloud config set builds/timeout 3600 --installation 2>/dev/null || gcloud config set builds/timeout 3600
+
+echo "==> deploying $SERVICE to Cloud Run ($REGION) — with silverc bundled, ~30 min"
 gcloud run deploy $SERVICE \
   --source . \
   --project $PROJECT \
@@ -31,8 +36,8 @@ gcloud run deploy $SERVICE \
   --min-instances 1 \
   --max-instances 1 \
   --no-cpu-throttling \
-  --memory 1Gi \
-  --cpu 1 \
+  --memory 4Gi \
+  --cpu 2 \
   --set-env-vars "^@^BACKUP_BUCKET=$BUCKET@NETWORKS=testnet-10,mainnet" \
   --port 8080
 
