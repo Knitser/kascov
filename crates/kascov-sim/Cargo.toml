@@ -1,0 +1,16 @@
+[package]
+name = "kascov-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+kascov-decode = { workspace = true }
+kaspa-consensus-core = { workspace = true }
+kaspa-txscript = { workspace = true }
+kaspa-addresses = { workspace = true }
+secp256k1 = { workspace = true }
+blake2b_simd = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }

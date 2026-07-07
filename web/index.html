@@ -44,8 +44,7 @@
       <div class="header-right">
         <nav class="site-nav" aria-label="Pages">
           <a class="nav-link" href="#/explore" data-nav="explore">explore</a>
-          <a class="nav-link" href="#/decode" data-nav="decode">decode</a>
-          <a class="nav-link" href="#/build" data-nav="build">build</a>
+          <a class="nav-link" href="#/decode" data-nav="playground">playground</a>
           <a class="nav-link" href="#/dev" data-nav="dev">API</a>
         </nav>
         <nav class="network-tabs" aria-label="Network">
@@ -67,6 +66,12 @@
         <p class="hero-sub">kascov watches every smart coin on the Kaspa <span data-net-word>testnet</span> — born, moving, retiring — and saves the history the network deletes after 3&nbsp;days.</p>
         <div class="hero-stats" id="hero-stats"></div>
         <p class="freshness" id="freshness"></p>
+      </section>
+
+      <section class="tour-video-wrap" aria-label="What’s new in kascov">
+        <video id="tour-video" class="tour-video" muted loop playsinline autoplay preload="auto" poster="kascov-tour-poster.jpg">
+          <source src="kascov-tour.mp4" type="video/mp4" />
+        </video>
       </section>
 
       <section class="digest" id="section-digest" aria-label="The last 24 hours" hidden>
@@ -170,17 +175,42 @@
         <div id="template-bars" class="template-bars"></div>
       </section>
 
-      <section class="families" id="section-families" aria-label="Apps" hidden>
-        <h2>apps · coins that move together</h2>
+      <details class="families collapse-sec" id="section-families" aria-label="Apps" hidden>
+        <summary><h2>apps · coins that move together</h2><span class="collapse-count dim" id="families-count"></span></summary>
         <p class="dim families-sub">a single transaction moving several smart coins is a multi-contract flow — a covenant <em>app</em>.</p>
         <div id="families-row" class="mini-grid"></div>
-      </section>
+      </details>
 
-      <section class="lanes" id="section-lanes" aria-label="Based-app activity" hidden>
-        <h2>based-app activity · by namespace</h2>
+      <details class="lanes collapse-sec" id="section-lanes" aria-label="Based-app activity" hidden>
+        <summary><h2>based-app activity · by namespace</h2><span class="collapse-count dim" id="lanes-count"></span></summary>
         <p class="dim families-sub">smart coins whose transactions carry an app payload, grouped by its namespace — the first per-namespace view of Kaspa's based apps.</p>
         <div id="lanes-row"></div>
-      </section>
+      </details>
+
+      <details class="lanes collapse-sec" id="section-inscriptions" aria-label="Inscriptions" hidden>
+        <summary><h2>inscriptions · what&rsquo;s being written on-chain</h2><span class="collapse-count dim" id="inscriptions-count"></span></summary>
+        <p class="dim families-sub">the JSON payloads, decoded straight from the bytes — each covenant&rsquo;s protocol, operation and token ticker, exactly as written. no registry, no labels we invented.</p>
+        <div id="inscriptions-row"></div>
+      </details>
+
+      <details class="lanes collapse-sec" id="section-appgraph" aria-label="App graph" hidden>
+        <summary><h2>app graph · coins that move together</h2><span class="collapse-count dim" id="appgraph-count"></span></summary>
+        <p class="dim families-sub">each cluster is an app — smart coins that shared transactions. click a dot to open the coin.</p>
+        <div class="appgraph-wrap">
+          <canvas id="appgraph-canvas" class="appgraph-canvas"></canvas>
+          <div class="appgraph-controls">
+            <button type="button" class="btn dbg-btn" data-action="graph-prev">◀</button>
+            <span class="dim mono" id="appgraph-label"></span>
+            <button type="button" class="btn dbg-btn" data-action="graph-next">▶</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="lanes collapse-sec" id="section-lifespans" aria-label="Lifespans" hidden>
+        <summary><h2>how long do smart coins live?</h2><span class="collapse-count dim" id="lifespans-count"></span></summary>
+        <p class="dim families-sub">the lifespan of every retired coin — from birth to burn. <span id="lifespans-median"></span></p>
+        <div id="lifespans-row"></div>
+      </details>
 
       <section class="stories" id="section-stories" aria-label="Latest stories">
         <h2>latest stories</h2>
@@ -220,10 +250,14 @@
     <section id="view-address" class="view-fade" aria-label="Address lookup" hidden></section>
 
     <!-- ============ DECODER ============ -->
-    <section id="view-decode" class="view-fade" aria-label="Script decoder" hidden>
+    <section id="view-decode" class="view-fade" aria-label="Playground — read" hidden>
+      <div class="pg-modes" aria-label="Playground mode">
+        <a class="pg-mode pg-active" href="#/decode">📄 read a script</a>
+        <a class="pg-mode" href="#/build">✎ write a covenant</a>
+      </div>
       <header class="page-head">
-        <h1>script decoder</h1>
-        <p class="page-sub">paste any Kaspa script as hex and read it as opcodes — including the post-Toccata set: transaction introspection (KIP-17), covenant ops (KIP-20), zk verification (KIP-16). decoding happens in your browser; nothing leaves the page. recognized contracts can be <strong>re-made with your own parameters</strong> and deployed on testnet-10.</p>
+        <h1>read a script</h1>
+        <p class="page-sub">paste any Kaspa script as hex and read it as opcodes — including the post-Toccata set: transaction introspection (KIP-17), covenant ops (KIP-20), zk verification (KIP-16). recognizing, disassembling &amp; linting run in your browser; <strong>simulate</strong>, <strong>verify-proof</strong> &amp; <strong>compile</strong> call the kascov node. recognized contracts can be <strong>re-made with your own parameters</strong>.</p>
       </header>
       <div class="decode-box">
         <textarea id="decode-input" rows="4" spellcheck="false" autocomplete="off" placeholder="script hex — e.g. 20a39404…82faac · whitespace and 0x prefixes are fine"></textarea>
@@ -242,9 +276,7 @@
           <button type="button" class="chip" data-action="decode-load" data-example="escrow">SilverScript · Escrow</button>
           <button type="button" class="chip" data-action="decode-load" data-example="lastwill">SilverScript · LastWill</button>
           <button type="button" class="chip" data-action="decode-load" data-example="zk">mainnet ZK covenant</button>
-          <button type="button" class="chip chip-make" data-action="gen-example" data-example="mecenas">🛠 make a Mecenas</button>
-          <button type="button" class="chip chip-make" data-action="gen-example" data-example="escrow">🛠 make an Escrow</button>
-          <button type="button" class="chip chip-make" data-action="gen-example" data-example="lastwill">🛠 make a LastWill</button>
+          <button type="button" class="chip" data-action="decode-load" data-example="groth">Groth16 proof</button>
         </div>
       </div>
       <div id="decode-out" class="decode-out" aria-live="polite"></div>
@@ -262,7 +294,11 @@
     </section>
 
     <!-- ============ BUILD — MAKE YOUR OWN SMART COIN ============ -->
-    <section id="view-build" class="view-fade" aria-label="Make your own smart coin" hidden>
+    <section id="view-build" class="view-fade" aria-label="Playground — write" hidden>
+      <div class="pg-modes" aria-label="Playground mode">
+        <a class="pg-mode" href="#/decode">📄 read a script</a>
+        <a class="pg-mode pg-active" href="#/build">✎ write a covenant</a>
+      </div>
       <header class="page-head build-head">
         <p class="page-eyebrow">the lab</p>
         <h1>Make your own <span class="grad">smart coin</span>.</h1>
@@ -271,6 +307,33 @@
           <code class="build-hero-cmd" data-copy="cargo run -p kascov-lab -- escrow-demo">cargo run -p kascov-lab -- escrow-demo <span class="copy-hint">click to copy</span></code>
         </div>
       </header>
+
+      <!-- write & compile SilverScript, in the browser -->
+      <section class="build-section" id="build-compiler">
+        <h2>write &amp; compile SilverScript</h2>
+        <p class="build-lead">Write a covenant in SilverScript and compile it to real Kaspa script right here — powered by the actual <code>silverc</code> compiler. Edit the source, set the constructor args, and get deployable hex.</p>
+        <div class="compiler-templates">
+          <span class="dim">start from a template:</span>
+          <button type="button" class="chip" data-action="compile-template" data-template="SilverScript · Escrow">Escrow</button>
+          <button type="button" class="chip" data-action="compile-template" data-template="SilverScript · Mecenas">Mecenas</button>
+          <button type="button" class="chip" data-action="compile-template" data-template="SilverScript · LastWill">LastWill</button>
+          <button type="button" class="chip" data-action="compile-template" data-template="blank">blank</button>
+        </div>
+        <div class="compiler-grid">
+          <div class="compiler-col">
+            <label class="compiler-label">contract source</label>
+            <textarea id="compiler-src" class="compiler-src" spellcheck="false" autocapitalize="off"></textarea>
+          </div>
+          <div class="compiler-col compiler-side">
+            <label class="compiler-label">constructor args <span class="dim">— one per line (hex or int)</span></label>
+            <textarea id="compiler-args" class="compiler-argsbox" spellcheck="false" autocapitalize="off"></textarea>
+            <div class="compiler-controls">
+              <button type="button" class="btn" data-action="compile-run">⚙ compile</button>
+            </div>
+          </div>
+        </div>
+        <div id="compiler-result" class="compiler-result"></div>
+      </section>
 
       <!-- the flow -->
       <section class="build-section">
@@ -284,6 +347,8 @@
         </ol>
       </section>
 
+      <details class="cli-wall" open>
+      <summary class="cli-wall-sum">⌘ prefer the command line? run the whole loop from the CLI</summary>
       <!-- one-command demos -->
       <section class="build-section">
         <h2>start here — one command</h2>
@@ -369,6 +434,7 @@
         </div>
         <p class="build-foot">Full walkthrough in <a href="https://github.com/Knitser/kascov/blob/main/docs/Covenant%20Lab.md" target="_blank" rel="noopener noreferrer"><code class="mono">docs/Covenant Lab.md</code></a>. Every command has <code class="mono">--help</code>.</p>
       </section>
+      </details>
     </section>
 
     <!-- ============ API DOCS ============ -->
@@ -585,7 +651,7 @@
   <footer class="site-footer">
     <div class="container footer-inner">
       <p class="footer-motto">Kaspa nodes forget after ~3 days. <strong>kascov remembers.</strong></p>
-      <p class="footer-nav"><a class="footer-link" href="#/explore">explorer</a> · <a class="footer-link" href="#/decode">script decoder</a> · <a class="footer-link" href="#/dev">JSON API &amp; docs</a></p>
+      <p class="footer-nav"><a class="footer-link" href="#/explore">explorer</a> · <a class="footer-link" href="#/decode">playground</a> · <a class="footer-link" href="#/dev">JSON API &amp; docs</a></p>
       <p><a class="footer-link" href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov</a></p>
       <p class="footer-dim">data streams live from the kascov indexer — it never stops watching</p>
       <p class="footer-dim">not affiliated with the Kaspa Foundation</p>
@@ -597,6 +663,7 @@
   <script src="/blake2b.js"></script>
   <script src="/disasm.js"></script>
   <script src="/vm.js"></script>
+  <script src="/graph.js"></script>
   <script src="/gen.js"></script>
   <script src="/app.js"></script>
 </body>

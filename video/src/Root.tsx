@@ -1,5 +1,6 @@
 import React from 'react';
 import {Composition} from 'remotion';
+import './fonts';
 import {LaunchVideo} from './Video';
 import {LaunchVideoV2, V2_TOTAL} from './VideoV2';
 import {UpdateVideoV4, V4_TOTAL} from './VideoV4';
@@ -8,6 +9,7 @@ import {RunVideoV6, V6_TOTAL} from './VideoV6';
 import {GhostDagVideoV7, V7_TOTAL} from './VideoV7';
 import {DevTourVideoV8, V8_TOTAL} from './VideoV8';
 import {FeaturesVideoV9, V9_TOTAL} from './VideoV9';
+import {FeaturesVideoV10, V10_TOTAL} from './VideoV10';
 import {LaunchVideoV3, V3_TOTAL} from './VideoV3';
 
 export const Root: React.FC = () => {
@@ -65,6 +67,14 @@ export const Root: React.FC = () => {
         id="FeaturesV9"
         component={FeaturesVideoV9}
         durationInFrames={V9_TOTAL}
+        fps={60}
+        width={1920}
+        height={1080}
+      />
+      <Composition
+        id="FeaturesV10"
+        component={FeaturesVideoV10}
+        durationInFrames={V10_TOTAL}
         fps={60}
         width={1920}
         height={1080}

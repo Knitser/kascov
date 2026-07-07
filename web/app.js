@@ -295,6 +295,8 @@ const state = {
   templates: {},      // network -> { data, at } (contract-type analytics)
   families: {},       // network -> { data, at } (multi-contract apps)
   lanes: {},          // network -> { data, at } (based-app namespaces)
+  inscriptions: {},   // network -> { data, at } (decoded JSON inscriptions)
+  lifespans: {},      // network -> { data, at } (retired-coin lifespans)
   digest: {},         // network -> { data, at, animated }
   activity: {},       // network -> { [range]: { data, at } } (data null = 404 miss)
   pulseRange: '24h',
@@ -515,6 +517,8 @@ function renderLanes(network) {
   const lanes = (cached.data && cached.data.lanes) || [];
   if (!lanes.length) { section.hidden = true; return; }
   section.hidden = false;
+  const cnt = $('#lanes-count');
+  if (cnt) cnt.textContent = `${lanes.length} namespace${lanes.length === 1 ? '' : 's'}`;
   const max = Math.max(1, ...lanes.map((l) => l.events));
   host.innerHTML = lanes.slice(0, 14).map((l) => {
     const w = Math.max((l.events / max) * 100, 3).toFixed(1);
@@ -524,6 +528,118 @@ function renderLanes(network) {
       `<span class="lane-track"><span class="lane-fill" style="width:${w}%"></span></span>` +
       `<span class="lane-counts dim">${fmtInt(l.events)} tx${l.events === 1 ? '' : 's'} · ${fmtInt(l.covenants)} coin${l.covenants === 1 ? '' : 's'}</span></div>`;
   }).join('');
+}
+
+async function loadInscriptions(network) {
+  const t = state.inscriptions[network];
+  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
+  try {
+    const res = await fetch(`data/${network}/inscriptions.json`, { cache: 'no-cache' });
+    if (!res.ok) { state.inscriptions[network] = { data: null, at: Date.now() }; return null; }
+    const data = await res.json();
+    state.inscriptions[network] = { data, at: Date.now() };
+    return data;
+  } catch (e) {
+    return t ? t.data : null;
+  }
+}
+
+function renderInscriptions(network) {
+  const section = $('#section-inscriptions');
+  const host = $('#inscriptions-row');
+  if (!section || !host) return;
+  const cached = state.inscriptions[network];
+  if (!cached) {
+    loadInscriptions(network).then((d) => {
+      if (d && state.network === network && parseRoute().view === 'explore') renderInscriptions(network);
+    });
+    section.hidden = true;
+    return;
+  }
+  const items = (cached.data && cached.data.inscriptions) || [];
+  if (!items.length) { section.hidden = true; return; }
+  section.hidden = false;
+  const cnt = $('#inscriptions-count');
+  if (cnt) cnt.textContent = `${items.length} kind${items.length === 1 ? '' : 's'}`;
+  const max = Math.max(1, ...items.map((l) => l.events));
+  host.innerHTML = items.slice(0, 14).map((l) => {
+    const w = Math.max((l.events / max) * 100, 3).toFixed(1);
+    return `<div class="lane-row"><span class="lane-ns">${esc(l.label)}</span>` +
+      `<span class="lane-track"><span class="lane-fill" style="width:${w}%"></span></span>` +
+      `<span class="lane-counts dim">${fmtInt(l.events)} tx${l.events === 1 ? '' : 's'} · ${fmtInt(l.covenants)} coin${l.covenants === 1 ? '' : 's'}</span></div>`;
+  }).join('');
+}
+
+async function loadLifespans(network) {
+  const t = state.lifespans[network];
+  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
+  try {
+    const res = await fetch(`data/${network}/lifespans.json`, { cache: 'no-cache' });
+    if (!res.ok) { state.lifespans[network] = { data: null, at: Date.now() }; return null; }
+    const data = await res.json();
+    state.lifespans[network] = { data, at: Date.now() };
+    return data;
+  } catch (e) {
+    return t ? t.data : null;
+  }
+}
+
+function renderLifespans(network) {
+  const section = $('#section-lifespans');
+  const host = $('#lifespans-row');
+  if (!section || !host) return;
+  const cached = state.lifespans[network];
+  if (!cached) {
+    loadLifespans(network).then((d) => {
+      if (d && state.network === network && parseRoute().view === 'explore') renderLifespans(network);
+    });
+    section.hidden = true;
+    return;
+  }
+  const data = cached.data;
+  const buckets = (data && data.buckets) || [];
+  if (!buckets.length || !data.total) { section.hidden = true; return; }
+  section.hidden = false;
+  const medMin = data.median_ms / 60000;
+  const medLabel = medMin >= 1 ? `${medMin.toFixed(1)} min` : `${Math.round(data.median_ms / 1000)} s`;
+  const cnt = $('#lifespans-count');
+  if (cnt) cnt.textContent = `median ${medLabel}`;
+  const med = $('#lifespans-median');
+  if (med) med.textContent = `median lifespan ${medLabel}, across ${fmtInt(data.total)} retired coins.`;
+  const max = Math.max(1, ...buckets.map((b) => b.count));
+  host.innerHTML = buckets.map((b) => {
+    const w = Math.max((b.count / max) * 100, 2).toFixed(1);
+    return `<div class="lane-row"><span class="lane-ns">${esc(b.label)}</span>` +
+      `<span class="lane-track"><span class="lane-fill" style="width:${w}%"></span></span>` +
+      `<span class="lane-counts dim">${fmtInt(b.count)} coin${b.count === 1 ? '' : 's'}</span></div>`;
+  }).join('');
+}
+
+/* the app graph — a force-directed cluster of a family (reuses loaded
+   families data; renders lazily when the section is expanded) */
+let appGraphCtrl = null;
+let graphIdx = 0;
+
+function graphFamilies() {
+  const c = state.families[state.network];
+  return ((c && c.data && c.data.families) || []).filter((f) => f.size >= 2);
+}
+
+function renderAppGraph() {
+  if (!window.kascovGraph) return;
+  const fams = graphFamilies();
+  const canvas = $('#appgraph-canvas');
+  const label = $('#appgraph-label');
+  if (!fams.length || !canvas) return;
+  graphIdx = ((graphIdx % fams.length) + fams.length) % fams.length;
+  const fam = fams[graphIdx];
+  if (label) label.textContent = `app ${graphIdx + 1} / ${fmtInt(fams.length)} · ${fmtInt(fam.size)} coins${fam.size > 40 ? ' (showing 40)' : ''}`;
+  if (appGraphCtrl) appGraphCtrl.stop();
+  appGraphCtrl = window.kascovGraph.render(
+    canvas,
+    { members: fam.members, label: `${fam.size} coins` },
+    { onPick: (n) => { location.hash = `#/${state.network}/c/${n.id}`; } }
+  );
 }
 
 async function loadFamilies(network) {
@@ -557,6 +673,21 @@ function renderFamilies(network) {
   const fams = (cached.data && cached.data.families) || [];
   if (!fams.length) { section.hidden = true; return; }
   section.hidden = false;
+  const fcnt = $('#families-count');
+  if (fcnt) fcnt.textContent = `${fams.length} app${fams.length === 1 ? '' : 's'}`;
+  // the app-graph section shares this families data
+  const gsec = $('#section-appgraph');
+  if (gsec) {
+    const graphable = fams.filter((f) => f.size >= 2).length;
+    if (graphable) {
+      gsec.hidden = false;
+      const gcnt = $('#appgraph-count');
+      if (gcnt) gcnt.textContent = `${fmtInt(graphable)} app${graphable === 1 ? '' : 's'}`;
+      if (gsec.open) renderAppGraph();
+    } else {
+      gsec.hidden = true;
+    }
+  }
   host.innerHTML = fams.slice(0, 6).map((f) => {
     const named = f.members.filter((m) => m.template && !/^p2(pk|sh)/.test(m.template));
     const label = named.length
@@ -678,10 +809,12 @@ function renderLiteExplore(live, network) {
   $('#empty-net').hidden = !empty;
   $('#watch-strip').hidden = true;
   $('#section-records').hidden = true;
-  if ($('#section-families')) $('#section-families').hidden = true;
-  /* lanes fetch their own small endpoint — render even before the big
-     snapshot lands so based-app activity shows immediately */
+  /* these fetch their own small endpoints — render even before the big
+     snapshot lands so the analytics show immediately */
+  renderFamilies(network);
   renderLanes(network);
+  renderInscriptions(network);
+  renderLifespans(network);
   const tpl = $('#section-templates');
   if (tpl) tpl.hidden = true; /* appears when the full snapshot render runs */
   $('#section-pulse').hidden = true;
@@ -1571,6 +1704,16 @@ function renderLanding(entry) {
   document.title = 'kascov — watch Kaspa’s smart coins live their lives';
   document.querySelectorAll('[data-net-word]').forEach((el) => { el.textContent = net.word; });
 
+  /* a <video autoplay> inside a view that starts hidden won't begin on its own
+     when the view is later shown — so nudge it (muted → autoplay is allowed).
+     This is why it only played after a refresh before. */
+  const tv = document.getElementById('tour-video');
+  if (tv) {
+    tv.muted = true;
+    const p = tv.play();
+    if (p && p.catch) p.catch(() => {});
+  }
+
   const s = data.stats;
   $('#hero-stats').innerHTML = [
     { n: s.covenants, label: 'smart coins tracked' },
@@ -1646,6 +1789,8 @@ function renderExplore(entry) {
   renderTemplates(network);
   renderFamilies(network);
   renderLanes(network);
+  renderInscriptions(network);
+  renderLifespans(network);
   loadTemplates(network).then(() => {
     if (state.network === network && parseRoute().view === 'explore') renderTemplates(network);
   });
@@ -1753,6 +1898,234 @@ function verifiedContractHtml(programHex) {
     `</div>`;
 }
 
+/* ---- plain-English contract explainer — turns a recognized template's
+   decoded fields into a sentence anyone can read. ---- */
+function explainCovenant(tpl) {
+  if (!tpl || !tpl.fields) return '';
+  const D = window.kascovDisasm, G = window.kascovGen;
+  const get = (n) => { const x = tpl.fields.find((f) => f.name === n); return x ? x.value : ''; };
+  const shortHex = (v) => (v && v.length > 16 ? v.slice(0, 8) + '…' + v.slice(-4) : v || '?');
+  const amount = (hex) => { try { return G.sompiToTkas(D.snumDecode(D.parseHex(hex))) + ' TKAS'; } catch (e) { return shortHex(hex); } };
+  const daa = (hex) => { try { return D.snumDecode(D.parseHex(hex)) + ' DAA'; } catch (e) { return shortHex(hex); } };
+  const c = (s) => `<code class="mono">${esc(s)}</code>`;
+  switch (tpl.name) {
+    case 'SilverScript · Escrow':
+      return `This is an <strong>escrow</strong>. The funds stay locked until the <strong>arbiter</strong> (key ${c(shortHex(get('arbiter_hash')))}) signs a release — and the contract forces that payout to go to <em>either</em> the buyer (${c(shortHex(get('buyer')))}) or the seller (${c(shortHex(get('seller')))}), the full amount minus the fee. No third address can be paid, and neither party can move it alone. The arbiter decides the outcome but can never touch the money.`;
+    case 'SilverScript · Mecenas':
+      return `This is a <strong>Mecenas</strong> — a recurring on-chain allowance. The <strong>funder</strong> (key ${c(shortHex(get('funder_hash')))}) funds it; the <strong>recipient</strong> (${c(shortHex(get('recipient')))}) may withdraw up to ${c(amount(get('pledge')))} once every ${c(daa(get('period')))} window, and the funder can reclaim the rest. The coin enforces it — the recipient can’t take more than the pledge per window, and only the funder can cancel.`;
+    case 'SilverScript · LastWill':
+      return `This is a <strong>LastWill</strong> — a dead-man’s-switch inheritance. Day-to-day the owner spends with a <strong>hot key</strong> (${c(shortHex(get('hot_hash')))}); a <strong>cold key</strong> (${c(shortHex(get('cold_hash')))}) is the backup that can always reclaim and reset the clock. If the owner goes silent long enough, the <strong>heir</strong> (${c(shortHex(get('inheritor_hash')))}) can inherit — but the cold key overrides them, so inheritance only fires on genuine inactivity.`;
+    default:
+      return '';
+  }
+}
+
+function explainerPanelHtml(tpl) {
+  const html = explainCovenant(tpl);
+  if (!html) return '';
+  return `<details class="explain-panel" open><summary><span class="explain-badge">📖 in plain English</span></summary><p class="explain-body">${html}</p></details>`;
+}
+
+/* ---- covenant security lint — a static audit from the opcodes. No covenant
+   linter exists anywhere; this flags the classic gaps from the disassembly. */
+function lintCovenant(instructions) {
+  const names = new Set(instructions.map((i) => i.name));
+  const has = (...ns) => ns.some((n) => names.has(n));
+  const sig = has('OpCheckSig', 'OpCheckSigVerify', 'OpCheckSigECDSA', 'OpCheckMultiSig', 'OpCheckMultiSigVerify', 'OpCheckMultiSigECDSA', 'OpCheckSigFromStack', 'OpCheckSigFromStackECDSA');
+  const zk = has('OpZkPrecompile');
+  const hashlock = has('OpBlake2b', 'OpBlake3', 'OpSHA256') && has('OpEqual', 'OpEqualVerify');
+  const timelock = has('OpCheckSequenceVerify', 'OpCheckLockTimeVerify');
+  const outSpk = has('OpTxOutputSpk', 'OpTxOutputSpkLen', 'OpTxOutputSpkSubstr');
+  const outVal = has('OpTxOutputAmount');
+  // covenants can also pin outputs by covenant-id / authorizing-input, not just spk/value
+  const outCov = has('OpOutputCovenantId', 'OpCovOutputCount', 'OpCovOutputIdx', 'OpAuthOutputCount', 'OpAuthOutputIdx', 'OpOutputAuthorizingInput');
+  const introspection = instructions.some((i) => /^Op(Tx|Cov|Outpoint|Auth)|CovenantId/.test(i.name));
+  const opreturn = has('OpReturn');
+  const f = [];
+  if (sig) f.push(['ok', 'requires a signature', 'a valid signature from the committed key is needed to spend.']);
+  else if (zk) f.push(['ok', 'requires a ZK proof', 'spending needs a valid zero-knowledge proof (KIP-16).']);
+  else if (hashlock) f.push(['ok', 'gated by a hash preimage', 'spending needs a value that hashes to a committed digest.']);
+  else f.push(['high', 'no authentication', 'needs no signature, hash preimage, or ZK proof — anyone who meets its other conditions can spend it.']);
+  if (outSpk || outVal || outCov) f.push(['ok', 'constrains its outputs', 'it checks the output destination, amount, or covenant-id — the spender can’t freely redirect the funds.']);
+  else if (introspection) f.push(['warn', 'reads the tx but doesn’t pin outputs', 'it inspects the spending transaction but never checks the output destination or amount.']);
+  if (timelock) f.push(['ok', 'enforces a timelock', 'a time lock gates at least one spend path.']);
+  if (opreturn) f.push(['warn', 'contains OpReturn', 'an always-fail opcode — one branch can never be spent; confirm that’s deliberate.']);
+  return f.map(([sev, title, body]) => ({ sev, title, body }));
+}
+
+function lintPanelHtml(instructions) {
+  if (!instructions || !instructions.length) return '';
+  const f = lintCovenant(instructions);
+  const highs = f.filter((x) => x.sev === 'high').length;
+  const warns = f.filter((x) => x.sev === 'warn').length;
+  const head = highs ? `${highs} issue${highs > 1 ? 's' : ''} found` : warns ? `${warns} thing${warns > 1 ? 's' : ''} to check` : 'looks well-formed';
+  const rows = f.map((x) => `<div class="lint-row lint-${x.sev}"><span class="lint-dot"></span><div><strong>${esc(x.title)}</strong><span class="dim"> — ${esc(x.body)}</span></div></div>`).join('');
+  return `<details class="lint-panel"${highs ? ' open' : ''}><summary><span class="lint-badge">🛡 security check</span> <span class="dim">${head}</span></summary><div class="lint-body">${rows}</div></details>`;
+}
+
+/* ---- SilverScript compiler playground (worker shells out to silverc) ---- */
+const SILVERSCRIPT_EXAMPLE = {
+  source: `pragma silverscript ^0.1.0;
+
+contract Escrow(byte[32] arbiter, pubkey buyer, pubkey seller) {
+    entrypoint function spend(pubkey pk, sig s) {
+        require(blake2b(pk) == arbiter);
+        require(checkSig(s, pk));
+
+        int minerFee = 1000;
+        int amount = tx.inputs[this.activeInputIndex].value - minerFee;
+        require(tx.outputs[0].value == amount);
+
+        byte[34] buyerLock = new ScriptPubKeyP2PK(buyer);
+        byte[34] sellerLock = new ScriptPubKeyP2PK(seller);
+        bool sendsToBuyer = tx.outputs[0].scriptPubKey == byte[](buyerLock);
+        bool sendsToSeller = tx.outputs[0].scriptPubKey == byte[](sellerLock);
+        require(sendsToBuyer || sendsToSeller);
+    }
+}`,
+  args: `0x${'33'.repeat(32)}\n0x${'11'.repeat(32)}\n0x${'22'.repeat(32)}`,
+};
+
+/* the Write-mode template picker: each canonical contract + a set of valid
+   default constructor args (source comes from gen.js's SOURCES at click time). */
+const SILVERSCRIPT_EXAMPLES = {
+  'SilverScript · Escrow': { label: 'Escrow', args: [`0x${'33'.repeat(32)}`, `0x${'11'.repeat(32)}`, `0x${'22'.repeat(32)}`] },
+  'SilverScript · Mecenas': { label: 'Mecenas', args: [`0x${'44'.repeat(32)}`, `0x${'55'.repeat(32)}`, '100000000', '86400'] },
+  'SilverScript · LastWill': { label: 'LastWill', args: [`0x${'66'.repeat(32)}`, `0x${'77'.repeat(32)}`, `0x${'88'.repeat(32)}`] },
+};
+
+function loadTemplate(name) {
+  const src = $('#compiler-src');
+  const args = $('#compiler-args');
+  const out = $('#compiler-result');
+  const ex = SILVERSCRIPT_EXAMPLES[name];
+  const source = window.kascovGen && window.kascovGen.SOURCES ? window.kascovGen.SOURCES[name] : '';
+  if (src) src.value = name === 'blank' || !source ? '' : source;
+  if (args) args.value = name === 'blank' || !ex ? '' : ex.args.join('\n');
+  if (out) out.innerHTML = '';
+  const pub = $('#publish-result');
+  if (pub) pub.innerHTML = '';
+}
+
+function initCompiler() {
+  const src = $('#compiler-src');
+  const args = $('#compiler-args');
+  if (src && !src.value) src.value = SILVERSCRIPT_EXAMPLE.source;
+  if (args && !args.value) args.value = SILVERSCRIPT_EXAMPLE.args;
+}
+
+let lastCompiled = null;
+function renderCompileResult(d) {
+  const out = $('#compiler-result');
+  if (!out) return;
+  if (!d || !d.ok) {
+    lastCompiled = null;
+    out.innerHTML = `<div class="compile-err">✗ ${esc((d && d.error) || 'compile failed')}</div>`;
+    return;
+  }
+  lastCompiled = d.hex;
+  const D = window.kascovDisasm;
+  let decoded = '';
+  const bytes = D && D.parseHex(d.hex);
+  if (bytes) {
+    const tpl = D.matchTemplates(D.disassemble(bytes).instructions, bytes);
+    if (tpl) decoded = `<div class="compile-tpl">✓ recognized as <strong>${esc(tpl.name)}</strong></div>`;
+  }
+  out.innerHTML = `<div class="compile-ok">✓ compiled — ${d.hex.length / 2} bytes of Kaspa script</div>` +
+    `<pre class="compile-hex script" data-copy="${esc(d.hex)}">${esc(d.hex)}</pre>` +
+    decoded +
+    `<div class="compile-actions"><a class="btn" href="#/decode?s=${esc(d.hex)}">▶ decode / debug it</a>` +
+    `<button type="button" class="chip" data-action="compile-publish">publish as verified source</button>` +
+    `<span class="dim"> then deploy with <code class="mono">kascov-lab deploy --program-hex …</code></span></div>` +
+    `<div id="publish-result" class="compile-publish-result"></div>`;
+}
+
+/* community verify-and-publish: if a decoded program's hash has a published
+   SilverScript source, show it. Async, injected after the decode renders. */
+function checkVerifiedRegistry(hex) {
+  const host = document.getElementById('registry-panel');
+  if (!host || !hex || !window.kascovBlake2b256) return;
+  const bytes = window.kascovDisasm.parseHex(hex);
+  if (!bytes) return;
+  const hash = window.kascovDisasm.toHex(window.kascovBlake2b256(bytes));
+  fetch(`data/${state.network}/verified/${hash}`, { cache: 'no-cache' })
+    .then((r) => r.json())
+    .then((d) => {
+      if (!d || !d.ok || !d.source) return;
+      host.innerHTML = `<details class="verified-contract registry-src"><summary><span class="vc-badge">✓ community-verified source</span>` +
+        `<strong>${esc(d.template || 'published SilverScript')}</strong>` +
+        `<span class="vc-proof">compiles byte-identical to this program ✓</span></summary>` +
+        `<pre class="script">${esc(d.source)}</pre></details>`;
+    })
+    .catch(() => {});
+}
+
+/* ---- in-browser spend simulation (worker runs the real script engine) ---- */
+const SIM_VALUE = 100_000_000; // simulate on a 1 TKAS coin
+const SIM_SCENARIOS = {
+  'SilverScript · Escrow': [
+    { label: 'arbiter releases to buyer', entrypoint: 'spend', recipient: 'buyer' },
+    { label: 'arbiter releases to seller', entrypoint: 'spend', recipient: 'seller' },
+    { label: 'arbiter sends it elsewhere', entrypoint: 'spend', recipient: 'other' },
+    { label: 'arbiter skims 5000 sompi', entrypoint: 'spend', recipient: 'buyer', amount: SIM_VALUE - 6000 },
+  ],
+  'SilverScript · Mecenas': [
+    { label: 'funder reclaims the pledge', entrypoint: 'reclaim', recipient: 'self' },
+  ],
+  'SilverScript · LastWill': [
+    { label: 'owner spends with the cold key', entrypoint: 'cold', recipient: 'self' },
+    { label: 'heir inherits', entrypoint: 'inherit', recipient: 'self' },
+  ],
+};
+
+function simulatePanelHtml(tpl, hex) {
+  if (!tpl || !SIM_SCENARIOS[tpl.name] || !hex) return '';
+  const chips = SIM_SCENARIOS[tpl.name]
+    .map((s, i) => `<button type="button" class="sim-chip" data-action="sim-run" data-i="${i}">${esc(s.label)}</button>`)
+    .join('');
+  return `<details class="sim-panel" data-hex="${esc(hex)}" data-tpl="${esc(tpl.name)}">` +
+    `<summary class="sim-head"><span class="sim-badge">▶ simulate</span> <strong>try a spend — without broadcasting</strong></summary>` +
+    `<p class="sim-sub dim">each runs through Kaspa&rsquo;s real script engine and reports what a node would decide.</p>` +
+    `<div class="sim-chips">${chips}</div>` +
+    `<div class="sim-result"></div></details>`;
+}
+
+let lastSimTrace = null;
+function simVerdictHtml(d) {
+  if (!d || !d.ok) return `<div class="sim-verdict sim-na">can&rsquo;t simulate — ${esc((d && d.verdict) || 'unknown')}</div>`;
+  const cls = d.pass ? 'sim-pass' : 'sim-fail';
+  const icon = d.pass ? '✓ PASS' : '✗ FAIL';
+  const rule = !d.pass && d.rule ? `<div class="sim-rule">↳ ${esc(d.rule)}</div>` : '';
+  const traceBtn = d.trace && d.trace.length
+    ? `<button type="button" class="btn dbg-btn sim-trace-btn" data-action="sim-trace">⧉ step through this run</button>`
+    : '';
+  return `<div class="sim-verdict ${cls}"><span class="sim-icon">${icon}</span><span>${esc(d.verdict)}</span></div>` +
+    rule + `<p class="sim-note dim">${esc(d.note)}</p>` + traceBtn;
+}
+
+/* open the debugger on a CONCRETE engine trace (from a simulate run) — real
+   stacks, real control flow, vs the symbolic decode-page trace */
+function openSimTrace(trace) {
+  if (!trace || !trace.length) return;
+  const short = (h) => (h && h.length > 18 ? h.slice(0, 10) + '…' + h.slice(-4) : h);
+  dbg = {
+    concrete: true,
+    i: 0,
+    steps: trace.map((s, i) => ({
+      offset: i,
+      name: s.op.split(' ')[0],
+      note: s.op.includes(' ') ? s.op.slice(s.op.indexOf(' ') + 1) : '',
+      group: 'standard',
+      indent: 0,
+      dstack: (s.dstack || []).map(short),
+      astack: (s.astack || []).map(short),
+    })),
+  };
+  renderDebugger();
+  const host = document.getElementById('dbg-panel');
+  if (host) host.scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+
 /* KIP-16 ZK-app detection. A covenant that calls OpZkPrecompile verifies a
    zero-knowledge proof ON-CHAIN — Kaspa's precompile checks BOTH Groth16
    (verifier tag 0x20) and RISC Zero zkVM (tag 0x21) proofs. No explorer in
@@ -1772,16 +2145,24 @@ function zkInfo(instructions) {
   return { system, tag, pushesBefore };
 }
 
-function zkPanelHtml(instructions) {
+function zkPanelHtml(instructions, hex) {
   const z = zkInfo(instructions);
   if (!z) return '';
+  // a self-contained proof script (public inputs + proof + vk + OpZkPrecompile,
+  // no transaction introspection) can be verified live here; a covenant that
+  // only *expects* a spend-time proof can't be (no proof present).
+  const selfContained = hex && !instructions.some((i) => /^Op(Tx|Cov|Outpoint|Auth)|CovenantId/.test(i.name));
+  const verify = selfContained
+    ? `<div class="zk-verify"><button type="button" class="btn zk-verify-btn" data-action="zk-verify" data-prog="${esc(hex)}">◆ verify the proof</button><span class="zk-verify-result"></span></div>`
+    : '';
   return `<div class="zk-panel">` +
-    `<div class="zk-head"><span class="zk-badge">⬡ ZK covenant</span>` +
+    `<div class="zk-head"><span class="zk-badge">⬡ ZK ${selfContained ? 'proof' : 'covenant'}</span>` +
     `<strong>on-chain zero-knowledge verification</strong>` +
     `<span class="zk-sys">${esc(z.system)}</span></div>` +
-    `<p class="zk-desc">This contract calls <code class="mono">OpZkPrecompile</code> (KIP-16) — Kaspa's L1 verifies a ` +
-    `${esc(z.system)} proof <em>inside the script</em>, so the coin only moves if a valid zero-knowledge proof is supplied. ` +
-    `Verified computation, settled on a ~10-blocks/sec BlockDAG.</p>` +
+    `<p class="zk-desc">${selfContained
+      ? `A self-contained <code class="mono">${esc(z.system)}</code> proof (public inputs + proof + verifying key + <code class="mono">OpZkPrecompile</code>). Verify it below — kascov runs the <em>exact</em> verifier Kaspa's L1 uses.`
+      : `This contract calls <code class="mono">OpZkPrecompile</code> (KIP-16) — Kaspa's L1 verifies a ${esc(z.system)} proof <em>inside the script</em>, so the coin only moves if a valid zero-knowledge proof is supplied. Verified computation, settled on a ~10-blocks/sec BlockDAG.`}</p>` +
+    verify +
     `</div>`;
 }
 
@@ -1836,7 +2217,11 @@ function renderDebugger() {
     `<div class="dbg-now"><span class="dbg-now-op mono">${esc(s.name)}</span> <span class="dbg-now-note">${esc(s.note)}</span></div>` +
     `<div class="dbg-stacks">${col('data stack', s.dstack)}${col('alt stack', s.astack)}</div>` +
     `<div class="dbg-oplist">${ops}</div>` +
-    `<p class="dim dbg-footnote">symbolic trace — concrete for pushes &amp; stack ops, ‹symbolic› where a value only resolves against a real spend</p>` +
+    `<p class="dim dbg-footnote">` +
+    (dbg.concrete
+      ? 'concrete trace — the real engine&rsquo;s stacks for this simulated spend, opcode by opcode, following the actual control flow'
+      : 'symbolic trace — concrete for pushes &amp; stack ops, ‹symbolic› where a value only resolves against a real spend') +
+    `</p>` +
     `</div>`;
   // scroll the active op into view WITHIN the op-list only — never the page
   // (scrollIntoView would bubble up and jump the whole document)
@@ -1902,7 +2287,7 @@ function nerdPanel(entry, network, program) {
         (u.spent_txid ? ` <a href="${esc(txUrl(network, u.spent_txid))}" target="_blank" rel="noopener noreferrer">(tx ↗)</a>` : '') +
         `:</p>` +
         (verifiedContractHtml(u.revealed_hex) || templateLine(u.revealed_template, u.revealed_fields)) +
-        (u.revealed_hex ? zkPanelHtml(window.kascovDisasm.disassemble(window.kascovDisasm.parseHex(u.revealed_hex) || []).instructions) : '') +
+        (u.revealed_hex ? zkPanelHtml(window.kascovDisasm.disassemble(window.kascovDisasm.parseHex(u.revealed_hex) || []).instructions, u.revealed_hex) : '') +
         `<pre class="script script-reveal">${esc(u.revealed_asm.join('\n'))}</pre>` +
         (u.revealed_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.revealed_hex)}">open revealed program in decoder →</a>` : '');
     } else if (u.sig_hex || u.spent_txid) {
@@ -2088,6 +2473,7 @@ const DECODE_EXAMPLES = {
   p2pk: '20' + 'a3'.repeat(32) + 'ac',
   p2sh: 'aa20' + 'c5'.repeat(32) + '87',
   guard: 'b9cf20' + '11'.repeat(32) + '8851',
+  groth: '20c07a65145c3cb48b6101962ea607a4dd93c753bb26975cb47feb00d3666e440420d223ffcb21c6ffcb7c8f60392ca49dde0000000000000000000000000000000020a95ac0b37bfedcd8136e6c1143086bf50000000000000000000000000000000020dbe7c0194edfcc37eb4d422a998c1f560000000000000000000000000000000020a54dc85ac99f851c92d7c96d7318af4100000000000000000000000000000000554c80570253c0c483a1b16460118e63c155f3684e784ae7d97e8fc3f544128b37fe15075eab5ac31150c8a44253d8525971241bbd7227fcefbae2db4ae71675c56a2e0eb9235136b15ab72f16e707832f3d6ae5b0ba7cca53ae17cb52b3201919eb9d908c16297abd90aa7e00267bc21a9a78116e717d4d76edd44e21cca17e3d592d4da801e2f26dbea299f5223b646cb1fb33eadb059d9407559d7441dfd902e3a79a4d2dabb73dc17fbc13021e2471e0c08bd67d8401f52b73d6d07483794cad4778180e0c06f33bbc4c79a9cadef253a68084d382f17788f885c9afd176f7cb2f036789edf692d95cbdde46ddda5ef7d422436779445c5e66006a42761e1f12efde0018c212f3aeb785e49712e7a9353349aaf1255dfb31b7bf60723a480d9293938e1933033e7fea1f40604eaacf699d4be9aacc577054a0db22d9129a1728ff85a01a1c3af829b62bf4914c0bcf2c81a4bd577190eff5f194ee9bac95faefd53cb0030600000000000000e43bdc655d0f9d730535554d9caa611ddd152c081a06a932a8e1d5dc259aac123f42a188f683d869873ccc4c119442e57b056e03e2fa92f2028c97bc20b9078747c30f85444697fdf436e348711c011115963f855197243e4b39e6cbe236ca8ba7f2042e11f9255afbb6c6e2c3accb88e401f2aac21c097c92b3fbdb99f98a9b0dcd6c075ada6ed0ddfece1d4a2d005f61a7d5df0b75c18a5b2374d64e495fab93d4c4b1200394d5253cce2f25a59b862ee8e4cd43686603faa09d5d0d3c1c8f0120a6',
   zk: '08b1762f000000000075088b1e466a00000000756320901be291efb290173ae8c021842fad986e73b878bff72d3405821b7ed0136270d0519d00796001307f20dcbe0edd8a2b405aabdead896b04ae82cd9a881df095fee9805fd5584068a9b888007900587f51080100000000000010a569007958607fb9b9c976022901947c02210194bca2690108517900587f7e0275087e517958607f7e01757eb9b9c976022001947cbc7eb9cf76d0519dd2519daa01877e02aa207c7e0200007c7e00c38800c2b9be0340420f94a269a8200f3756c052ff1749fbbe0d4b28010a42c989e227130752e7188047498ba124aa207a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e01010121a6695167b9cf76d0519d76d2519d00d376c3b9bf88c2b9be0340420f94a2695168',
 };
 /* the SilverScript instances come from disasm.js's embedded compiler dumps */
@@ -2115,8 +2501,8 @@ function genCta(tpl) {
   if (!info || !info.emitVerified) return ''; /* generator only offers itself when emit is proven */
   const open = genState && genState.open;
   return `<p class="gen-cta-row"><button type="button" class="btn btn-accent gen-cta" data-action="gen-toggle">` +
-    `${open ? 'close the generator ↑' : 'make this yours →'}</button>` +
-    `<span class="dim gen-cta-hint">edit the parameters, get your own deployable contract</span></p>`;
+    `${open ? 'close the editor ↑' : '✎ edit & redeploy this →'}</button>` +
+    `<span class="dim gen-cta-hint">re-make this contract with your own parameters, get deployable hex</span></p>`;
 }
 
 function genPanelHtml(tpl, bytes) {
@@ -2242,7 +2628,8 @@ function runDecode(updateHash) {
   const tpl = !truncated && window.kascovDisasm.matchTemplates
     ? window.kascovDisasm.matchTemplates(instructions, bytes)
     : null;
-  const summary =
+  const hexAll = window.kascovDisasm.toHex(bytes);
+  const statsLine =
     `<p class="decode-summary">` +
     `<span>${fmtInt(bytes.length)} byte${bytes.length === 1 ? '' : 's'} · ` +
     `${fmtInt(instructions.length)} instruction${instructions.length === 1 ? '' : 's'}</span>` +
@@ -2250,12 +2637,7 @@ function runDecode(updateHash) {
     (groups.includes('covenant') ? '<span class="flag flag-ops">covenant ops</span>' : '') +
     (groups.includes('zk') ? '<span class="flag flag-ops">zk ops</span>' : '') +
     (truncated ? '<span class="flag flag-no">truncated / malformed tail</span>' : '') +
-    `</p>` +
-    zkPanelHtml(instructions) +
-    (tpl ? verifiedContractHtml(window.kascovDisasm.toHex(bytes)) || templateLine(tpl.name, tpl.fields) : '') +
-    genCta(tpl) +
-    genPanelHtml(tpl, bytes) +
-    debugCtaHtml(bytes);
+    `</p>`;
   const shown = decodeShowAll ? instructions : instructions.slice(0, DECODE_WINDOW);
   const rows = shown.map((inst) => {
     const dataBit = inst.data && inst.data.length
@@ -2273,7 +2655,19 @@ function runDecode(updateHash) {
         : `show all ${fmtInt(instructions.length)} instructions ↓`) +
       `</button></div>`
     : '';
-  out.innerHTML = summary + `<div class="inst-list">${rows}</div>` + foot;
+  // TIERS — Identity (what it is) · Understand (read the logic) · Deep tools.
+  const identity = statsLine + (tpl ? verifiedContractHtml(hexAll) || templateLine(tpl.name, tpl.fields) : '');
+  const disasm = `<div class="inst-list">${rows}</div>` + foot;
+  const understand = explainerPanelHtml(tpl) + disasm + lintPanelHtml(instructions) + '<div id="registry-panel"></div>';
+  const deepTools =
+    `<div class="deep-tools-head dim">deep tools</div>` +
+    zkPanelHtml(instructions, hexAll) +
+    simulatePanelHtml(tpl, hexAll) +
+    genCta(tpl) +
+    genPanelHtml(tpl, bytes) +
+    debugCtaHtml(bytes);
+  out.innerHTML = identity + understand + deepTools;
+  checkVerifiedRegistry(hexAll);
   if (updateHash && cleanKey.length <= DECODE_SHARE_MAX) {
     /* replaceState keeps the link shareable without re-triggering render;
        megabyte URLs help nobody, so huge scripts skip it */
@@ -2317,6 +2711,7 @@ function renderDev() {
 
 function renderBuild() {
   document.title = 'make your own smart coin — kascov';
+  initCompiler();
 }
 
 /* API docs: scroll-spy that highlights the sidebar entry for the endpoint
@@ -2453,6 +2848,7 @@ function parseRoute() {
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
   if (m) return { view: 'explore', network: m[1] || null };
   if (/^#\/decode\/?$/.test(path)) return { view: 'decode', network: null, s: params.get('s') || '' };
+  if (/^#\/playground\/?$/.test(path)) return { view: 'decode', network: null, s: params.get('s') || '' };
   if (/^#\/build\/?$/.test(path)) return { view: 'build', network: null };
   if (/^#\/dev\/?$/.test(path)) return { view: 'dev', network: null };
   /* old home links '#/<network>' were data views — send them to the explorer */
@@ -2519,8 +2915,10 @@ async function render() {
   document.querySelectorAll('.network-tab').forEach((b) => {
     b.setAttribute('aria-pressed', String(b.dataset.network === state.network));
   });
+  /* decode + build are the two modes of the unified "playground" nav entry */
+  const navFor = route.view === 'decode' || route.view === 'build' ? 'playground' : route.view;
   document.querySelectorAll('.nav-link').forEach((a) => {
-    if (a.dataset.nav === route.view) a.setAttribute('aria-current', 'page');
+    if (a.dataset.nav === navFor) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
   $('#header-search').hidden = route.view !== 'explore';
@@ -2983,6 +3381,76 @@ document.addEventListener('click', (e) => {
         location.hash = `#/${state.network}/c/${route.id}?program=${val}`;
       }
     }
+  } else if (action === 'compile-run') {
+    const src = $('#compiler-src');
+    const argsEl = $('#compiler-args');
+    const out = $('#compiler-result');
+    if (!src || !out) return;
+    out.innerHTML = '<span class="dim">compiling through silverc…</span>';
+    const args = (argsEl ? argsEl.value : '').split('\n').map((s) => s.trim()).filter(Boolean);
+    fetch(`data/${state.network}/compile`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: src.value, args }) })
+      .then((r) => r.json())
+      .then(renderCompileResult)
+      .catch(() => { out.innerHTML = '<div class="compile-err">the compiler isn’t available right now</div>'; });
+  } else if (action === 'compile-example') {
+    const src = $('#compiler-src');
+    const args = $('#compiler-args');
+    if (src) src.value = SILVERSCRIPT_EXAMPLE.source;
+    if (args) args.value = SILVERSCRIPT_EXAMPLE.args;
+    const out = $('#compiler-result');
+    if (out) out.innerHTML = '';
+  } else if (action === 'compile-template') {
+    loadTemplate(el.dataset.template);
+  } else if (action === 'compile-publish') {
+    const src = $('#compiler-src');
+    const argsEl = $('#compiler-args');
+    const out = $('#publish-result');
+    if (!lastCompiled || !src || !out) return;
+    out.innerHTML = '<span class="dim">publishing…</span>';
+    const args = (argsEl ? argsEl.value : '').split('\n').map((s) => s.trim()).filter(Boolean);
+    fetch(`data/${state.network}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: src.value, args }) })
+      .then((r) => r.json())
+      .then((d) => {
+        out.innerHTML = d.ok
+          ? `<div class="compile-ok">✓ published — any coin whose program hashes <code class="mono">${esc(d.hash.slice(0, 12))}…</code> now shows this source on its decode page</div>`
+          : `<div class="compile-err">${esc(d.error || 'publish failed')}</div>`;
+      })
+      .catch(() => { out.innerHTML = '<div class="compile-err">publish unavailable</div>'; });
+  } else if (action === 'zk-verify') {
+    const result = el.parentElement.querySelector('.zk-verify-result');
+    const prog = el.dataset.prog;
+    if (!prog || !result) return;
+    result.innerHTML = ' <span class="dim">running the verifier…</span>';
+    fetch(`data/${state.network}/zk-verify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ program_hex: prog }) })
+      .then((r) => r.json())
+      .then((d) => {
+        result.innerHTML = d.valid
+          ? ` <span class="zk-valid">✓ ${esc(d.reason)}</span>`
+          : ` <span class="zk-invalid">✗ ${esc(d.reason || 'invalid')}</span>`;
+      })
+      .catch(() => { result.innerHTML = ' <span class="dim">verifier unavailable</span>'; });
+  } else if (action === 'graph-prev') {
+    graphIdx -= 1;
+    renderAppGraph();
+  } else if (action === 'graph-next') {
+    graphIdx += 1;
+    renderAppGraph();
+  } else if (action === 'sim-run') {
+    const panel = el.closest('.sim-panel');
+    const scenario = (SIM_SCENARIOS[panel && panel.dataset.tpl] || [])[parseInt(el.dataset.i, 10)];
+    const out = panel && panel.querySelector('.sim-result');
+    if (!panel || !scenario || !out) return;
+    panel.querySelectorAll('.sim-chip').forEach((c) => c.classList.remove('sim-active'));
+    el.classList.add('sim-active');
+    out.innerHTML = '<span class="dim">running through the script engine…</span>';
+    const body = { program_hex: panel.dataset.hex, entrypoint: scenario.entrypoint, recipient: scenario.recipient, value: SIM_VALUE, trace: true };
+    if (scenario.amount != null) body.amount = scenario.amount;
+    fetch(`data/${state.network}/simulate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then((r) => r.json())
+      .then((d) => { lastSimTrace = d.trace || null; out.innerHTML = simVerdictHtml(d); })
+      .catch(() => { out.innerHTML = '<div class="sim-verdict sim-na">simulation unavailable</div>'; });
+  } else if (action === 'sim-trace') {
+    openSimTrace(lastSimTrace);
   } else if (action === 'dbg-open') {
     openDebugger(el.dataset.prog || '');
   } else if (action === 'dbg-prev') {
@@ -3007,6 +3475,12 @@ document.addEventListener('input', (e) => {
   const el = e.target.closest('[data-action="dbg-slider"]');
   if (el) dbgStep(0, parseInt(el.value, 10));
 });
+
+/* render the app-graph lazily when its section is expanded (toggle doesn't
+   bubble, so capture) */
+document.addEventListener('toggle', (e) => {
+  if (e.target && e.target.id === 'section-appgraph' && e.target.open) renderAppGraph();
+}, true);
 
 $('#search').addEventListener('input', (e) => {
   const hadQuery = Boolean(state.query);

@@ -989,7 +989,7 @@ async fn serve(
     db_dir: Option<std::path::PathBuf>,
     max_events: u64,
 ) -> Result<()> {
-    use axum::routing::get;
+    use axum::routing::{get, post};
 
     let networks: Vec<Network> = networks
         .split(',')
@@ -1020,11 +1020,19 @@ async fn serve(
     });
     let app = axum::Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/data/{network}/simulate", post(simulate_handler))
+        .route("/data/{network}/zk-verify", post(zk_verify_handler))
+        .route("/data/{network}/compile", post(compile_handler))
+        .route("/data/{network}/publish", post(publish_handler))
+        .route("/data/{network}/verified/{hash}", get(verified_handler))
+        .route("/data/{network}/subscribe", post(subscribe_handler))
         .route("/data/{file}", get(data_handler))
         .route("/data/{network}/c/{id}", get(detail_handler))
         .route("/data/{network}/tx/{txid}", get(tx_handler))
         .route("/data/{network}/families.json", get(families_handler))
         .route("/data/{network}/lanes.json", get(lanes_handler))
+        .route("/data/{network}/inscriptions.json", get(inscriptions_handler))
+        .route("/data/{network}/lifespans.json", get(lifespans_handler))
         .route("/data/{network}/digest.json", get(digest_handler))
         .route("/data/{network}/templates.json", get(templates_handler))
         .route("/data/{network}/activity.json", get(activity_handler))
@@ -1337,6 +1345,277 @@ fn build_families(store: &Store, network: kascov_core::Network) -> Result<serde_
         "tip_at_ms": tip.map(|t| t.1),
         "families": out,
     }))
+}
+
+/// POST /data/{network}/compile — compile SilverScript source + constructor
+/// args to script hex by shelling out to the `silverc` binary (path in the
+/// SILVERC_BIN env var). Powers verify-and-publish and the no-code builder.
+#[derive(serde::Deserialize)]
+struct CompileReq {
+    source: String,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+fn json_resp(v: serde_json::Value) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    (StatusCode::OK, [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], v.to_string()).into_response()
+}
+
+fn blake2b32(bytes: &[u8]) -> [u8; 32] {
+    *blake2b_simd::Params::new().hash_length(32).hash(bytes).as_bytes().first_chunk::<32>().unwrap()
+}
+
+/// Compile SilverScript source + args to script hex via the `silverc` binary
+/// (SILVERC_BIN). Ok(hex) or Err(message).
+async fn run_silverc(source: String, args: Vec<String>) -> Result<String, String> {
+    let bin = std::env::var("SILVERC_BIN").unwrap_or_default();
+    if bin.is_empty() {
+        return Err("the SilverScript compiler isn't available on this server".into());
+    }
+    let out = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(&bin)
+            .arg("-")
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child.stdin.take().unwrap().write_all(source.as_bytes())?;
+        let o = child.wait_with_output()?;
+        std::io::Result::Ok((
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        ))
+    })
+    .await;
+    match out {
+        Ok(Ok((true, hex, _))) => Ok(hex),
+        Ok(Ok((false, _, err))) => Err(err),
+        _ => Err("compiler failed to run".into()),
+    }
+}
+
+/// POST /data/{network}/zk-verify — run a self-contained ZK verification
+/// script through the real engine (Kaspa's ark_groth16 / RISC-Zero verifier).
+#[derive(serde::Deserialize)]
+struct ZkReq {
+    program_hex: String,
+}
+
+async fn zk_verify_handler(
+    axum::extract::Path(_net): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<ZkReq>,
+) -> axum::response::Response {
+    if req.program_hex.len() > 8_000 {
+        return json_resp(serde_json::json!({ "ok": false, "error": "program too large" }));
+    }
+    let Ok(bytes) = hex::decode(req.program_hex.trim().trim_start_matches("0x")) else {
+        return json_resp(serde_json::json!({ "ok": false, "error": "not valid hex" }));
+    };
+    let (valid, reason) = tokio::task::spawn_blocking(move || kascov_sim::verify_zk_script(&bytes))
+        .await
+        .unwrap_or((false, "verifier failed to run".into()));
+    json_resp(serde_json::json!({ "ok": true, "valid": valid, "reason": reason }))
+}
+
+async fn compile_handler(
+    axum::extract::Path(_net): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<CompileReq>,
+) -> axum::response::Response {
+    if req.source.len() > 40_000 || req.args.len() > 16 || req.args.iter().any(|a| a.len() > 200) {
+        return json_resp(serde_json::json!({ "ok": false, "error": "input too large" }));
+    }
+    match run_silverc(req.source, req.args).await {
+        Ok(hex) => json_resp(serde_json::json!({ "ok": true, "hex": hex })),
+        Err(e) => json_resp(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+/// POST /data/{network}/publish — compile submitted source, and if it compiles,
+/// record it as a community-verified source keyed by the program's blake2b hash.
+/// A coin whose revealed program hashes the same now shows the published source.
+async fn publish_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<CompileReq>,
+) -> axum::response::Response {
+    let net = net_name.strip_suffix("/publish").unwrap_or(&net_name);
+    let Ok(network) = net.parse::<Network>() else { return json_resp(serde_json::json!({ "ok": false, "error": "unknown network" })) };
+    if !state.networks.contains(&network) || req.source.len() > 40_000 {
+        return json_resp(serde_json::json!({ "ok": false, "error": "bad request" }));
+    }
+    let hex = match run_silverc(req.source.clone(), req.args.clone()).await {
+        Ok(h) => h,
+        Err(e) => return json_resp(serde_json::json!({ "ok": false, "error": e })),
+    };
+    let Ok(bytes) = hex::decode(&hex) else { return json_resp(serde_json::json!({ "ok": false, "error": "compiler output wasn't hex" })) };
+    let hash = hex::encode(blake2b32(&bytes));
+    let decoded = kascov_decode::Registry::default().decode(0, &bytes);
+    let template = decoded.template.map(|t| t.to_string());
+    let db = state.base_dir.join(format!("{network}.db"));
+    let (source, args) = (req.source, req.args.join("\n"));
+    let (hash2, tmpl2) = (hash.clone(), template.clone());
+    let stored = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        store.put_verified_source(&hash2, &hex, &source, &args, tmpl2.as_deref(), now_ms())?;
+        Ok(())
+    })
+    .await;
+    match stored {
+        Ok(Ok(())) => json_resp(serde_json::json!({ "ok": true, "hash": hash, "template": template })),
+        _ => json_resp(serde_json::json!({ "ok": false, "error": "couldn't store the source" })),
+    }
+}
+
+/// GET /data/{network}/verified/{hash} — the published source for a program hash.
+async fn verified_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net, hash)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    let Ok(network) = net.parse::<Network>() else { return json_resp(serde_json::json!({ "ok": false })) };
+    if !state.networks.contains(&network) {
+        return json_resp(serde_json::json!({ "ok": false }));
+    }
+    let db = state.base_dir.join(format!("{network}.db"));
+    let hash = hash.trim_end_matches(".json").to_lowercase();
+    let got = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<(String, String, Option<String>, u64)>> {
+        Ok(kascov_core::store::Store::open(&db, network)?.get_verified_source(&hash)?)
+    })
+    .await;
+    match got {
+        Ok(Ok(Some((source, args, template, at)))) => json_resp(serde_json::json!({ "ok": true, "source": source, "args": args, "template": template, "verified_at": at })),
+        Ok(Ok(None)) => json_resp(serde_json::json!({ "ok": false })),
+        _ => json_resp(serde_json::json!({ "ok": false })),
+    }
+}
+
+/// POST /data/{network}/subscribe — register a webhook for covenant events.
+#[derive(serde::Deserialize)]
+struct SubscribeReq {
+    #[serde(default)]
+    covenant_id: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    url: String,
+}
+
+async fn subscribe_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<SubscribeReq>,
+) -> axum::response::Response {
+    let net = net_name.strip_suffix("/subscribe").unwrap_or(&net_name);
+    let Ok(network) = net.parse::<Network>() else { return json_resp(serde_json::json!({ "ok": false, "error": "unknown network" })) };
+    if !state.networks.contains(&network) || req.url.len() > 500 || !req.url.starts_with("http") {
+        return json_resp(serde_json::json!({ "ok": false, "error": "a valid http(s) url is required" }));
+    }
+    let cid = req.covenant_id.as_deref().and_then(|s| hex::decode(s).ok());
+    let db = state.base_dir.join(format!("{network}.db"));
+    let (kind, url) = (req.kind, req.url);
+    let added = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        Ok(store.add_subscription(cid.as_deref(), kind.as_deref(), &url, now_ms())?)
+    })
+    .await;
+    match added {
+        Ok(Ok(id)) => json_resp(serde_json::json!({ "ok": true, "id": id })),
+        _ => json_resp(serde_json::json!({ "ok": false, "error": "couldn't subscribe" })),
+    }
+}
+
+/// POST /data/{network}/simulate — run a hypothetical covenant spend through
+/// the real script engine (kascov-sim), off-chain. Network-agnostic (pure
+/// computation); the {network} segment just keeps it under the /data rewrite.
+async fn simulate_handler(
+    axum::extract::Path(_net): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<kascov_sim::SimRequest>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    if req.program_hex.len() > 20_000 {
+        return (StatusCode::BAD_REQUEST, "program too large").into_response();
+    }
+    match tokio::task::spawn_blocking(move || kascov_sim::simulate(&req)).await {
+        Ok(r) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")],
+            serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()),
+        )
+            .into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "simulation failed").into_response(),
+    }
+}
+
+async fn lifespans_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let net = net_name.strip_suffix("/lifespans.json").unwrap_or(&net_name);
+    let Ok(network) = net.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+    let db = state.base_dir.join(format!("{network}.db"));
+    let cc = "public, max-age=120, s-maxage=300, stale-while-revalidate=900";
+    serve_cached(&state, format!("{network}/lifespans"), 180, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let (buckets, median_daa, total) = store.lifespan_stats()?;
+        let items: Vec<_> = buckets
+            .into_iter()
+            .map(|(label, count)| serde_json::json!({ "label": label, "count": count }))
+            .collect();
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "buckets": items,
+            "median_daa": median_daa,
+            "median_ms": median_daa * 100, // 10 DAA ≈ 1 s
+            "total": total,
+        }))?))
+    })
+    .await
+}
+
+async fn inscriptions_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let net = net_name.strip_suffix("/inscriptions.json").unwrap_or(&net_name);
+    let Ok(network) = net.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+    let db = state.base_dir.join(format!("{network}.db"));
+    let cc = "public, max-age=60, s-maxage=180, stale-while-revalidate=600";
+    serve_cached(&state, format!("{network}/inscriptions"), 90, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let items: Vec<_> = store
+            .inscription_breakdown()?
+            .into_iter()
+            .map(|(label, events, coins)| serde_json::json!({ "label": label, "events": events, "covenants": coins }))
+            .collect();
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "inscriptions": items,
+        }))?))
+    })
+    .await
 }
 
 async fn lanes_handler(
