@@ -2597,7 +2597,8 @@ function runDecode(updateHash) {
   const tpl = !truncated && window.kascovDisasm.matchTemplates
     ? window.kascovDisasm.matchTemplates(instructions, bytes)
     : null;
-  const summary =
+  const hexAll = window.kascovDisasm.toHex(bytes);
+  const statsLine =
     `<p class="decode-summary">` +
     `<span>${fmtInt(bytes.length)} byte${bytes.length === 1 ? '' : 's'} · ` +
     `${fmtInt(instructions.length)} instruction${instructions.length === 1 ? '' : 's'}</span>` +
@@ -2605,16 +2606,7 @@ function runDecode(updateHash) {
     (groups.includes('covenant') ? '<span class="flag flag-ops">covenant ops</span>' : '') +
     (groups.includes('zk') ? '<span class="flag flag-ops">zk ops</span>' : '') +
     (truncated ? '<span class="flag flag-no">truncated / malformed tail</span>' : '') +
-    `</p>` +
-    lintPanelHtml(instructions) +
-    zkPanelHtml(instructions, window.kascovDisasm.toHex(bytes)) +
-    (tpl ? verifiedContractHtml(window.kascovDisasm.toHex(bytes)) || templateLine(tpl.name, tpl.fields) : '') +
-    '<div id="registry-panel"></div>' +
-    explainerPanelHtml(tpl) +
-    simulatePanelHtml(tpl, window.kascovDisasm.toHex(bytes)) +
-    genCta(tpl) +
-    genPanelHtml(tpl, bytes) +
-    debugCtaHtml(bytes);
+    `</p>`;
   const shown = decodeShowAll ? instructions : instructions.slice(0, DECODE_WINDOW);
   const rows = shown.map((inst) => {
     const dataBit = inst.data && inst.data.length
@@ -2632,8 +2624,19 @@ function runDecode(updateHash) {
         : `show all ${fmtInt(instructions.length)} instructions ↓`) +
       `</button></div>`
     : '';
-  out.innerHTML = summary + `<div class="inst-list">${rows}</div>` + foot;
-  checkVerifiedRegistry(window.kascovDisasm.toHex(bytes));
+  // TIERS — Identity (what it is) · Understand (read the logic) · Deep tools.
+  const identity = statsLine + (tpl ? verifiedContractHtml(hexAll) || templateLine(tpl.name, tpl.fields) : '');
+  const disasm = `<div class="inst-list">${rows}</div>` + foot;
+  const understand = explainerPanelHtml(tpl) + disasm + lintPanelHtml(instructions) + '<div id="registry-panel"></div>';
+  const deepTools =
+    `<div class="deep-tools-head dim">deep tools</div>` +
+    zkPanelHtml(instructions, hexAll) +
+    simulatePanelHtml(tpl, hexAll) +
+    genCta(tpl) +
+    genPanelHtml(tpl, bytes) +
+    debugCtaHtml(bytes);
+  out.innerHTML = identity + understand + deepTools;
+  checkVerifiedRegistry(hexAll);
   if (updateHash && cleanKey.length <= DECODE_SHARE_MAX) {
     /* replaceState keeps the link shareable without re-triggering render;
        megabyte URLs help nobody, so huge scripts skip it */
