@@ -1805,6 +1805,8 @@ function lintCovenant(instructions) {
   const timelock = has('OpCheckSequenceVerify', 'OpCheckLockTimeVerify');
   const outSpk = has('OpTxOutputSpk', 'OpTxOutputSpkLen', 'OpTxOutputSpkSubstr');
   const outVal = has('OpTxOutputAmount');
+  // covenants can also pin outputs by covenant-id / authorizing-input, not just spk/value
+  const outCov = has('OpOutputCovenantId', 'OpCovOutputCount', 'OpCovOutputIdx', 'OpAuthOutputCount', 'OpAuthOutputIdx', 'OpOutputAuthorizingInput');
   const introspection = instructions.some((i) => /^Op(Tx|Cov|Outpoint|Auth)|CovenantId/.test(i.name));
   const opreturn = has('OpReturn');
   const f = [];
@@ -1812,7 +1814,7 @@ function lintCovenant(instructions) {
   else if (zk) f.push(['ok', 'requires a ZK proof', 'spending needs a valid zero-knowledge proof (KIP-16).']);
   else if (hashlock) f.push(['ok', 'gated by a hash preimage', 'spending needs a value that hashes to a committed digest.']);
   else f.push(['high', 'no authentication', 'needs no signature, hash preimage, or ZK proof — anyone who meets its other conditions can spend it.']);
-  if (outSpk || outVal) f.push(['ok', 'constrains its outputs', 'it checks where and/or how much the funds move — the spender can’t freely redirect them.']);
+  if (outSpk || outVal || outCov) f.push(['ok', 'constrains its outputs', 'it checks the output destination, amount, or covenant-id — the spender can’t freely redirect the funds.']);
   else if (introspection) f.push(['warn', 'reads the tx but doesn’t pin outputs', 'it inspects the spending transaction but never checks the output destination or amount.']);
   if (timelock) f.push(['ok', 'enforces a timelock', 'a time lock gates at least one spend path.']);
   if (opreturn) f.push(['warn', 'contains OpReturn', 'an always-fail opcode — one branch can never be spent; confirm that’s deliberate.']);
