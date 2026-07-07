@@ -2526,3 +2526,9 @@ details.collapse-sec > summary:hover h2 { color: var(--accent); }
 .compile-tpl { color: var(--accent); font-size: 0.9rem; margin-bottom: 0.5rem; }
 .compile-actions { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; }
 @media (max-width: 720px) { .compiler-grid { grid-template-columns: 1fr; } }
+
+/* verify-and-publish: community source + publish result */
+.registry-src { margin: 0.7rem 0; }
+.registry-src > summary { cursor: pointer; list-style: none; }
+.registry-src > summary::-webkit-details-marker { display: none; }
+.compile-publish-result:not(:empty) { margin-top: 0.7rem; }

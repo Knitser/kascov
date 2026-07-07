@@ -56,6 +56,25 @@ CREATE TABLE IF NOT EXISTS covenant_utxos (
 CREATE INDEX IF NOT EXISTS utxo_by_covenant ON covenant_utxos(covenant_id);
 CREATE INDEX IF NOT EXISTS utxo_by_created ON covenant_utxos(created_block);
 CREATE INDEX IF NOT EXISTS utxo_by_spent ON covenant_utxos(spent_block) WHERE spent_block IS NOT NULL;
+-- community-verified source: a compiled program proven byte-identical to
+-- submitted SilverScript source (verify-and-publish).
+CREATE TABLE IF NOT EXISTS verified_sources (
+    program_hash TEXT PRIMARY KEY,
+    program_hex TEXT NOT NULL,
+    source TEXT NOT NULL,
+    args TEXT NOT NULL,
+    template TEXT,
+    verified_at INTEGER NOT NULL
+);
+-- covenant event alerting: POST a webhook when a matching event fires.
+CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    covenant_id BLOB,
+    kind TEXT,
+    url TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS webhook_by_covenant ON webhook_subscriptions(covenant_id);
 ";
 
 pub struct Store {
@@ -1140,6 +1159,62 @@ impl Store {
         out.sort_by(|a, b| b.1.cmp(&a.1));
         out.truncate(60);
         Ok(out)
+    }
+
+    /// Record a community-verified source (proven byte-identical to a compiled
+    /// program). Keyed by the program's blake2b hash.
+    pub fn put_verified_source(&self, hash: &str, hex: &str, source: &str, args: &str, template: Option<&str>, now_ms: u64) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO verified_sources (program_hash, program_hex, source, args, template, verified_at) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![hash, hex, source, args, template, now_ms as i64],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Fetch a published source by program hash → (source, args, template, verified_at).
+    pub fn get_verified_source(&self, hash: &str) -> Result<Option<(String, String, Option<String>, u64)>> {
+        self.conn
+            .query_row(
+                "SELECT source, args, template, verified_at FROM verified_sources WHERE program_hash = ?1",
+                params![hash],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, i64>(3)? as u64)),
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
+    /// Add a webhook subscription (covenant_id / kind NULL = wildcard). Returns its id.
+    pub fn add_subscription(&self, covenant_id: Option<&[u8]>, kind: Option<&str>, url: &str, now_ms: u64) -> Result<i64> {
+        self.conn
+            .execute(
+                "INSERT INTO webhook_subscriptions (covenant_id, kind, url, created_at) VALUES (?1,?2,?3,?4)",
+                params![covenant_id, kind, url, now_ms as i64],
+            )
+            .map_err(db_err)?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Remove a subscription by id. Returns whether one was deleted.
+    pub fn delete_subscription(&self, id: i64) -> Result<bool> {
+        let n = self.conn.execute("DELETE FROM webhook_subscriptions WHERE id = ?1", params![id]).map_err(db_err)?;
+        Ok(n > 0)
+    }
+
+    /// Webhook URLs matching an event (covenant_id + kind; NULL columns are wildcards).
+    pub fn subscriptions_for(&self, covenant_id: &[u8], kind: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT url FROM webhook_subscriptions WHERE (covenant_id IS NULL OR covenant_id = ?1) AND (kind IS NULL OR kind = ?2)")
+            .map_err(db_err)?;
+        let rows = stmt.query_map(params![covenant_id, kind], |r| r.get::<_, String>(0)).map_err(db_err)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(db_err)
+    }
+
+    /// Total active subscriptions (for the fire loop to skip work when zero).
+    pub fn subscription_count(&self) -> Result<u64> {
+        self.conn.query_row("SELECT COUNT(*) FROM webhook_subscriptions", [], |r| r.get::<_, i64>(0)).map(|n| n as u64).map_err(db_err)
     }
 
     /// Transactions that touched more than one covenant, with the covenants

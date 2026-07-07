@@ -1983,13 +1983,16 @@ function initCompiler() {
   if (args && !args.value) args.value = SILVERSCRIPT_EXAMPLE.args;
 }
 
+let lastCompiled = null;
 function renderCompileResult(d) {
   const out = $('#compiler-result');
   if (!out) return;
   if (!d || !d.ok) {
+    lastCompiled = null;
     out.innerHTML = `<div class="compile-err">✗ ${esc((d && d.error) || 'compile failed')}</div>`;
     return;
   }
+  lastCompiled = d.hex;
   const D = window.kascovDisasm;
   let decoded = '';
   const bytes = D && D.parseHex(d.hex);
@@ -2001,7 +2004,29 @@ function renderCompileResult(d) {
     `<pre class="compile-hex script" data-copy="${esc(d.hex)}">${esc(d.hex)}</pre>` +
     decoded +
     `<div class="compile-actions"><a class="btn" href="#/decode?s=${esc(d.hex)}">▶ decode / debug it</a>` +
-    `<span class="dim"> then deploy with <code class="mono">kascov-lab deploy --program-hex …</code></span></div>`;
+    `<button type="button" class="chip" data-action="compile-publish">publish as verified source</button>` +
+    `<span class="dim"> then deploy with <code class="mono">kascov-lab deploy --program-hex …</code></span></div>` +
+    `<div id="publish-result" class="compile-publish-result"></div>`;
+}
+
+/* community verify-and-publish: if a decoded program's hash has a published
+   SilverScript source, show it. Async, injected after the decode renders. */
+function checkVerifiedRegistry(hex) {
+  const host = document.getElementById('registry-panel');
+  if (!host || !hex || !window.kascovBlake2b256) return;
+  const bytes = window.kascovDisasm.parseHex(hex);
+  if (!bytes) return;
+  const hash = window.kascovDisasm.toHex(window.kascovBlake2b256(bytes));
+  fetch(`data/${state.network}/verified/${hash}`, { cache: 'no-cache' })
+    .then((r) => r.json())
+    .then((d) => {
+      if (!d || !d.ok || !d.source) return;
+      host.innerHTML = `<details class="verified-contract registry-src"><summary><span class="vc-badge">✓ community-verified source</span>` +
+        `<strong>${esc(d.template || 'published SilverScript')}</strong>` +
+        `<span class="vc-proof">compiles byte-identical to this program ✓</span></summary>` +
+        `<pre class="script">${esc(d.source)}</pre></details>`;
+    })
+    .catch(() => {});
 }
 
 /* ---- in-browser spend simulation (worker runs the real script engine) ---- */
@@ -2575,6 +2600,7 @@ function runDecode(updateHash) {
     lintPanelHtml(instructions) +
     zkPanelHtml(instructions) +
     (tpl ? verifiedContractHtml(window.kascovDisasm.toHex(bytes)) || templateLine(tpl.name, tpl.fields) : '') +
+    '<div id="registry-panel"></div>' +
     explainerPanelHtml(tpl) +
     simulatePanelHtml(tpl, window.kascovDisasm.toHex(bytes)) +
     genCta(tpl) +
@@ -2598,6 +2624,7 @@ function runDecode(updateHash) {
       `</button></div>`
     : '';
   out.innerHTML = summary + `<div class="inst-list">${rows}</div>` + foot;
+  checkVerifiedRegistry(window.kascovDisasm.toHex(bytes));
   if (updateHash && cleanKey.length <= DECODE_SHARE_MAX) {
     /* replaceState keeps the link shareable without re-triggering render;
        megabyte URLs help nobody, so huge scripts skip it */
@@ -3326,6 +3353,21 @@ document.addEventListener('click', (e) => {
     if (args) args.value = SILVERSCRIPT_EXAMPLE.args;
     const out = $('#compiler-result');
     if (out) out.innerHTML = '';
+  } else if (action === 'compile-publish') {
+    const src = $('#compiler-src');
+    const argsEl = $('#compiler-args');
+    const out = $('#publish-result');
+    if (!lastCompiled || !src || !out) return;
+    out.innerHTML = '<span class="dim">publishing…</span>';
+    const args = (argsEl ? argsEl.value : '').split('\n').map((s) => s.trim()).filter(Boolean);
+    fetch(`data/${state.network}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: src.value, args }) })
+      .then((r) => r.json())
+      .then((d) => {
+        out.innerHTML = d.ok
+          ? `<div class="compile-ok">✓ published — any coin whose program hashes <code class="mono">${esc(d.hash.slice(0, 12))}…</code> now shows this source on its decode page</div>`
+          : `<div class="compile-err">${esc(d.error || 'publish failed')}</div>`;
+      })
+      .catch(() => { out.innerHTML = '<div class="compile-err">publish unavailable</div>'; });
   } else if (action === 'graph-prev') {
     graphIdx -= 1;
     renderAppGraph();
