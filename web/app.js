@@ -1753,6 +1753,45 @@ function verifiedContractHtml(programHex) {
     `</div>`;
 }
 
+/* ---- in-browser spend simulation (worker runs the real script engine) ---- */
+const SIM_VALUE = 100_000_000; // simulate on a 1 TKAS coin
+const SIM_SCENARIOS = {
+  'SilverScript · Escrow': [
+    { label: 'arbiter releases to buyer', entrypoint: 'spend', recipient: 'buyer' },
+    { label: 'arbiter releases to seller', entrypoint: 'spend', recipient: 'seller' },
+    { label: 'arbiter sends it elsewhere', entrypoint: 'spend', recipient: 'other' },
+    { label: 'arbiter skims 5000 sompi', entrypoint: 'spend', recipient: 'buyer', amount: SIM_VALUE - 6000 },
+  ],
+  'SilverScript · Mecenas': [
+    { label: 'funder reclaims the pledge', entrypoint: 'reclaim', recipient: 'self' },
+  ],
+  'SilverScript · LastWill': [
+    { label: 'owner spends with the cold key', entrypoint: 'cold', recipient: 'self' },
+    { label: 'heir inherits', entrypoint: 'inherit', recipient: 'self' },
+  ],
+};
+
+function simulatePanelHtml(tpl, hex) {
+  if (!tpl || !SIM_SCENARIOS[tpl.name] || !hex) return '';
+  const chips = SIM_SCENARIOS[tpl.name]
+    .map((s, i) => `<button type="button" class="sim-chip" data-action="sim-run" data-i="${i}">${esc(s.label)}</button>`)
+    .join('');
+  return `<div class="sim-panel" data-hex="${esc(hex)}" data-tpl="${esc(tpl.name)}">` +
+    `<div class="sim-head"><span class="sim-badge">▶ simulate</span><strong>try a spend — without broadcasting</strong></div>` +
+    `<p class="sim-sub dim">each runs through Kaspa&rsquo;s real script engine and reports what a node would decide.</p>` +
+    `<div class="sim-chips">${chips}</div>` +
+    `<div class="sim-result"></div></div>`;
+}
+
+function simVerdictHtml(d) {
+  if (!d || !d.ok) return `<div class="sim-verdict sim-na">can&rsquo;t simulate — ${esc((d && d.verdict) || 'unknown')}</div>`;
+  const cls = d.pass ? 'sim-pass' : 'sim-fail';
+  const icon = d.pass ? '✓ PASS' : '✗ FAIL';
+  const rule = !d.pass && d.rule ? `<div class="sim-rule">↳ ${esc(d.rule)}</div>` : '';
+  return `<div class="sim-verdict ${cls}"><span class="sim-icon">${icon}</span><span>${esc(d.verdict)}</span></div>` +
+    rule + `<p class="sim-note dim">${esc(d.note)}</p>`;
+}
+
 /* KIP-16 ZK-app detection. A covenant that calls OpZkPrecompile verifies a
    zero-knowledge proof ON-CHAIN — Kaspa's precompile checks BOTH Groth16
    (verifier tag 0x20) and RISC Zero zkVM (tag 0x21) proofs. No explorer in
@@ -2253,6 +2292,7 @@ function runDecode(updateHash) {
     `</p>` +
     zkPanelHtml(instructions) +
     (tpl ? verifiedContractHtml(window.kascovDisasm.toHex(bytes)) || templateLine(tpl.name, tpl.fields) : '') +
+    simulatePanelHtml(tpl, window.kascovDisasm.toHex(bytes)) +
     genCta(tpl) +
     genPanelHtml(tpl, bytes) +
     debugCtaHtml(bytes);
@@ -2983,6 +3023,20 @@ document.addEventListener('click', (e) => {
         location.hash = `#/${state.network}/c/${route.id}?program=${val}`;
       }
     }
+  } else if (action === 'sim-run') {
+    const panel = el.closest('.sim-panel');
+    const scenario = (SIM_SCENARIOS[panel && panel.dataset.tpl] || [])[parseInt(el.dataset.i, 10)];
+    const out = panel && panel.querySelector('.sim-result');
+    if (!panel || !scenario || !out) return;
+    panel.querySelectorAll('.sim-chip').forEach((c) => c.classList.remove('sim-active'));
+    el.classList.add('sim-active');
+    out.innerHTML = '<span class="dim">running through the script engine…</span>';
+    const body = { program_hex: panel.dataset.hex, entrypoint: scenario.entrypoint, recipient: scenario.recipient, value: SIM_VALUE };
+    if (scenario.amount != null) body.amount = scenario.amount;
+    fetch(`data/${state.network}/simulate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then((r) => r.json())
+      .then((d) => { out.innerHTML = simVerdictHtml(d); })
+      .catch(() => { out.innerHTML = '<div class="sim-verdict sim-na">simulation unavailable</div>'; });
   } else if (action === 'dbg-open') {
     openDebugger(el.dataset.prog || '');
   } else if (action === 'dbg-prev') {

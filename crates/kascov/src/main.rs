@@ -989,7 +989,7 @@ async fn serve(
     db_dir: Option<std::path::PathBuf>,
     max_events: u64,
 ) -> Result<()> {
-    use axum::routing::get;
+    use axum::routing::{get, post};
 
     let networks: Vec<Network> = networks
         .split(',')
@@ -1020,6 +1020,7 @@ async fn serve(
     });
     let app = axum::Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/data/{network}/simulate", post(simulate_handler))
         .route("/data/{file}", get(data_handler))
         .route("/data/{network}/c/{id}", get(detail_handler))
         .route("/data/{network}/tx/{txid}", get(tx_handler))
@@ -1337,6 +1338,29 @@ fn build_families(store: &Store, network: kascov_core::Network) -> Result<serde_
         "tip_at_ms": tip.map(|t| t.1),
         "families": out,
     }))
+}
+
+/// POST /data/{network}/simulate — run a hypothetical covenant spend through
+/// the real script engine (kascov-sim), off-chain. Network-agnostic (pure
+/// computation); the {network} segment just keeps it under the /data rewrite.
+async fn simulate_handler(
+    axum::extract::Path(_net): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<kascov_sim::SimRequest>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    if req.program_hex.len() > 20_000 {
+        return (StatusCode::BAD_REQUEST, "program too large").into_response();
+    }
+    match tokio::task::spawn_blocking(move || kascov_sim::simulate(&req)).await {
+        Ok(r) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")],
+            serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()),
+        )
+            .into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "simulation failed").into_response(),
+    }
 }
 
 async fn lanes_handler(
