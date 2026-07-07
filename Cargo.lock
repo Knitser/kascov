@@ -2060,6 +2060,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "blake2b_simd",
  "bytes",
  "clap",
  "comfy-table",
@@ -2070,6 +2071,7 @@ dependencies = [
  "kascov-decode",
  "kascov-sim",
  "kaspa-addresses",
+ "serde",
  "serde_json",
  "tokio",
  "tower-http",
