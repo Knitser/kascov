@@ -170,23 +170,23 @@
         <div id="template-bars" class="template-bars"></div>
       </section>
 
-      <section class="families" id="section-families" aria-label="Apps" hidden>
-        <h2>apps · coins that move together</h2>
+      <details class="families collapse-sec" id="section-families" aria-label="Apps" hidden>
+        <summary><h2>apps · coins that move together</h2><span class="collapse-count dim" id="families-count"></span></summary>
         <p class="dim families-sub">a single transaction moving several smart coins is a multi-contract flow — a covenant <em>app</em>.</p>
         <div id="families-row" class="mini-grid"></div>
-      </section>
+      </details>
 
-      <section class="lanes" id="section-lanes" aria-label="Based-app activity" hidden>
-        <h2>based-app activity · by namespace</h2>
+      <details class="lanes collapse-sec" id="section-lanes" aria-label="Based-app activity" hidden>
+        <summary><h2>based-app activity · by namespace</h2><span class="collapse-count dim" id="lanes-count"></span></summary>
         <p class="dim families-sub">smart coins whose transactions carry an app payload, grouped by its namespace — the first per-namespace view of Kaspa's based apps.</p>
         <div id="lanes-row"></div>
-      </section>
+      </details>
 
-      <section class="lanes" id="section-inscriptions" aria-label="Inscriptions" hidden>
-        <h2>inscriptions · what&rsquo;s being written on-chain</h2>
+      <details class="lanes collapse-sec" id="section-inscriptions" aria-label="Inscriptions" hidden>
+        <summary><h2>inscriptions · what&rsquo;s being written on-chain</h2><span class="collapse-count dim" id="inscriptions-count"></span></summary>
         <p class="dim families-sub">the JSON payloads, decoded straight from the bytes — each covenant&rsquo;s protocol, operation and token ticker, exactly as written. no registry, no labels we invented.</p>
         <div id="inscriptions-row"></div>
-      </section>
+      </details>
 
       <section class="stories" id="section-stories" aria-label="Latest stories">
         <h2>latest stories</h2>

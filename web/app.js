@@ -516,6 +516,8 @@ function renderLanes(network) {
   const lanes = (cached.data && cached.data.lanes) || [];
   if (!lanes.length) { section.hidden = true; return; }
   section.hidden = false;
+  const cnt = $('#lanes-count');
+  if (cnt) cnt.textContent = `${lanes.length} namespace${lanes.length === 1 ? '' : 's'}`;
   const max = Math.max(1, ...lanes.map((l) => l.events));
   host.innerHTML = lanes.slice(0, 14).map((l) => {
     const w = Math.max((l.events / max) * 100, 3).toFixed(1);
@@ -556,6 +558,8 @@ function renderInscriptions(network) {
   const items = (cached.data && cached.data.inscriptions) || [];
   if (!items.length) { section.hidden = true; return; }
   section.hidden = false;
+  const cnt = $('#inscriptions-count');
+  if (cnt) cnt.textContent = `${items.length} kind${items.length === 1 ? '' : 's'}`;
   const max = Math.max(1, ...items.map((l) => l.events));
   host.innerHTML = items.slice(0, 14).map((l) => {
     const w = Math.max((l.events / max) * 100, 3).toFixed(1);
@@ -596,6 +600,8 @@ function renderFamilies(network) {
   const fams = (cached.data && cached.data.families) || [];
   if (!fams.length) { section.hidden = true; return; }
   section.hidden = false;
+  const fcnt = $('#families-count');
+  if (fcnt) fcnt.textContent = `${fams.length} app${fams.length === 1 ? '' : 's'}`;
   host.innerHTML = fams.slice(0, 6).map((f) => {
     const named = f.members.filter((m) => m.template && !/^p2(pk|sh)/.test(m.template));
     const label = named.length

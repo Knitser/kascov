@@ -2487,3 +2487,12 @@ a.build-card:hover { transform: translateY(-3px); border-color: var(--border-str
 .lint-warn .lint-dot { background: var(--burn); box-shadow: 0 0 8px var(--burn); }
 .lint-high .lint-dot { background: #ff6b6b; box-shadow: 0 0 10px #ff6b6b; }
 .lint-high strong { color: #ff8f8f; }
+
+/* collapsible explore sections (based-app activity, inscriptions, apps) */
+details.collapse-sec > summary { cursor: pointer; list-style: none; display: flex; align-items: baseline; gap: 0.7rem; padding: 0.25rem 0; }
+details.collapse-sec > summary::-webkit-details-marker { display: none; }
+details.collapse-sec > summary::before { content: '▸'; color: var(--accent); font-size: 0.85rem; align-self: center; transition: transform 0.15s ease; }
+details.collapse-sec[open] > summary::before { transform: rotate(90deg); }
+details.collapse-sec > summary h2 { margin: 0; display: inline-block; }
+details.collapse-sec > summary:hover h2 { color: var(--accent); }
+.collapse-count { font-size: 0.85rem; font-family: var(--mono); }
