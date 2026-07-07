@@ -2545,3 +2545,9 @@ details.collapse-sec > summary:hover h2 { color: var(--accent); }
 .pg-mode { padding: 0.45rem 1.1rem; border-radius: 999px; font-size: 0.92rem; font-weight: 500; color: var(--muted); text-decoration: none; transition: background 0.15s, color 0.15s; }
 .pg-mode:hover { color: var(--text); text-decoration: none; }
 .pg-mode.pg-active { background: var(--accent); color: var(--bg); font-weight: 600; }
+
+/* simulate panel is now collapsible (a deep tool) */
+details.sim-panel > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 0.5rem; }
+details.sim-panel > summary::-webkit-details-marker { display: none; }
+details.sim-panel > summary::before { content: '▸'; color: var(--accent); font-size: 0.85rem; transition: transform 0.15s; }
+details.sim-panel[open] > summary::before { transform: rotate(90deg); }

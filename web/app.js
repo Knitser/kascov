@@ -2052,11 +2052,11 @@ function simulatePanelHtml(tpl, hex) {
   const chips = SIM_SCENARIOS[tpl.name]
     .map((s, i) => `<button type="button" class="sim-chip" data-action="sim-run" data-i="${i}">${esc(s.label)}</button>`)
     .join('');
-  return `<div class="sim-panel" data-hex="${esc(hex)}" data-tpl="${esc(tpl.name)}">` +
-    `<div class="sim-head"><span class="sim-badge">▶ simulate</span><strong>try a spend — without broadcasting</strong></div>` +
+  return `<details class="sim-panel" data-hex="${esc(hex)}" data-tpl="${esc(tpl.name)}">` +
+    `<summary class="sim-head"><span class="sim-badge">▶ simulate</span> <strong>try a spend — without broadcasting</strong></summary>` +
     `<p class="sim-sub dim">each runs through Kaspa&rsquo;s real script engine and reports what a node would decide.</p>` +
     `<div class="sim-chips">${chips}</div>` +
-    `<div class="sim-result"></div></div>`;
+    `<div class="sim-result"></div></details>`;
 }
 
 let lastSimTrace = null;
