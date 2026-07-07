@@ -1794,6 +1794,41 @@ function verifiedContractHtml(programHex) {
     `</div>`;
 }
 
+/* ---- covenant security lint — a static audit from the opcodes. No covenant
+   linter exists anywhere; this flags the classic gaps from the disassembly. */
+function lintCovenant(instructions) {
+  const names = new Set(instructions.map((i) => i.name));
+  const has = (...ns) => ns.some((n) => names.has(n));
+  const sig = has('OpCheckSig', 'OpCheckSigVerify', 'OpCheckSigECDSA', 'OpCheckMultiSig', 'OpCheckMultiSigVerify', 'OpCheckMultiSigECDSA', 'OpCheckSigFromStack', 'OpCheckSigFromStackECDSA');
+  const zk = has('OpZkPrecompile');
+  const hashlock = has('OpBlake2b', 'OpBlake3', 'OpSHA256') && has('OpEqual', 'OpEqualVerify');
+  const timelock = has('OpCheckSequenceVerify', 'OpCheckLockTimeVerify');
+  const outSpk = has('OpTxOutputSpk', 'OpTxOutputSpkLen', 'OpTxOutputSpkSubstr');
+  const outVal = has('OpTxOutputAmount');
+  const introspection = instructions.some((i) => /^Op(Tx|Cov|Outpoint|Auth)|CovenantId/.test(i.name));
+  const opreturn = has('OpReturn');
+  const f = [];
+  if (sig) f.push(['ok', 'requires a signature', 'a valid signature from the committed key is needed to spend.']);
+  else if (zk) f.push(['ok', 'requires a ZK proof', 'spending needs a valid zero-knowledge proof (KIP-16).']);
+  else if (hashlock) f.push(['ok', 'gated by a hash preimage', 'spending needs a value that hashes to a committed digest.']);
+  else f.push(['high', 'no authentication', 'needs no signature, hash preimage, or ZK proof — anyone who meets its other conditions can spend it.']);
+  if (outSpk || outVal) f.push(['ok', 'constrains its outputs', 'it checks where and/or how much the funds move — the spender can’t freely redirect them.']);
+  else if (introspection) f.push(['warn', 'reads the tx but doesn’t pin outputs', 'it inspects the spending transaction but never checks the output destination or amount.']);
+  if (timelock) f.push(['ok', 'enforces a timelock', 'a time lock gates at least one spend path.']);
+  if (opreturn) f.push(['warn', 'contains OpReturn', 'an always-fail opcode — one branch can never be spent; confirm that’s deliberate.']);
+  return f.map(([sev, title, body]) => ({ sev, title, body }));
+}
+
+function lintPanelHtml(instructions) {
+  if (!instructions || !instructions.length) return '';
+  const f = lintCovenant(instructions);
+  const highs = f.filter((x) => x.sev === 'high').length;
+  const warns = f.filter((x) => x.sev === 'warn').length;
+  const head = highs ? `${highs} issue${highs > 1 ? 's' : ''} found` : warns ? `${warns} thing${warns > 1 ? 's' : ''} to check` : 'looks well-formed';
+  const rows = f.map((x) => `<div class="lint-row lint-${x.sev}"><span class="lint-dot"></span><div><strong>${esc(x.title)}</strong><span class="dim"> — ${esc(x.body)}</span></div></div>`).join('');
+  return `<details class="lint-panel"${highs ? ' open' : ''}><summary><span class="lint-badge">🛡 security check</span> <span class="dim">${head}</span></summary><div class="lint-body">${rows}</div></details>`;
+}
+
 /* ---- in-browser spend simulation (worker runs the real script engine) ---- */
 const SIM_VALUE = 100_000_000; // simulate on a 1 TKAS coin
 const SIM_SCENARIOS = {
@@ -2331,6 +2366,7 @@ function runDecode(updateHash) {
     (groups.includes('zk') ? '<span class="flag flag-ops">zk ops</span>' : '') +
     (truncated ? '<span class="flag flag-no">truncated / malformed tail</span>' : '') +
     `</p>` +
+    lintPanelHtml(instructions) +
     zkPanelHtml(instructions) +
     (tpl ? verifiedContractHtml(window.kascovDisasm.toHex(bytes)) || templateLine(tpl.name, tpl.fields) : '') +
     simulatePanelHtml(tpl, window.kascovDisasm.toHex(bytes)) +
