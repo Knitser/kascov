@@ -1704,6 +1704,16 @@ function renderLanding(entry) {
   document.title = 'kascov — watch Kaspa’s smart coins live their lives';
   document.querySelectorAll('[data-net-word]').forEach((el) => { el.textContent = net.word; });
 
+  /* a <video autoplay> inside a view that starts hidden won't begin on its own
+     when the view is later shown — so nudge it (muted → autoplay is allowed).
+     This is why it only played after a refresh before. */
+  const tv = document.getElementById('tour-video');
+  if (tv) {
+    tv.muted = true;
+    const p = tv.play();
+    if (p && p.catch) p.catch(() => {});
+  }
+
   const s = data.stats;
   $('#hero-stats').innerHTML = [
     { n: s.covenants, label: 'smart coins tracked' },

@@ -2565,3 +2565,7 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
 .cli-wall-sum::before { content: '▸ '; color: var(--accent); }
 .cli-wall[open] .cli-wall-sum::before { content: '▾ '; }
 .cli-wall:not([open]) > *:not(summary) { display: none; }
+
+/* full-bleed landing tour video */
+.tour-video-wrap { width: 100vw; margin-left: calc(50% - 50vw); margin-top: 2.5rem; margin-bottom: 0.5rem; line-height: 0; background: #05100e; overflow: hidden; }
+.tour-video { display: block; width: 100%; height: auto; }
