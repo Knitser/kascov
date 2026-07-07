@@ -1800,6 +1800,34 @@ function verifiedContractHtml(programHex) {
     `</div>`;
 }
 
+/* ---- plain-English contract explainer — turns a recognized template's
+   decoded fields into a sentence anyone can read. ---- */
+function explainCovenant(tpl) {
+  if (!tpl || !tpl.fields) return '';
+  const D = window.kascovDisasm, G = window.kascovGen;
+  const get = (n) => { const x = tpl.fields.find((f) => f.name === n); return x ? x.value : ''; };
+  const shortHex = (v) => (v && v.length > 16 ? v.slice(0, 8) + '…' + v.slice(-4) : v || '?');
+  const amount = (hex) => { try { return G.sompiToTkas(D.snumDecode(D.parseHex(hex))) + ' TKAS'; } catch (e) { return shortHex(hex); } };
+  const daa = (hex) => { try { return D.snumDecode(D.parseHex(hex)) + ' DAA'; } catch (e) { return shortHex(hex); } };
+  const c = (s) => `<code class="mono">${esc(s)}</code>`;
+  switch (tpl.name) {
+    case 'SilverScript · Escrow':
+      return `This is an <strong>escrow</strong>. The funds stay locked until the <strong>arbiter</strong> (key ${c(shortHex(get('arbiter_hash')))}) signs a release — and the contract forces that payout to go to <em>either</em> the buyer (${c(shortHex(get('buyer')))}) or the seller (${c(shortHex(get('seller')))}), the full amount minus the fee. No third address can be paid, and neither party can move it alone. The arbiter decides the outcome but can never touch the money.`;
+    case 'SilverScript · Mecenas':
+      return `This is a <strong>Mecenas</strong> — a recurring on-chain allowance. The <strong>funder</strong> (key ${c(shortHex(get('funder_hash')))}) funds it; the <strong>recipient</strong> (${c(shortHex(get('recipient')))}) may withdraw up to ${c(amount(get('pledge')))} once every ${c(daa(get('period')))} window, and the funder can reclaim the rest. The coin enforces it — the recipient can’t take more than the pledge per window, and only the funder can cancel.`;
+    case 'SilverScript · LastWill':
+      return `This is a <strong>LastWill</strong> — a dead-man’s-switch inheritance. Day-to-day the owner spends with a <strong>hot key</strong> (${c(shortHex(get('hot_hash')))}); a <strong>cold key</strong> (${c(shortHex(get('cold_hash')))}) is the backup that can always reclaim and reset the clock. If the owner goes silent long enough, the <strong>heir</strong> (${c(shortHex(get('inheritor_hash')))}) can inherit — but the cold key overrides them, so inheritance only fires on genuine inactivity.`;
+    default:
+      return '';
+  }
+}
+
+function explainerPanelHtml(tpl) {
+  const html = explainCovenant(tpl);
+  if (!html) return '';
+  return `<details class="explain-panel" open><summary><span class="explain-badge">📖 in plain English</span></summary><p class="explain-body">${html}</p></details>`;
+}
+
 /* ---- covenant security lint — a static audit from the opcodes. No covenant
    linter exists anywhere; this flags the classic gaps from the disassembly. */
 function lintCovenant(instructions) {
@@ -2377,6 +2405,7 @@ function runDecode(updateHash) {
     lintPanelHtml(instructions) +
     zkPanelHtml(instructions) +
     (tpl ? verifiedContractHtml(window.kascovDisasm.toHex(bytes)) || templateLine(tpl.name, tpl.fields) : '') +
+    explainerPanelHtml(tpl) +
     simulatePanelHtml(tpl, window.kascovDisasm.toHex(bytes)) +
     genCta(tpl) +
     genPanelHtml(tpl, bytes) +

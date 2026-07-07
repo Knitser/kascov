@@ -2496,3 +2496,12 @@ details.collapse-sec[open] > summary::before { transform: rotate(90deg); }
 details.collapse-sec > summary h2 { margin: 0; display: inline-block; }
 details.collapse-sec > summary:hover h2 { color: var(--accent); }
 .collapse-count { font-size: 0.85rem; font-family: var(--mono); }
+
+/* plain-English explainer panel */
+.explain-panel { margin: 0.8rem 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); box-shadow: var(--hairline); overflow: hidden; }
+.explain-panel > summary { cursor: pointer; padding: 0.7rem 1rem; list-style: none; display: flex; align-items: center; gap: 0.5rem; }
+.explain-panel > summary::-webkit-details-marker { display: none; }
+.explain-badge { font-family: var(--mono); font-size: 0.74rem; font-weight: 600; color: var(--accent); }
+.explain-body { margin: 0; padding: 0 1rem 0.95rem; line-height: 1.62; color: var(--muted); max-width: 68ch; }
+.explain-body strong { color: var(--text); }
+.explain-body code { color: var(--accent); font-size: 0.86em; }
