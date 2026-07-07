@@ -265,11 +265,27 @@ impl Store {
         conn.execute_batch(SCHEMA).map_err(db_err)?;
         // Additive migrations for pre-existing databases (SQLite has no
         // ADD COLUMN IF NOT EXISTS; a duplicate-column error means done).
-        let _ = conn.execute("ALTER TABLE covenant_utxos ADD COLUMN spent_sig BLOB", []);
-        let _ = conn.execute("ALTER TABLE covenant_utxos ADD COLUMN spent_budget INTEGER", []);
-        let _ = conn.execute("ALTER TABLE covenant_events ADD COLUMN payload BLOB", []);
-        let _ = conn.execute("ALTER TABLE covenant_utxos ADD COLUMN template TEXT", []);
-        let _ = conn.execute("ALTER TABLE covenant_utxos ADD COLUMN revealed_template TEXT", []);
+        // Only ignore SQLITE_ERROR (1) with "duplicate column" — re-raise
+        // genuine failures like disk-full, I/O errors, or database corruption.
+        let migrations = [
+            "ALTER TABLE covenant_utxos ADD COLUMN spent_sig BLOB",
+            "ALTER TABLE covenant_utxos ADD COLUMN spent_budget INTEGER",
+            "ALTER TABLE covenant_events ADD COLUMN payload BLOB",
+            "ALTER TABLE covenant_utxos ADD COLUMN template TEXT",
+            "ALTER TABLE covenant_utxos ADD COLUMN revealed_template TEXT",
+        ];
+        for sql in &migrations {
+            if let Err(e) = conn.execute(sql, []) {
+                match &e {
+                    rusqlite::Error::SqliteFailure(err, _)
+                        if err.code == rusqlite::ErrorCode::Unknown =>
+                    {
+                        // SQLITE_ERROR — likely "duplicate column name"; skip.
+                    }
+                    _ => return Err(db_err(e)),
+                }
+            }
+        }
         // Partial "todo" indexes keep the backfill probe below O(1) once every
         // row is stamped. They reference the columns added above, so they must
         // be created here (after the ALTERs), never inside SCHEMA — and unlike
