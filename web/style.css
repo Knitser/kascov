@@ -2554,3 +2554,6 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
 
 /* deep-tools divider in the read tier stack */
 .deep-tools-head { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase; margin: 1.6rem 0 0.4rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+
+/* Write-mode template picker */
+.compiler-templates { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }

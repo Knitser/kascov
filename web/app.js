@@ -1976,6 +1976,27 @@ contract Escrow(byte[32] arbiter, pubkey buyer, pubkey seller) {
   args: `0x${'33'.repeat(32)}\n0x${'11'.repeat(32)}\n0x${'22'.repeat(32)}`,
 };
 
+/* the Write-mode template picker: each canonical contract + a set of valid
+   default constructor args (source comes from gen.js's SOURCES at click time). */
+const SILVERSCRIPT_EXAMPLES = {
+  'SilverScript · Escrow': { label: 'Escrow', args: [`0x${'33'.repeat(32)}`, `0x${'11'.repeat(32)}`, `0x${'22'.repeat(32)}`] },
+  'SilverScript · Mecenas': { label: 'Mecenas', args: [`0x${'44'.repeat(32)}`, `0x${'55'.repeat(32)}`, '100000000', '86400'] },
+  'SilverScript · LastWill': { label: 'LastWill', args: [`0x${'66'.repeat(32)}`, `0x${'77'.repeat(32)}`, `0x${'88'.repeat(32)}`] },
+};
+
+function loadTemplate(name) {
+  const src = $('#compiler-src');
+  const args = $('#compiler-args');
+  const out = $('#compiler-result');
+  const ex = SILVERSCRIPT_EXAMPLES[name];
+  const source = window.kascovGen && window.kascovGen.SOURCES ? window.kascovGen.SOURCES[name] : '';
+  if (src) src.value = name === 'blank' || !source ? '' : source;
+  if (args) args.value = name === 'blank' || !ex ? '' : ex.args.join('\n');
+  if (out) out.innerHTML = '';
+  const pub = $('#publish-result');
+  if (pub) pub.innerHTML = '';
+}
+
 function initCompiler() {
   const src = $('#compiler-src');
   const args = $('#compiler-args');
@@ -2470,8 +2491,8 @@ function genCta(tpl) {
   if (!info || !info.emitVerified) return ''; /* generator only offers itself when emit is proven */
   const open = genState && genState.open;
   return `<p class="gen-cta-row"><button type="button" class="btn btn-accent gen-cta" data-action="gen-toggle">` +
-    `${open ? 'close the generator ↑' : 'make this yours →'}</button>` +
-    `<span class="dim gen-cta-hint">edit the parameters, get your own deployable contract</span></p>`;
+    `${open ? 'close the editor ↑' : '✎ edit & redeploy this →'}</button>` +
+    `<span class="dim gen-cta-hint">re-make this contract with your own parameters, get deployable hex</span></p>`;
 }
 
 function genPanelHtml(tpl, bytes) {
@@ -3368,6 +3389,8 @@ document.addEventListener('click', (e) => {
     if (args) args.value = SILVERSCRIPT_EXAMPLE.args;
     const out = $('#compiler-result');
     if (out) out.innerHTML = '';
+  } else if (action === 'compile-template') {
+    loadTemplate(el.dataset.template);
   } else if (action === 'compile-publish') {
     const src = $('#compiler-src');
     const argsEl = $('#compiler-args');

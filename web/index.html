@@ -271,9 +271,6 @@
           <button type="button" class="chip" data-action="decode-load" data-example="lastwill">SilverScript · LastWill</button>
           <button type="button" class="chip" data-action="decode-load" data-example="zk">mainnet ZK covenant</button>
           <button type="button" class="chip" data-action="decode-load" data-example="groth">Groth16 proof</button>
-          <button type="button" class="chip chip-make" data-action="gen-example" data-example="mecenas">🛠 make a Mecenas</button>
-          <button type="button" class="chip chip-make" data-action="gen-example" data-example="escrow">🛠 make an Escrow</button>
-          <button type="button" class="chip chip-make" data-action="gen-example" data-example="lastwill">🛠 make a LastWill</button>
         </div>
       </div>
       <div id="decode-out" class="decode-out" aria-live="polite"></div>
@@ -309,6 +306,13 @@
       <section class="build-section" id="build-compiler">
         <h2>write &amp; compile SilverScript</h2>
         <p class="build-lead">Write a covenant in SilverScript and compile it to real Kaspa script right here — powered by the actual <code>silverc</code> compiler. Edit the source, set the constructor args, and get deployable hex.</p>
+        <div class="compiler-templates">
+          <span class="dim">start from a template:</span>
+          <button type="button" class="chip" data-action="compile-template" data-template="SilverScript · Escrow">Escrow</button>
+          <button type="button" class="chip" data-action="compile-template" data-template="SilverScript · Mecenas">Mecenas</button>
+          <button type="button" class="chip" data-action="compile-template" data-template="SilverScript · LastWill">LastWill</button>
+          <button type="button" class="chip" data-action="compile-template" data-template="blank">blank</button>
+        </div>
         <div class="compiler-grid">
           <div class="compiler-col">
             <label class="compiler-label">contract source</label>
@@ -319,7 +323,6 @@
             <textarea id="compiler-args" class="compiler-argsbox" spellcheck="false" autocapitalize="off"></textarea>
             <div class="compiler-controls">
               <button type="button" class="btn" data-action="compile-run">⚙ compile</button>
-              <button type="button" class="chip" data-action="compile-example">reset to Escrow example</button>
             </div>
           </div>
         </div>
