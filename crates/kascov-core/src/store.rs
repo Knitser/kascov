@@ -243,6 +243,58 @@ fn db_err(e: rusqlite::Error) -> Error {
     Error::Rpc(format!("store: {e}"))
 }
 
+/// Parse an inscription payload's first JSON value — raw `{"…`, or ASCII-hex-
+/// encoded — tolerating trailing binary after the object.
+fn extract_inscription_json(payload: &[u8]) -> Option<serde_json::Value> {
+    let first = |bytes: &[u8]| {
+        serde_json::Deserializer::from_slice(bytes)
+            .into_iter::<serde_json::Value>()
+            .next()
+            .and_then(|r| r.ok())
+    };
+    if payload.starts_with(b"{\"") {
+        return first(payload);
+    }
+    if payload.starts_with(b"7b22") {
+        let run: Vec<u8> = payload.iter().copied().take_while(|b| b.is_ascii_hexdigit()).collect();
+        let n = run.len() & !1;
+        if let Ok(dec) = hex::decode(&run[..n]) {
+            return first(&dec);
+        }
+    }
+    None
+}
+
+/// A short human label for what an inscription is: KRC-20-style protocol/op/
+/// tick when present, else the `t`/tick/top-level type.
+fn inscription_kind(v: &serde_json::Value) -> String {
+    let obj = v.as_object();
+    let get = |k: &str| obj.and_then(|o| o.get(k)).and_then(|x| x.as_str());
+    let clip = |s: &str| s.chars().take(24).collect::<String>();
+    let label = if let Some(p) = get("p") {
+        let mut s = clip(p);
+        if let Some(op) = get("op") {
+            s.push_str(" · ");
+            s.push_str(&clip(op));
+        }
+        if let Some(tick) = get("tick") {
+            s.push_str(" · ");
+            s.push_str(&clip(tick));
+        }
+        s
+    } else if let Some(t) = get("t") {
+        clip(t)
+    } else if let Some(tick) = get("tick") {
+        format!("token · {}", clip(tick))
+    } else if let Some((k, _)) = obj.and_then(|o| o.iter().next()) {
+        clip(k)
+    } else {
+        "JSON".into()
+    };
+    // keep it printable
+    label.chars().filter(|c| !c.is_control()).collect()
+}
+
 /// Process-wide decode registry for write-time template recognition —
 /// construction derives the SilverScript skeletons once, and Registry is
 /// Send + Sync (its decoders are `Box<dyn StateDecoder: Send + Sync>`).
@@ -1009,6 +1061,41 @@ impl Store {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
         Ok(rows)
+    }
+
+    /// Decoded inscription activity: parse the JSON payloads (raw `{"…` and
+    /// ASCII-hex-encoded) and group by what they actually are — protocol/op/
+    /// tick for KRC-20-style tokens, or the `t`/top-level type for others.
+    /// Returns (kind_label, event_count, distinct_covenants), busiest first.
+    pub fn inscription_breakdown(&self) -> Result<Vec<(String, u64, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT substr(payload, 1, 512), lower(hex(covenant_id))
+                 FROM covenant_events
+                 WHERE payload IS NOT NULL
+                   AND (substr(payload, 1, 2) = x'7b22' OR substr(payload, 1, 4) = x'37623232')",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)))
+            .map_err(db_err)?;
+        // kind -> (event count, distinct covenant ids)
+        let mut agg: std::collections::HashMap<String, (u64, std::collections::HashSet<String>)> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (payload, cid) = row.map_err(db_err)?;
+            let Some(v) = extract_inscription_json(&payload) else { continue };
+            let kind = inscription_kind(&v);
+            let e = agg.entry(kind).or_default();
+            e.0 += 1;
+            e.1.insert(cid);
+        }
+        let mut out: Vec<(String, u64, u64)> =
+            agg.into_iter().map(|(k, (c, set))| (k, c, set.len() as u64)).collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.truncate(60);
+        Ok(out)
     }
 
     /// Transactions that touched more than one covenant, with the covenants

@@ -1026,6 +1026,7 @@ async fn serve(
         .route("/data/{network}/tx/{txid}", get(tx_handler))
         .route("/data/{network}/families.json", get(families_handler))
         .route("/data/{network}/lanes.json", get(lanes_handler))
+        .route("/data/{network}/inscriptions.json", get(inscriptions_handler))
         .route("/data/{network}/digest.json", get(digest_handler))
         .route("/data/{network}/templates.json", get(templates_handler))
         .route("/data/{network}/activity.json", get(activity_handler))
@@ -1361,6 +1362,38 @@ async fn simulate_handler(
             .into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "simulation failed").into_response(),
     }
+}
+
+async fn inscriptions_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let net = net_name.strip_suffix("/inscriptions.json").unwrap_or(&net_name);
+    let Ok(network) = net.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+    let db = state.base_dir.join(format!("{network}.db"));
+    let cc = "public, max-age=60, s-maxage=180, stale-while-revalidate=600";
+    serve_cached(&state, format!("{network}/inscriptions"), 90, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let items: Vec<_> = store
+            .inscription_breakdown()?
+            .into_iter()
+            .map(|(label, events, coins)| serde_json::json!({ "label": label, "events": events, "covenants": coins }))
+            .collect();
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "inscriptions": items,
+        }))?))
+    })
+    .await
 }
 
 async fn lanes_handler(

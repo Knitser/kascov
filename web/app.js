@@ -295,6 +295,7 @@ const state = {
   templates: {},      // network -> { data, at } (contract-type analytics)
   families: {},       // network -> { data, at } (multi-contract apps)
   lanes: {},          // network -> { data, at } (based-app namespaces)
+  inscriptions: {},   // network -> { data, at } (decoded JSON inscriptions)
   digest: {},         // network -> { data, at, animated }
   activity: {},       // network -> { [range]: { data, at } } (data null = 404 miss)
   pulseRange: '24h',
@@ -526,6 +527,44 @@ function renderLanes(network) {
   }).join('');
 }
 
+async function loadInscriptions(network) {
+  const t = state.inscriptions[network];
+  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
+  try {
+    const res = await fetch(`data/${network}/inscriptions.json`, { cache: 'no-cache' });
+    if (!res.ok) { state.inscriptions[network] = { data: null, at: Date.now() }; return null; }
+    const data = await res.json();
+    state.inscriptions[network] = { data, at: Date.now() };
+    return data;
+  } catch (e) {
+    return t ? t.data : null;
+  }
+}
+
+function renderInscriptions(network) {
+  const section = $('#section-inscriptions');
+  const host = $('#inscriptions-row');
+  if (!section || !host) return;
+  const cached = state.inscriptions[network];
+  if (!cached) {
+    loadInscriptions(network).then((d) => {
+      if (d && state.network === network && parseRoute().view === 'explore') renderInscriptions(network);
+    });
+    section.hidden = true;
+    return;
+  }
+  const items = (cached.data && cached.data.inscriptions) || [];
+  if (!items.length) { section.hidden = true; return; }
+  section.hidden = false;
+  const max = Math.max(1, ...items.map((l) => l.events));
+  host.innerHTML = items.slice(0, 14).map((l) => {
+    const w = Math.max((l.events / max) * 100, 3).toFixed(1);
+    return `<div class="lane-row"><span class="lane-ns">${esc(l.label)}</span>` +
+      `<span class="lane-track"><span class="lane-fill" style="width:${w}%"></span></span>` +
+      `<span class="lane-counts dim">${fmtInt(l.events)} tx${l.events === 1 ? '' : 's'} · ${fmtInt(l.covenants)} coin${l.covenants === 1 ? '' : 's'}</span></div>`;
+  }).join('');
+}
+
 async function loadFamilies(network) {
   const t = state.families[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
@@ -682,6 +721,7 @@ function renderLiteExplore(live, network) {
   /* lanes fetch their own small endpoint — render even before the big
      snapshot lands so based-app activity shows immediately */
   renderLanes(network);
+  renderInscriptions(network);
   const tpl = $('#section-templates');
   if (tpl) tpl.hidden = true; /* appears when the full snapshot render runs */
   $('#section-pulse').hidden = true;
@@ -1646,6 +1686,7 @@ function renderExplore(entry) {
   renderTemplates(network);
   renderFamilies(network);
   renderLanes(network);
+  renderInscriptions(network);
   loadTemplates(network).then(() => {
     if (state.network === network && parseRoute().view === 'explore') renderTemplates(network);
   });
