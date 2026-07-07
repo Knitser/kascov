@@ -158,17 +158,40 @@
     raf = requestAnimationFrame(tick);
   }
 
+  /* Always (re)start a fresh loop. The old `if (!raf)` guard assumed raf is 0
+     when stopped, but if the loop ever froze (a background tab throttling RAF,
+     or a stray throw) raf stayed non-zero and the loop could never be revived —
+     which is exactly why it "only played after a hard refresh". Cancel any
+     existing frame and schedule a new one. */
+  function start() {
+    if (REDUCE) return;
+    if (raf) cancelAnimationFrame(raf);
+    last = performance.now();
+    raf = requestAnimationFrame(tick);
+  }
+  function stop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+  /* force a re-measure + (re)start — called when the landing view is shown via
+     an SPA switch, where the canvas may have first measured 0×0 and idled. */
+  function kick() { resize(); start(); }
+
   const ro = new ResizeObserver(() => resize());
   ro.observe(cv);
+  // The robust fix: kick whenever the canvas actually becomes visible. The
+  // hero starts hidden in the SPA, so on a route-switch onto the landing the
+  // canvas had never been laid out when it first measured — it sat idle until
+  // a hard refresh. An IntersectionObserver fires the moment it's on screen,
+  // regardless of which code path revealed it.
+  const io = new IntersectionObserver(
+    (es) => { for (const e of es) if (e.isIntersecting) kick(); },
+    { threshold: 0.01 }
+  );
+  io.observe(cv);
   resize();
-  if (!REDUCE) {
-    const start = () => { if (!raf) { last = performance.now(); raf = requestAnimationFrame(tick); } };
-    const stop = () => { if (raf) { cancelAnimationFrame(raf); raf = 0; } };
-    start();
-    document.addEventListener('visibilitychange', () => (document.hidden ? stop() : start()));
-    // a normal reload / back-navigation restores from bfcache with the loop
-    // frozen — resume it (previously only a hard refresh re-ran the script)
-    window.addEventListener('pageshow', start);
-    window.addEventListener('focus', start);
-  }
+  start();
+  document.addEventListener('visibilitychange', () => (document.hidden ? stop() : start()));
+  // a normal reload / back-navigation restores from bfcache with the loop
+  // frozen — resume it (previously only a hard refresh re-ran the script)
+  window.addEventListener('pageshow', start);
+  window.addEventListener('focus', start);
+  window.kascovDag = { kick };
 })();
