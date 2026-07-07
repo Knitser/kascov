@@ -1953,6 +1953,57 @@ function lintPanelHtml(instructions) {
   return `<details class="lint-panel"${highs ? ' open' : ''}><summary><span class="lint-badge">🛡 security check</span> <span class="dim">${head}</span></summary><div class="lint-body">${rows}</div></details>`;
 }
 
+/* ---- SilverScript compiler playground (worker shells out to silverc) ---- */
+const SILVERSCRIPT_EXAMPLE = {
+  source: `pragma silverscript ^0.1.0;
+
+contract Escrow(byte[32] arbiter, pubkey buyer, pubkey seller) {
+    entrypoint function spend(pubkey pk, sig s) {
+        require(blake2b(pk) == arbiter);
+        require(checkSig(s, pk));
+
+        int minerFee = 1000;
+        int amount = tx.inputs[this.activeInputIndex].value - minerFee;
+        require(tx.outputs[0].value == amount);
+
+        byte[34] buyerLock = new ScriptPubKeyP2PK(buyer);
+        byte[34] sellerLock = new ScriptPubKeyP2PK(seller);
+        bool sendsToBuyer = tx.outputs[0].scriptPubKey == byte[](buyerLock);
+        bool sendsToSeller = tx.outputs[0].scriptPubKey == byte[](sellerLock);
+        require(sendsToBuyer || sendsToSeller);
+    }
+}`,
+  args: `0x${'33'.repeat(32)}\n0x${'11'.repeat(32)}\n0x${'22'.repeat(32)}`,
+};
+
+function initCompiler() {
+  const src = $('#compiler-src');
+  const args = $('#compiler-args');
+  if (src && !src.value) src.value = SILVERSCRIPT_EXAMPLE.source;
+  if (args && !args.value) args.value = SILVERSCRIPT_EXAMPLE.args;
+}
+
+function renderCompileResult(d) {
+  const out = $('#compiler-result');
+  if (!out) return;
+  if (!d || !d.ok) {
+    out.innerHTML = `<div class="compile-err">✗ ${esc((d && d.error) || 'compile failed')}</div>`;
+    return;
+  }
+  const D = window.kascovDisasm;
+  let decoded = '';
+  const bytes = D && D.parseHex(d.hex);
+  if (bytes) {
+    const tpl = D.matchTemplates(D.disassemble(bytes).instructions, bytes);
+    if (tpl) decoded = `<div class="compile-tpl">✓ recognized as <strong>${esc(tpl.name)}</strong></div>`;
+  }
+  out.innerHTML = `<div class="compile-ok">✓ compiled — ${d.hex.length / 2} bytes of Kaspa script</div>` +
+    `<pre class="compile-hex script" data-copy="${esc(d.hex)}">${esc(d.hex)}</pre>` +
+    decoded +
+    `<div class="compile-actions"><a class="btn" href="#/decode?s=${esc(d.hex)}">▶ decode / debug it</a>` +
+    `<span class="dim"> then deploy with <code class="mono">kascov-lab deploy --program-hex …</code></span></div>`;
+}
+
 /* ---- in-browser spend simulation (worker runs the real script engine) ---- */
 const SIM_VALUE = 100_000_000; // simulate on a 1 TKAS coin
 const SIM_SCENARIOS = {
@@ -2590,6 +2641,7 @@ function renderDev() {
 
 function renderBuild() {
   document.title = 'make your own smart coin — kascov';
+  initCompiler();
 }
 
 /* API docs: scroll-spy that highlights the sidebar entry for the endpoint
@@ -3256,6 +3308,24 @@ document.addEventListener('click', (e) => {
         location.hash = `#/${state.network}/c/${route.id}?program=${val}`;
       }
     }
+  } else if (action === 'compile-run') {
+    const src = $('#compiler-src');
+    const argsEl = $('#compiler-args');
+    const out = $('#compiler-result');
+    if (!src || !out) return;
+    out.innerHTML = '<span class="dim">compiling through silverc…</span>';
+    const args = (argsEl ? argsEl.value : '').split('\n').map((s) => s.trim()).filter(Boolean);
+    fetch(`data/${state.network}/compile`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: src.value, args }) })
+      .then((r) => r.json())
+      .then(renderCompileResult)
+      .catch(() => { out.innerHTML = '<div class="compile-err">the compiler isn’t available right now</div>'; });
+  } else if (action === 'compile-example') {
+    const src = $('#compiler-src');
+    const args = $('#compiler-args');
+    if (src) src.value = SILVERSCRIPT_EXAMPLE.source;
+    if (args) args.value = SILVERSCRIPT_EXAMPLE.args;
+    const out = $('#compiler-result');
+    if (out) out.innerHTML = '';
   } else if (action === 'graph-prev') {
     graphIdx -= 1;
     renderAppGraph();

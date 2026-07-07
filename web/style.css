@@ -2510,3 +2510,19 @@ details.collapse-sec > summary:hover h2 { color: var(--accent); }
 .appgraph-wrap { margin-top: 0.3rem; }
 .appgraph-canvas { width: 100%; height: 380px; display: block; border: 1px solid var(--border); border-radius: var(--radius); background: #06120f; }
 .appgraph-controls { display: flex; align-items: center; gap: 0.9rem; margin-top: 0.7rem; }
+
+/* SilverScript compiler playground */
+.compiler-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 1rem; margin-top: 0.4rem; }
+.compiler-label { display: block; font-size: 0.82rem; color: var(--muted); margin-bottom: 0.4rem; }
+.compiler-src, .compiler-argsbox { width: 100%; font-family: var(--mono); font-size: 0.82rem; line-height: 1.5; background: #06120f; color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.8rem; resize: vertical; }
+.compiler-src { min-height: 340px; }
+.compiler-argsbox { min-height: 120px; }
+.compiler-side { display: flex; flex-direction: column; }
+.compiler-controls { display: flex; gap: 0.6rem; margin-top: 0.8rem; flex-wrap: wrap; }
+.compiler-result:not(:empty) { margin-top: 1rem; }
+.compile-ok { color: var(--born); font-weight: 600; font-size: 0.92rem; }
+.compile-err { color: var(--burn); font-family: var(--mono); font-size: 0.86rem; background: var(--burn-soft); border: 1px solid rgba(242,165,102,0.35); border-radius: var(--radius-sm); padding: 0.7rem 0.9rem; white-space: pre-wrap; }
+.compile-hex { margin: 0.6rem 0; max-height: 130px; overflow: auto; word-break: break-all; cursor: pointer; }
+.compile-tpl { color: var(--accent); font-size: 0.9rem; margin-bottom: 0.5rem; }
+.compile-actions { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; }
+@media (max-width: 720px) { .compiler-grid { grid-template-columns: 1fr; } }

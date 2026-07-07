@@ -297,6 +297,27 @@
         </div>
       </header>
 
+      <!-- write & compile SilverScript, in the browser -->
+      <section class="build-section" id="build-compiler">
+        <h2>write &amp; compile SilverScript</h2>
+        <p class="build-lead">Write a covenant in SilverScript and compile it to real Kaspa script right here — powered by the actual <code>silverc</code> compiler. Edit the source, set the constructor args, and get deployable hex.</p>
+        <div class="compiler-grid">
+          <div class="compiler-col">
+            <label class="compiler-label">contract source</label>
+            <textarea id="compiler-src" class="compiler-src" spellcheck="false" autocapitalize="off"></textarea>
+          </div>
+          <div class="compiler-col compiler-side">
+            <label class="compiler-label">constructor args <span class="dim">— one per line (hex or int)</span></label>
+            <textarea id="compiler-args" class="compiler-argsbox" spellcheck="false" autocapitalize="off"></textarea>
+            <div class="compiler-controls">
+              <button type="button" class="btn" data-action="compile-run">⚙ compile</button>
+              <button type="button" class="chip" data-action="compile-example">reset to Escrow example</button>
+            </div>
+          </div>
+        </div>
+        <div id="compiler-result" class="compiler-result"></div>
+      </section>
+
       <!-- the flow -->
       <section class="build-section">
         <h2>the whole loop</h2>

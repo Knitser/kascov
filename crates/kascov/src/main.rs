@@ -1021,6 +1021,7 @@ async fn serve(
     let app = axum::Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/data/{network}/simulate", post(simulate_handler))
+        .route("/data/{network}/compile", post(compile_handler))
         .route("/data/{file}", get(data_handler))
         .route("/data/{network}/c/{id}", get(detail_handler))
         .route("/data/{network}/tx/{txid}", get(tx_handler))
@@ -1340,6 +1341,58 @@ fn build_families(store: &Store, network: kascov_core::Network) -> Result<serde_
         "tip_at_ms": tip.map(|t| t.1),
         "families": out,
     }))
+}
+
+/// POST /data/{network}/compile — compile SilverScript source + constructor
+/// args to script hex by shelling out to the `silverc` binary (path in the
+/// SILVERC_BIN env var). Powers verify-and-publish and the no-code builder.
+#[derive(serde::Deserialize)]
+struct CompileReq {
+    source: String,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+async fn compile_handler(
+    axum::extract::Path(_net): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<CompileReq>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    if req.source.len() > 40_000 || req.args.len() > 16 || req.args.iter().any(|a| a.len() > 200) {
+        return (StatusCode::BAD_REQUEST, "input too large").into_response();
+    }
+    let bin = std::env::var("SILVERC_BIN").unwrap_or_default();
+    let json = |v: serde_json::Value| {
+        (StatusCode::OK, [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], v.to_string()).into_response()
+    };
+    if bin.is_empty() {
+        return json(serde_json::json!({ "ok": false, "error": "the SilverScript compiler isn't available on this server" }));
+    }
+    let out = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(&bin)
+            .arg("-")
+            .args(&req.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child.stdin.take().unwrap().write_all(req.source.as_bytes())?;
+        let o = child.wait_with_output()?;
+        std::io::Result::Ok((
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        ))
+    })
+    .await;
+    match out {
+        Ok(Ok((true, hex, _))) => json(serde_json::json!({ "ok": true, "hex": hex })),
+        Ok(Ok((false, _, err))) => json(serde_json::json!({ "ok": false, "error": err })),
+        _ => json(serde_json::json!({ "ok": false, "error": "compiler failed to run" })),
+    }
 }
 
 /// POST /data/{network}/simulate — run a hypothetical covenant spend through

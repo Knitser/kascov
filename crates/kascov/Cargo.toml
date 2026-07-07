@@ -16,6 +16,7 @@ tower-http = { workspace = true }
 flate2 = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
