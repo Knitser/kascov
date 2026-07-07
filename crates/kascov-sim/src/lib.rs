@@ -45,6 +45,19 @@ pub struct SimRequest {
     /// Output-0 value in sompi; default = `value − 1000` (the contract's fee).
     #[serde(default)]
     pub amount: Option<u64>,
+    /// Capture the concrete per-opcode execution trace (real stacks, real
+    /// control flow) for the visual debugger.
+    #[serde(default)]
+    pub trace: bool,
+}
+
+/// One step of the real engine's execution: the opcode and the stacks as they
+/// stood just before it ran (concrete hex values).
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceStep {
+    pub op: String,
+    pub dstack: Vec<String>,
+    pub astack: Vec<String>,
 }
 
 fn default_recipient() -> String {
@@ -71,6 +84,9 @@ pub struct SimResult {
     /// On failure: the specific contract rule the spend violates (plain English).
     #[serde(default)]
     pub rule: String,
+    /// Concrete per-opcode execution trace (only when requested).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace: Vec<TraceStep>,
     /// Honest framing shown in the UI.
     pub note: String,
 }
@@ -86,6 +102,7 @@ impl SimResult {
             recipient: String::new(),
             output_value: 0,
             rule: String::new(),
+            trace: Vec::new(),
             note: String::new(),
         }
     }
@@ -231,7 +248,7 @@ pub fn simulate(req: &SimRequest) -> SimResult {
     witness.extend_from_slice(&kascov_decode::encode_push(&program2));
     mtx.tx.inputs[0].signature_script = witness;
 
-    let (pass, verdict) = run_engine(&mtx);
+    let (pass, verdict, trace) = run_engine(&mtx, req.trace);
     let rule = if pass { String::new() } else { failing_rule(template, &req.recipient, value, output_value) };
     SimResult {
         ok: true,
@@ -242,34 +259,69 @@ pub fn simulate(req: &SimRequest) -> SimResult {
         recipient: req.recipient.clone(),
         output_value,
         rule,
+        trace,
         note: "simulated with a stand-in signer — the signature rule always resolves so the amount, destination & timelock rules are what's tested".into(),
     }
 }
 
-fn run_engine(mtx: &MutableTransaction<Transaction>) -> (bool, String) {
+fn run_engine(mtx: &MutableTransaction<Transaction>, trace: bool) -> (bool, String, Vec<TraceStep>) {
     let reused = SigHashReusedValuesUnsync::new();
     let vtx = mtx.as_verifiable();
     let sig_cache = Cache::new(10_000);
     let entry = mtx.entries[0].clone().expect("entry present");
-    let mut vm = TxScriptEngine::from_transaction_input(
-        &vtx,
-        &mtx.tx.inputs[0],
-        0,
-        &entry,
-        EngineCtx::new(&sig_cache).with_reused(&reused),
-        EngineFlags { covenants_enabled: true, ..Default::default() },
-    );
-    match vm.execute() {
-        Ok(()) => (true, "the spend satisfies the contract — a node would accept it".to_string()),
-        Err(e) => (false, format!("{e}")),
+    let mut buf: Vec<u8> = Vec::new();
+    let (pass, verdict) = {
+        let mut vm = TxScriptEngine::from_transaction_input(
+            &vtx,
+            &mtx.tx.inputs[0],
+            0,
+            &entry,
+            EngineCtx::new(&sig_cache).with_reused(&reused),
+            EngineFlags { covenants_enabled: true, ..Default::default() },
+        );
+        if trace {
+            vm = vm.with_opcode_execution_log_buffer(&mut buf);
+        }
+        match vm.execute() {
+            Ok(()) => (true, "the spend satisfies the contract — a node would accept it".to_string()),
+            Err(e) => (false, format!("{e}")),
+        }
+    };
+    let steps = if trace { parse_trace(&String::from_utf8_lossy(&buf)) } else { Vec::new() };
+    (pass, verdict, steps)
+}
+
+/// Parse the engine's opcode log — each line is
+/// `Executing opcode: <op>, astack: [..], dstack: [..]` with the stacks as they
+/// stood BEFORE that opcode ran.
+fn parse_trace(log: &str) -> Vec<TraceStep> {
+    log.lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("Executing opcode: ")?;
+            let (op, rest) = rest.split_once(", astack: ")?;
+            let (astack_s, dstack_s) = rest.split_once(", dstack: ")?;
+            Some(TraceStep {
+                op: op.trim().to_string(),
+                astack: parse_hex_array(astack_s),
+                dstack: parse_hex_array(dstack_s),
+            })
+        })
+        .collect()
+}
+
+fn parse_hex_array(s: &str) -> Vec<String> {
+    let s = s.trim().trim_start_matches('[').trim_end_matches(']').trim();
+    if s.is_empty() {
+        return Vec::new();
     }
+    s.split(',').map(|x| x.trim().trim_matches('"').to_string()).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ESCROW: &str = "78aa2033333333333333333333333333333333333333333333333333333333333333338769765279ac6900c2b9be02e803949c6900c3201111111111111111111111111111111111111111111111111111111111111111030000207c7e01ac7e8700c3202222222222222222222222222222222222222222222222222222222222222222030000207c7e01ac7e879b69757551";
+    pub const ESCROW: &str = "78aa2033333333333333333333333333333333333333333333333333333333333333338769765279ac6900c2b9be02e803949c6900c3201111111111111111111111111111111111111111111111111111111111111111030000207c7e01ac7e8700c3202222222222222222222222222222222222222222222222222222222222222222030000207c7e01ac7e879b69757551";
 
     fn sim(recipient: &str, amount: Option<u64>) -> SimResult {
         simulate(&SimRequest {
@@ -278,6 +330,7 @@ mod tests {
             recipient: recipient.into(),
             value: 100_000_000,
             amount,
+            trace: false,
         })
     }
 
@@ -316,7 +369,32 @@ mod tests {
             recipient: "self".into(),
             value: 1_000_000,
             amount: None,
+            trace: false,
         });
         assert!(!r.ok);
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+    #[test]
+    fn concrete_trace_is_captured() {
+        let escrow = tests::ESCROW;
+        let r = simulate(&SimRequest {
+            program_hex: escrow.into(),
+            entrypoint: "spend".into(),
+            recipient: "buyer".into(),
+            value: 100_000_000,
+            amount: None,
+            trace: true,
+        });
+        assert!(r.pass, "buyer release should pass: {}", r.verdict);
+        assert!(!r.trace.is_empty(), "trace should be captured");
+        // stacks are concrete hex; the trace should include real opcodes
+        assert!(r.trace.iter().any(|s| s.op.contains("Op")), "trace has opcodes");
+        eprintln!("trace steps: {}", r.trace.len());
+        eprintln!("first: {:?}", r.trace.first());
+        eprintln!("last:  {:?}", r.trace.last());
     }
 }

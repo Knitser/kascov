@@ -1983,13 +1983,40 @@ function simulatePanelHtml(tpl, hex) {
     `<div class="sim-result"></div></div>`;
 }
 
+let lastSimTrace = null;
 function simVerdictHtml(d) {
   if (!d || !d.ok) return `<div class="sim-verdict sim-na">can&rsquo;t simulate — ${esc((d && d.verdict) || 'unknown')}</div>`;
   const cls = d.pass ? 'sim-pass' : 'sim-fail';
   const icon = d.pass ? '✓ PASS' : '✗ FAIL';
   const rule = !d.pass && d.rule ? `<div class="sim-rule">↳ ${esc(d.rule)}</div>` : '';
+  const traceBtn = d.trace && d.trace.length
+    ? `<button type="button" class="btn dbg-btn sim-trace-btn" data-action="sim-trace">⧉ step through this run</button>`
+    : '';
   return `<div class="sim-verdict ${cls}"><span class="sim-icon">${icon}</span><span>${esc(d.verdict)}</span></div>` +
-    rule + `<p class="sim-note dim">${esc(d.note)}</p>`;
+    rule + `<p class="sim-note dim">${esc(d.note)}</p>` + traceBtn;
+}
+
+/* open the debugger on a CONCRETE engine trace (from a simulate run) — real
+   stacks, real control flow, vs the symbolic decode-page trace */
+function openSimTrace(trace) {
+  if (!trace || !trace.length) return;
+  const short = (h) => (h && h.length > 18 ? h.slice(0, 10) + '…' + h.slice(-4) : h);
+  dbg = {
+    concrete: true,
+    i: 0,
+    steps: trace.map((s, i) => ({
+      offset: i,
+      name: s.op.split(' ')[0],
+      note: s.op.includes(' ') ? s.op.slice(s.op.indexOf(' ') + 1) : '',
+      group: 'standard',
+      indent: 0,
+      dstack: (s.dstack || []).map(short),
+      astack: (s.astack || []).map(short),
+    })),
+  };
+  renderDebugger();
+  const host = document.getElementById('dbg-panel');
+  if (host) host.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 
 /* KIP-16 ZK-app detection. A covenant that calls OpZkPrecompile verifies a
@@ -2075,7 +2102,11 @@ function renderDebugger() {
     `<div class="dbg-now"><span class="dbg-now-op mono">${esc(s.name)}</span> <span class="dbg-now-note">${esc(s.note)}</span></div>` +
     `<div class="dbg-stacks">${col('data stack', s.dstack)}${col('alt stack', s.astack)}</div>` +
     `<div class="dbg-oplist">${ops}</div>` +
-    `<p class="dim dbg-footnote">symbolic trace — concrete for pushes &amp; stack ops, ‹symbolic› where a value only resolves against a real spend</p>` +
+    `<p class="dim dbg-footnote">` +
+    (dbg.concrete
+      ? 'concrete trace — the real engine&rsquo;s stacks for this simulated spend, opcode by opcode, following the actual control flow'
+      : 'symbolic trace — concrete for pushes &amp; stack ops, ‹symbolic› where a value only resolves against a real spend') +
+    `</p>` +
     `</div>`;
   // scroll the active op into view WITHIN the op-list only — never the page
   // (scrollIntoView would bubble up and jump the whole document)
@@ -3239,12 +3270,14 @@ document.addEventListener('click', (e) => {
     panel.querySelectorAll('.sim-chip').forEach((c) => c.classList.remove('sim-active'));
     el.classList.add('sim-active');
     out.innerHTML = '<span class="dim">running through the script engine…</span>';
-    const body = { program_hex: panel.dataset.hex, entrypoint: scenario.entrypoint, recipient: scenario.recipient, value: SIM_VALUE };
+    const body = { program_hex: panel.dataset.hex, entrypoint: scenario.entrypoint, recipient: scenario.recipient, value: SIM_VALUE, trace: true };
     if (scenario.amount != null) body.amount = scenario.amount;
     fetch(`data/${state.network}/simulate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
       .then((r) => r.json())
-      .then((d) => { out.innerHTML = simVerdictHtml(d); })
+      .then((d) => { lastSimTrace = d.trace || null; out.innerHTML = simVerdictHtml(d); })
       .catch(() => { out.innerHTML = '<div class="sim-verdict sim-na">simulation unavailable</div>'; });
+  } else if (action === 'sim-trace') {
+    openSimTrace(lastSimTrace);
   } else if (action === 'dbg-open') {
     openDebugger(el.dataset.prog || '');
   } else if (action === 'dbg-prev') {
