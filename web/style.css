@@ -2557,3 +2557,11 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
 
 /* Write-mode template picker */
 .compiler-templates { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+
+/* collapsed CLI wall on Write */
+.cli-wall { margin-top: 1.6rem; border-top: 1px solid var(--border); }
+.cli-wall-sum { cursor: pointer; list-style: none; font-family: var(--mono); font-size: 0.86rem; color: var(--muted); padding: 0.9rem 0; }
+.cli-wall-sum::-webkit-details-marker { display: none; }
+.cli-wall-sum::before { content: '▸ '; color: var(--accent); }
+.cli-wall[open] .cli-wall-sum::before { content: '▾ '; }
+.cli-wall:not([open]) > *:not(summary) { display: none; }
