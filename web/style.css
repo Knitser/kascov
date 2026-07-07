@@ -2539,3 +2539,9 @@ details.collapse-sec > summary:hover h2 { color: var(--accent); }
 .zk-verify-result { font-size: 0.9rem; }
 .zk-valid { color: var(--born); font-weight: 600; }
 .zk-invalid { color: var(--burn); font-weight: 600; }
+
+/* playground mode switch (read | write) */
+.pg-modes { display: inline-flex; gap: 0.3rem; padding: 0.3rem; margin-bottom: 1.4rem; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 999px; }
+.pg-mode { padding: 0.45rem 1.1rem; border-radius: 999px; font-size: 0.92rem; font-weight: 500; color: var(--muted); text-decoration: none; transition: background 0.15s, color 0.15s; }
+.pg-mode:hover { color: var(--text); text-decoration: none; }
+.pg-mode.pg-active { background: var(--accent); color: var(--bg); font-weight: 600; }

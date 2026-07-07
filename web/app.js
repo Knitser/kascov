@@ -2814,6 +2814,7 @@ function parseRoute() {
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
   if (m) return { view: 'explore', network: m[1] || null };
   if (/^#\/decode\/?$/.test(path)) return { view: 'decode', network: null, s: params.get('s') || '' };
+  if (/^#\/playground\/?$/.test(path)) return { view: 'decode', network: null, s: params.get('s') || '' };
   if (/^#\/build\/?$/.test(path)) return { view: 'build', network: null };
   if (/^#\/dev\/?$/.test(path)) return { view: 'dev', network: null };
   /* old home links '#/<network>' were data views — send them to the explorer */
@@ -2880,8 +2881,10 @@ async function render() {
   document.querySelectorAll('.network-tab').forEach((b) => {
     b.setAttribute('aria-pressed', String(b.dataset.network === state.network));
   });
+  /* decode + build are the two modes of the unified "playground" nav entry */
+  const navFor = route.view === 'decode' || route.view === 'build' ? 'playground' : route.view;
   document.querySelectorAll('.nav-link').forEach((a) => {
-    if (a.dataset.nav === route.view) a.setAttribute('aria-current', 'page');
+    if (a.dataset.nav === navFor) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
   $('#header-search').hidden = route.view !== 'explore';

@@ -44,8 +44,7 @@
       <div class="header-right">
         <nav class="site-nav" aria-label="Pages">
           <a class="nav-link" href="#/explore" data-nav="explore">explore</a>
-          <a class="nav-link" href="#/decode" data-nav="decode">decode</a>
-          <a class="nav-link" href="#/build" data-nav="build">build</a>
+          <a class="nav-link" href="#/decode" data-nav="playground">playground</a>
           <a class="nav-link" href="#/dev" data-nav="dev">API</a>
         </nav>
         <nav class="network-tabs" aria-label="Network">
@@ -245,10 +244,14 @@
     <section id="view-address" class="view-fade" aria-label="Address lookup" hidden></section>
 
     <!-- ============ DECODER ============ -->
-    <section id="view-decode" class="view-fade" aria-label="Script decoder" hidden>
+    <section id="view-decode" class="view-fade" aria-label="Playground — read" hidden>
+      <div class="pg-modes" aria-label="Playground mode">
+        <a class="pg-mode pg-active" href="#/decode">📄 read a script</a>
+        <a class="pg-mode" href="#/build">✎ write a covenant</a>
+      </div>
       <header class="page-head">
-        <h1>script decoder</h1>
-        <p class="page-sub">paste any Kaspa script as hex and read it as opcodes — including the post-Toccata set: transaction introspection (KIP-17), covenant ops (KIP-20), zk verification (KIP-16). decoding happens in your browser; nothing leaves the page. recognized contracts can be <strong>re-made with your own parameters</strong> and deployed on testnet-10.</p>
+        <h1>read a script</h1>
+        <p class="page-sub">paste any Kaspa script as hex and read it as opcodes — including the post-Toccata set: transaction introspection (KIP-17), covenant ops (KIP-20), zk verification (KIP-16). recognizing, disassembling &amp; linting run in your browser; <strong>simulate</strong>, <strong>verify-proof</strong> &amp; <strong>compile</strong> call the kascov node. recognized contracts can be <strong>re-made with your own parameters</strong>.</p>
       </header>
       <div class="decode-box">
         <textarea id="decode-input" rows="4" spellcheck="false" autocomplete="off" placeholder="script hex — e.g. 20a39404…82faac · whitespace and 0x prefixes are fine"></textarea>
@@ -288,7 +291,11 @@
     </section>
 
     <!-- ============ BUILD — MAKE YOUR OWN SMART COIN ============ -->
-    <section id="view-build" class="view-fade" aria-label="Make your own smart coin" hidden>
+    <section id="view-build" class="view-fade" aria-label="Playground — write" hidden>
+      <div class="pg-modes" aria-label="Playground mode">
+        <a class="pg-mode" href="#/decode">📄 read a script</a>
+        <a class="pg-mode pg-active" href="#/build">✎ write a covenant</a>
+      </div>
       <header class="page-head build-head">
         <p class="page-eyebrow">the lab</p>
         <h1>Make your own <span class="grad">smart coin</span>.</h1>
