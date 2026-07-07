@@ -188,6 +188,19 @@
         <div id="inscriptions-row"></div>
       </details>
 
+      <details class="lanes collapse-sec" id="section-appgraph" aria-label="App graph" hidden>
+        <summary><h2>app graph · coins that move together</h2><span class="collapse-count dim" id="appgraph-count"></span></summary>
+        <p class="dim families-sub">each cluster is an app — smart coins that shared transactions. click a dot to open the coin.</p>
+        <div class="appgraph-wrap">
+          <canvas id="appgraph-canvas" class="appgraph-canvas"></canvas>
+          <div class="appgraph-controls">
+            <button type="button" class="btn dbg-btn" data-action="graph-prev">◀</button>
+            <span class="dim mono" id="appgraph-label"></span>
+            <button type="button" class="btn dbg-btn" data-action="graph-next">▶</button>
+          </div>
+        </div>
+      </details>
+
       <details class="lanes collapse-sec" id="section-lifespans" aria-label="Lifespans" hidden>
         <summary><h2>how long do smart coins live?</h2><span class="collapse-count dim" id="lifespans-count"></span></summary>
         <p class="dim families-sub">the lifespan of every retired coin — from birth to burn. <span id="lifespans-median"></span></p>
@@ -609,6 +622,7 @@
   <script src="/blake2b.js"></script>
   <script src="/disasm.js"></script>
   <script src="/vm.js"></script>
+  <script src="/graph.js"></script>
   <script src="/gen.js"></script>
   <script src="/app.js"></script>
 </body>

@@ -615,6 +615,33 @@ function renderLifespans(network) {
   }).join('');
 }
 
+/* the app graph — a force-directed cluster of a family (reuses loaded
+   families data; renders lazily when the section is expanded) */
+let appGraphCtrl = null;
+let graphIdx = 0;
+
+function graphFamilies() {
+  const c = state.families[state.network];
+  return ((c && c.data && c.data.families) || []).filter((f) => f.size >= 2);
+}
+
+function renderAppGraph() {
+  if (!window.kascovGraph) return;
+  const fams = graphFamilies();
+  const canvas = $('#appgraph-canvas');
+  const label = $('#appgraph-label');
+  if (!fams.length || !canvas) return;
+  graphIdx = ((graphIdx % fams.length) + fams.length) % fams.length;
+  const fam = fams[graphIdx];
+  if (label) label.textContent = `app ${graphIdx + 1} / ${fmtInt(fams.length)} · ${fmtInt(fam.size)} coins${fam.size > 40 ? ' (showing 40)' : ''}`;
+  if (appGraphCtrl) appGraphCtrl.stop();
+  appGraphCtrl = window.kascovGraph.render(
+    canvas,
+    { members: fam.members, label: `${fam.size} coins` },
+    { onPick: (n) => { location.hash = `#/${state.network}/c/${n.id}`; } }
+  );
+}
+
 async function loadFamilies(network) {
   const t = state.families[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
@@ -648,6 +675,19 @@ function renderFamilies(network) {
   section.hidden = false;
   const fcnt = $('#families-count');
   if (fcnt) fcnt.textContent = `${fams.length} app${fams.length === 1 ? '' : 's'}`;
+  // the app-graph section shares this families data
+  const gsec = $('#section-appgraph');
+  if (gsec) {
+    const graphable = fams.filter((f) => f.size >= 2).length;
+    if (graphable) {
+      gsec.hidden = false;
+      const gcnt = $('#appgraph-count');
+      if (gcnt) gcnt.textContent = `${fmtInt(graphable)} app${graphable === 1 ? '' : 's'}`;
+      if (gsec.open) renderAppGraph();
+    } else {
+      gsec.hidden = true;
+    }
+  }
   host.innerHTML = fams.slice(0, 6).map((f) => {
     const named = f.members.filter((m) => m.template && !/^p2(pk|sh)/.test(m.template));
     const label = named.length
@@ -769,9 +809,9 @@ function renderLiteExplore(live, network) {
   $('#empty-net').hidden = !empty;
   $('#watch-strip').hidden = true;
   $('#section-records').hidden = true;
-  if ($('#section-families')) $('#section-families').hidden = true;
-  /* lanes fetch their own small endpoint — render even before the big
-     snapshot lands so based-app activity shows immediately */
+  /* these fetch their own small endpoints — render even before the big
+     snapshot lands so the analytics show immediately */
+  renderFamilies(network);
   renderLanes(network);
   renderInscriptions(network);
   renderLifespans(network);
@@ -3185,6 +3225,12 @@ document.addEventListener('click', (e) => {
         location.hash = `#/${state.network}/c/${route.id}?program=${val}`;
       }
     }
+  } else if (action === 'graph-prev') {
+    graphIdx -= 1;
+    renderAppGraph();
+  } else if (action === 'graph-next') {
+    graphIdx += 1;
+    renderAppGraph();
   } else if (action === 'sim-run') {
     const panel = el.closest('.sim-panel');
     const scenario = (SIM_SCENARIOS[panel && panel.dataset.tpl] || [])[parseInt(el.dataset.i, 10)];
@@ -3223,6 +3269,12 @@ document.addEventListener('input', (e) => {
   const el = e.target.closest('[data-action="dbg-slider"]');
   if (el) dbgStep(0, parseInt(el.value, 10));
 });
+
+/* render the app-graph lazily when its section is expanded (toggle doesn't
+   bubble, so capture) */
+document.addEventListener('toggle', (e) => {
+  if (e.target && e.target.id === 'section-appgraph' && e.target.open) renderAppGraph();
+}, true);
 
 $('#search').addEventListener('input', (e) => {
   const hadQuery = Boolean(state.query);
