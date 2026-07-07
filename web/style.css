@@ -103,6 +103,7 @@ h2::after {
   top: 0;
   z-index: 10;
   background: rgba(10, 16, 15, 0.82);
+  -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border);
 }
