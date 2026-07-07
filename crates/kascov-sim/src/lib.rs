@@ -264,6 +264,18 @@ pub fn simulate(req: &SimRequest) -> SimResult {
     }
 }
 
+/// Run a self-contained ZK verification script (public inputs + proof + vk +
+/// OpZkPrecompile) through the real engine — invoking the exact ark_groth16 /
+/// RISC-Zero verification a Kaspa node performs. Returns (valid, reason).
+pub fn verify_zk_script(program: &[u8]) -> (bool, String) {
+    let sig_cache = Cache::new(10);
+    let reused = SigHashReusedValuesUnsync::new();
+    match kaspa_txscript::zk_precompiles::tests::helpers::execute_zk_script(program, &sig_cache, &reused) {
+        Ok(()) => (true, "the zero-knowledge proof VERIFIED — the same on-chain check Kaspa L1 performs".into()),
+        Err(e) => (false, format!("proof rejected: {e}")),
+    }
+}
+
 fn run_engine(mtx: &MutableTransaction<Transaction>, trace: bool) -> (bool, String, Vec<TraceStep>) {
     let reused = SigHashReusedValuesUnsync::new();
     let vtx = mtx.as_verifiable();
@@ -396,5 +408,24 @@ mod trace_tests {
         eprintln!("trace steps: {}", r.trace.len());
         eprintln!("first: {:?}", r.trace.first());
         eprintln!("last:  {:?}", r.trace.last());
+    }
+}
+
+#[cfg(test)]
+mod zk_probe {
+    #[test]
+    fn real_groth16_proof_verifies_through_the_engine() {
+        use kaspa_txscript::caches::Cache;
+        use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
+        use kaspa_txscript::zk_precompiles::tests::helpers::{build_groth_script, execute_zk_script};
+        // a complete Groth16-verifying script built from the dep's real fixture
+        let script = build_groth_script();
+        eprintln!("groth script bytes: {}", script.len());
+        eprintln!("groth script hex: {}", script.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+        let sig_cache = Cache::new(10);
+        let reused = SigHashReusedValuesUnsync::new();
+        let r = execute_zk_script(&script, &sig_cache, &reused);
+        eprintln!("verify result: {r:?}");
+        assert!(r.is_ok(), "the real Groth16 proof should verify: {r:?}");
     }
 }

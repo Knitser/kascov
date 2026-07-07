@@ -2114,16 +2114,24 @@ function zkInfo(instructions) {
   return { system, tag, pushesBefore };
 }
 
-function zkPanelHtml(instructions) {
+function zkPanelHtml(instructions, hex) {
   const z = zkInfo(instructions);
   if (!z) return '';
+  // a self-contained proof script (public inputs + proof + vk + OpZkPrecompile,
+  // no transaction introspection) can be verified live here; a covenant that
+  // only *expects* a spend-time proof can't be (no proof present).
+  const selfContained = hex && !instructions.some((i) => /^Op(Tx|Cov|Outpoint|Auth)|CovenantId/.test(i.name));
+  const verify = selfContained
+    ? `<div class="zk-verify"><button type="button" class="btn zk-verify-btn" data-action="zk-verify" data-prog="${esc(hex)}">◆ verify the proof</button><span class="zk-verify-result"></span></div>`
+    : '';
   return `<div class="zk-panel">` +
-    `<div class="zk-head"><span class="zk-badge">⬡ ZK covenant</span>` +
+    `<div class="zk-head"><span class="zk-badge">⬡ ZK ${selfContained ? 'proof' : 'covenant'}</span>` +
     `<strong>on-chain zero-knowledge verification</strong>` +
     `<span class="zk-sys">${esc(z.system)}</span></div>` +
-    `<p class="zk-desc">This contract calls <code class="mono">OpZkPrecompile</code> (KIP-16) — Kaspa's L1 verifies a ` +
-    `${esc(z.system)} proof <em>inside the script</em>, so the coin only moves if a valid zero-knowledge proof is supplied. ` +
-    `Verified computation, settled on a ~10-blocks/sec BlockDAG.</p>` +
+    `<p class="zk-desc">${selfContained
+      ? `A self-contained <code class="mono">${esc(z.system)}</code> proof (public inputs + proof + verifying key + <code class="mono">OpZkPrecompile</code>). Verify it below — kascov runs the <em>exact</em> verifier Kaspa's L1 uses.`
+      : `This contract calls <code class="mono">OpZkPrecompile</code> (KIP-16) — Kaspa's L1 verifies a ${esc(z.system)} proof <em>inside the script</em>, so the coin only moves if a valid zero-knowledge proof is supplied. Verified computation, settled on a ~10-blocks/sec BlockDAG.`}</p>` +
+    verify +
     `</div>`;
 }
 
@@ -2248,7 +2256,7 @@ function nerdPanel(entry, network, program) {
         (u.spent_txid ? ` <a href="${esc(txUrl(network, u.spent_txid))}" target="_blank" rel="noopener noreferrer">(tx ↗)</a>` : '') +
         `:</p>` +
         (verifiedContractHtml(u.revealed_hex) || templateLine(u.revealed_template, u.revealed_fields)) +
-        (u.revealed_hex ? zkPanelHtml(window.kascovDisasm.disassemble(window.kascovDisasm.parseHex(u.revealed_hex) || []).instructions) : '') +
+        (u.revealed_hex ? zkPanelHtml(window.kascovDisasm.disassemble(window.kascovDisasm.parseHex(u.revealed_hex) || []).instructions, u.revealed_hex) : '') +
         `<pre class="script script-reveal">${esc(u.revealed_asm.join('\n'))}</pre>` +
         (u.revealed_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.revealed_hex)}">open revealed program in decoder →</a>` : '');
     } else if (u.sig_hex || u.spent_txid) {
@@ -2434,6 +2442,7 @@ const DECODE_EXAMPLES = {
   p2pk: '20' + 'a3'.repeat(32) + 'ac',
   p2sh: 'aa20' + 'c5'.repeat(32) + '87',
   guard: 'b9cf20' + '11'.repeat(32) + '8851',
+  groth: '20c07a65145c3cb48b6101962ea607a4dd93c753bb26975cb47feb00d3666e440420d223ffcb21c6ffcb7c8f60392ca49dde0000000000000000000000000000000020a95ac0b37bfedcd8136e6c1143086bf50000000000000000000000000000000020dbe7c0194edfcc37eb4d422a998c1f560000000000000000000000000000000020a54dc85ac99f851c92d7c96d7318af4100000000000000000000000000000000554c80570253c0c483a1b16460118e63c155f3684e784ae7d97e8fc3f544128b37fe15075eab5ac31150c8a44253d8525971241bbd7227fcefbae2db4ae71675c56a2e0eb9235136b15ab72f16e707832f3d6ae5b0ba7cca53ae17cb52b3201919eb9d908c16297abd90aa7e00267bc21a9a78116e717d4d76edd44e21cca17e3d592d4da801e2f26dbea299f5223b646cb1fb33eadb059d9407559d7441dfd902e3a79a4d2dabb73dc17fbc13021e2471e0c08bd67d8401f52b73d6d07483794cad4778180e0c06f33bbc4c79a9cadef253a68084d382f17788f885c9afd176f7cb2f036789edf692d95cbdde46ddda5ef7d422436779445c5e66006a42761e1f12efde0018c212f3aeb785e49712e7a9353349aaf1255dfb31b7bf60723a480d9293938e1933033e7fea1f40604eaacf699d4be9aacc577054a0db22d9129a1728ff85a01a1c3af829b62bf4914c0bcf2c81a4bd577190eff5f194ee9bac95faefd53cb0030600000000000000e43bdc655d0f9d730535554d9caa611ddd152c081a06a932a8e1d5dc259aac123f42a188f683d869873ccc4c119442e57b056e03e2fa92f2028c97bc20b9078747c30f85444697fdf436e348711c011115963f855197243e4b39e6cbe236ca8ba7f2042e11f9255afbb6c6e2c3accb88e401f2aac21c097c92b3fbdb99f98a9b0dcd6c075ada6ed0ddfece1d4a2d005f61a7d5df0b75c18a5b2374d64e495fab93d4c4b1200394d5253cce2f25a59b862ee8e4cd43686603faa09d5d0d3c1c8f0120a6',
   zk: '08b1762f000000000075088b1e466a00000000756320901be291efb290173ae8c021842fad986e73b878bff72d3405821b7ed0136270d0519d00796001307f20dcbe0edd8a2b405aabdead896b04ae82cd9a881df095fee9805fd5584068a9b888007900587f51080100000000000010a569007958607fb9b9c976022901947c02210194bca2690108517900587f7e0275087e517958607f7e01757eb9b9c976022001947cbc7eb9cf76d0519dd2519daa01877e02aa207c7e0200007c7e00c38800c2b9be0340420f94a269a8200f3756c052ff1749fbbe0d4b28010a42c989e227130752e7188047498ba124aa207a8f24092c34ed3eb81b3d0a0b796c588c615d3488ef9e61c21dbd1e4b83ea6e01010121a6695167b9cf76d0519d76d2519d00d376c3b9bf88c2b9be0340420f94a2695168',
 };
 /* the SilverScript instances come from disasm.js's embedded compiler dumps */
@@ -2598,7 +2607,7 @@ function runDecode(updateHash) {
     (truncated ? '<span class="flag flag-no">truncated / malformed tail</span>' : '') +
     `</p>` +
     lintPanelHtml(instructions) +
-    zkPanelHtml(instructions) +
+    zkPanelHtml(instructions, window.kascovDisasm.toHex(bytes)) +
     (tpl ? verifiedContractHtml(window.kascovDisasm.toHex(bytes)) || templateLine(tpl.name, tpl.fields) : '') +
     '<div id="registry-panel"></div>' +
     explainerPanelHtml(tpl) +
@@ -3368,6 +3377,19 @@ document.addEventListener('click', (e) => {
           : `<div class="compile-err">${esc(d.error || 'publish failed')}</div>`;
       })
       .catch(() => { out.innerHTML = '<div class="compile-err">publish unavailable</div>'; });
+  } else if (action === 'zk-verify') {
+    const result = el.parentElement.querySelector('.zk-verify-result');
+    const prog = el.dataset.prog;
+    if (!prog || !result) return;
+    result.innerHTML = ' <span class="dim">running the verifier…</span>';
+    fetch(`data/${state.network}/zk-verify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ program_hex: prog }) })
+      .then((r) => r.json())
+      .then((d) => {
+        result.innerHTML = d.valid
+          ? ` <span class="zk-valid">✓ ${esc(d.reason)}</span>`
+          : ` <span class="zk-invalid">✗ ${esc(d.reason || 'invalid')}</span>`;
+      })
+      .catch(() => { result.innerHTML = ' <span class="dim">verifier unavailable</span>'; });
   } else if (action === 'graph-prev') {
     graphIdx -= 1;
     renderAppGraph();

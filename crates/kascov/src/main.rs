@@ -1021,6 +1021,7 @@ async fn serve(
     let app = axum::Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/data/{network}/simulate", post(simulate_handler))
+        .route("/data/{network}/zk-verify", post(zk_verify_handler))
         .route("/data/{network}/compile", post(compile_handler))
         .route("/data/{network}/publish", post(publish_handler))
         .route("/data/{network}/verified/{hash}", get(verified_handler))
@@ -1397,6 +1398,29 @@ async fn run_silverc(source: String, args: Vec<String>) -> Result<String, String
         Ok(Ok((false, _, err))) => Err(err),
         _ => Err("compiler failed to run".into()),
     }
+}
+
+/// POST /data/{network}/zk-verify — run a self-contained ZK verification
+/// script through the real engine (Kaspa's ark_groth16 / RISC-Zero verifier).
+#[derive(serde::Deserialize)]
+struct ZkReq {
+    program_hex: String,
+}
+
+async fn zk_verify_handler(
+    axum::extract::Path(_net): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<ZkReq>,
+) -> axum::response::Response {
+    if req.program_hex.len() > 8_000 {
+        return json_resp(serde_json::json!({ "ok": false, "error": "program too large" }));
+    }
+    let Ok(bytes) = hex::decode(req.program_hex.trim().trim_start_matches("0x")) else {
+        return json_resp(serde_json::json!({ "ok": false, "error": "not valid hex" }));
+    };
+    let (valid, reason) = tokio::task::spawn_blocking(move || kascov_sim::verify_zk_script(&bytes))
+        .await
+        .unwrap_or((false, "verifier failed to run".into()));
+    json_resp(serde_json::json!({ "ok": true, "valid": valid, "reason": reason }))
 }
 
 async fn compile_handler(

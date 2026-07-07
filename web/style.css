@@ -2532,3 +2532,10 @@ details.collapse-sec > summary:hover h2 { color: var(--accent); }
 .registry-src > summary { cursor: pointer; list-style: none; }
 .registry-src > summary::-webkit-details-marker { display: none; }
 .compile-publish-result:not(:empty) { margin-top: 0.7rem; }
+
+/* ZK proof verification */
+.zk-verify { margin-top: 0.7rem; display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.zk-verify-btn { border-color: rgba(138,180,255,0.45); }
+.zk-verify-result { font-size: 0.9rem; }
+.zk-valid { color: var(--born); font-weight: 600; }
+.zk-invalid { color: var(--burn); font-weight: 600; }
