@@ -5,13 +5,11 @@
 .DS_Store
 web/.claude/
 node_modules/
-video/out/
-video/.remotion/
 .firebase/
 
 # local editor/agent config and internal audit notes — not for the public repo
 .claude/
 HANDOFF-AUDIT.md
-video/public/devtour/
-video/public/v9update/
-video/public/v10update/
+
+# Remotion promo-video project — rendered locally, not tracked
+video/
