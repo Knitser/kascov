@@ -50,7 +50,7 @@ kascov-lab demo --transitions 2        # genesis → 2 transitions → burn
 kascov --network testnet-10 sync --follow &
 kascov --network testnet-10 trace <covenant-id-from-demo>
 
-# or just paste the demo's txid into the search box at kascov-explorer.web.app —
+# or just paste the demo's txid into the search box at kascov.io —
 # it lands on the coin with the event highlighted, live within seconds
 ```
 
@@ -63,7 +63,7 @@ The lab deliberately breaks [[Architecture]] Rule 1 (it imports kaspa crates dir
 
 ## Deploying a compiled contract
 
-The generator on [kascov-explorer.web.app/decode](https://kascov-explorer.web.app/decode) turns any recognized SilverScript contract into *your* instance: edit the constructor args, copy the compiled hex, then:
+The generator on [kascov.io/decode](https://kascov.io/decode) turns any recognized SilverScript contract into *your* instance: edit the constructor args, copy the compiled hex, then:
 
 ```sh
 cargo run -p kascov-lab -- keygen          # prints address, pubkey, blake2b(pubkey)

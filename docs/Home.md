@@ -1,6 +1,6 @@
 # kascov — Kaspa Covenant Explorer
 
-> First-mover tooling for covenants on Kaspa L1, born days after the [[Toccata Protocol Notes|Toccata hardfork]] activated (June 30, 2026). Live at **[kascov-explorer.web.app](https://kascov-explorer.web.app)**.
+> First-mover tooling for covenants on Kaspa L1, born days after the [[Toccata Protocol Notes|Toccata hardfork]] activated (June 30, 2026). Live at **[kascov.io](https://kascov.io)**.
 
 **What it is:** a Rust CLI + indexer + always-on web explorer that finds covenant UTXOs, traces their lineage by covenant ID, and decodes their state scripts — including the programs revealed at spend time. Kaspa nodes *validate* covenants but expose no way to *query* them — no "get UTXOs by covenant id" RPC exists, and no other explorer decodes covenant lineage. kascov fills that gap.
 
@@ -29,7 +29,7 @@ Kaspa nodes prune block data after ~3 days. A covenant's history older than the 
 | M4 watch (live feed) | ✅ |
 | M5 decode (disassembler) | ✅ + in-browser port (`web/disasm.js`, byte-identical on all indexed scripts) |
 | M6 own covenant end-to-end | ✅ [[Covenant Lab]] on TN10 |
-| M7 export + web dashboard | ✅ [kascov-explorer.web.app](https://kascov-explorer.web.app) |
+| M7 export + web dashboard | ✅ [kascov.io](https://kascov.io) |
 | M8 always-on serving | ✅ Cloud Run worker, GCS-backed continuity, live JSON API |
 | M9 spend-time decoding | ✅ sig capture, verified P2SH reveals, payload Δ in `trace` |
 | M10 KIP-20 genesis validation | ✅ consensus-hash-verified classification |

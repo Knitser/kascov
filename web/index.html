@@ -2,6 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <script>
+    /* kascov.io is home now — forward the old Firebase URLs, preserving the
+       full path/query/hash so deep-links survive the move. */
+    (function () {
+      var h = location.hostname;
+      if (h === 'kascov-explorer.web.app' || h.endsWith('.firebaseapp.com')) {
+        location.replace('https://kascov.io' + location.pathname + location.search + location.hash);
+      }
+    })();
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>kascov — watch Kaspa's smart coins live their lives</title>
   <meta name="description" content="The first covenant explorer for Kaspa L1. kascov watches every smart coin on the Kaspa network get born, move, and retire — and saves the history the network deletes after ~3 days.">
@@ -9,14 +19,14 @@
   <meta property="og:description" content="The first covenant explorer for Kaspa L1. Every smart coin, born, moving, retiring — recorded live, remembered forever.">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="kascov">
-  <meta property="og:url" content="https://kascov-explorer.web.app/">
-  <meta property="og:image" content="https://kascov-explorer.web.app/og.png">
+  <meta property="og:url" content="https://kascov.io/">
+  <meta property="og:image" content="https://kascov.io/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="kascov — watch Kaspa's smart coins live their lives">
   <meta name="twitter:description" content="The first covenant explorer for Kaspa L1. Every smart coin, born, moving, retiring — recorded live, remembered forever.">
-  <meta name="twitter:image" content="https://kascov-explorer.web.app/og.png">
+  <meta name="twitter:image" content="https://kascov.io/og.png">
   <meta name="theme-color" content="#0a100f">
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32">
@@ -66,12 +76,6 @@
         <p class="hero-sub">kascov watches every smart coin on the Kaspa <span data-net-word>testnet</span> — born, moving, retiring — and saves the history the network deletes after 3&nbsp;days.</p>
         <div class="hero-stats" id="hero-stats"></div>
         <p class="freshness" id="freshness"></p>
-      </section>
-
-      <section class="tour-video-wrap" aria-label="What’s new in kascov">
-        <video id="tour-video" class="tour-video" muted loop playsinline autoplay preload="auto" poster="kascov-tour-poster.jpg">
-          <source src="kascov-tour.mp4" type="video/mp4" />
-        </video>
       </section>
 
       <section class="digest" id="section-digest" aria-label="The last 24 hours" hidden>
@@ -472,7 +476,7 @@
             <p>The indexer follows Kaspa's chain tip live, classifies every covenant event (born / moved / retired), decodes spend-time script reveals, and serves the whole index as static JSON from a CDN. Reads are cheap and cacheable — poll as often as you like.</p>
             <table class="api-meta">
               <tbody>
-                <tr><th>Base URL</th><td><code class="mono">https://kascov-explorer.web.app</code></td></tr>
+                <tr><th>Base URL</th><td><code class="mono">https://kascov.io</code></td></tr>
                 <tr><th>Format</th><td>JSON · <code class="mono">application/json</code></td></tr>
                 <tr><th>Auth</th><td>None — public</td></tr>
                 <tr><th>CORS</th><td><code class="mono">Access-Control-Allow-Origin: *</code></td></tr>
@@ -490,7 +494,7 @@
             <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}-live.json</code></div>
             <p class="ep-desc">The small, fast feed — network stats, the chain tip, and the ~150 newest life events. This is the one to poll (a few KB, refreshes every few seconds).</p>
             <div class="ep-cols">
-              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -s https://kascov-explorer.web.app/data/testnet-10-live.json</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -s https://kascov.io/data/testnet-10-live.json</code></pre></div>
               <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
   "stats": { "covenants": 89747, "active": 6566, "events": 403794 },
   "tip_daa": 509571904,
@@ -534,7 +538,7 @@
             <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/stream</code></div>
             <p class="ep-desc">Server-sent events — one JSON message the moment the indexer sees each life event, plus a <code class="mono">: ka</code> keep-alive every 25s. Treat messages as hints and confirm through the polled feeds (some CDNs buffer streams).</p>
             <div class="ep-cols">
-              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -N https://kascov-explorer.web.app/data/testnet-10/stream</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -N https://kascov.io/data/testnet-10/stream</code></pre></div>
               <div class="ep-example"><div class="ep-ex-head">Each message</div><pre class="codeblock"><code>data: {"covenant_id":"b11acf6c…","kind":"genesis",
        "txid":"a86041…","accepting_daa":508951007}</code></pre></div>
             </div>
