@@ -41,5 +41,5 @@ kascov --network testnet-10 show <covenant-id> --decode
 kascov --network testnet-10 trace <covenant-id>     # payload Δ appears on P2SH covenants
 
 # the hosted API (same data, no local setup):
-curl -s https://kascov-explorer.web.app/data/testnet-10-live.json | jq .stats
+curl -s https://kascov.io/data/testnet-10-live.json | jq .stats
 ```

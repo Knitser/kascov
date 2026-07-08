@@ -34,7 +34,7 @@ What kascov covers: covenant ids/lineage (consensus-validated genesis), P2SH rev
 
 ## Publishing
 
-- Repo: `github.com/Knitser/kascov` · dashboard: `kascov-explorer.web.app` (Firebase Hosting + Cloud Run worker).
+- Repo: `github.com/Knitser/kascov` · dashboard: `kascov.io` (Firebase Hosting + Cloud Run worker).
 - The pitch window is **open right now**: mainnet's first covenant appeared July 2 (~11:00 UTC, `c7948684ae…`, 195 events within the hour) and kascov indexed it live. TN10's same-day covenant storm (2,900+ covenants) shows the tester audience exists. Ship the "first covenant explorer for Kaspa L1" post immediately.
 
 ## Operational notes

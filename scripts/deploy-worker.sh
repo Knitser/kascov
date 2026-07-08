@@ -52,4 +52,4 @@ firebase deploy --only hosting --non-interactive
 
 URL=$(gcloud run services describe $SERVICE --project $PROJECT --region $REGION --format='value(status.url)')
 echo "==> done. worker: $URL"
-echo "    site data now live via https://kascov-explorer.web.app/data/testnet-10.json"
+echo "    site data now live via https://kascov.io/data/testnet-10.json"

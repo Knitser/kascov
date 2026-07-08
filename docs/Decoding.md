@@ -6,7 +6,7 @@
 
 `DisasmDecoder` disassembles any script into named opcodes with the full post-Toccata opcode table (extracted from rusty-kaspa's `crypto/txscript/src/opcodes/mod.rs` at the pinned rev). Each instruction is tagged with a group: **push** · **standard** · **introspection** (KIP-17, 0xb2–0xc9 + `OpNum2Bin`/`OpBin2Num`) · **covenant** (KIP-20: `OpInputCovenantId`, `OpCovOutputIdx`, `OpOutputAuthorizingInput`, …) · **zk** (`OpZkPrecompile`, KIP-16).
 
-`web/disasm.js` is a **verified port** of this disassembler — byte-identical output on every script in the live index — powering the site's [#/decode](https://kascov-explorer.web.app/#/decode) page, where any hex round-trips entirely in the browser.
+`web/disasm.js` is a **verified port** of this disassembler — byte-identical output on every script in the live index — powering the site's [#/decode](https://kascov.io/#/decode) page, where any hex round-trips entirely in the browser.
 
 ## Spend-time decoding (shipped)
 
@@ -37,6 +37,6 @@ Exports carry `template` + `state_fields` (and `revealed_template` + `revealed_f
 
 Compiled [SilverScript](https://github.com/kaspanet/silverscript) contracts **inline constructor args at their use sites** (a pledge appears three times mid-script), so suffix/prefix splitting cannot work. Instead `Skeleton::derive(a, b, sentinels)` aligns **two builds of the same contract with distinct sentinel args** instruction-by-instruction: identical items become fixed ops/consts, differing pushes become labeled slots (looked up by sentinel value). Matching requires equal length, equal ops/consts, and *agreement across repeated slots* — the same arg pushed twice must carry the same value, which is what disambiguates Escrow from LastWill (identical arg shapes, different wiring).
 
-Wired entries (derived at startup from six embedded `silverc` dumps, two per contract): **Mecenas** (`recipient`, `funder_hash`, `pledge`, `period`) · **Escrow** (`arbiter_hash`, `buyer`, `seller`) · **LastWill** (`inheritor_hash`, `cold_hash`, `hot_hash`). The same engine is ported to the browser (`web/disasm.js`), so the [decode page](https://kascov-explorer.web.app/decode) names pasted contracts too. Matching never guesses: no skeleton, no label.
+Wired entries (derived at startup from six embedded `silverc` dumps, two per contract): **Mecenas** (`recipient`, `funder_hash`, `pledge`, `period`) · **Escrow** (`arbiter_hash`, `buyer`, `seller`) · **LastWill** (`inheritor_hash`, `cold_hash`, `hot_hash`). The same engine is ported to the browser (`web/disasm.js`), so the [decode page](https://kascov.io/decode) names pasted contracts too. Matching never guesses: no skeleton, no label.
 
 Escrow and LastWill are indistinguishable by argument shape (both 3×32B), which is exactly why matching uses compiled bodies rather than arity heuristics.

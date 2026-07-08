@@ -35,4 +35,4 @@ Node: rusty-kaspa **v2.0.1** (mainnet + TN10). Default borsh wRPC ports: mainnet
 
 - **SilverScript** ([kaspanet/silverscript](https://github.com/kaspanet/silverscript)) — the covenant language; compiles to native Kaspa Script. Its example contracts (Mecenas, Escrow, LastWill) are wired into kascov's [[Decoding#Template decoders (named contracts, labeled fields)|template registry]].
 - **vprogs** ([kaspanet/vprogs](https://github.com/kaspanet/vprogs)) — Rust framework for based ZK apps (off-chain compute, on-chain RISC Zero proof verification). Flagship demo: trustless chess.
-- Explorers: [kascov-explorer.web.app](https://kascov-explorer.web.app) (covenant lineage — this project), [tn10.kaspa.stream](https://tn10.kaspa.stream/) (general blocks/txs/addresses), explorer-tn10.kaspa.org. kascov remains the only one decoding covenant lineage.
+- Explorers: [kascov.io](https://kascov.io) (covenant lineage — this project), [tn10.kaspa.stream](https://tn10.kaspa.stream/) (general blocks/txs/addresses), explorer-tn10.kaspa.org. kascov remains the only one decoding covenant lineage.
