@@ -1,0 +1,22 @@
+[package]
+name = "kascov-labkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The reusable half of kascov-lab: tx building, signing, and broadcast for
+# covenants on testnet-10. kascov-lab is a thin CLI over this; the worker's
+# custodial /deploy endpoint links it directly.
+[dependencies]
+kaspa-wrpc-client = { workspace = true }
+kaspa-rpc-core = { workspace = true }
+kaspa-consensus-core = { workspace = true }
+kaspa-addresses = { workspace = true }
+kaspa-txscript = { workspace = true }
+secp256k1 = { workspace = true }
+kascov-decode = { path = "../kascov-decode" }
+blake2b_simd = { workspace = true }
+
+tokio = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }

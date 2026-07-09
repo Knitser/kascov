@@ -271,6 +271,7 @@ fn classify<'a>(
                 kind,
                 txid: tx.txid,
                 payload: (!tx.payload.is_empty()).then(|| tx.payload.clone()),
+                lane_namespace: crate::store::lane_namespace(&tx.payload),
             });
         }
     }

@@ -29,21 +29,53 @@ restore() {
   done
 }
 
+# A .bak is only safe to upload if it opens as a real, non-empty SQLite file —
+# otherwise a corrupt/truncated DB would clobber the only backup. This checks the
+# 16-byte "SQLite format 3\0" magic + a sane size without needing the sqlite3 CLI.
+valid_sqlite() {
+  f="$1"
+  [ -s "$f" ] || return 1
+  [ "$(wc -c < "$f")" -ge 512 ] || return 1
+  head -c 16 "$f" | grep -q "SQLite format 3" || return 1
+}
+
+# gcs_put FILE OBJECT — upload FILE to gs://$BACKUP_BUCKET/OBJECT.
+gcs_put() {
+  curl -sf -X POST -H "Authorization: Bearer $2" \
+    -H "Content-Type: application/octet-stream" \
+    --data-binary "@$1" \
+    "https://storage.googleapis.com/upload/storage/v1/b/$BACKUP_BUCKET/o?uploadType=media&name=$3" \
+    > /dev/null
+}
+
 backup_loop() {
   [ -n "$BACKUP_BUCKET" ] || return 0
+  # One-time operator setup for real durability (run once, NOT here):
+  #   gcloud storage buckets update gs://$BACKUP_BUCKET --versioning
+  #   gcloud storage buckets update gs://$BACKUP_BUCKET \
+  #     --lifecycle-file=lifecycle.json   # e.g. keep 30 noncurrent versions
+  #   # and an uptime alert on the health path:
+  #   gcloud monitoring uptime create kascov-live --resource-type=uptime-url \
+  #     --host=<cloud-run-host> --path=/data/mainnet-live.json   # + a policy/channel
   while true; do
     sleep "$BACKUP_EVERY"
     token=$(gcs_token) || continue
+    stamp=$(date -u +%Y%m%d-%H%M%S)
     for n in $(echo "$NETWORKS" | tr ',' ' '); do
       [ -f "$DB_DIR/$n.db" ] || continue
-      if kascov --network "$n" --db "$DB_DIR/$n.db" backup --out "/tmp/$n.bak" 2>/dev/null; then
-        curl -sf -X POST -H "Authorization: Bearer $token" \
-          -H "Content-Type: application/octet-stream" \
-          --data-binary "@/tmp/$n.bak" \
-          "https://storage.googleapis.com/upload/storage/v1/b/$BACKUP_BUCKET/o?uploadType=media&name=$n.db" \
-          > /dev/null && echo "[entrypoint] backed up $n.db"
+      kascov --network "$n" --db "$DB_DIR/$n.db" backup --out "/tmp/$n.bak" 2>/dev/null || continue
+      if ! valid_sqlite "/tmp/$n.bak"; then
+        echo "[entrypoint] WARNING: $n backup failed validation — NOT uploading (preserving last good backup)"
         rm -f "/tmp/$n.bak"
+        continue
       fi
+      # Timestamped archival copy first (history survives even without bucket
+      # versioning), then advance the stable 'latest' that restore reads.
+      gcs_put "/tmp/$n.bak" "$token" "archive/$n-$stamp.db" || true
+      if gcs_put "/tmp/$n.bak" "$token" "$n.db"; then
+        echo "[entrypoint] backed up $n.db (+ archive/$n-$stamp.db)"
+      fi
+      rm -f "/tmp/$n.bak"
     done
   done
 }

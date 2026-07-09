@@ -28,6 +28,10 @@ pub struct Decoded {
     pub pushes: Vec<Vec<u8>>,
     pub uses_covenant_ops: bool,
     pub uses_zk_ops: bool,
+    /// Best-effort proving system guessed from the ZK arguments, when the
+    /// script uses `OpZkPrecompile` (see `zk_system`). `None` when there are
+    /// no ZK ops or the shape is too ambiguous to call.
+    pub zk_system: Option<&'static str>,
     /// Recognized template name, when a template decoder matched.
     pub template: Option<&'static str>,
     /// Labeled constructor/state fields, when the template names them.
@@ -50,11 +54,52 @@ fn base_decode(name: &'static str, script: &[u8]) -> Decoded {
         pushes: instructions.iter().filter_map(|i| i.data.clone()).collect(),
         uses_covenant_ops: instructions.iter().any(|i| i.group == OpGroup::Covenant),
         uses_zk_ops: instructions.iter().any(|i| i.group == OpGroup::Zk),
+        zk_system: zk_system_from(&instructions),
         instructions,
         truncated,
         template: None,
         fields: vec![],
     }
+}
+
+/// Guess which zero-knowledge proving system a covenant script hands to
+/// `OpZkPrecompile` (KIP-16, opcode `0xa6`). Best effort: the verifier pops a
+/// verifying key, a proof, and public inputs off the stack, so the data
+/// pushes in the program encode those shapes. We key on the two systems'
+/// very different proof sizes and prefer `None` over a shaky guess.
+///
+///   * **Groth16** (BN254 / BLS12-381) has a fixed, tiny proof — three curve
+///     points, 128–256 bytes depending on curve and compression — and its
+///     public inputs are 32-byte field elements. The verifying key is a
+///     handful of 64-byte G1 / 96–128-byte G2 points. No single push reaches
+///     STARK scale.
+///   * **RISC Zero** seals are STARK receipts: kilobytes of proof data plus a
+///     32-byte image id. A push of >= 1 KiB feeding the precompile is the tell.
+///
+/// Bare 32/64-byte pushes on their own are too generic to attribute, so those
+/// yield `None`.
+pub fn zk_system(script: &[u8]) -> Option<&'static str> {
+    let (instructions, _) = disassemble(script);
+    zk_system_from(&instructions)
+}
+
+fn zk_system_from(instructions: &[Instruction]) -> Option<&'static str> {
+    // Only meaningful for scripts that actually invoke the ZK verifier.
+    if !instructions.iter().any(|i| i.group == OpGroup::Zk) {
+        return None;
+    }
+    let sizes: Vec<usize> = instructions.iter().filter_map(|i| i.data.as_ref().map(|d| d.len())).collect();
+    // STARK-scale seal → RISC Zero.
+    if sizes.iter().any(|&n| n >= 1024) {
+        return Some("risc0");
+    }
+    // Groth16 proof band: three curve points, ~128 (compressed) up to 256
+    // (uncompressed). A push in this range, with nothing STARK-scale present,
+    // reads as Groth16.
+    if sizes.iter().any(|&n| (128..=256).contains(&n)) {
+        return Some("groth16");
+    }
+    None
 }
 
 impl StateDecoder for DisasmDecoder {
@@ -599,6 +644,34 @@ mod tests {
         assert_eq!(encode_push(&snum(6)), vec![0x56]);
         // and a 32-byte value uses a direct length-prefixed push
         assert_eq!(encode_push(&[0xab; 32])[0], 0x20);
+    }
+
+    #[test]
+    fn zk_system_classifier() {
+        // No ZK op → nothing to say.
+        let mut plain = vec![0x20];
+        plain.extend([0x00; 32]);
+        plain.push(0xac);
+        assert_eq!(zk_system(&plain), None);
+        assert_eq!(Registry::default().decode(0, &plain).zk_system, None);
+
+        // A ~192-byte proof push (Groth16 band) then OpZkPrecompile → groth16.
+        let mut groth = encode_push(&vec![0x01; 192]);
+        groth.push(0xa6);
+        assert_eq!(zk_system(&groth), Some("groth16"));
+        assert!(Registry::default().decode(0, &groth).uses_zk_ops);
+        assert_eq!(Registry::default().decode(0, &groth).zk_system, Some("groth16"));
+
+        // A 2 KiB seal push → STARK scale → risc0 (wins over any small push).
+        let mut risc0 = encode_push(&vec![0xab; 2048]);
+        risc0.extend(encode_push(&vec![0xcd; 32])); // image id
+        risc0.push(0xa6);
+        assert_eq!(zk_system(&risc0), Some("risc0"));
+
+        // ZK op present but only generic 32-byte pushes → too ambiguous.
+        let mut ambiguous = encode_push(&vec![0x07; 32]);
+        ambiguous.push(0xa6);
+        assert_eq!(zk_system(&ambiguous), None);
     }
 
     #[test]

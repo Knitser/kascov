@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS covenant_events (
     accepting_block BLOB NOT NULL,
     accepting_daa INTEGER NOT NULL,
     payload BLOB,       -- the tx's v1 payload, when non-empty
+    -- KIP-21 lane namespace: the 4-byte app tag (hex) of a payload shaped as
+    -- <4-byte namespace><16 zero bytes>… — NULL when the payload isn't a lane.
+    lane_namespace TEXT,
     PRIMARY KEY (covenant_id, seq)
 );
 CREATE INDEX IF NOT EXISTS ev_by_accepting ON covenant_events(accepting_block);
@@ -75,6 +78,15 @@ CREATE TABLE IF NOT EXISTS webhook_subscriptions (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS webhook_by_covenant ON webhook_subscriptions(covenant_id);
+-- an append-only ledger of virtual-chain reorgs the indexer has applied. Each
+-- row is one rollback: the DAA we had reached, when it happened (ms), and how
+-- many chain blocks were undone.
+CREATE TABLE IF NOT EXISTS reorg_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    daa INTEGER NOT NULL,
+    at_ms INTEGER NOT NULL,
+    rolled_back INTEGER NOT NULL
+);
 ";
 
 pub struct Store {
@@ -169,6 +181,30 @@ pub struct PubkeyCovenantRow {
     pub last_seen_daa: u64,
 }
 
+/// A pubkey that has owned a p2pk-shaped state UTXO of one covenant — the
+/// inverse of `covenants_by_pubkey`, scoped to a single coin's holders.
+#[derive(Clone, Debug, Serialize)]
+pub struct HolderRow {
+    /// Owner pubkey (32-byte x-only or 33-byte ECDSA), hex-encoded.
+    pub pubkey: String,
+    /// The key currently owns at least one live state UTXO of this covenant.
+    pub controls_now: bool,
+    /// How many state UTXOs (live + spent) have carried this key.
+    pub states_seen: u64,
+    pub first_seen_daa: u64,
+    pub last_seen_daa: u64,
+}
+
+/// One applied virtual-chain reorg: the DAA the indexer had reached, the
+/// wall-clock instant it was undone (ms since epoch), and how many chain
+/// blocks were rolled back.
+#[derive(Clone, Debug, Serialize)]
+pub struct ReorgRow {
+    pub daa: u64,
+    pub at_ms: u64,
+    pub rolled_back: u64,
+}
+
 /// One recognized script shape's footprint across every state UTXO ever
 /// indexed. `template: None` is the unrecognized bucket.
 #[derive(Clone, Debug, Serialize)]
@@ -224,6 +260,21 @@ pub struct NewEvent {
     pub txid: TxId,
     /// The tx's v1 payload, stored only when non-empty.
     pub payload: Option<Vec<u8>>,
+    /// The KIP-21 lane namespace (4-byte app tag, hex) when the payload has the
+    /// lane shape; NULL otherwise. Derive with [`lane_namespace`].
+    pub lane_namespace: Option<String>,
+}
+
+/// Sniff a KIP-21 user-lane namespace out of a v1 tx payload. The lane shape is
+/// a leading 4-byte app namespace followed by 16 zero bytes (mirrors the same
+/// probe the `inspect tx` tool prints). Returns the namespace as lowercase hex,
+/// or `None` when the payload is too short or isn't lane-shaped.
+pub fn lane_namespace(payload: &[u8]) -> Option<String> {
+    if payload.len() >= 20 && payload[4..20].iter().all(|&b| b == 0) {
+        Some(hex::encode(&payload[..4]))
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -260,6 +311,15 @@ pub struct NewUtxo {
 
 fn db_err(e: rusqlite::Error) -> Error {
     Error::Rpc(format!("store: {e}"))
+}
+
+/// Milliseconds since the Unix epoch (wall clock). Used to timestamp reorg-log
+/// rows; a backwards clock only yields a smaller number, never a panic.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Parse an inscription payload's first JSON value — raw `{"…`, or ASCII-hex-
@@ -342,6 +402,7 @@ impl Store {
             "ALTER TABLE covenant_utxos ADD COLUMN spent_sig BLOB",
             "ALTER TABLE covenant_utxos ADD COLUMN spent_budget INTEGER",
             "ALTER TABLE covenant_events ADD COLUMN payload BLOB",
+            "ALTER TABLE covenant_events ADD COLUMN lane_namespace TEXT",
             "ALTER TABLE covenant_utxos ADD COLUMN template TEXT",
             "ALTER TABLE covenant_utxos ADD COLUMN revealed_template TEXT",
         ];
@@ -640,17 +701,18 @@ impl Store {
             )
             .map_err(db_err)?;
             tx.execute(
-                "INSERT INTO covenant_events (covenant_id, seq, kind, txid, accepting_block, accepting_daa, payload)
+                "INSERT INTO covenant_events (covenant_id, seq, kind, txid, accepting_block, accepting_daa, payload, lane_namespace)
                  VALUES (?1,
                    (SELECT COALESCE(MAX(seq), -1) + 1 FROM covenant_events WHERE covenant_id = ?1),
-                   ?2, ?3, ?4, ?5, ?6)",
+                   ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     event.covenant_id.0.as_slice(),
                     event.kind.as_str(),
                     event.txid.0.as_slice(),
                     block.accepting_block.0.as_slice(),
                     block.accepting_daa,
-                    event.payload
+                    event.payload,
+                    event.lane_namespace
                 ],
             )
             .map_err(db_err)?;
@@ -706,7 +768,44 @@ impl Store {
         }
         // Covenants whose genesis was rolled back disappear entirely.
         tx.execute("DELETE FROM covenants WHERE event_count <= 0", []).map_err(db_err)?;
+        // Record the reorg for the public feed. The best-available DAA is the
+        // indexer's own progress mark (the tip we had reached) — the removed
+        // blocks are being deleted, so their DAAs aren't reliably queryable
+        // here, and not every reorged block carried covenant activity anyway.
+        if !removed.is_empty() {
+            let daa: u64 = tx
+                .query_row("SELECT value FROM meta WHERE key = 'processed_daa'", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(db_err)?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            tx.execute(
+                "INSERT INTO reorg_log (daa, at_ms, rolled_back) VALUES (?1, ?2, ?3)",
+                params![daa, now_ms(), removed.len() as u64],
+            )
+            .map_err(db_err)?;
+        }
         tx.commit().map_err(db_err)
+    }
+
+    /// The most recent applied reorgs, newest first. Backs the public reorg
+    /// feed; caps at `limit` rows.
+    pub fn reorg_log(&self, limit: u64) -> Result<Vec<ReorgRow>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT daa, at_ms, rolled_back FROM reorg_log ORDER BY id DESC LIMIT ?1")
+            .map_err(db_err)?;
+        let limit = limit.min(i64::MAX as u64) as i64;
+        let rows = stmt
+            .query_map([limit], |row| {
+                Ok(ReorgRow { daa: row.get(0)?, at_ms: row.get(1)?, rolled_back: row.get(2)? })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
     }
 
     pub fn list(&self, limit: u64) -> Result<Vec<CovenantSummary>> {
@@ -737,6 +836,60 @@ impl Store {
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// A single page of the covenant list, newest activity first. `after` is an
+    /// exclusive compound cursor `(last_activity_daa, covenant_id)`: pass the
+    /// previous page's `(next_after_daa, next_after_id)` to walk backwards.
+    /// `None` starts from the tip. The compound key means covenants sharing a
+    /// boundary DAA page deterministically instead of being skipped.
+    pub fn list_page(&self, after: Option<(u64, [u8; 32])>, limit: u64) -> Result<Vec<CovenantSummary>> {
+        let select = "SELECT c.covenant_id, c.genesis_txid, c.genesis_daa, c.lineage_complete,
+                        c.event_count, c.last_activity_daa,
+                        (SELECT COUNT(*) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL),
+                        (SELECT COALESCE(SUM(value), 0) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL)
+                 FROM covenants c";
+        let order = "ORDER BY c.last_activity_daa DESC, c.covenant_id DESC";
+        let limit = limit.min(i64::MAX as u64) as i64;
+        let map_row = |row: &rusqlite::Row| {
+            Ok(CovenantSummary {
+                covenant_id: CovenantId(row.get(0)?),
+                genesis_txid: row.get::<_, Option<[u8; 32]>>(1)?.map(TxId),
+                genesis_daa: row.get(2)?,
+                lineage_complete: row.get(3)?,
+                event_count: row.get(4)?,
+                last_activity_daa: row.get(5)?,
+                live_utxos: row.get(6)?,
+                live_value: row.get(7)?,
+            })
+        };
+        let rows = match after {
+            Some((daa, id)) => {
+                let sql = format!(
+                    "{select} WHERE c.last_activity_daa < ?1 \
+                       OR (c.last_activity_daa = ?1 AND c.covenant_id < ?2) {order} LIMIT ?3"
+                );
+                let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
+                let daa = daa.min(i64::MAX as u64) as i64;
+                let out = stmt
+                    .query_map(params![daa, id.as_slice(), limit], map_row)
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?;
+                out
+            }
+            None => {
+                let sql = format!("{select} {order} LIMIT ?1");
+                let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
+                let out = stmt
+                    .query_map([limit], map_row)
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?;
+                out
+            }
+        };
         Ok(rows)
     }
 
@@ -1113,7 +1266,35 @@ impl Store {
                         COUNT(DISTINCT covenant_id) AS coins
                  FROM covenant_events
                  WHERE payload IS NOT NULL AND length(payload) >= 4
+                   AND lane_namespace IS NULL
                  GROUP BY k
+                 ORDER BY events DESC
+                 LIMIT 200",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64)))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// KIP-21 user-lane activity, grouped by the stored `lane_namespace` (the
+    /// 4-byte app tag, hex). Only events whose payload had the lane shape at
+    /// write time are counted — the strict complement of the generic tag
+    /// buckets in [`based_app_namespaces`], so a lane never double-counts.
+    /// Returns (namespace_hex, event_count, distinct_covenants), busiest first.
+    pub fn lane_namespaces(&self) -> Result<Vec<(String, u64, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT lane_namespace,
+                        COUNT(*) AS events,
+                        COUNT(DISTINCT covenant_id) AS coins
+                 FROM covenant_events
+                 WHERE lane_namespace IS NOT NULL
+                 GROUP BY lane_namespace
                  ORDER BY events DESC
                  LIMIT 200",
             )
@@ -1344,6 +1525,70 @@ impl Store {
         Ok(rows)
     }
 
+    /// The p2pk-state owners of ONE covenant — the inverse of
+    /// `covenants_by_pubkey`. Groups this covenant's state UTXOs by their
+    /// exact spk (a p2pk script is unique per owner key), then keeps the rows
+    /// whose shape is the p2pk template `[len-2 push][key][OpCheckSig]` and
+    /// lifts the owner pubkey out of the script. Single indexed-by-covenant
+    /// query, bounded by a SQL `LIMIT` (a multiple of `limit`, since the
+    /// p2pk-shape filter runs after the fetch) so a covenant with many distinct
+    /// scripts can't materialize unbounded groups on every detail load; the
+    /// Rust-side cap then keeps `limit` most-recent p2pk owners (pass e.g. 100).
+    pub fn holders_of_covenant(&self, id: &CovenantId, limit: u64) -> Result<Vec<HolderRow>> {
+        // scan bound: enough headroom to survive the shape filter, still bounded
+        let scan = limit.saturating_mul(10).clamp(64, i64::MAX as u64) as i64;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT spk_script,
+                        MAX(spent_block IS NULL) AS controls_now,
+                        COUNT(*) AS states_seen,
+                        MIN(created_daa) AS first_seen_daa,
+                        MAX(created_daa) AS last_seen_daa
+                 FROM covenant_utxos
+                 WHERE covenant_id = ?1
+                 GROUP BY spk_script
+                 ORDER BY last_seen_daa DESC
+                 LIMIT ?2",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params![id.0.as_slice(), scan], |row| {
+                let spk: Vec<u8> = row.get(0)?;
+                Ok((
+                    spk,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        let mut holders = Vec::new();
+        for (spk, controls_now, states_seen, first_seen_daa, last_seen_daa) in rows {
+            // p2pk shape: [len-2 push opcode][key][OpCheckSig], key 32 or 33 bytes.
+            let key = match spk.first().copied() {
+                Some(len @ (32 | 33)) if spk.len() == len as usize + 2 && spk.last() == Some(&0xac) => {
+                    &spk[1..1 + len as usize]
+                }
+                _ => continue,
+            };
+            holders.push(HolderRow {
+                pubkey: hex::encode(key),
+                controls_now,
+                states_seen,
+                first_seen_daa,
+                last_seen_daa,
+            });
+            if holders.len() as usize >= limit as usize {
+                break;
+            }
+        }
+        Ok(holders)
+    }
+
     pub fn events(&self, id: &CovenantId) -> Result<Vec<EventRow>> {
         let mut stmt = self
             .conn
@@ -1448,11 +1693,71 @@ mod tests {
                     kind,
                     txid: TxId([tx; 32]),
                     payload: None,
+                    lane_namespace: None,
                 })
                 .collect(),
             created_utxos: vec![],
             spent_utxos: vec![],
         }
+    }
+
+    #[test]
+    fn lane_namespace_sniff() {
+        // Lane shape: 4-byte namespace + 16 zero bytes → namespace hex.
+        let mut lane = vec![0xde, 0xad, 0xbe, 0xef];
+        lane.extend_from_slice(&[0u8; 16]);
+        assert_eq!(lane_namespace(&lane).as_deref(), Some("deadbeef"));
+        // Trailing bytes after the 16 zeros are allowed (payload body).
+        let mut lane_body = lane.clone();
+        lane_body.extend_from_slice(b"hello");
+        assert_eq!(lane_namespace(&lane_body).as_deref(), Some("deadbeef"));
+        // Too short (< 20 bytes) is never a lane.
+        assert_eq!(lane_namespace(&lane[..19]), None);
+        // Non-zero in the 16-byte gap disqualifies it (e.g. a JSON payload).
+        let mut not_lane = vec![0xde, 0xad, 0xbe, 0xef];
+        not_lane.extend_from_slice(&[0u8; 16]);
+        not_lane[10] = 1;
+        assert_eq!(lane_namespace(&not_lane), None);
+    }
+
+    #[test]
+    fn lane_namespaces_group_and_exclude_tags() {
+        let store = test_store("lanes");
+        let lane_ns = "01020304".to_string();
+        let mut lane_payload = hex::decode(&lane_ns).unwrap();
+        lane_payload.extend_from_slice(&[0u8; 16]);
+        let block = BlockEvents {
+            accepting_block: BlockHash([9; 32]),
+            accepting_daa: 100,
+            events: vec![
+                NewEvent {
+                    covenant_id: CovenantId([1; 32]),
+                    kind: EventKind::Genesis,
+                    txid: TxId([1; 32]),
+                    payload: Some(lane_payload.clone()),
+                    lane_namespace: Some(lane_ns.clone()),
+                },
+                // A generic (non-lane) tagged payload — must stay in the tag
+                // buckets and never appear as a lane.
+                NewEvent {
+                    covenant_id: CovenantId([2; 32]),
+                    kind: EventKind::Genesis,
+                    txid: TxId([2; 32]),
+                    payload: Some(vec![0xaa, 0xbb, 0xcc, 0xdd, 0x01]),
+                    lane_namespace: None,
+                },
+            ],
+            created_utxos: vec![],
+            spent_utxos: vec![],
+        };
+        let mut store = store;
+        store.apply(&block, BlockHash([9; 32])).unwrap();
+        let lanes = store.lane_namespaces().unwrap();
+        assert_eq!(lanes, vec![(lane_ns, 1, 1)]);
+        // The tag view excludes the lane row (no double count) but keeps the
+        // generic tagged payload.
+        let tags = store.based_app_namespaces().unwrap();
+        assert_eq!(tags, vec![("tag:aabbccdd".to_string(), 1, 1)]);
     }
 
     #[test]

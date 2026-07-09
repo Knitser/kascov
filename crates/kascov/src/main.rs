@@ -273,8 +273,35 @@ fn build_activity_snapshot(
 /// no scripts. This is what the web app loads up front; per-coin detail comes
 /// from `/data/{network}/c/{id}.json` on demand. At 42k covenants the old
 /// all-in-one snapshot passed 1 GiB in flight — this stays a few MB.
-fn build_grid_snapshot(store: &Store, network: kascov_core::Network) -> Result<serde_json::Value> {
-    let covenants = store.list(u64::MAX)?;
+fn build_grid_snapshot(
+    store: &Store,
+    network: kascov_core::Network,
+    after: Option<(u64, [u8; 32])>,
+    limit: Option<u64>,
+) -> Result<serde_json::Value> {
+    // Back-compat: with no paging params we still serialize every covenant
+    // (`store.list(u64::MAX)`). A caller that passes `?after_daa=`/`?limit=`
+    // opts into a page window ordered by `last_activity_daa DESC`, default
+    // 5000 most-recent; `next_after_daa` appears when more rows remain.
+    const DEFAULT_PAGE: u64 = 5000;
+    let paged = after.is_some() || limit.is_some();
+    let mut next_after_daa: Option<u64> = None;
+    let mut next_after_id: Option<String> = None;
+    let covenants = if paged {
+        let page = limit.unwrap_or(DEFAULT_PAGE).max(1);
+        // Over-fetch by one to detect whether another page exists.
+        let mut rows = store.list_page(after, page.saturating_add(1))?;
+        if rows.len() as u64 > page {
+            rows.truncate(page as usize);
+            if let Some(last) = rows.last() {
+                next_after_daa = Some(last.last_activity_daa);
+                next_after_id = Some(last.covenant_id.to_string());
+            }
+        }
+        rows
+    } else {
+        store.list(u64::MAX)?
+    };
     let born = store.born_values()?;
     let templates = store.covenant_templates()?;
     let tip = store.tip()?;
@@ -295,7 +322,7 @@ fn build_grid_snapshot(store: &Store, network: kascov_core::Network) -> Result<s
             })
         })
         .collect();
-    Ok(serde_json::json!({
+    let mut snapshot = serde_json::json!({
         "network": network.to_string(),
         "grid": true,
         "generated_at_ms": now_ms(),
@@ -304,7 +331,12 @@ fn build_grid_snapshot(store: &Store, network: kascov_core::Network) -> Result<s
         "processed_daa": store.processed_daa()?,
         "stats": stats_json(store)?,
         "covenants": rows,
-    }))
+    });
+    if let (Some(daa), Some(id)) = (next_after_daa, next_after_id) {
+        snapshot["next_after_daa"] = serde_json::json!(daa);
+        snapshot["next_after_id"] = serde_json::json!(id);
+    }
+    Ok(snapshot)
 }
 
 /// Contract-type analytics: which script templates run on this network,
@@ -387,6 +419,10 @@ fn build_covenant_detail(
     obj.insert("generated_at_ms".into(), serde_json::json!(now_ms()));
     obj.insert("tip_daa".into(), serde_json::json!(tip.map(|t| t.0)));
     obj.insert("tip_at_ms".into(), serde_json::json!(tip.map(|t| t.1)));
+    // Per-coin holders: the p2pk-state owners of THIS covenant (inverse of
+    // covenants_by_pubkey). Cheap single query, capped at 100 recent owners.
+    let holders = store.holders_of_covenant(&summary.covenant_id, 100)?;
+    obj.insert("holders".into(), serde_json::json!(holders));
     Ok(detail)
 }
 
@@ -416,6 +452,9 @@ fn covenant_json(
                 "uses_covenant_ops": decoded.uses_covenant_ops,
                 "uses_zk_ops": decoded.uses_zk_ops,
             });
+            if decoded.uses_zk_ops {
+                json["zk_system"] = serde_json::json!(decoded.zk_system);
+            }
             if let Some(template) = decoded.template {
                 json["template"] = serde_json::json!(template);
                 json["state_fields"] = serde_json::json!(decoded.fields);
@@ -436,6 +475,9 @@ fn covenant_json(
                     );
                     json["revealed_uses_covenant_ops"] = serde_json::json!(d.uses_covenant_ops);
                     json["revealed_uses_zk_ops"] = serde_json::json!(d.uses_zk_ops);
+                    if d.uses_zk_ops {
+                        json["revealed_zk_system"] = serde_json::json!(d.zk_system);
+                    }
                     if let Some(template) = d.template {
                         json["revealed_template"] = serde_json::json!(template);
                         json["revealed_fields"] = serde_json::json!(d.fields);
@@ -971,6 +1013,13 @@ struct ServeState {
     base_dir: std::path::PathBuf,
     networks: Vec<Network>,
     max_events: u64,
+    /// Node url for the custodial deploy endpoint (None → public resolver).
+    rpc: Option<String>,
+    /// Rate limiter shared by the custodial /deploy endpoint.
+    deploy_limiter: tokio::sync::Mutex<DeployLimiter>,
+    /// Serializes custodial deploys: they all spend from one funding wallet, so
+    /// concurrent builds would pick the same UTXO and double-spend. One in flight.
+    deploy_inflight: tokio::sync::Mutex<()>,
     /// Per-network live event broadcast (SSE). A Vec, not a HashMap:
     /// `Network` has no `Hash` impl and there are at most a couple entries.
     live: Vec<(Network, LiveChannel)>,
@@ -1014,6 +1063,9 @@ async fn serve(
         base_dir,
         networks,
         max_events,
+        rpc: cli.rpc.clone(),
+        deploy_limiter: tokio::sync::Mutex::new(DeployLimiter::new()),
+        deploy_inflight: tokio::sync::Mutex::new(()),
         live,
         cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         build_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
@@ -1023,6 +1075,7 @@ async fn serve(
         .route("/data/{network}/simulate", post(simulate_handler))
         .route("/data/{network}/zk-verify", post(zk_verify_handler))
         .route("/data/{network}/compile", post(compile_handler))
+        .route("/data/{network}/deploy", post(deploy_handler))
         .route("/data/{network}/publish", post(publish_handler))
         .route("/data/{network}/verified/{hash}", get(verified_handler))
         .route("/data/{network}/subscribe", post(subscribe_handler))
@@ -1030,6 +1083,8 @@ async fn serve(
         .route("/data/{network}/c/{id}", get(detail_handler))
         .route("/data/{network}/tx/{txid}", get(tx_handler))
         .route("/data/{network}/families.json", get(families_handler))
+        .route("/data/{network}/reorgs.json", get(reorgs_handler))
+        .route("/data/{network}/galaxy.json", get(galaxy_handler))
         .route("/data/{network}/lanes.json", get(lanes_handler))
         .route("/data/{network}/inscriptions.json", get(inscriptions_handler))
         .route("/data/{network}/lifespans.json", get(lifespans_handler))
@@ -1097,8 +1152,8 @@ async fn follow_forever(
         };
         tracing::info!("{network}: following the chain");
         loop {
-            let result = kascov_core::sync::sync_once(&node, &mut store, None, |update| {
-                if let SyncUpdate::Event { covenant_id, kind, txid, accepting_daa } = update {
+            let result = kascov_core::sync::sync_once(&node, &mut store, None, |update| match update {
+                SyncUpdate::Event { covenant_id, kind, txid, accepting_daa } => {
                     tracing::info!("{network}: {} covenant {covenant_id}", kind.as_str());
                     // Fan out to any open SSE streams; serialization is skipped
                     // entirely when nobody is listening, and send() failing
@@ -1114,6 +1169,20 @@ async fn follow_forever(
                         let _ = live_tx.send(msg.into());
                     }
                 }
+                SyncUpdate::Reorg { rolled_back } => {
+                    tracing::info!("{network}: reorg — rolled back {rolled_back} chain blocks");
+                    // Same fire-and-forget fan-out as events; the "kind":"reorg"
+                    // tag lets subscribers distinguish it from covenant activity.
+                    if live_tx.receiver_count() > 0 {
+                        let msg = serde_json::json!({
+                            "kind": "reorg",
+                            "rolled_back": rolled_back,
+                        })
+                        .to_string();
+                        let _ = live_tx.send(msg.into());
+                    }
+                }
+                SyncUpdate::Progress(_) => {}
             })
             .await;
             match result {
@@ -1229,6 +1298,7 @@ fn accepts_gzip(headers: &axum::http::HeaderMap) -> bool {
 async fn data_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path(file): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
@@ -1256,12 +1326,46 @@ async fn data_handler(
     } else {
         (20, "public, max-age=15, s-maxage=60, stale-while-revalidate=300")
     };
-    serve_cached(&state, name.to_string(), ttl, cache_control, accepts_gzip(&headers), move || {
+    // Grid paging: `?after_daa=` (exclusive cursor) and `?limit=` (page size,
+    // capped) walk the grid newest-first. Invalid numbers are ignored so a bad
+    // param degrades to the full snapshot rather than erroring. Params are only
+    // meaningful for the grid, and are folded into the cache key so each page
+    // caches independently.
+    const MAX_PAGE: u64 = 20_000;
+    let (after, limit) = if live {
+        (None, None)
+    } else {
+        // Compound cursor `(after_daa, after_id)`. A caller sending only
+        // `after_daa` (older client) gets id = 0xFF..FF, which re-includes the
+        // whole boundary DAA — the client dedups by id, so nothing is skipped.
+        let after = q.get("after_daa").and_then(|s| s.parse::<u64>().ok()).map(|daa| {
+            let id = q
+                .get("after_id")
+                .and_then(|s| {
+                    let mut b = [0u8; 32];
+                    hex::decode_to_slice(s.trim(), &mut b).ok().map(|_| b)
+                })
+                .unwrap_or([0xFF; 32]);
+            (daa, id)
+        });
+        let limit = q.get("limit").and_then(|s| s.parse::<u64>().ok()).map(|l| l.clamp(1, MAX_PAGE));
+        (after, limit)
+    };
+    let key = match (after, limit) {
+        (None, None) => name.to_string(),
+        (a, l) => format!(
+            "{name}?after_daa={}&after_id={}&limit={}",
+            a.map_or(0, |v| v.0),
+            a.map_or_else(String::new, |v| hex::encode(v.1)),
+            l.map_or(0, |v| v)
+        ),
+    };
+    serve_cached(&state, key, ttl, cache_control, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
         let snapshot = if live {
             build_live_snapshot(&store, network)?
         } else {
-            build_grid_snapshot(&store, network)?
+            build_grid_snapshot(&store, network, after, limit)?
         };
         Ok(Some(serde_json::to_string(&snapshot)?))
     })
@@ -1344,6 +1448,215 @@ fn build_families(store: &Store, network: kascov_core::Network) -> Result<serde_
         "tip_daa": tip.map(|t| t.0),
         "tip_at_ms": tip.map(|t| t.1),
         "families": out,
+    }))
+}
+
+/// Build the whole-network "galaxy": the same union-find clusters as
+/// `build_families`, but with everything a zoomable node-link map needs and
+/// `families.json` lacks — precomputed 2D node positions (so the browser never
+/// runs a force sim), weighted pairwise edges (how many txs each pair shared),
+/// and per-node template + alive/burned status. Positions come from a
+/// cumulative-area sunflower packing: big apps near the galactic core, size-2
+/// dust at the rim. Coordinates are centered on the origin and quantized to
+/// integers to keep the payload small. See docs plan Wave 1.
+fn build_galaxy(store: &Store, network: kascov_core::Network) -> Result<serde_json::Value> {
+    use kascov_core::CovenantId;
+    use std::collections::HashMap;
+
+    let edges_raw = store.multi_covenant_txs()?;
+    let templates = store.covenant_templates()?;
+
+    // alive/burned per covenant, derived exactly like the grid (live_utxos > 0)
+    let mut active: HashMap<CovenantId, bool> = HashMap::new();
+    for c in store.list(u64::MAX)? {
+        active.insert(c.covenant_id, c.live_utxos > 0);
+    }
+
+    // union-find over covenant ids (mirrors build_families)
+    let mut parent: HashMap<CovenantId, CovenantId> = HashMap::new();
+    fn find(parent: &mut HashMap<CovenantId, CovenantId>, x: CovenantId) -> CovenantId {
+        let p = *parent.get(&x).unwrap_or(&x);
+        if p == x {
+            return x;
+        }
+        let root = find(parent, p);
+        parent.insert(x, root);
+        root
+    }
+    let mut degree: HashMap<CovenantId, u32> = HashMap::new();
+    for (_txid, covs) in &edges_raw {
+        for c in covs {
+            parent.entry(*c).or_insert(*c);
+            *degree.entry(*c).or_insert(0) += 1;
+        }
+        if let Some(first) = covs.first() {
+            for c in &covs[1..] {
+                let (ra, rb) = (find(&mut parent, *first), find(&mut parent, *c));
+                if ra != rb {
+                    parent.insert(ra, rb);
+                }
+            }
+        }
+    }
+
+    // gather clusters (root -> members), keep size >= 2
+    let all: Vec<CovenantId> = parent.keys().copied().collect();
+    let mut clusters: HashMap<CovenantId, Vec<CovenantId>> = HashMap::new();
+    for m in all {
+        let root = find(&mut parent, m);
+        clusters.entry(root).or_default().push(m);
+    }
+    let mut cluster_list: Vec<Vec<CovenantId>> =
+        clusters.into_values().filter(|c| c.len() >= 2).collect();
+    // biggest first (core), deterministic tiebreak by smallest member id
+    cluster_list.sort_by(|a, b| {
+        b.len()
+            .cmp(&a.len())
+            .then_with(|| a.iter().map(|c| c.0).min().cmp(&b.iter().map(|c| c.0).min()))
+    });
+    for c in &mut cluster_list {
+        c.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    // intern template names once; -1 == unrecognized
+    let mut tpl_names: Vec<String> = Vec::new();
+    let mut tpl_index: HashMap<&str, i64> = HashMap::new();
+    for name in templates.values() {
+        if !tpl_index.contains_key(name.as_str()) {
+            tpl_index.insert(name.as_str(), tpl_names.len() as i64);
+            tpl_names.push(name.clone());
+        }
+    }
+    let tpl_of = |id: &CovenantId| -> i64 {
+        templates
+            .get(id)
+            .and_then(|n| tpl_index.get(n.as_str()).copied())
+            .unwrap_or(-1)
+    };
+
+    // ---- layout: cumulative-area sunflower ----
+    const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653; // 137.5° in radians
+    const TAU: f64 = std::f64::consts::TAU;
+    const SPACING: f64 = 0.62; // ~ disk area == total cluster area
+    let ring_radius = |size: usize| -> f64 { 14.0 + 10.0 * (size as f64).sqrt() };
+
+    let mut nodes: Vec<serde_json::Value> = Vec::new();
+    let mut apps: Vec<serde_json::Value> = Vec::new();
+    let mut node_index: HashMap<CovenantId, usize> = HashMap::new();
+    let (mut min_x, mut min_y, mut max_x, mut max_y) =
+        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+
+    let mut cum_area = 0.0_f64;
+    for (i, cluster) in cluster_list.iter().enumerate() {
+        let size = cluster.len();
+        let cr = ring_radius(size);
+        cum_area += std::f64::consts::PI * (cr + 6.0) * (cr + 6.0);
+        let spiral_r = SPACING * cum_area.sqrt();
+        let theta = i as f64 * GOLDEN_ANGLE;
+        let (cx, cy) = (spiral_r * theta.cos(), spiral_r * theta.sin());
+
+        // dominant template of the cluster = most common member template
+        let mut counts: HashMap<i64, usize> = HashMap::new();
+        for m in cluster {
+            *counts.entry(tpl_of(m)).or_insert(0) += 1;
+        }
+        let dom_t = counts
+            .iter()
+            .filter(|(t, _)| **t >= 0)
+            .max_by_key(|(_, c)| **c)
+            .map(|(t, _)| *t)
+            .unwrap_or(-1);
+
+        apps.push(serde_json::json!({
+            "cx": cx.round() as i64,
+            "cy": cy.round() as i64,
+            "r": cr.round() as i64,
+            "size": size,
+            "t": dom_t,
+        }));
+
+        for (mi, m) in cluster.iter().enumerate() {
+            let a = (mi as f64 / size as f64) * TAU;
+            let (x, y) = (cx + cr * a.cos(), cy + cr * a.sin());
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+            let nr = 3 + degree.get(m).copied().unwrap_or(1).min(6);
+            node_index.insert(*m, nodes.len());
+            nodes.push(serde_json::json!({
+                "id": m,
+                "t": tpl_of(m),
+                "s": if *active.get(m).unwrap_or(&false) { 1 } else { 0 },
+                "x": x.round() as i64,
+                "y": y.round() as i64,
+                "r": nr,
+                "a": i,
+            }));
+        }
+    }
+
+    // ---- pairwise weighted edges (cap clique-explosion) ----
+    let mut edge_w: HashMap<(usize, usize), u32> = HashMap::new();
+    let bump = |a: usize, b: usize, edge_w: &mut HashMap<(usize, usize), u32>| {
+        let key = if a < b { (a, b) } else { (b, a) };
+        *edge_w.entry(key).or_insert(0) += 1;
+    };
+    for (_txid, covs) in &edges_raw {
+        let idxs: Vec<usize> = covs.iter().filter_map(|c| node_index.get(c).copied()).collect();
+        if idxs.len() < 2 {
+            continue;
+        }
+        if idxs.len() <= 8 {
+            for i in 0..idxs.len() {
+                for j in (i + 1)..idxs.len() {
+                    bump(idxs[i], idxs[j], &mut edge_w);
+                }
+            }
+        } else {
+            // a single high-degree tx would emit O(k^2) edges; star it instead
+            let hub = idxs[0];
+            for &other in &idxs[1..] {
+                bump(hub, other, &mut edge_w);
+            }
+        }
+    }
+    const MAX_EDGES: usize = 80_000;
+    let mut edges: Vec<(usize, usize, u32)> =
+        edge_w.into_iter().map(|((a, b), w)| (a, b, w)).collect();
+    let edge_total = edges.len();
+    if edges.len() > MAX_EDGES {
+        edges.sort_by(|a, b| b.2.cmp(&a.2)); // keep the heaviest links
+        edges.truncate(MAX_EDGES);
+    }
+    let edges_json: Vec<serde_json::Value> = edges
+        .iter()
+        .map(|(a, b, w)| serde_json::json!([a, b, w]))
+        .collect();
+
+    if !min_x.is_finite() {
+        min_x = 0.0;
+        min_y = 0.0;
+        max_x = 0.0;
+        max_y = 0.0;
+    }
+    let tip = store.tip()?;
+    Ok(serde_json::json!({
+        "network": network.to_string(),
+        "generated_at_ms": now_ms(),
+        "tip_daa": tip.map(|t| t.0),
+        "tip_at_ms": tip.map(|t| t.1),
+        "bounds": {
+            "minx": min_x.floor() as i64,
+            "miny": min_y.floor() as i64,
+            "w": (max_x - min_x).ceil() as i64,
+            "h": (max_y - min_y).ceil() as i64,
+        },
+        "templates": tpl_names,
+        "apps": apps,
+        "nodes": nodes,
+        "edges": edges_json,
+        "edges_total": edge_total,
     }))
 }
 
@@ -1433,6 +1746,168 @@ async fn compile_handler(
     match run_silverc(req.source, req.args).await {
         Ok(hex) => json_resp(serde_json::json!({ "ok": true, "hex": hex })),
         Err(e) => json_resp(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+// ── Custodial deploy (SAFE, gated OFF by default) ─────────────────────────
+// POST /data/{network}/deploy births a covenant with the server's own faucet
+// key, so the browser builder can deploy without a local toolchain. It is
+// ACTIVE ONLY when KASCOV_DEPLOY_KEY is set AND network == testnet-10 —
+// otherwise the route answers 404, as if it didn't exist. Both a global token
+// bucket and a per-IP/day cap throttle it (the custodial key is spendable, so
+// abuse just drains testnet coins, never mainnet, but we still gate hard).
+
+/// Global token bucket + per-IP daily counter for the deploy endpoint.
+struct DeployLimiter {
+    tokens: f64,
+    last_refill: std::time::Instant,
+    per_ip: std::collections::HashMap<String, (u64, u32)>, // ip -> (day, count)
+}
+
+// The GLOBAL token bucket is the only sound bound on faucet drain (X-Forwarded-For
+// is client-spoofable, so the per-IP cap is best-effort — meaningful only behind a
+// trusted proxy). Bucket holds 5 deploys, refilling 1 per 10 min (~144/day). With
+// the 10 TKAS value ceiling below that caps drain at ~1,440 TKAS/day — fund the
+// custodial key accordingly.
+const DEPLOY_BUCKET_CAP: f64 = 5.0;
+const DEPLOY_REFILL_PER_SEC: f64 = 1.0 / 600.0;
+/// Each client IP may deploy this many coins per calendar day (UTC) — best-effort.
+const DEPLOY_PER_IP_PER_DAY: u32 = 20;
+/// Hard ceiling on the per-IP map size so a spoofed-XFF flood can't OOM us.
+const DEPLOY_IP_MAP_MAX: usize = 50_000;
+
+impl DeployLimiter {
+    fn new() -> Self {
+        Self { tokens: DEPLOY_BUCKET_CAP, last_refill: std::time::Instant::now(), per_ip: Default::default() }
+    }
+
+    /// Charge one deploy to `ip`. Ok on success; Err(reason) when throttled.
+    fn try_take(&mut self, ip: &str) -> Result<(), &'static str> {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.last_refill).as_secs_f64();
+        self.last_refill = now;
+        self.tokens = (self.tokens + dt * DEPLOY_REFILL_PER_SEC).min(DEPLOY_BUCKET_CAP);
+
+        // Check the global bucket FIRST, before touching per_ip — so a flood of
+        // throttled (or spoofed-IP) requests never allocates a per-IP row.
+        if self.tokens < 1.0 {
+            return Err("deploy rate limit — try again in a few minutes");
+        }
+
+        let day = now_ms() / 86_400_000;
+        // Bound the map hard, regardless of day: evict stale days first, and if
+        // that isn't enough (a same-day spoofed-XFF flood), drop it entirely.
+        if self.per_ip.len() > DEPLOY_IP_MAP_MAX {
+            self.per_ip.retain(|_, (d, _)| *d == day);
+            if self.per_ip.len() > DEPLOY_IP_MAP_MAX {
+                self.per_ip.clear();
+            }
+        }
+        let entry = self.per_ip.entry(ip.to_string()).or_insert((day, 0));
+        if entry.0 != day {
+            *entry = (day, 0);
+        }
+        if entry.1 >= DEPLOY_PER_IP_PER_DAY {
+            return Err("daily deploy limit reached for your address — try again tomorrow");
+        }
+        self.tokens -= 1.0;
+        entry.1 += 1;
+        Ok(())
+    }
+}
+
+/// Best-effort client IP: the first hop in X-Forwarded-For (set by the CDN /
+/// Cloud Run front end), else X-Real-IP, else a shared bucket key.
+fn client_ip(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[derive(serde::Deserialize)]
+struct DeployReq {
+    program_hex: String,
+    #[serde(default)]
+    value: u64,
+}
+
+/// POST /data/{network}/deploy — see the section comment above. Body is
+/// `{program_hex, value}`; on success returns `{ok, covenant_id, network}`.
+async fn deploy_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    axum::Json(req): axum::Json<DeployReq>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let not_found = || (StatusCode::NOT_FOUND, "not found").into_response();
+    let net = net_name.strip_suffix("/deploy").unwrap_or(&net_name);
+    let Ok(network) = net.parse::<Network>() else { return not_found() };
+    // Gated OFF by default: the route only exists when armed for testnet-10.
+    let deploy_key = std::env::var("KASCOV_DEPLOY_KEY").unwrap_or_default();
+    if deploy_key.trim().is_empty()
+        || network != Network::Testnet(10)
+        || !state.networks.contains(&network)
+    {
+        return not_found();
+    }
+
+    // Validate the request body.
+    if req.program_hex.len() > 20_000 {
+        return json_resp(serde_json::json!({ "ok": false, "error": "program too large" }));
+    }
+    let Ok(program) = hex::decode(req.program_hex.trim().trim_start_matches("0x")) else {
+        return json_resp(serde_json::json!({ "ok": false, "error": "program_hex is not valid hex" }));
+    };
+    if program.is_empty() {
+        return json_resp(serde_json::json!({ "ok": false, "error": "empty program" }));
+    }
+    // Value bounds: 1 .. 10 TKAS, in sompi. Keeps a runaway request from
+    // draining the faucet balance into one coin (drain ceiling = global
+    // refill/day × this max — see DeployLimiter).
+    if req.value < 100_000_000 || req.value > 1_000_000_000 {
+        return json_resp(serde_json::json!({
+            "ok": false,
+            "error": "value must be between 1 and 10 TKAS (given in sompi)"
+        }));
+    }
+
+    // Rate limit before we touch the node.
+    let ip = client_ip(&headers);
+    if let Err(reason) = state.deploy_limiter.lock().await.try_take(&ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")],
+            serde_json::json!({ "ok": false, "error": reason }).to_string(),
+        )
+            .into_response();
+    }
+
+    let keypair = match kascov_labkit::keypair_from_hex(deploy_key.trim()) {
+        Ok(k) => k,
+        Err(_) => return json_resp(serde_json::json!({ "ok": false, "error": "server deploy key misconfigured" })),
+    };
+    // Only one custodial deploy in flight — they share one funding wallet, so
+    // parallel builds would select the same UTXO and collide as double-spends.
+    let _inflight = state.deploy_inflight.lock().await;
+    let client = match kascov_labkit::connect(state.rpc.as_deref()).await {
+        Ok(c) => c,
+        Err(e) => return json_resp(serde_json::json!({ "ok": false, "error": format!("node unavailable: {e}") })),
+    };
+    match kascov_labkit::deploy(&client, &keypair, &program, req.value).await {
+        Ok(id) => json_resp(serde_json::json!({
+            "ok": true,
+            "covenant_id": id.to_string(),
+            "network": network.to_string(),
+        })),
+        Err(e) => json_resp(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
 }
 
@@ -1639,6 +2114,23 @@ async fn lanes_handler(
         let mut json_events = 0u64;
         let mut json_coins = 0u64;
         let mut lanes: Vec<serde_json::Value> = Vec::new();
+        // KIP-21 user lanes: payloads shaped <4-byte namespace><16 zero bytes>,
+        // stamped with their namespace at write time. Strict complement of the
+        // generic tag buckets below, so no event is counted twice. (Zero rows
+        // today — detection scaffolding that lights up when lane traffic lands.)
+        for (hex, events, coins) in store.lane_namespaces()? {
+            let bytes = hex::decode(&hex).unwrap_or_default();
+            let printable = !bytes.is_empty() && bytes.iter().all(|&b| (0x20..=0x7e).contains(&b));
+            let label = if printable { String::from_utf8_lossy(&bytes).into_owned() } else { format!("0x{hex}") };
+            lanes.push(serde_json::json!({
+                "label": label,
+                "hex": hex,
+                "ascii": printable,
+                "kind": "lane",
+                "events": events,
+                "covenants": coins,
+            }));
+        }
         for (key, events, coins) in store.based_app_namespaces()? {
             if key == "json" || key == "jsonhex" {
                 json_events += events;
@@ -1700,6 +2192,63 @@ async fn families_handler(
     serve_cached(&state, format!("{network}/families"), 60, cc, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
         Ok(Some(serde_json::to_string(&build_families(&store, network)?)?))
+    })
+    .await
+}
+
+/// GET /data/{network}/reorgs.json — the applied virtual-chain reorg feed,
+/// newest first. Reorgs are rare, so this is cached like families.
+async fn reorgs_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let net = net_name.strip_suffix("/reorgs.json").unwrap_or(&net_name);
+    let Ok(network) = net.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+    let db = state.base_dir.join(format!("{network}.db"));
+    let cc = "public, max-age=30, s-maxage=120, stale-while-revalidate=600";
+    serve_cached(&state, format!("{network}/reorgs"), 60, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let reorgs = store.reorg_log(500)?;
+        let out = serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "reorgs": reorgs,
+        });
+        Ok(Some(serde_json::to_string(&out)?))
+    })
+    .await
+}
+
+/// GET /data/{network}/galaxy.json — the whole-network App Graph (precomputed
+/// positions + weighted edges + status). Cached like families; independent of
+/// first paint (the explorer never blocks on it).
+async fn galaxy_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let net = net_name.strip_suffix("/galaxy.json").unwrap_or(&net_name);
+    let Ok(network) = net.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+    let db = state.base_dir.join(format!("{network}.db"));
+    let cc = "public, max-age=30, s-maxage=120, stale-while-revalidate=600";
+    serve_cached(&state, format!("{network}/galaxy"), 60, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        Ok(Some(serde_json::to_string(&build_galaxy(&store, network)?)?))
     })
     .await
 }
@@ -2057,4 +2606,79 @@ async fn stream_handler(
     // ask proxies not to buffer (nginx-style hint; Firebase may ignore it)
     headers.insert(HeaderName::from_static("x-accel-buffering"), HeaderValue::from_static("no"));
     resp
+}
+
+#[cfg(test)]
+mod galaxy_tests {
+    use super::*;
+    use kascov_core::store::{BlockEvents, EventKind, NewEvent, NewUtxo, Store};
+    use kascov_core::{BlockHash, CovenantId, Network, Outpoint, TxId};
+
+    fn ev(cov: u8, kind: EventKind, tx: u8) -> NewEvent {
+        NewEvent { covenant_id: CovenantId([cov; 32]), kind, txid: TxId([tx; 32]), payload: None, lane_namespace: None }
+    }
+
+    // A synthetic index with two "apps": {A1,B2} share tx 0x10, and
+    // {C3,D4,E5} share tx 0x20; a lone F6 is a size-1 cluster (excluded).
+    // A1 gets a live utxo so it reads as active.
+    fn galaxy_store() -> serde_json::Value {
+        let path = std::env::temp_dir().join(format!("kascov-galaxy-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = Store::open(&path, Network::Testnet(10)).unwrap();
+        let block = BlockEvents {
+            accepting_block: BlockHash([1; 32]),
+            accepting_daa: 100,
+            events: vec![
+                ev(0xA1, EventKind::Genesis, 0x10),
+                ev(0xB2, EventKind::Genesis, 0x10),
+                ev(0xC3, EventKind::Genesis, 0x20),
+                ev(0xD4, EventKind::Genesis, 0x20),
+                ev(0xE5, EventKind::Genesis, 0x20),
+                ev(0xF6, EventKind::Genesis, 0x30),
+            ],
+            created_utxos: vec![NewUtxo {
+                outpoint: Outpoint { txid: TxId([0x10; 32]), index: 0 },
+                covenant_id: CovenantId([0xA1; 32]),
+                value: 1_000_000_000,
+                spk_version: 0,
+                spk_script: vec![],
+            }],
+            spent_utxos: vec![],
+        };
+        store.apply(&block, BlockHash([1; 32])).unwrap();
+        build_galaxy(&store, Network::Testnet(10)).unwrap()
+    }
+
+    #[test]
+    fn galaxy_clusters_nodes_and_edges() {
+        let g = galaxy_store();
+        // two apps (size>=2), five member nodes (F6 excluded)
+        assert_eq!(g["apps"].as_array().unwrap().len(), 2);
+        assert_eq!(g["nodes"].as_array().unwrap().len(), 5);
+        // edges: {A1,B2}=1 pair, {C3,D4,E5}=3 pairs -> 4 weighted edges
+        assert_eq!(g["edges"].as_array().unwrap().len(), 4);
+        assert_eq!(g["edges_total"].as_u64().unwrap(), 4);
+
+        // node shape + status wiring: exactly one node is active (A1's utxo)
+        let nodes = g["nodes"].as_array().unwrap();
+        let active = nodes.iter().filter(|n| n["s"].as_i64() == Some(1)).count();
+        assert_eq!(active, 1);
+        for n in nodes {
+            assert_eq!(n["id"].as_str().unwrap().len(), 64); // hex covenant id
+            for k in ["t", "s", "x", "y", "r", "a"] {
+                assert!(n.get(k).is_some(), "node missing {k}");
+            }
+        }
+        // apps sorted biggest-first; each edge references valid node indices
+        assert_eq!(g["apps"][0]["size"].as_u64().unwrap(), 3);
+        for e in g["edges"].as_array().unwrap() {
+            let (a, b) = (e[0].as_u64().unwrap(), e[1].as_u64().unwrap());
+            assert!((a as usize) < nodes.len() && (b as usize) < nodes.len());
+            assert!(e[2].as_u64().unwrap() >= 1); // weight
+        }
+        // bounds present and finite
+        for k in ["minx", "miny", "w", "h"] {
+            assert!(g["bounds"].get(k).is_some(), "bounds missing {k}");
+        }
+    }
 }

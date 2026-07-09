@@ -175,5 +175,49 @@ contract LastWill(byte[32] inheritor, byte[32] cold, byte[32] hot) {
     ].join('\n');
   }
 
-  window.kascovGen = { SOURCES, validateField, prefillFor, sompiToTkas, buildSource, buildDeployCommand };
+  /* per-template reveal step — which entrypoint spends (and reveals) the coin */
+  const REVEAL_CMDS = {
+    'SilverScript · Mecenas': 'spend --program-hex "$PROGRAM_HEX" --entrypoint reclaim',
+    'SilverScript · Escrow': 'settle-escrow --program-hex "$PROGRAM_HEX" --release-to buyer',
+    'SilverScript · LastWill': 'spend --program-hex "$PROGRAM_HEX" --entrypoint cold',
+  };
+
+  /* the whole loop wrapped as a self-contained, runnable bash file — the
+     guided builder offers this as a downloadable deploy.sh (opts: template,
+     date). The compiled hex and coin value are baked in as shell variables. */
+  function buildDeployScript(programHex, valueSompi, opts) {
+    opts = opts || {};
+    const short = (opts.template || '').replace('SilverScript · ', '') || 'contract';
+    const reveal = REVEAL_CMDS[opts.template] || 'spend --program-hex "$PROGRAM_HEX" --entrypoint <entrypoint>';
+    const tkas = sompiToTkas(valueSompi);
+    return [
+      '#!/usr/bin/env bash',
+      `# kascov — deploy your ${short} covenant on Kaspa testnet-10`,
+      opts.date ? `# generated on kascov, ${opts.date}` : '# generated on kascov',
+      '#',
+      '# Prereqs: the kascov repo (https://github.com/Knitser/kascov) and a',
+      '# faucet-funded testnet key. Run this from the repo root.',
+      'set -euo pipefail',
+      '',
+      `PROGRAM_HEX="${programHex}"`,
+      `VALUE_SOMPI="${valueSompi}"   # ${tkas} TKAS`,
+      '',
+      'echo "==> 1/3  make a throwaway testnet key"',
+      'echo "         fund the printed address at https://faucet-testnet.kaspanet.io"',
+      'cargo run -p kascov-lab -- keygen',
+      '',
+      'read -r -p "Funded the address? Press Enter to deploy… " _',
+      '',
+      'echo "==> 2/3  birth the contract (a hidden p2sh commitment)"',
+      'cargo run -p kascov-lab -- deploy --program-hex "$PROGRAM_HEX" --value "$VALUE_SOMPI"',
+      '',
+      'echo "==> 3/3  reveal it — spend under the contract’s own rules"',
+      `cargo run -p kascov-lab -- ${reveal}`,
+      '',
+      'echo "Done. Watch it appear on https://kascov.io"',
+      '',
+    ].join('\n');
+  }
+
+  window.kascovGen = { SOURCES, validateField, prefillFor, sompiToTkas, buildSource, buildDeployCommand, buildDeployScript };
 })();

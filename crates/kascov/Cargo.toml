@@ -8,7 +8,10 @@ license.workspace = true
 kascov-core = { workspace = true }
 kascov-decode = { workspace = true }
 kascov-sim = { workspace = true }
+kascov-labkit = { path = "../kascov-labkit" }
 kaspa-addresses = { workspace = true }
+kaspa-wrpc-client = { workspace = true }
+secp256k1 = { workspace = true }
 
 tokio = { workspace = true }
 axum = { workspace = true }

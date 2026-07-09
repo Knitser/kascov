@@ -25,6 +25,11 @@ const NETWORKS = {
 
 const MS_PER_DAA = 100;   // the chain ticks ~10 DAA per second
 const PAGE_SIZE = 60;
+/* Rows pulled from the grid feed per network round-trip. The worker honours
+   ?limit=/?after_daa= and hands back "next_after_daa" while older rows remain;
+   older workers ignore the params and return the whole snapshot in one shot
+   (no cursor), so this degrades to the original full load automatically. */
+const GRID_PAGE = 2000;
 const STORY_COUNT = 15;
 const TEASER_COUNT = 3;
 const PULSE_BUCKETS = 12;
@@ -258,6 +263,36 @@ function shortHex(hex, head, tail) {
   return `${hex.slice(0, head)}…${hex.slice(-tail)}`;
 }
 
+/* provenance chip: does the index hold this coin's every state back to
+   genesis? optional field — render nothing when the export didn't ship it. */
+function lineageBadge(c) {
+  if (!c || typeof c.lineage_complete !== 'boolean') return '';
+  return c.lineage_complete
+    ? `<span class="flag flag-yes" title="every state back to genesis is indexed — this coin’s origin is provable">provably genesis ✓</span>`
+    : `<span class="flag flag-off" title="indexing began after this coin was born — its earliest history is missing">adopted mid-life</span>`;
+}
+
+/* decode a tx payload for humans: printable bytes read as text, everything
+   else falls back to a truncated hex peek. returns null when there's nothing
+   to show. `label` is the compact display, `title` the full value tooltip. */
+function payloadPeek(hex, len) {
+  if (typeof hex === 'string' && hex.length >= 2) {
+    const bytes = [];
+    for (let i = 0; i + 1 < hex.length; i += 2) bytes.push(parseInt(hex.slice(i, i + 2), 16));
+    const printable = bytes.length &&
+      bytes.every((b) => b === 9 || b === 10 || b === 13 || (b >= 32 && b <= 126));
+    if (printable) {
+      const full = bytes.map((b) => String.fromCharCode(b)).join('');
+      const flat = full.replace(/\s+/g, ' ').trim();
+      const clipped = flat.length > 48 ? flat.slice(0, 48) + '…' : flat;
+      return { label: `“${clipped}”`, title: full, bytes: bytes.length, mono: false };
+    }
+    return { label: shortHex(hex, 12, 8), title: hex, bytes: bytes.length, mono: true };
+  }
+  if (len != null) return { label: `${fmtInt(len)} bytes`, title: '', bytes: null, mono: false };
+  return null;
+}
+
 /* exact UTC stamp for tooltips on relative times */
 function utcTitle(ms) {
   return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
@@ -297,6 +332,7 @@ const state = {
   lanes: {},          // network -> { data, at } (based-app namespaces)
   inscriptions: {},   // network -> { data, at } (decoded JSON inscriptions)
   lifespans: {},      // network -> { data, at } (retired-coin lifespans)
+  reorgs: {},         // network -> { data, at } (virtual-chain reorg log; data null = 404 miss)
   digest: {},         // network -> { data, at, animated }
   activity: {},       // network -> { [range]: { data, at } } (data null = 404 miss)
   pulseRange: '24h',
@@ -377,14 +413,56 @@ function buildIndex(data) {
   return { covs, byId };
 }
 
+/* Fetch one grid page. The compound cursor `afterDaa`+`afterId` and `limit` are
+   folded into the query only when present so a plain `data/{net}.json` still
+   works against older workers. */
+async function fetchGridPage(network, afterDaa, afterId, limit) {
+  const qs = new URLSearchParams();
+  if (afterDaa != null) qs.set('after_daa', String(afterDaa));
+  if (afterId != null) qs.set('after_id', String(afterId));
+  if (limit != null) qs.set('limit', String(limit));
+  const suffix = qs.toString();
+  const res = await fetch(`data/${network}.json${suffix ? `?${suffix}` : ''}`, { cache: 'no-cache' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 async function loadNetwork(network) {
   if (state.cache[network]) return state.cache[network];
-  const res = await fetch(`data/${network}.json`, { cache: 'no-cache' });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
+  const data = await fetchGridPage(network, null, null, GRID_PAGE);
   data.__anchor = makeAnchor(data, network);
-  const entry = { data, index: buildIndex(data) };
+  /* a cursor means the worker paginated and older rows remain; its absence
+     means we already hold the full snapshot (older worker or a small net) */
+  const cursor = data.next_after_daa != null ? data.next_after_daa : null;
+  const entry = {
+    data, index: buildIndex(data), nextAfterDaa: cursor,
+    nextAfterId: data.next_after_id != null ? data.next_after_id : null,
+    loadingMore: false,
+  };
   state.cache[network] = entry;
+  return entry;
+}
+
+/* Pull the next older grid page and merge it into the cached entry: append the
+   fresh rows, advance the cursor, and rebuild the derived index so search,
+   sort, filter and the watch strip all see the newly loaded coins. Returns the
+   entry unchanged (no-op) when there is nothing more to load or a fetch is
+   already in flight. */
+async function loadMoreGrid(network) {
+  const entry = state.cache[network];
+  if (!entry || entry.nextAfterDaa == null || entry.loadingMore) return entry;
+  entry.loadingMore = true;
+  try {
+    const page = await fetchGridPage(network, entry.nextAfterDaa, entry.nextAfterId, GRID_PAGE);
+    const rows = Array.isArray(page.covenants) ? page.covenants : [];
+    const seen = new Set(entry.data.covenants.map((c) => c.covenant_id));
+    for (const c of rows) if (!seen.has(c.covenant_id)) entry.data.covenants.push(c);
+    entry.nextAfterDaa = page.next_after_daa != null ? page.next_after_daa : null;
+    entry.nextAfterId = page.next_after_id != null ? page.next_after_id : null;
+    entry.index = buildIndex(entry.data);
+  } finally {
+    entry.loadingMore = false;
+  }
   return entry;
 }
 
@@ -615,31 +693,64 @@ function renderLifespans(network) {
   }).join('');
 }
 
-/* the app graph — a force-directed cluster of a family (reuses loaded
-   families data; renders lazily when the section is expanded) */
-let appGraphCtrl = null;
-let graphIdx = 0;
+/* the app graph — the whole-network "galaxy": every app at once, positions +
+   weighted edges precomputed by the worker (data/<net>/galaxy.json). Rendered
+   lazily by web/galaxy.js when the section is expanded. */
+let galaxyCtrl = null;
+let galaxyMounted = null;      // which network the live controller shows
+const galaxyCache = {};        // network -> { data, at }
 
-function graphFamilies() {
-  const c = state.families[state.network];
-  return ((c && c.data && c.data.families) || []).filter((f) => f.size >= 2);
+async function loadGalaxy(network) {
+  const t = galaxyCache[network];
+  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
+  try {
+    const res = await fetch(`data/${network}/galaxy.json`, { cache: 'no-cache' });
+    if (!res.ok) { galaxyCache[network] = { data: null, at: Date.now() }; return null; }
+    const data = await res.json();
+    galaxyCache[network] = { data, at: Date.now() };
+    return data;
+  } catch (e) {
+    return t ? t.data : null;
+  }
+}
+
+function renderGalaxyLegend(data) {
+  const host = $('#appgraph-legend');
+  if (!host || !galaxyCtrl) return;
+  const swatch = (label, color) =>
+    `<span class="lg-item"><span class="lg-dot" style="background:${esc(color)}"></span>${esc(label)}</span>`;
+  const parts = (data.templates || []).slice(0, 8).map(
+    (n, i) => swatch(n.replace('SilverScript · ', ''), galaxyCtrl.colorForTemplate(i))
+  );
+  parts.push(swatch('other', 'rgba(150,160,180,0.85)'));
+  host.innerHTML = parts.join('');
 }
 
 function renderAppGraph() {
-  if (!window.kascovGraph) return;
-  const fams = graphFamilies();
+  const gsec = $('#section-appgraph');
   const canvas = $('#appgraph-canvas');
-  const label = $('#appgraph-label');
-  if (!fams.length || !canvas) return;
-  graphIdx = ((graphIdx % fams.length) + fams.length) % fams.length;
-  const fam = fams[graphIdx];
-  if (label) label.textContent = `app ${graphIdx + 1} / ${fmtInt(fams.length)} · ${fmtInt(fam.size)} coins${fam.size > 40 ? ' (showing 40)' : ''}`;
-  if (appGraphCtrl) appGraphCtrl.stop();
-  appGraphCtrl = window.kascovGraph.render(
-    canvas,
-    { members: fam.members, label: `${fam.size} coins` },
-    { onPick: (n) => { location.hash = `#/${state.network}/c/${n.id}`; } }
-  );
+  if (!gsec || !gsec.open || !canvas || !window.kascovGalaxy) return;
+  const network = state.network;
+  const cached = galaxyCache[network];
+  if (!cached) {
+    loadGalaxy(network).then(() => {
+      if (state.network === network && gsec.open && parseRoute().view === 'explore') renderAppGraph();
+    });
+    return;
+  }
+  const data = cached.data;
+  // galaxy.json missing/empty (e.g. an older worker without the endpoint):
+  // hide the section rather than leave a blank canvas + empty legend.
+  if (!data || !(data.nodes && data.nodes.length)) { gsec.hidden = true; return; }
+  if (galaxyCtrl && galaxyMounted === network) { galaxyCtrl.resize(); return; }
+  if (galaxyCtrl) galaxyCtrl.destroy();
+  galaxyCtrl = window.kascovGalaxy.create(canvas, {
+    friendlyName,
+    onPickCoin: (id) => { location.hash = `#/${network}/c/${id}`; },
+  });
+  galaxyMounted = network;
+  galaxyCtrl.load(data);
+  renderGalaxyLegend(data);
 }
 
 async function loadFamilies(network) {
@@ -824,6 +935,7 @@ function renderLiteExplore(live, network) {
     $('#empty-net').innerHTML = emptyCardHtml(network);
     return;
   }
+  renderAnalytics(network);
   $('#story-list').innerHTML = dedupByCovenant(live.recent_events)
     .slice(0, STORY_COUNT)
     .map((ev) => liteStoryRow(ev, live, network))
@@ -1327,9 +1439,13 @@ const SORTS = {
 
 function renderGrid(entry, network) {
   const list = entry.index.covs.filter(matchesFilter).sort(SORTS[state.sort] || SORTS.activity);
-  const total = entry.index.covs.length;
+  const loaded = entry.index.covs.length;
+  /* the headline count is the whole network (from stats) when paginating; the
+     filtered denominator stays the rows actually searched so "of N" is honest */
+  const total = (entry.data.stats && entry.data.stats.covenants != null)
+    ? entry.data.stats.covenants : loaded;
   $('#result-count').textContent = (state.query || state.filter !== 'all')
-    ? `${list.length} of ${total} smart coin${total === 1 ? '' : 's'}`
+    ? `${list.length} of ${loaded} smart coin${loaded === 1 ? '' : 's'}`
     : `${total} smart coin${total === 1 ? '' : 's'}`;
 
   const grid = $('#coin-grid');
@@ -1353,8 +1469,25 @@ function renderGrid(entry, network) {
         `<p class="dim">tap the ★ on any coin to pin it here — it survives reloads.</p></div>`;
     } else {
       const example = entry.index.covs[0] ? entry.index.covs[0].name : 'brave-teal-otter';
-      grid.innerHTML = `<div class="no-results"><p>No smart coins match${state.query ? ` <strong>“${esc(state.query)}”</strong>` : ' that filter'}.</p>` +
-        `<p class="dim">Try a friendly name like <em>${esc(example)}</em>, or paste a coin’s id or a transaction id.</p></div>`;
+      /* the grid now loads only the newest window, so a text search can miss an
+         OLDER coin that simply hasn't been fetched yet. When the chain still has
+         older pages (nextAfterDaa set), say so plainly and offer to search on
+         rather than dead-ending on a misleading "no match" */
+      const moreOnChain = Boolean(state.query) && entry.nextAfterDaa != null;
+      grid.innerHTML = `<div class="no-results"><p>No smart coins match${state.query ? ` <strong>“${esc(state.query)}”</strong>` : ' that filter'}` +
+        `${moreOnChain ? ` in the ${loaded} loaded coin${loaded === 1 ? '' : 's'}` : ''}.</p>` +
+        (moreOnChain
+          ? `<p class="dim">older coins from the chain aren’t loaded yet — search further back to keep looking.</p></div>`
+          : `<p class="dim">Try a friendly name like <em>${esc(example)}</em>, or paste a coin’s id or a transaction id.</p></div>`);
+      if (moreOnChain) {
+        /* reuse the grid's load-more path: after each page loadMoreGrid rebuilds
+           the index and re-renders against the live query, so a newly fetched
+           match surfaces on its own — bounded by the user's clicks, never a loop */
+        foot.innerHTML = entry.loadingMore
+          ? `<button type="button" class="btn" disabled>searching older coins…</button>`
+          : `<button type="button" class="btn" data-action="more-net">search older coins <span class="dim">from the chain</span></button>`;
+        return;
+      }
     }
     foot.innerHTML = '';
     return;
@@ -1368,15 +1501,24 @@ function renderGrid(entry, network) {
       `<div class="card-id"><a class="card-link" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">${esc(e.name)}</a>` +
       `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>` +
       (namedTpl ? `<span class="flag flag-tpl" title="recognized contract: a compiled ${esc(namedTpl)} — constructor arguments labeled on the coin page">${esc(namedTpl)}</span>` : '') +
+      lineageBadge(e.c) +
       `</div>` +
       `<button type="button" class="star${watched ? ' starred' : ''}" data-action="watch" data-id="${esc(e.c.covenant_id)}"` +
       ` aria-pressed="${watched}" aria-label="${watched ? 'stop watching' : 'watch'} ${esc(e.name)}">★</button></div>` +
       `<p class="card-story">${esc(cardStory(e, network))}</p>` +
       `</article>`;
   }).join('');
-  foot.innerHTML = list.length > state.shown
-    ? `<button type="button" class="btn" data-action="more">show more <span class="dim">(${list.length - state.shown} hidden)</span></button>`
-    : '';
+  if (entry.loadingMore) {
+    foot.innerHTML = `<button type="button" class="btn" disabled>loading more…</button>`;
+  } else if (list.length > state.shown) {
+    /* reveal already-loaded rows first — cheap, no round-trip */
+    foot.innerHTML = `<button type="button" class="btn" data-action="more">show more <span class="dim">(${list.length - state.shown} hidden)</span></button>`;
+  } else if (entry.nextAfterDaa != null) {
+    /* everything loaded is on screen but the chain has older coins to fetch */
+    foot.innerHTML = `<button type="button" class="btn" data-action="more-net">load more <span class="dim">from the chain</span></button>`;
+  } else {
+    foot.innerHTML = '';
+  }
 }
 
 /* --------------------------------------------------- search suggestions */
@@ -1579,6 +1721,243 @@ function renderTemplates(network) {
   }).join('');
 }
 
+/* ------------------------------------------------------- analytics board */
+
+/* the reorg log — the append-only ledger of virtual-chain reorgs the indexer
+   applied. Optional: an older worker without the endpoint 404s, which we
+   remember (data: null) and reprobe after the ttl, so the panel hides
+   instead of pinning a dead request. */
+async function loadReorgs(network) {
+  const t = state.reorgs[network];
+  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
+  try {
+    const res = await fetch(`data/${network}/reorgs.json`, { cache: 'no-cache' });
+    if (!res.ok) { state.reorgs[network] = { data: null, at: Date.now() }; return null; }
+    const data = await res.json();
+    state.reorgs[network] = { data, at: Date.now() };
+    return data;
+  } catch (e) {
+    return t ? t.data : null;
+  }
+}
+
+/* births vs burns over the whole history — two cumulative lines drawn from the
+   same activity buckets the pulse chart reads; the gap between them is the
+   living population. Vanilla SVG, CSS-var colors, to match paintActivity. */
+function analyticsFlowSvg(data) {
+  const width = data.bucket_daa || 1;
+  const anchorDaa = data.tip_daa != null ? data.tip_daa
+    : (data.buckets.length ? data.buckets[data.buckets.length - 1].daa : null);
+  if (anchorDaa == null || !data.buckets.length) return '';
+  const last = Math.floor(anchorDaa / width);
+  let first = Math.floor((data.window_start_daa != null ? data.window_start_daa
+    : data.buckets[0].daa) / width);
+  let n = last - first + 1;
+  if (n > ACTIVITY_MAX_COLS) { first = last - ACTIVITY_MAX_COLS + 1; n = ACTIVITY_MAX_COLS; }
+  if (n < 2) return ''; /* one column can't make a trend line */
+
+  const births = new Array(n).fill(0);
+  const burns = new Array(n).fill(0);
+  for (const b of data.buckets) {
+    const i = Math.floor(b.daa / width) - first;
+    if (i < 0 || i >= n) continue;
+    births[i] += Number(b.births) || 0;
+    burns[i] += Number(b.burns) || 0;
+  }
+  let cb = 0, cd = 0;
+  const cumB = new Array(n), cumD = new Array(n);
+  for (let i = 0; i < n; i++) { cb += births[i]; cd += burns[i]; cumB[i] = cb; cumD[i] = cd; }
+  const totalB = cb, totalD = cd;
+  if (totalB === 0) return '';
+  const alive = Math.max(0, totalB - totalD);
+  const yMax = Math.max(1, totalB, totalD);
+
+  const W = 720, H = 200, padT = 14, padB = 28, padX = 10;
+  const innerW = W - padX * 2, innerH = H - padT - padB;
+  const X = (i) => padX + (i / (n - 1)) * innerW;
+  const Y = (v) => H - padB - (v / yMax) * innerH;
+  const ptsB = cumB.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+  const ptsD = cumD.map((v, i) => `${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+  /* alive area = between the two lines: born line forward, burn line back */
+  const areaPts = ptsB + ' ' + cumD.map((v, i) => `${X(n - 1 - i).toFixed(1)},${Y(cumD[n - 1 - i]).toFixed(1)}`).join(' ');
+
+  const spanMs = n * width * MS_PER_DAA;
+  const withDate = spanMs > 20 * 3600 * 1000 || (Date.now() - activityMs(data, first * width)) > 20 * 3600 * 1000;
+  const tickIdx = [...new Set([0, (n - 1) >> 1, n - 1])];
+  const ticks = tickIdx.map((i) => {
+    const anchor = i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle';
+    return `<text x="${X(i).toFixed(1)}" y="${H - 8}" text-anchor="${anchor}" class="pulse-tick">` +
+      `${esc(fmtClock(activityMs(data, (first + i) * width), false, withDate))}</text>`;
+  }).join('');
+
+  return `<div class="an-legend" aria-hidden="true">` +
+    `<span><i class="dot dot-born"></i>${fmtInt(totalB)} born</span>` +
+    `<span><i class="dot" style="background:var(--accent)"></i>${fmtInt(alive)} alive</span>` +
+    `<span><i class="dot dot-burn"></i>${fmtInt(totalD)} retired</span></div>` +
+    `<svg viewBox="0 0 ${W} ${H}" class="an-svg" role="img" preserveAspectRatio="xMidYMid meet" ` +
+    `aria-label="Cumulative births versus retirements over ${esc(fmtSpan(spanMs))}: ${fmtInt(totalB)} born, ${fmtInt(totalD)} retired, ${fmtInt(alive)} alive">` +
+    `<line x1="${padX}" y1="${(H - padB + 0.5).toFixed(1)}" x2="${W - padX}" y2="${(H - padB + 0.5).toFixed(1)}" class="pulse-axis"/>` +
+    `<polygon points="${areaPts}" fill="var(--accent)" opacity="0.12"/>` +
+    `<polyline points="${ptsB}" fill="none" stroke="var(--born)" stroke-width="2" stroke-linejoin="round"/>` +
+    `<polyline points="${ptsD}" fill="none" stroke="var(--burn)" stroke-width="2" stroke-linejoin="round"/>` +
+    ticks + `</svg>`;
+}
+
+/* per-template coin counts — how the population splits by recognized script
+   shape. Distinct from the "what's running here" bars (which measure live
+   state pieces); here we count distinct smart coins. */
+function analyticsTemplatesHtml(data) {
+  const rows = (data.templates || [])
+    .map((x) => ({ label: x.name, coins: Number(x.covenants) || 0, unrec: false }))
+    .filter((r) => r.coins > 0);
+  if (data.unrecognized && Number(data.unrecognized.covenants) > 0) {
+    rows.push({ label: 'unrecognized scripts', coins: Number(data.unrecognized.covenants), unrec: true });
+  }
+  if (!rows.length) return '';
+  rows.sort((a, b) => b.coins - a.coins);
+  const total = rows.reduce((s, r) => s + r.coins, 0);
+  const top = rows.slice(0, 10);
+  const max = Math.max(1, ...top.map((r) => r.coins));
+  return top.map((r) => {
+    const w = Math.max((r.coins / max) * 100, 2).toFixed(1);
+    const color = r.unrec ? 'var(--faint)' : templateColor(r.label);
+    const pct = total ? (r.coins / total) * 100 : 0;
+    const share = pct >= 1 ? `${pct.toFixed(0)}%` : '<1%';
+    return `<div class="lane-row"><span class="lane-ns">${esc(r.label)}</span>` +
+      `<span class="lane-track" aria-hidden="true"><span class="lane-fill" style="width:${w}%;background:${color}"></span></span>` +
+      `<span class="lane-counts dim">${fmtInt(r.coins)} coin${r.coins === 1 ? '' : 's'} · ${share}</span></div>`;
+  }).join('');
+}
+
+/* survival curve — the share of retired coins still alive at each age bucket,
+   a monotone descent from 100%. Complements the lifespans histogram (which
+   shows where coins die; this shows how many are left). */
+function analyticsSurvivalSvg(data) {
+  const buckets = (data && data.buckets) || [];
+  if (!buckets.length || !data.total) return '';
+  const total = data.total;
+  const k = buckets.length;
+  const surv = [1];
+  let dead = 0;
+  for (let i = 0; i < k; i++) { dead += Number(buckets[i].count) || 0; surv.push(Math.max(0, (total - dead) / total)); }
+
+  const W = 720, H = 210, padT = 12, padB = 40, padL = 30, padR = 8;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const X = (i) => padL + (i / k) * innerW;
+  const Y = (s) => H - padB - s * innerH;
+  const pts = surv.map((s, i) => `${X(i).toFixed(1)},${Y(s).toFixed(1)}`).join(' ');
+  const areaPts = `${X(0).toFixed(1)},${(H - padB).toFixed(1)} ${pts} ${X(k).toFixed(1)},${(H - padB).toFixed(1)}`;
+
+  let grid = '';
+  for (const g of [0, 0.25, 0.5, 0.75, 1]) {
+    const y = Y(g);
+    grid += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${(W - padR).toFixed(1)}" y2="${y.toFixed(1)}" class="pulse-axis" opacity="${g === 0 ? 1 : 0.35}"/>` +
+      `<text x="${(padL - 6).toFixed(1)}" y="${(y + 3).toFixed(1)}" text-anchor="end" class="pulse-tick">${Math.round(g * 100)}%</text>`;
+  }
+  /* show every bucket label if few, else thin to ~6 to stay legible */
+  const step = k <= 8 ? 1 : Math.ceil(k / 6);
+  let xlab = '';
+  for (let i = 0; i < k; i++) {
+    if (i % step !== 0 && i !== k - 1) continue;
+    xlab += `<text x="${X(i + 0.5).toFixed(1)}" y="${(H - 8).toFixed(1)}" text-anchor="middle" class="pulse-tick">${esc(buckets[i].label)}</text>`;
+  }
+
+  const medMin = data.median_ms / 60000;
+  const medLabel = medMin >= 1 ? `${medMin.toFixed(1)} min` : `${Math.round(data.median_ms / 1000)} s`;
+  return `<p class="an-note dim">median lifespan <strong>${esc(medLabel)}</strong> · ${fmtInt(total)} retired coin${total === 1 ? '' : 's'}</p>` +
+    `<svg viewBox="0 0 ${W} ${H}" class="an-svg" role="img" preserveAspectRatio="xMidYMid meet" ` +
+    `aria-label="Survival curve: share of retired coins still alive at each age, median ${esc(medLabel)}">` +
+    grid +
+    `<polygon points="${areaPts}" fill="var(--accent)" opacity="0.12"/>` +
+    `<polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>` +
+    xlab + `</svg>`;
+}
+
+/* recent reorgs (optional) — the indexer's virtual-chain rollback ledger.
+   Tiny sparkline of rollback depths (oldest→newest) plus a one-line summary.
+   Schema (reorgs.json): { reorgs: [{ daa, at_ms, rolled_back }], … } newest first. */
+function analyticsReorgsHtml(data) {
+  const list = (data && data.reorgs) || [];
+  if (!list.length) return '';
+  const totalBlocks = list.reduce((s, r) => s + (Number(r.rolled_back) || 0), 0);
+  const latest = list[0];
+  const latestMs = Number(latest && latest.at_ms) || 0;
+  const depths = list.slice(0, 60).reverse().map((r) => Math.max(0, Number(r.rolled_back) || 0));
+  const max = Math.max(1, ...depths);
+  const W = 280, H = 34, gap = 2;
+  const slot = W / depths.length;
+  const bw = Math.max(1, slot - gap);
+  const bars = depths.map((d, i) => {
+    const h = d > 0 ? Math.max((d / max) * (H - 4), 2) : 1;
+    const x = i * slot + (slot - bw) / 2;
+    return `<rect x="${x.toFixed(1)}" y="${(H - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1" fill="var(--move)"/>`;
+  }).join('');
+  const summary = `${fmtInt(list.length)} reorg${list.length === 1 ? '' : 's'} on record · ` +
+    `${fmtInt(totalBlocks)} chain block${totalBlocks === 1 ? '' : 's'} rolled back` +
+    (latestMs ? ` · latest ${esc(relTime(latestMs))}` : '');
+  return `<p class="an-note dim">${summary}</p>` +
+    `<svg viewBox="0 0 ${W} ${H}" class="an-spark" role="img" preserveAspectRatio="none" ` +
+    `aria-label="Rollback depth of the ${esc(fmtInt(depths.length))} most recent reorgs, oldest to newest">${bars}</svg>`;
+}
+
+/* the analytics board — a collapsible dashboard of charts drawn from the
+   small feeds the explore page already serves. Each card degrades on its own:
+   a missing/404 feed hides just that card, and the whole board hides only when
+   every card is empty. */
+function renderAnalytics(network) {
+  const section = $('#section-analytics');
+  if (!section) return;
+  const cards = {
+    flow: { card: $('#acard-flow'), host: $('#analytics-flow') },
+    tpl: { card: $('#acard-templates'), host: $('#analytics-templates') },
+    surv: { card: $('#acard-survival'), host: $('#analytics-survival') },
+    reorg: { card: $('#acard-reorgs'), host: $('#analytics-reorgs') },
+  };
+  let visible = 0;
+  const reRender = () => {
+    if (state.network === network && parseRoute().view === 'explore') renderAnalytics(network);
+  };
+  const show = (key, html) => {
+    const c = cards[key];
+    if (!c || !c.card || !c.host) return;
+    if (html) { c.host.innerHTML = html; c.card.hidden = false; visible++; }
+    else { c.card.hidden = true; }
+  };
+  const loading = (key, note) => {
+    const c = cards[key];
+    if (!c || !c.card || !c.host) return;
+    c.host.innerHTML = `<p class="dim"><span class="radar" aria-hidden="true"></span>${esc(note)}</p>`;
+    c.card.hidden = false;
+    visible++;
+  };
+
+  /* births vs burns — reads its own 'all' activity window (separate from the
+     pulse chart's range so neither disturbs the other) */
+  const actHit = (state.activity[network] || {})['all'];
+  if (!actHit) { loading('flow', 'reading births & burns…'); loadActivity(network, 'all').then(reRender); }
+  else if (actHit.data) { show('flow', analyticsFlowSvg(actHit.data)); }
+  else { show('flow', ''); }
+
+  const tplHit = state.templates[network];
+  if (!tplHit) { loading('tpl', 'reading contract types…'); loadTemplates(network).then(reRender); }
+  else if (tplHit.data) { show('tpl', analyticsTemplatesHtml(tplHit.data)); }
+  else { show('tpl', ''); }
+
+  const lifeHit = state.lifespans[network];
+  if (!lifeHit) { loading('surv', 'measuring lifespans…'); loadLifespans(network).then(reRender); }
+  else if (lifeHit.data) { show('surv', analyticsSurvivalSvg(lifeHit.data)); }
+  else { show('surv', ''); }
+
+  /* reorgs are optional — stay hidden until a feed is known (no loading note,
+     so an older worker without the endpoint never shows an empty card) */
+  const reHit = state.reorgs[network];
+  if (!reHit) { loadReorgs(network).then(reRender); show('reorg', ''); }
+  else if (reHit.data) { show('reorg', analyticsReorgsHtml(reHit.data)); }
+  else { show('reorg', ''); }
+
+  section.hidden = visible === 0;
+}
+
 /* ---------------------------------------------------------------- landing */
 
 function emptyCardHtml(network) {
@@ -1778,6 +2157,8 @@ function renderExplore(entry) {
     $('#section-records').hidden = true;
     const tpl = $('#section-templates');
     if (tpl) tpl.hidden = true;
+    const anb = $('#section-analytics');
+    if (anb) anb.hidden = true;
     $('#empty-net').innerHTML = emptyCardHtml(network);
     return;
   }
@@ -1791,6 +2172,7 @@ function renderExplore(entry) {
   renderLanes(network);
   renderInscriptions(network);
   renderLifespans(network);
+  renderAnalytics(network);
   loadTemplates(network).then(() => {
     if (state.network === network && parseRoute().view === 'explore') renderTemplates(network);
   });
@@ -1808,14 +2190,27 @@ function timelineItem(entry, ev, data, network, flashTx) {
   let nerdBits = state.nerd
     ? ` · <span class="mono dim">DAA ${esc(fmtInt(ev.accepting_daa))}</span>`
     : '';
-  if (state.nerd && ev.payload) {
-    nerdBits += ` · <span class="dim">payload</span> <span class="mono" title="${esc(ev.payload)}">${esc(shortHex(ev.payload, 12, 8))}</span>`;
-  } else if (state.nerd && ev.payload_len) {
-    nerdBits += ` · <span class="dim">payload ${esc(fmtInt(ev.payload_len))}B</span>`;
-  }
   /* KIP-21 user lane: 4-byte app namespace + 16 zero bytes */
   if (ev.payload && ev.payload.length >= 40 && /^0{32}$/.test(ev.payload.slice(8, 40))) {
     nerdBits += ` · <span class="flag flag-tpl" title="KIP-21 based-app lane — this transaction carries app-sequencing data">lane 0x${esc(ev.payload.slice(0, 8))}</span>`;
+  }
+  /* tx payload peek: printable-ASCII if we can, else a short hex sample */
+  let payloadBits = '';
+  const pk = payloadPeek(ev.payload, ev.payload_len);
+  if (pk) {
+    payloadBits = `<p class="tl-payload"><span class="tl-payload-tag">payload</span> ` +
+      `<span class="tl-payload-val${pk.mono ? ' mono' : ''}"` +
+      (pk.title ? ` title="${esc(pk.title)}"` : '') + `>${esc(pk.label)}</span>` +
+      (pk.bytes != null ? ` <span class="dim">${esc(fmtInt(pk.bytes))}B</span>` : '') + `</p>`;
+  }
+  /* KRC-20-style JSON inscription in the payload → a compact labelled chip */
+  let inscBits = '';
+  if (window.kascovPayload) {
+    const insc = window.kascovPayload.decodeInscription(ev.payload);
+    if (insc) {
+      inscBits = `<p class="tl-insc"><span class="insc-chip" title="${esc(window.kascovPayload.chipTitle(insc))}">` +
+        `${esc(window.kascovPayload.chipLabel(insc))}</span></p>`;
+    }
   }
   /* multi-covenant transactions: this tx moved other coins too */
   let withBits = '';
@@ -1831,6 +2226,8 @@ function timelineItem(entry, ev, data, network, flashTx) {
     `<div class="tl-body">` +
     `<p class="tl-text">${eventSentence(entry, ev, network, true)}</p>` +
     `<p class="tl-meta"><span title="${esc(utcTitle(ms))}">${esc(relTime(ms))}</span> · <span class="abs-t" title="${esc(utcTitle(ms))}">${esc(absShort(ms))}</span> · <a href="${esc(txUrl(network, ev.txid))}" target="_blank" rel="noopener noreferrer">view transaction ↗</a>${nerdBits}</p>` +
+    inscBits +
+    payloadBits +
     withBits +
     `</div></li>`;
 }
@@ -1924,6 +2321,57 @@ function explainerPanelHtml(tpl) {
   const html = explainCovenant(tpl);
   if (!html) return '';
   return `<details class="explain-panel" open><summary><span class="explain-badge">📖 in plain English</span></summary><p class="explain-body">${html}</p></details>`;
+}
+
+/* ---- coin-page contract intelligence: read the program a coin actually
+   committed to / revealed at spend, so the coin detail page can surface the
+   same plain-English explainer and on-chain ZK verification the decode page
+   gives — without making the reader leave the coin or open nerd mode. ---- */
+
+/* find a readable program for this coin and decode it once. Prefers a UTXO
+   with a recognized (non-p2pk/p2sh) template, then any revealed program (the
+   bytes that actually ran), then any live committed script. */
+function coinProgram(c) {
+  const D = window.kascovDisasm;
+  if (!D || !D.parseHex) return null;
+  const utxos = (c && c.utxos) || [];
+  let hex = '';
+  for (const u of utxos) {
+    const t = u.revealed_template || u.template;
+    if (t && !/^p2(pk|sh)/.test(t)) { hex = u.revealed_hex || u.script_hex || ''; if (hex) break; }
+  }
+  if (!hex) for (const u of utxos) { if (u.revealed_hex) { hex = u.revealed_hex; break; } }
+  if (!hex) for (const u of utxos) { if (u.script_hex) { hex = u.script_hex; break; } }
+  if (!hex) return null;
+  const bytes = D.parseHex(hex);
+  if (!bytes) return null;
+  const { instructions, truncated } = D.disassemble(bytes);
+  const tpl = !truncated && D.matchTemplates ? D.matchTemplates(instructions, bytes) : null;
+  return { hex, bytes, instructions, tpl };
+}
+
+/* optional exported ZK-system label ("Groth16" / "RISC Zero" / "ZK"), from the
+   coin or any of its UTXOs — feature-detected; absent on older exports. */
+function coinZkSystem(c) {
+  if (!c) return '';
+  if (c.zk_system) return String(c.zk_system);
+  for (const u of (c.utxos || [])) if (u.zk_system) return String(u.zk_system);
+  return '';
+}
+
+/* the prominent "what this contract does" block for the top of a coin page:
+   the plain-English explainer for a recognized template, plus a ZK panel (with
+   the zk_system label + live "verify the proof" button) wherever the program
+   does on-chain zero-knowledge verification. */
+function coinContractSectionHtml(c) {
+  const prog = coinProgram(c);
+  if (!prog) return '';
+  const parts = [];
+  if (prog.tpl) parts.push(explainerPanelHtml(prog.tpl));
+  parts.push(zkPanelHtml(prog.instructions, prog.hex, coinZkSystem(c)));
+  const body = parts.filter(Boolean).join('');
+  if (!body) return '';
+  return `<section class="contract-intel" aria-label="What this contract does">${body}</section>`;
 }
 
 /* ---- covenant security lint — a static audit from the opcodes. No covenant
@@ -2145,9 +2593,19 @@ function zkInfo(instructions) {
   return { system, tag, pushesBefore };
 }
 
-function zkPanelHtml(instructions, hex) {
+function zkPanelHtml(instructions, hex, systemOverride) {
   const z = zkInfo(instructions);
   if (!z) return '';
+  // an optional exported "zk_system" label (Groth16 / RISC Zero / ZK) wins over
+  // the tag we sniff from the pushes — but we always fall back to the sniffed one.
+  // NB: both are heuristics (push-size shape), never asserted by consensus, so a
+  // specific system name is hedged as inferred; only the ZK-ness itself is certain.
+  const system = systemOverride || z.system;
+  const inferred = /groth|risc|plonk|stark|halo|nova/i.test(system);
+  const sysChip = inferred
+    ? `${esc(system)} <span class="zk-infer" title="proving system inferred from the script's push shape — not asserted by consensus">inferred</span>`
+    : esc(system);
+  const verb = inferred ? 'appears to verify' : 'verifies';
   // a self-contained proof script (public inputs + proof + vk + OpZkPrecompile,
   // no transaction introspection) can be verified live here; a covenant that
   // only *expects* a spend-time proof can't be (no proof present).
@@ -2158,10 +2616,10 @@ function zkPanelHtml(instructions, hex) {
   return `<div class="zk-panel">` +
     `<div class="zk-head"><span class="zk-badge">⬡ ZK ${selfContained ? 'proof' : 'covenant'}</span>` +
     `<strong>on-chain zero-knowledge verification</strong>` +
-    `<span class="zk-sys">${esc(z.system)}</span></div>` +
+    `<span class="zk-sys">${sysChip}</span></div>` +
     `<p class="zk-desc">${selfContained
-      ? `A self-contained <code class="mono">${esc(z.system)}</code> proof (public inputs + proof + verifying key + <code class="mono">OpZkPrecompile</code>). Verify it below — kascov runs the <em>exact</em> verifier Kaspa's L1 uses.`
-      : `This contract calls <code class="mono">OpZkPrecompile</code> (KIP-16) — Kaspa's L1 verifies a ${esc(z.system)} proof <em>inside the script</em>, so the coin only moves if a valid zero-knowledge proof is supplied. Verified computation, settled on a ~10-blocks/sec BlockDAG.`}</p>` +
+      ? `A self-contained <code class="mono">${esc(system)}</code>${inferred ? '-shaped' : ''} proof (public inputs + proof + verifying key + <code class="mono">OpZkPrecompile</code>). Verify it below — kascov runs the <em>exact</em> verifier Kaspa's L1 uses.`
+      : `This contract calls <code class="mono">OpZkPrecompile</code> (KIP-16) — Kaspa's L1 ${verb} a ${esc(system)} proof <em>inside the script</em>, so the coin only moves if a valid zero-knowledge proof is supplied. Verified computation, settled on a ~10-blocks/sec BlockDAG.`}</p>` +
     verify +
     `</div>`;
 }
@@ -2252,6 +2710,21 @@ function revealPreviewHtml(u, program) {
     `</div>`;
 }
 
+/* an honest, approximate cost for a spend from its compute budget.
+   spent_budget is in compute units (1 unit = 10000 script units); Kaspa's
+   storage-mass fee floor is 100 sompi × max(compute grams, 2 × tx bytes).
+   we don't know the spending tx's byte size here, so we can only show the
+   compute-bound estimate — a floor that a tiny tx would actually pay. */
+const SCRIPT_UNITS_PER_BUDGET = 10000;
+const SOMPI_PER_COMPUTE_GRAM = 100;
+function spentBudgetHtml(budget, network) {
+  const grams = budget * SCRIPT_UNITS_PER_BUDGET;
+  const sompi = grams * SOMPI_PER_COMPUTE_GRAM;
+  return `<span class="dim spent-budget" title="fee floor is 100 sompi × max(compute grams, 2 × tx bytes) — this is the compute-bound estimate and ignores transaction size, so the real fee is at least this much">` +
+    `this spend budgeted ${esc(fmtInt(budget))} unit${budget === 1 ? '' : 's'} ` +
+    `(≈ ${esc(fmtInt(grams))} script units, ~${esc(fmtAmount(sompi, network))} if compute-bound)</span>`;
+}
+
 function nerdPanel(entry, network, program) {
   const c = entry.c;
   const rows = [
@@ -2287,7 +2760,7 @@ function nerdPanel(entry, network, program) {
         (u.spent_txid ? ` <a href="${esc(txUrl(network, u.spent_txid))}" target="_blank" rel="noopener noreferrer">(tx ↗)</a>` : '') +
         `:</p>` +
         (verifiedContractHtml(u.revealed_hex) || templateLine(u.revealed_template, u.revealed_fields)) +
-        (u.revealed_hex ? zkPanelHtml(window.kascovDisasm.disassemble(window.kascovDisasm.parseHex(u.revealed_hex) || []).instructions, u.revealed_hex) : '') +
+        (u.revealed_hex ? zkPanelHtml(window.kascovDisasm.disassemble(window.kascovDisasm.parseHex(u.revealed_hex) || []).instructions, u.revealed_hex, u.revealed_zk_system || u.zk_system || c.zk_system) : '') +
         `<pre class="script script-reveal">${esc(u.revealed_asm.join('\n'))}</pre>` +
         (u.revealed_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.revealed_hex)}">open revealed program in decoder →</a>` : '');
     } else if (u.sig_hex || u.spent_txid) {
@@ -2305,7 +2778,7 @@ function nerdPanel(entry, network, program) {
     return `<div class="utxo">` +
       `<div class="utxo-head"><span class="mono break">${esc(u.outpoint)}</span><span class="utxo-flags">${badges}</span></div>` +
       `<div class="utxo-meta"><span>${esc(fmtAmount(u.value, network))}</span><span class="dim">created at DAA ${esc(fmtInt(u.created_daa))}</span>` +
-      (u.spent_budget != null ? `<span class="dim">spent with budget ${esc(fmtInt(u.spent_budget))}</span>` : '') +
+      (u.spent_budget != null ? spentBudgetHtml(u.spent_budget, network) : '') +
       `</div>` +
       templateLine(u.template, u.state_fields) +
       `<pre class="script">${esc((u.script_asm || []).join('\n'))}</pre>` +
@@ -2323,6 +2796,10 @@ function nerdPanel(entry, network, program) {
 /* long coins fold: show a window of events/UTXOs with expanders */
 const STORY_WINDOW = 8;
 const UTXO_WINDOW = 8;
+
+/* live controller for the coin page's "moved together" graph — stopped and
+   replaced on every re-render so old animation loops don't pile up */
+let detailGraph = null;
 
 function renderDetail(entry, covId, flashTx, program) {
   const network = state.network;
@@ -2365,6 +2842,7 @@ function renderDetail(entry, covId, flashTx, program) {
       `<div class="detail-id"><h1>${esc(gridRec.name)}</h1>` +
       `<p class="detail-tags"><span class="pill ${alive0 ? 'pill-alive' : 'pill-retired'}" title="${esc(alive0 ? GLOSSARY.alive : GLOSSARY.retired)}">${alive0 ? 'alive' : 'retired'}</span>` +
       `<button type="button" class="star${watched0 ? ' starred' : ''}" data-action="watch" data-id="${esc(covId)}" aria-pressed="${watched0}" aria-label="watch this coin">★</button>` +
+      lineageBadge(gridRec.c) +
       `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span></p>` +
       `<p class="id-chip"><span class="mono">${esc(shortHex(covId, 10, 8))}</span>` +
       `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(covId)}" aria-label="copy this coin’s full id">copy id</button></p>` +
@@ -2431,6 +2909,45 @@ function renderDetail(entry, covId, flashTx, program) {
       `</button>`
     : '';
 
+  /* "moved together": other covenants that shared a transaction with this one,
+     collected across the whole story and counted (used as spoke weights) */
+  const togetherCounts = new Map();
+  for (const ev of events) {
+    if (Array.isArray(ev.with_covenants)) {
+      for (const id of ev.with_covenants) {
+        if (id === c.covenant_id) continue;
+        togetherCounts.set(id, (togetherCounts.get(id) || 0) + 1);
+      }
+    }
+  }
+  const togetherSection = togetherCounts.size
+    ? `<section class="together" aria-label="Coins moved together"><h2>moved together</h2>` +
+      `<p class="dim together-sub">other smart coins that shared a transaction with this one — tap any dot to open it</p>` +
+      `<canvas id="together-graph" class="together-graph" width="600" height="360" role="img"` +
+      ` aria-label="graph of ${esc(fmtInt(togetherCounts.size))} coins that moved with this one"></canvas></section>`
+    : '';
+
+  /* holders panel: keys that have controlled a piece of this coin's state.
+     optional field — only rendered when the detail export ships it */
+  let holdersSection = '';
+  if (Array.isArray(c.holders) && c.holders.length) {
+    const holderRows = c.holders.map((h) => {
+      const pk = String(h.pubkey || '');
+      const inner = `${avatarSvg(pk, 34)}<span class="holder-name">${esc(friendlyName(pk))}</span>` +
+        `<span class="holder-key mono">${esc(shortHex(pk, 8, 6))}</span>`;
+      const idCell = PUBKEY_RE.test(pk)
+        ? `<a class="holder-id" href="#/${esc(network)}/addr/${esc(pk)}" title="${esc(pk)}">${inner}</a>`
+        : `<span class="holder-id" title="${esc(pk)}">${inner}</span>`;
+      const badges = [];
+      if (h.controls_now) badges.push(`<span class="pill pill-alive" title="this key controls a live piece of this coin right now">controls now</span>`);
+      if (h.states_seen != null) badges.push(`<span class="dim">${esc(fmtInt(h.states_seen))} state${h.states_seen === 1 ? '' : 's'} seen</span>`);
+      return `<li class="holder-row">${idCell}<span class="holder-meta">${badges.join(' ')}</span></li>`;
+    }).join('');
+    holdersSection = `<section class="holders" aria-label="Holders"><h2>holders</h2>` +
+      `<p class="dim">keys that have controlled a piece of this coin’s state</p>` +
+      `<ul class="holder-list">${holderRows}</ul></section>`;
+  }
+
   view.innerHTML =
     `<a class="back" href="#/explore">← all smart coins</a>` +
     `<header class="detail-head">` +
@@ -2441,19 +2958,38 @@ function renderDetail(entry, covId, flashTx, program) {
     `<button type="button" class="star${watched ? ' starred' : ''}" data-action="watch" data-id="${esc(c.covenant_id)}"` +
     ` aria-pressed="${watched}" aria-label="${watched ? 'stop watching' : 'watch'} this coin">★</button>` +
     (namedTemplate ? `<span class="flag flag-tpl">${esc(namedTemplate)}</span>` : '') +
+    lineageBadge(c) +
     `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span></p>` +
     `<p class="id-chip"><span class="mono">${esc(shortHex(c.covenant_id, 10, 8))}</span>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(c.covenant_id)}" aria-label="copy this coin’s full id">copy id</button></p>` +
     `</div></header>` +
     `<p class="detail-summary">${esc(summaryBits.join(' · '))}.</p>` +
+    coinContractSectionHtml(c) +
     `<section aria-label="Life story"><h2>life story</h2>${truncNote}` +
     `<ol class="timeline">${preface}${shownEvents.map((ev) => timelineItem(rec, ev, data, network, flashTx)).join('')}</ol>${storyFoot}</section>` +
+    togetherSection +
+    holdersSection +
     `<section class="nerd" aria-label="Technical details">` +
     `<button type="button" class="nerd-toggle" data-action="nerd" aria-expanded="${state.nerd}">` +
     `<span class="nerd-switch" aria-hidden="true"></span><span>nerd mode</span>` +
     `<span class="dim nerd-hint">raw ids, DAA scores, UTXOs &amp; scripts</span></button>` +
     `<div id="nerd-panel" class="nerd-panel" ${state.nerd ? '' : 'hidden'}>${state.nerd ? nerdPanel(rec, network, program) : ''}</div>` +
     `</section>`;
+
+  /* wire the "moved together" force graph now that its canvas is in the DOM;
+     always stop any prior controller so animation loops don't accumulate */
+  if (detailGraph) { detailGraph.stop(); detailGraph = null; }
+  if (togetherCounts.size && window.kascovGraph) {
+    const canvas = view.querySelector('#together-graph');
+    if (canvas) {
+      const members = [...togetherCounts.entries()].map(([id, n]) => ({
+        covenant_id: id, name: friendlyName(id), shared_txs: n,
+      }));
+      detailGraph = window.kascovGraph.render(canvas, { members, label: rec.name }, {
+        onPick: (node) => { location.hash = `#/${network}/c/${node.id}`; },
+      });
+    }
+  }
 
   if (flashTx) {
     /* after render()'s scroll-to-top settles, bring the flashed event into view */
@@ -2709,8 +3245,180 @@ function renderDev() {
   wireApiSidebar();
 }
 
+/* ---- guided visual builder (#/build) — the codeless path ----
+   A self-contained form per template: plain-language fields, byte-perfect hex
+   via disasm.js skeleton.emit, a live readable source + a downloadable deploy
+   script. Independent of the decode-page generator (genState) above — this
+   one never reads #decode-input, it starts from example parameters. */
+
+const GUIDED_TEMPLATES = ['SilverScript · Mecenas', 'SilverScript · Escrow', 'SilverScript · LastWill'];
+
+/* obvious repeated-nibble stand-ins so the builder is live on first paint;
+   the user is meant to replace every key with their own (keygen prints them) */
+const GUIDED_DEFAULTS = {
+  'SilverScript · Mecenas': { recipient: '11'.repeat(32), funder_hash: '22'.repeat(32), pledge: '1', period: '3600' },
+  'SilverScript · Escrow': { arbiter_hash: '33'.repeat(32), buyer: '11'.repeat(32), seller: '22'.repeat(32) },
+  'SilverScript · LastWill': { inheritor_hash: '11'.repeat(32), cold_hash: '22'.repeat(32), hot_hash: '33'.repeat(32) },
+};
+
+/* plain-language labels keyed by the SilverScript param name (p.source) */
+const GUIDED_LABELS = {
+  recipient: 'Recipient', funder: 'Funder (you)', pledge: 'Pledge per period', period: 'Period',
+  arbiter: 'Arbiter', buyer: 'Buyer', seller: 'Seller',
+  inheritor: 'Inheritor', cold: 'Cold key (override)', hot: 'Hot key (everyday)',
+};
+
+let guidedState = null;
+let lastGuidedBuild = null;
+/* wallet-assisted one-click deploy state — persists across #guided-out
+   re-renders (which happen on every keystroke) so a connected wallet stays
+   connected while you keep editing. Address only; no keys ever touch kascov. */
+let guidedWallet = { address: null };
+
+/* is a Kaspa browser wallet (KasWare) present? feature-detected, never assumed. */
+function hasKasware() {
+  return typeof window !== 'undefined' && window.kasware && typeof window.kasware.requestAccounts === 'function';
+}
+
+/* the wallet strip inside the deploy panel — rendered from guidedWallet so it
+   survives partial re-renders. Degrades to a subtle note when no wallet. */
+function guidedWalletHtml() {
+  if (!hasKasware()) {
+    return `<p class="guided-wallet-note dim">no Kaspa wallet detected (KasWare) — you can still deploy below, or install a wallet to connect an address.</p>`;
+  }
+  if (guidedWallet.address) {
+    return `<p class="guided-wallet-note">wallet connected: <code class="mono">${esc(guidedWallet.address)}</code> ` +
+      `· <a href="https://faucet-testnet.kaspanet.io" target="_blank" rel="noopener">get testnet funds from the faucet ↗</a></p>`;
+  }
+  return `<div class="guided-wallet-connect">` +
+    `<button type="button" class="btn" data-action="guided-connect-wallet">connect wallet</button>` +
+    `<span class="dim">KasWare detected — connect to see your testnet address</span>` +
+    `</div>`;
+}
+
+function guidedInit(template) {
+  if (!GUIDED_TEMPLATES.includes(template)) template = GUIDED_TEMPLATES[0];
+  const info = window.kascovDisasm && window.kascovDisasm.skeletonInfo(template);
+  const values = {};
+  if (info) {
+    const defs = GUIDED_DEFAULTS[template] || {};
+    for (const p of info.params) values[p.name] = defs[p.name] || '';
+  }
+  guidedState = { template, values, coinValue: '10' };
+}
+
+function renderGuidedBuilder() {
+  const host = $('#guided-builder');
+  if (!host) return;
+  const D = window.kascovDisasm, G = window.kascovGen;
+  if (!D || !G || !D.skeletonInfo || !D.emitFromSkeleton) {
+    host.innerHTML = '<p class="dim">the in-browser builder isn’t available right now.</p>';
+    return;
+  }
+  if (!guidedState) guidedInit(GUIDED_TEMPLATES[0]);
+  host.innerHTML = guidedBuilderHtml();
+}
+
+function guidedBuilderHtml() {
+  const info = window.kascovDisasm.skeletonInfo(guidedState.template);
+  if (!info || !info.emitVerified) return '<p class="dim">this template can’t be assembled in the browser.</p>';
+  const tabs = GUIDED_TEMPLATES.map((name) => {
+    const on = guidedState.template === name;
+    return `<button type="button" class="guided-tab${on ? ' guided-tab-on' : ''}" data-action="guided-template" data-template="${esc(name)}" aria-pressed="${on}">${esc(name.replace('SilverScript · ', ''))}</button>`;
+  }).join('');
+  const kindLabel = { pubkey: 'x-only pubkey · 64 hex', hash32: 'blake2b-256 · 64 hex', amount: 'TKAS', daa: 'DAA ticks' };
+  const placeholder = { pubkey: '64 hex characters', hash32: '64 hex characters', amount: 'e.g. 1.5', daa: 'e.g. 3600' };
+  const fields = info.params.map((p) => {
+    const v = guidedState.values[p.name] || '';
+    const check = window.kascovGen.validateField(p.kind, v);
+    let conv = '';
+    if (p.kind === 'daa' && check.ok) conv = `<span class="guided-conv dim">≈ ${esc(String(Math.round(Number(v) / 600)))} min at ~10 DAA/s</span>`;
+    if (p.kind === 'amount' && check.ok) conv = `<span class="guided-conv dim">= ${esc(String(check.sompi))} sompi</span>`;
+    return `<label class="guided-field gen-field">` +
+      `<span class="gen-label">${esc(GUIDED_LABELS[p.source] || p.source)} <span class="dim">(${esc(kindLabel[p.kind] || p.kind)})</span></span>` +
+      `<input type="text" data-guided-field="${esc(p.name)}" value="${esc(v)}" spellcheck="false" autocomplete="off" placeholder="${esc(placeholder[p.kind] || '')}">` +
+      `<span class="gen-hint dim">${esc(p.hint || '')}</span>` + conv +
+      (v && !check.ok ? `<span class="gen-err">${esc(check.err)}</span>` : '') +
+      `</label>`;
+  }).join('');
+  const valueField = `<label class="guided-field gen-field">` +
+    `<span class="gen-label">Coin value <span class="dim">(TKAS the newborn coin holds)</span></span>` +
+    `<input type="text" data-guided-field="__value" value="${esc(guidedState.coinValue)}" spellcheck="false" autocomplete="off" placeholder="e.g. 10">` +
+    `<span class="gen-hint dim">funded from your faucet wallet at deploy time, not minted</span>` +
+    `</label>`;
+  return `<div class="guided-tabs" role="group" aria-label="Template">${tabs}</div>` +
+    `<div class="gen-fields">${fields}${valueField}</div>` +
+    `<div id="guided-out">${guidedOutputsHtml()}</div>`;
+}
+
+function guidedOutputsHtml() {
+  const info = window.kascovDisasm.skeletonInfo(guidedState.template);
+  const args = {}, values = {};
+  for (const p of info.params) {
+    const check = window.kascovGen.validateField(p.kind, guidedState.values[p.name] || '');
+    if (!check.ok) {
+      lastGuidedBuild = null;
+      return `<p class="gen-wait dim">fill in the fields above — the readable source and compiled hex appear here, live as you type.</p>`;
+    }
+    args[p.name] = check.value;
+    values[p.name] = check;
+  }
+  const valCheck = window.kascovGen.validateField('amount', guidedState.coinValue || '');
+  if (!valCheck.ok) { lastGuidedBuild = null; return `<p class="gen-wait dim">coin value: ${esc(valCheck.err)}</p>`; }
+
+  const emitted = window.kascovDisasm.emitFromSkeleton(guidedState.template, args);
+  if (!emitted) { lastGuidedBuild = null; return `<p class="gen-err">could not assemble the script — this should not happen; please report it.</p>`; }
+  const hex = window.kascovDisasm.toHex(emitted);
+
+  /* self-verify: the emitted bytes must decode back to exactly these args */
+  const redecoded = window.kascovDisasm.disassemble(emitted);
+  const back = window.kascovDisasm.matchTemplates(redecoded.instructions, emitted);
+  const roundTrips = !!back && back.name === guidedState.template && info.params.every((p) => {
+    const got = (back.fields.find((f) => f.name === p.name) || {}).value;
+    return got === window.kascovDisasm.toHex(Uint8Array.from(args[p.name]));
+  });
+  if (!roundTrips) { lastGuidedBuild = null; return `<p class="gen-err">round-trip check failed — not offering this script. please report it.</p>`; }
+
+  const source = window.kascovGen.buildSource(guidedState.template, info.params, values,
+    { date: new Date().toISOString().slice(0, 10) });
+  const deploy = window.kascovGen.buildDeployCommand(hex, String(valCheck.sompi));
+  lastGuidedBuild = { template: guidedState.template, hex, sompi: String(valCheck.sompi) };
+
+  const block = (title, body, hint) =>
+    `<div class="gen-block"><div class="gen-block-head"><span>${esc(title)}</span>` +
+    (hint ? `<span class="dim">${esc(hint)}</span>` : '') +
+    `<button type="button" class="copy-btn" data-action="copy-block">copy</button></div>` +
+    `<pre>${esc(body)}</pre></div>`;
+  const short = guidedState.template.replace('SilverScript · ', '');
+  const actions = `<div class="guided-actions">` +
+    `<button type="button" class="btn btn-accent" data-action="guided-download">⬇ download deploy.sh</button>` +
+    `<button type="button" class="btn" data-action="guided-publish">publish as verified source</button>` +
+    `<a class="btn" href="#/decode?s=${esc(hex)}">▶ open in the decoder</a>` +
+    `<span id="guided-publish-result" class="compile-publish-result"></span></div>`;
+  /* one-click, no-toolchain deploy: the custodial worker signs & broadcasts.
+     Feature-detected end-to-end — if the endpoint is gated off (404) or the
+     network fails, the click falls back to the download-deploy.sh path above. */
+  const deployPanel = `<div class="guided-deploy" id="guided-deploy">` +
+    `<div class="guided-deploy-head"><span class="guided-deploy-title">Deploy on testnet-10 — no toolchain needed</span>` +
+    `<span class="dim">signed & broadcast by the kascov worker; the download above stays available as a fallback</span></div>` +
+    `<div id="guided-wallet" class="guided-wallet">${guidedWalletHtml()}</div>` +
+    `<div class="guided-deploy-actions">` +
+    `<button type="button" class="btn btn-accent" data-action="guided-deploy">🚀 deploy on testnet-10</button>` +
+    `<span class="dim">deploys the exact ${esc(emitted.length + '')}-byte script above with a coin value of ${esc(String(valCheck.sompi))} sompi</span>` +
+    `</div>` +
+    `<div id="guided-deploy-result" class="guided-deploy-result" aria-live="polite"></div>` +
+    `</div>`;
+  return `<p class="gen-verify-ok">byte-perfect — re-decodes as ${esc(short)} with your parameters ✓</p>` +
+    block('the contract, readable', source, 'canonical SilverScript source') +
+    block('the contract, compiled', hex, `${emitted.length} bytes of Kaspa script`) +
+    block('deploy it on testnet-10', deploy, 'or download the full script below') +
+    actions +
+    deployPanel;
+}
+
 function renderBuild() {
   document.title = 'make your own smart coin — kascov';
+  renderGuidedBuilder();
   initCompiler();
 }
 
@@ -3021,13 +3729,20 @@ async function refreshSnapshot() {
   if (document.visibilityState !== 'visible') return;
   const network = state.network;
   try {
-    const res = await fetch(`data/${network}.json`, { cache: 'no-cache' });
-    if (!res.ok) return;
-    const data = await res.json();
     const old = state.cache[network];
+    /* re-request a window at least as wide as what's already loaded so a
+       paginated net doesn't shrink back to one page on refresh; a full-snapshot
+       worker ignores the limit and returns everything as before */
+    const limit = old ? Math.max(GRID_PAGE, old.data.covenants.length) : GRID_PAGE;
+    const data = await fetchGridPage(network, null, null, limit);
     if (old && data.generated_at_ms === old.data.generated_at_ms) return;
     data.__anchor = makeAnchor(data, network);
-    state.cache[network] = { data, index: buildIndex(data) };
+    const cursor = data.next_after_daa != null ? data.next_after_daa : null;
+    state.cache[network] = {
+      data, index: buildIndex(data), nextAfterDaa: cursor,
+      nextAfterId: data.next_after_id != null ? data.next_after_id : null,
+      loadingMore: false,
+    };
     /* cached coin details are now stale — drop all but the one on screen
        (yanking the open coin's story mid-read would collapse its sections) */
     const dm = state.details[network];
@@ -3258,6 +3973,26 @@ document.addEventListener('click', (e) => {
     state.shown += PAGE_SIZE;
     const entry = state.cache[state.network];
     if (entry) renderGrid(entry, state.network);
+  } else if (action === 'more-net') {
+    const network = state.network;
+    const entry = state.cache[network];
+    if (!entry || entry.nextAfterDaa == null || entry.loadingMore) return;
+    /* loadMoreGrid flips entry.loadingMore synchronously (before its first
+       await), so the immediate re-render shows the button's loading state */
+    const pending = loadMoreGrid(network);
+    renderGrid(entry, network);
+    pending
+      .then(() => {
+        if (state.network !== network || parseRoute().view !== 'explore') return;
+        state.shown += PAGE_SIZE; /* reveal a chunk of the freshly loaded rows */
+        renderGrid(entry, network);
+      })
+      .catch(() => {
+        /* loadMoreGrid's finally already cleared loadingMore */
+        if (state.network === network && parseRoute().view === 'explore') {
+          renderGrid(entry, network);
+        }
+      });
   } else if (action === 'nerd') {
     state.nerd = !state.nerd;
     try { localStorage.setItem('kascov-nerd', state.nerd ? '1' : '0'); } catch (err) { /* ignore */ }
@@ -3317,6 +4052,106 @@ document.addEventListener('click', (e) => {
       const panel = $('#gen-panel');
       if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
+  } else if (action === 'guided-template') {
+    guidedInit(el.dataset.template);
+    renderGuidedBuilder();
+  } else if (action === 'guided-open') {
+    /* gallery card → jump into the builder with this template selected */
+    guidedInit(el.dataset.template);
+    renderGuidedBuilder();
+    const sec = document.getElementById('build-guided');
+    if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } else if (action === 'guided-download') {
+    if (!lastGuidedBuild || !window.kascovGen || !window.kascovGen.buildDeployScript) return;
+    const b = lastGuidedBuild;
+    const script = window.kascovGen.buildDeployScript(b.hex, b.sompi,
+      { template: b.template, date: new Date().toISOString().slice(0, 10) });
+    const blob = new Blob([script], { type: 'text/x-shellscript' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `deploy-${b.template.replace('SilverScript · ', '').toLowerCase()}.sh`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } else if (action === 'guided-publish') {
+    /* register the canonical source against this program's hash — recompiled
+       server-side with your args, so any coin hashing to it shows the source */
+    const out = document.getElementById('guided-publish-result');
+    if (!lastGuidedBuild || !out || !guidedState) return;
+    const src = window.kascovGen.SOURCES[lastGuidedBuild.template];
+    const info = window.kascovDisasm.skeletonInfo(lastGuidedBuild.template);
+    if (!src || !info) { out.innerHTML = ' <span class="compile-err">no source for this template</span>'; return; }
+    const args = info.params.map((p) => {
+      const check = window.kascovGen.validateField(p.kind, guidedState.values[p.name] || '');
+      if (!check.ok) return '';
+      if (p.kind === 'pubkey' || p.kind === 'hash32') return '0x' + check.display;
+      if (p.kind === 'amount') return String(check.sompi);
+      return check.display; /* daa — whole number of ticks */
+    });
+    out.innerHTML = ' <span class="dim">publishing…</span>';
+    fetch(`data/${state.network}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: src, args }) })
+      .then((r) => r.json())
+      .then((d) => {
+        out.innerHTML = d && d.ok
+          ? ` <span class="compile-ok">✓ published — coins hashing <code class="mono">${esc(d.hash.slice(0, 12))}…</code> now show this source</span>`
+          : ` <span class="compile-err">${esc((d && d.error) || 'publish failed')}</span>`;
+      })
+      .catch(() => { out.innerHTML = ' <span class="compile-err">publish unavailable — is the kascov node reachable?</span>'; });
+  } else if (action === 'guided-connect-wallet') {
+    /* KasWare connect — read-only: we only surface the address + a faucet link.
+       No signing here; the custodial worker deploys. Guarded + graceful. */
+    const strip = document.getElementById('guided-wallet');
+    if (!hasKasware()) { if (strip) strip.innerHTML = guidedWalletHtml(); return; }
+    if (strip) strip.innerHTML = '<p class="guided-wallet-note dim">connecting…</p>';
+    Promise.resolve()
+      .then(() => window.kasware.requestAccounts())
+      .then((accounts) => {
+        const addr = Array.isArray(accounts) ? accounts[0] : (accounts && accounts[0]);
+        guidedWallet.address = addr || null;
+        if (strip) strip.innerHTML = guidedWalletHtml();
+      })
+      .catch((err) => {
+        if (strip) strip.innerHTML = `<p class="guided-wallet-note dim">wallet not connected${err && err.message ? ' — ' + esc(String(err.message)) : ''}. you can still deploy below.</p>`;
+      });
+  } else if (action === 'guided-deploy') {
+    /* one-click custodial deploy. Endpoint is gated OFF by default (404 unless
+       the operator set KASCOV_DEPLOY_KEY), so any 404 / network error falls
+       back to the existing download-deploy.sh + CLI path. */
+    const out = document.getElementById('guided-deploy-result');
+    if (!out) return;
+    if (!lastGuidedBuild || !lastGuidedBuild.hex) {
+      out.innerHTML = '<p class="guided-deploy-err">nothing to deploy yet — fill in the fields above so a byte-perfect script is produced.</p>';
+      return;
+    }
+    const fallback = (why) => {
+      out.innerHTML = `<p class="guided-deploy-fallback">one-click deploy isn’t enabled on this worker — use <strong>⬇ download deploy.sh</strong> above and run it locally.` +
+        (why ? ` <span class="dim">(${esc(why)})</span>` : '') + `</p>`;
+    };
+    const b = lastGuidedBuild;
+    out.innerHTML = '<p class="guided-deploy-pending dim">deploying on testnet-10…</p>';
+    fetch('data/testnet-10/deploy', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ program_hex: b.hex, value: Number(b.sompi) }),
+    })
+      .then((r) => {
+        if (r.status === 404) { fallback('endpoint disabled'); return null; }
+        if (!r.ok) { fallback('worker returned ' + r.status); return null; }
+        return r.json().catch(() => null);
+      })
+      .then((d) => {
+        if (d === null) return; /* fallback already shown, or gated off */
+        if (d && d.ok && d.covenant_id) {
+          const net = esc(String(d.network || 'testnet-10'));
+          const cid = esc(String(d.covenant_id));
+          out.innerHTML = `<div class="guided-deploy-ok">` +
+            `<p>✓ deployed on ${net} — your covenant is live.</p>` +
+            `<a class="btn btn-accent" href="#/testnet-10/c/${cid}">▶ open ${cid.slice(0, 12)}… on kascov</a>` +
+            `</div>`;
+        } else {
+          out.innerHTML = `<p class="guided-deploy-err">deploy failed${d && d.error ? ' — ' + esc(String(d.error)) : ''}. the download-deploy.sh path above still works.</p>`;
+        }
+      })
+      .catch(() => fallback('network error'));
   } else if (action === 'copy-block') {
     const pre = el.closest('.gen-block');
     const text = pre && pre.querySelector('pre') ? pre.querySelector('pre').textContent : '';
@@ -3429,12 +4264,14 @@ document.addEventListener('click', (e) => {
           : ` <span class="zk-invalid">✗ ${esc(d.reason || 'invalid')}</span>`;
       })
       .catch(() => { result.innerHTML = ' <span class="dim">verifier unavailable</span>'; });
-  } else if (action === 'graph-prev') {
-    graphIdx -= 1;
-    renderAppGraph();
-  } else if (action === 'graph-next') {
-    graphIdx += 1;
-    renderAppGraph();
+  } else if (action === 'galaxy-status') {
+    const box = el.closest('.appgraph-chips');
+    if (box) box.querySelectorAll('.chip').forEach((c) => c.classList.toggle('chip-on', c === el));
+    if (galaxyCtrl) galaxyCtrl.setFilter({ status: el.dataset.val });
+  } else if (action === 'galaxy-color') {
+    const box = el.closest('.appgraph-chips');
+    if (box) box.querySelectorAll('.chip').forEach((c) => c.classList.toggle('chip-on', c === el));
+    if (galaxyCtrl) galaxyCtrl.setColorMode(el.dataset.val);
   } else if (action === 'sim-run') {
     const panel = el.closest('.sim-panel');
     const scenario = (SIM_SCENARIOS[panel && panel.dataset.tpl] || [])[parseInt(el.dataset.i, 10)];
@@ -3576,6 +4413,24 @@ document.addEventListener('change', (e) => {
   if (e.target.closest && e.target.closest('#gen-panel') && genState) runDecode(false);
 });
 
+/* guided builder fields (#/build): live output refresh while typing (caret-safe
+   — only #guided-out re-renders), full rebuild on blur so field hints settle */
+document.addEventListener('input', (e) => {
+  const field = e.target.closest && e.target.closest('#guided-builder') ? e.target : null;
+  if (!field || !guidedState || !field.dataset.guidedField) return;
+  const key = field.dataset.guidedField;
+  if (key === '__value') guidedState.coinValue = field.value;
+  else guidedState.values[key] = field.value;
+  const out = $('#guided-out');
+  if (out) out.innerHTML = guidedOutputsHtml();
+});
+document.addEventListener('change', (e) => {
+  if (e.target.closest && e.target.closest('#guided-builder') && guidedState &&
+      e.target.dataset && e.target.dataset.guidedField) {
+    renderGuidedBuilder();
+  }
+});
+
 $('#search').addEventListener('keydown', (e) => {
   const open = suggest.items.length > 0 && !$('#search-suggest').hidden;
   if (e.key === 'ArrowDown' && open) {
@@ -3650,6 +4505,21 @@ if (decodeInput) {
     decodeTimer = setTimeout(() => runDecode(true), 250);
   });
 }
+
+/* galaxy search — center + highlight the matching coin */
+const galaxySearch = $('#appgraph-search');
+let galaxySearchTimer = 0;
+if (galaxySearch) {
+  galaxySearch.addEventListener('input', () => {
+    clearTimeout(galaxySearchTimer);
+    galaxySearchTimer = setTimeout(() => {
+      if (galaxyCtrl) galaxyCtrl.search(galaxySearch.value);
+    }, 200);
+  });
+}
+
+/* keep the galaxy sized to its container */
+window.addEventListener('resize', () => { if (galaxyCtrl) galaxyCtrl.resize(); });
 
 window.addEventListener('hashchange', render);
 

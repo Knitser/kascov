@@ -2069,8 +2069,11 @@ dependencies = [
  "hex",
  "kascov-core",
  "kascov-decode",
+ "kascov-labkit",
  "kascov-sim",
  "kaspa-addresses",
+ "kaspa-wrpc-client",
+ "secp256k1",
  "serde",
  "serde_json",
  "tokio",
@@ -2115,8 +2118,18 @@ name = "kascov-lab"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "blake2b_simd",
  "clap",
+ "hex",
+ "kascov-labkit",
+ "tokio",
+]
+
+[[package]]
+name = "kascov-labkit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake2b_simd",
  "hex",
  "kascov-decode",
  "kaspa-addresses",

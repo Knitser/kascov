@@ -4,15 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# A thin CLI over kascov-labkit, which holds all the tx-building logic.
 [dependencies]
-kaspa-wrpc-client = { workspace = true }
-kaspa-rpc-core = { workspace = true }
-kaspa-consensus-core = { workspace = true }
-kaspa-addresses = { workspace = true }
-kaspa-txscript = { workspace = true }
-secp256k1 = { workspace = true }
-kascov-decode = { path = "../kascov-decode" }
-blake2b_simd = { workspace = true }
+kascov-labkit = { path = "../kascov-labkit" }
 
 tokio = { workspace = true }
 clap = { workspace = true }

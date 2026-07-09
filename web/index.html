@@ -198,15 +198,23 @@
       </details>
 
       <details class="lanes collapse-sec" id="section-appgraph" aria-label="App graph" hidden>
-        <summary><h2>app graph · coins that move together</h2><span class="collapse-count dim" id="appgraph-count"></span></summary>
-        <p class="dim families-sub">each cluster is an app — smart coins that shared transactions. click a dot to open the coin.</p>
+        <summary><h2>app graph · the whole network</h2><span class="collapse-count dim" id="appgraph-count"></span></summary>
+        <p class="dim families-sub">every app at once — each dot is a smart coin, each link a shared transaction. scroll to zoom, drag to pan, click a dot to open the coin.</p>
+        <div class="appgraph-toolbar">
+          <input type="search" id="appgraph-search" class="appgraph-search" placeholder="find a coin…" autocomplete="off" spellcheck="false" aria-label="Find a coin in the graph">
+          <span class="appgraph-chips" role="group" aria-label="Filter">
+            <button type="button" class="chip chip-on" data-action="galaxy-status" data-val="all">all</button>
+            <button type="button" class="chip" data-action="galaxy-status" data-val="active">alive</button>
+            <button type="button" class="chip" data-action="galaxy-status" data-val="burned">retired</button>
+          </span>
+          <span class="appgraph-chips" role="group" aria-label="Color by">
+            <button type="button" class="chip chip-on" data-action="galaxy-color" data-val="template">by type</button>
+            <button type="button" class="chip" data-action="galaxy-color" data-val="status">by status</button>
+          </span>
+        </div>
         <div class="appgraph-wrap">
           <canvas id="appgraph-canvas" class="appgraph-canvas"></canvas>
-          <div class="appgraph-controls">
-            <button type="button" class="btn dbg-btn" data-action="graph-prev">◀</button>
-            <span class="dim mono" id="appgraph-label"></span>
-            <button type="button" class="btn dbg-btn" data-action="graph-next">▶</button>
-          </div>
+          <div class="appgraph-legend" id="appgraph-legend" aria-hidden="true"></div>
         </div>
       </details>
 
@@ -214,6 +222,29 @@
         <summary><h2>how long do smart coins live?</h2><span class="collapse-count dim" id="lifespans-count"></span></summary>
         <p class="dim families-sub">the lifespan of every retired coin — from birth to burn. <span id="lifespans-median"></span></p>
         <div id="lifespans-row"></div>
+      </details>
+
+      <details class="lanes collapse-sec analytics" id="section-analytics" aria-label="Analytics" hidden>
+        <summary><h2>analytics · the network at a glance</h2><span class="collapse-count dim">charts</span></summary>
+        <p class="dim families-sub">the same feeds behind this page, drawn as charts — births against retirements over the whole history, the population by contract type, and how long coins survive.</p>
+        <div class="analytics-grid">
+          <div class="analytics-card" id="acard-flow" hidden>
+            <h3>births vs retirements over time</h3>
+            <div id="analytics-flow"></div>
+          </div>
+          <div class="analytics-card" id="acard-survival" hidden>
+            <h3>survival curve</h3>
+            <div id="analytics-survival"></div>
+          </div>
+          <div class="analytics-card" id="acard-templates" hidden>
+            <h3>coins by contract type</h3>
+            <div id="analytics-templates"></div>
+          </div>
+          <div class="analytics-card" id="acard-reorgs" hidden>
+            <h3>recent reorgs</h3>
+            <div id="analytics-reorgs"></div>
+          </div>
+        </div>
       </details>
 
       <section class="stories" id="section-stories" aria-label="Latest stories">
@@ -312,6 +343,13 @@
         </div>
       </header>
 
+      <!-- guided visual builder — the codeless path -->
+      <section class="build-section" id="build-guided">
+        <h2>build one without writing code</h2>
+        <p class="build-lead">Pick a covenant, fill in the parties, amounts and timelocks in plain terms, and kascov assembles <strong>byte-perfect Kaspa script</strong> in your browser — the exact bytes the <code>silverc</code> compiler emits, live as you type. Then <strong>deploy it in one click on testnet-10</strong> — no local toolchain — or download a ready-to-run <code>deploy.sh</code>.</p>
+        <div id="guided-builder" class="guided-builder" aria-live="polite"></div>
+      </section>
+
       <!-- write & compile SilverScript, in the browser -->
       <section class="build-section" id="build-compiler">
         <h2>write &amp; compile SilverScript</h2>
@@ -379,23 +417,23 @@
       <!-- the three contracts -->
       <section class="build-section">
         <h2>the contracts you can make</h2>
-        <p class="build-lead">Three canonical SilverScript covenants ship with the decoder. Open one, put your own keys and amounts in, and it compiles to deployable hex in your browser.</p>
+        <p class="build-lead">Three canonical SilverScript covenants ship with kascov. Open one in the builder above, put your own keys and amounts in, and it compiles to deployable hex in your browser.</p>
         <div class="build-cards">
-          <a class="build-card contract-card" href="#/decode">
+          <button type="button" class="build-card contract-card" data-action="guided-open" data-template="SilverScript · Mecenas">
             <div class="build-card-head"><span class="bc-icon bc-mecenas"></span><h3>Mecenas</h3></div>
             <p>A recurring allowance. A recipient may claim a fixed <em>pledge</em> every <em>period</em>; the funder can reclaim the rest at any time.</p>
-            <span class="build-make">🛠 make a Mecenas →</span>
-          </a>
-          <a class="build-card contract-card" href="#/decode">
+            <span class="build-make">🛠 open in builder →</span>
+          </button>
+          <button type="button" class="build-card contract-card" data-action="guided-open" data-template="SilverScript · Escrow">
             <div class="build-card-head"><span class="bc-icon bc-escrow"></span><h3>Escrow</h3></div>
             <p>Funds held for a trade. An <em>arbiter</em> releases them to the <em>buyer</em> or the <em>seller</em> — and the script enforces that the money can only go to one of them.</p>
-            <span class="build-make">🛠 make an Escrow →</span>
-          </a>
-          <a class="build-card contract-card" href="#/decode">
+            <span class="build-make">🛠 open in builder →</span>
+          </button>
+          <button type="button" class="build-card contract-card" data-action="guided-open" data-template="SilverScript · LastWill">
             <div class="build-card-head"><span class="bc-icon bc-lastwill"></span><h3>LastWill</h3></div>
             <p>An inheritance switch. A <em>hot</em> key refreshes it; if it goes quiet long enough, an <em>inheritor</em> can claim — with a <em>cold</em> key as the override.</p>
-            <span class="build-make">🛠 make a LastWill →</span>
-          </a>
+            <span class="build-make">🛠 open in builder →</span>
+          </button>
         </div>
       </section>
 
@@ -415,7 +453,7 @@
             <div class="bs-num">02</div>
             <div class="bs-body">
               <h3>Generate your contract</h3>
-              <p>On <a href="#/decode">the decoder</a>, click <strong>make a Mecenas / Escrow / LastWill</strong>, edit the fields (use the pubkey and blake2b that <code class="mono">keygen</code> printed), and copy the compiled hex.</p>
+              <p>In the builder above, pick <strong>Mecenas / Escrow / LastWill</strong>, edit the fields (use the pubkey and blake2b that <code class="mono">keygen</code> printed), and copy the compiled hex — or download the ready-to-run <code class="mono">deploy.sh</code>.</p>
             </div>
           </div>
           <div class="build-stepblock">
@@ -668,7 +706,9 @@
   <script src="/disasm.js"></script>
   <script src="/vm.js"></script>
   <script src="/graph.js"></script>
+  <script src="/galaxy.js"></script>
   <script src="/gen.js"></script>
+  <script src="/decode-payload.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

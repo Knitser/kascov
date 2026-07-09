@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kascov-core", "crates/kascov-decode", "crates/kascov-sim", "crates/kascov", "crates/kascov-lab"]
+members = ["crates/kascov-core", "crates/kascov-decode", "crates/kascov-sim", "crates/kascov", "crates/kascov-labkit", "crates/kascov-lab"]
 
 [workspace.package]
 version = "0.1.0"

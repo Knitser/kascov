@@ -1748,6 +1748,77 @@ a.btn:hover { text-decoration: none; }
 .tl-with { margin: 0.25rem 0 0; font-size: 0.86rem; }
 .tl-with a { color: var(--accent); }
 
+/* tx payload peek under timeline rows */
+.tl-payload { margin: 0.3rem 0 0; font-size: 0.82rem; color: var(--muted); }
+.tl-payload-tag {
+  font-size: 0.66rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-right: 0.35rem;
+}
+.tl-payload-val { color: var(--text); word-break: break-word; }
+.tl-payload-val.mono { font-family: var(--mono); font-size: 0.8rem; }
+
+/* KRC-20-style inscription chip under a timeline row */
+.tl-insc { margin: 0.3rem 0 0; }
+.insc-chip {
+  display: inline-block;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* "moved together" force-graph section on the coin page */
+.together { margin-top: 1.6rem; }
+.together-sub { margin: 0.2rem 0 0.6rem; font-size: 0.86rem; }
+.together-graph {
+  display: block;
+  width: 100%;
+  height: 360px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+/* holders panel on the coin page */
+.holders { margin-top: 1.6rem; }
+.holder-list { list-style: none; margin: 0.6rem 0 0; padding: 0; }
+.holder-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.holder-row:first-child { border-top: none; }
+.holder-id {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  text-decoration: none;
+  color: var(--text);
+}
+a.holder-id:hover .holder-name { color: var(--accent); }
+.holder-name { font-weight: 600; }
+.holder-key { font-size: 0.78rem; color: var(--muted); }
+.holder-meta {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+
+/* approximate compute-budget cost on a spent UTXO */
+.spent-budget { font-size: 0.8rem; }
+
 /* ===================== contract generator ("make this yours") ========== */
 
 .gen-cta-row { display: flex; align-items: center; gap: 0.8rem; margin: 0.6rem 0 0.2rem; flex-wrap: wrap; }
@@ -1800,6 +1871,45 @@ a.btn:hover { text-decoration: none; }
 @media (max-width: 720px) {
   .gen-fields { grid-template-columns: 1fr; }
 }
+
+/* guided visual builder (#/build) — reuses .gen-field/.gen-block styling */
+.guided-builder { margin-top: 0.4rem; }
+.guided-tabs { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1.1rem; }
+.guided-tab {
+  font: inherit; font-size: 0.9rem; cursor: pointer;
+  background: var(--bg-soft); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 9px;
+  padding: 0.45rem 0.95rem;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.guided-tab:hover { color: var(--text); border-color: var(--border-strong); }
+.guided-tab-on { color: var(--text); border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.guided-conv { font-size: 0.76rem; }
+.guided-actions { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; margin-top: 0.2rem; }
+
+/* one-click deploy panel (#/build guided) — wallet strip + custodial deploy,
+   feature-detected; the whole block degrades to the download-deploy.sh path */
+.guided-deploy {
+  margin-top: 1.1rem; padding: 0.9rem 1rem;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: rgba(255,255,255,0.03);
+}
+.guided-deploy-head { display: flex; flex-direction: column; gap: 0.15rem; margin-bottom: 0.7rem; }
+.guided-deploy-title { font-size: 0.9rem; font-weight: 650; }
+.guided-deploy-head .dim { font-size: 0.78rem; }
+.guided-wallet { margin-bottom: 0.7rem; }
+.guided-wallet-note { font-size: 0.82rem; margin: 0; line-height: 1.5; }
+.guided-wallet-note code { word-break: break-all; }
+.guided-wallet-connect { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+.guided-wallet-connect .dim { font-size: 0.8rem; }
+.guided-deploy-actions { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+.guided-deploy-actions .dim { font-size: 0.78rem; }
+.guided-deploy-result { margin-top: 0.6rem; }
+.guided-deploy-result p { font-size: 0.84rem; margin: 0; line-height: 1.5; }
+.guided-deploy-ok { display: flex; flex-direction: column; align-items: flex-start; gap: 0.55rem; }
+.guided-deploy-ok p { color: var(--born); font-weight: 600; }
+.guided-deploy-err { color: var(--danger, #e06c6c); }
+.guided-deploy-fallback code, .guided-deploy-fallback strong { font-weight: 650; }
 
 /* inline absolute times: quiet, non-wrapping segments */
 .abs-t { color: var(--faint); white-space: nowrap; }
@@ -2313,8 +2423,9 @@ h2::before { color: var(--accent); }
 
 .build-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(255px, 1fr)); gap: 1rem; }
 .build-card { background: linear-gradient(180deg, rgba(255,255,255,0.015), transparent 55%), var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.3rem; box-shadow: var(--hairline); display: block; }
-a.build-card { transition: transform 0.18s cubic-bezier(0.2,0.7,0.2,1), border-color 0.18s; }
-a.build-card:hover { transform: translateY(-3px); border-color: var(--border-strong); text-decoration: none; }
+a.build-card, button.build-card { transition: transform 0.18s cubic-bezier(0.2,0.7,0.2,1), border-color 0.18s; }
+a.build-card:hover, button.build-card:hover { transform: translateY(-3px); border-color: var(--border-strong); text-decoration: none; }
+button.build-card { width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer; }
 .build-card-head { display: flex; align-items: center; gap: 0.7rem; margin-bottom: 0.7rem; }
 .build-card-head h3 { font-family: var(--display); font-weight: 700; font-size: 1.12rem; margin: 0; }
 .build-card p { color: var(--muted); font-size: 0.92rem; line-height: 1.55; margin: 0 0 0.9rem; }
@@ -2426,6 +2537,7 @@ a.build-card:hover { transform: translateY(-3px); border-color: var(--border-str
 .zk-head strong { font-family: var(--display); font-weight: 700; }
 .zk-badge { font-family: var(--mono); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.05em; color: var(--move); background: var(--move-soft); border: 1px solid rgba(138,180,255,0.45); border-radius: 6px; padding: 0.22rem 0.55rem; }
 .zk-sys { margin-left: auto; font-family: var(--mono); font-size: 0.8rem; color: var(--move); }
+.zk-infer { margin-left: 0.35rem; font-family: var(--mono); font-size: 0.62rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 0.05rem 0.3rem; vertical-align: middle; }
 .zk-desc { color: var(--muted); line-height: 1.55; margin: 0; font-size: 0.92rem; }
 .zk-desc code { color: var(--move); }
 
@@ -2497,6 +2609,20 @@ details.collapse-sec > summary h2 { margin: 0; display: inline-block; }
 details.collapse-sec > summary:hover h2 { color: var(--accent); }
 .collapse-count { font-size: 0.85rem; font-family: var(--mono); }
 
+/* analytics board — a small dashboard of charts drawn from the explore feeds */
+.analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem; margin-top: 0.3rem; }
+.analytics-card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); box-shadow: var(--hairline); padding: 0.9rem 1rem 1rem; min-width: 0; }
+.analytics-card[hidden] { display: none; }
+.analytics-card h3 { margin: 0 0 0.6rem; font-size: 0.92rem; font-weight: 600; color: var(--text); }
+.analytics-card h3::before { content: "\25AE "; color: var(--accent); font-size: 0.55rem; }
+.analytics-card .an-svg { width: 100%; height: auto; display: block; }
+.analytics-card .an-spark { width: 100%; height: 34px; display: block; margin-top: 0.4rem; }
+.an-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.8rem; color: var(--faint); margin-bottom: 0.4rem; }
+.an-legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+.an-note { font-size: 0.82rem; margin: 0 0 0.5rem; }
+.an-note strong { color: var(--text); }
+@media (max-width: 720px) { .analytics-grid { grid-template-columns: 1fr; } }
+
 /* plain-English explainer panel */
 .explain-panel { margin: 0.8rem 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); box-shadow: var(--hairline); overflow: hidden; }
 .explain-panel > summary { cursor: pointer; padding: 0.7rem 1rem; list-style: none; display: flex; align-items: center; gap: 0.5rem; }
@@ -2506,10 +2632,27 @@ details.collapse-sec > summary:hover h2 { color: var(--accent); }
 .explain-body strong { color: var(--text); }
 .explain-body code { color: var(--accent); font-size: 0.86em; }
 
-/* app graph — force-directed cluster of a family */
-.appgraph-wrap { margin-top: 0.3rem; }
-.appgraph-canvas { width: 100%; height: 380px; display: block; border: 1px solid var(--border); border-radius: var(--radius); background: #06120f; }
-.appgraph-controls { display: flex; align-items: center; gap: 0.9rem; margin-top: 0.7rem; }
+/* coin-page contract intelligence — the plain-English + ZK block, surfaced
+   near the top of the coin page so it reads before the life story */
+.contract-intel { margin: 0.4rem 0 1.4rem; }
+.contract-intel .explain-panel:first-child { margin-top: 0; }
+.contract-intel .zk-panel { margin-top: 0.7rem; }
+
+/* app graph — the whole-network galaxy */
+.appgraph-wrap { margin-top: 0.5rem; position: relative; }
+.appgraph-canvas { width: 100%; height: 520px; display: block; border: 1px solid var(--border); border-radius: var(--radius); background: radial-gradient(120% 120% at 50% 45%, #071a15 0%, #05100d 70%); touch-action: none; cursor: grab; }
+.appgraph-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem 0.9rem; margin-top: 0.6rem; }
+.appgraph-search { flex: 1 1 220px; min-width: 160px; max-width: 320px; padding: 0.45rem 0.7rem; font: inherit; font-size: 0.86rem; color: var(--text); background: var(--surface, #0c1a16); border: 1px solid var(--border); border-radius: 9px; }
+.appgraph-search:focus { outline: none; border-color: var(--accent); }
+.appgraph-chips { display: inline-flex; gap: 0.35rem; }
+.chip-on { color: var(--text); border-color: var(--accent); background: rgba(112, 199, 186, 0.12); }
+.appgraph-legend { position: absolute; left: 10px; bottom: 10px; display: flex; flex-wrap: wrap; gap: 0.4rem 0.75rem; max-width: calc(100% - 20px); padding: 0.4rem 0.55rem; background: rgba(6, 18, 15, 0.72); border: 1px solid var(--border); border-radius: 9px; pointer-events: none; }
+.lg-item { display: inline-flex; align-items: center; gap: 0.32rem; font-size: 0.74rem; color: var(--muted); }
+.lg-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.galaxy-tip { position: absolute; pointer-events: none; z-index: 6; display: none; padding: 0.3rem 0.5rem; font-size: 0.78rem; line-height: 1.25; color: var(--text); background: rgba(6, 18, 15, 0.92); border: 1px solid var(--border-strong, var(--border)); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
+.galaxy-tip strong { display: block; font-weight: 600; }
+.galaxy-tip span { display: block; color: var(--muted); font-size: 0.72rem; }
+@media (max-width: 640px) { .appgraph-canvas { height: 400px; } }
 
 /* SilverScript compiler playground */
 .compiler-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 1rem; margin-top: 0.4rem; }
