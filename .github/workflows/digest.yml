@@ -1,0 +1,36 @@
+# Daily "today on Kaspa smart coins" digest → Telegram.
+# Needs two repo secrets (Settings → Secrets → Actions):
+#   TELEGRAM_BOT_TOKEN — from @BotFather
+#   TELEGRAM_CHAT_ID   — the channel/chat id the bot posts to
+# Until they exist, runs fail fast and post nothing. Test by hand first:
+#   workflow_dispatch with dry_run=true prints the message into the job log.
+name: daily-digest
+on:
+  schedule:
+    - cron: '0 16 * * *' # 16:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: print instead of posting
+        type: boolean
+        default: true
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: post digest
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            node scripts/digest-post.mjs --dry-run
+          else
+            node scripts/digest-post.mjs
+          fi
