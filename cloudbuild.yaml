@@ -1,0 +1,14 @@
+# Cloud Build config for the kascov worker image. Kaniko caches every Docker
+# layer in Artifact Registry, so warm builds skip the cargo-chef dependency
+# cook and the silverc language build (~30 min cold → minutes warm). Bump
+# SILVERSCRIPT_REV in the Dockerfile to invalidate the silverc layers.
+steps:
+  - name: gcr.io/kaniko-project/executor:latest
+    args:
+      - --destination=europe-west4-docker.pkg.dev/$PROJECT_ID/kascov/kascov-worker:latest
+      - --cache=true
+      - --cache-ttl=336h
+      - --snapshot-mode=redo
+timeout: 3600s
+options:
+  machineType: E2_HIGHCPU_8

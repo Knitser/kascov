@@ -1,0 +1,12 @@
+{
+  "rule": [
+    {
+      "action": {"type": "Delete"},
+      "condition": {"age": 14, "matchesPrefix": ["archive/"]}
+    },
+    {
+      "action": {"type": "Delete"},
+      "condition": {"numNewerVersions": 30, "isLive": false}
+    }
+  ]
+}

@@ -17,19 +17,31 @@ if [ "$(gcloud billing projects describe $PROJECT --format='value(billingEnabled
 fi
 
 echo "==> enabling APIs"
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com storage.googleapis.com --project $PROJECT
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com storage.googleapis.com monitoring.googleapis.com --project $PROJECT
 
-echo "==> ensuring backup bucket gs://$BUCKET"
+echo "==> ensuring backup bucket gs://$BUCKET (+ versioning + lifecycle)"
 gcloud storage buckets create "gs://$BUCKET" --project $PROJECT --location=$REGION 2>/dev/null || true
+# Idempotent durability one-timers (previously tribal knowledge in a comment):
+# object versioning so a bad 'latest' has history, and the lifecycle rule that
+# prunes archive/ copies + old noncurrent versions (scripts/lifecycle.json).
+gcloud storage buckets update "gs://$BUCKET" --versioning --project $PROJECT > /dev/null || true
+gcloud storage buckets update "gs://$BUCKET" --lifecycle-file="$(dirname "$0")/lifecycle.json" --project $PROJECT > /dev/null || true
 
-# the image now also builds + bundles the silverc compiler (a second, heavy
-# build stage cloning kaspanet/silverscript), so give Cloud Build more room.
-echo "==> extending Cloud Build timeout for the silverc bundling stage"
-gcloud config set builds/timeout 3600 --installation 2>/dev/null || gcloud config set builds/timeout 3600
+echo "==> ensuring Artifact Registry repo (kaniko layer cache + images)"
+gcloud artifacts repositories create kascov \
+  --repository-format=docker --location=$REGION --project $PROJECT 2>/dev/null || true
 
-echo "==> deploying $SERVICE to Cloud Run ($REGION) — with silverc bundled, ~30 min"
+IMAGE="$REGION-docker.pkg.dev/$PROJECT/kascov/kascov-worker:latest"
+
+# Kaniko caches every Docker layer in the registry (cloudbuild.yaml), so warm
+# builds skip the cargo-chef dependency cook and the silverc language build:
+# ~30 min cold → minutes warm.
+echo "==> building $IMAGE via Cloud Build (kaniko layer cache)"
+gcloud builds submit --config cloudbuild.yaml --project $PROJECT .
+
+echo "==> deploying $SERVICE to Cloud Run ($REGION)"
 gcloud run deploy $SERVICE \
-  --source . \
+  --image "$IMAGE" \
   --project $PROJECT \
   --region $REGION \
   --allow-unauthenticated \
@@ -40,6 +52,18 @@ gcloud run deploy $SERVICE \
   --cpu 2 \
   --set-env-vars "^@^BACKUP_BUCKET=$BUCKET@NETWORKS=testnet-10,mainnet" \
   --port 8080
+
+# Uptime check on the small always-cheap health path; alerting needs a
+# notification channel, which is account-specific — print the pointer instead
+# of guessing.
+echo "==> ensuring uptime check on /data/mainnet-live.json"
+HOST=$(gcloud run services describe $SERVICE --project $PROJECT --region $REGION --format='value(status.url)' | sed 's|https://||')
+gcloud monitoring uptime create kascov-live \
+  --resource-type=uptime-url \
+  --resource-labels="host=$HOST,project_id=$PROJECT" \
+  --path=/data/mainnet-live.json \
+  --project $PROJECT 2>/dev/null \
+  || echo "    (uptime check exists or CLI unsupported — attach an alert policy + email channel in the console)"
 
 echo "==> granting the service account access to the backup bucket"
 SA=$(gcloud run services describe $SERVICE --project $PROJECT --region $REGION --format='value(spec.template.spec.serviceAccountName)')

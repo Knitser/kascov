@@ -50,13 +50,8 @@ gcs_put() {
 
 backup_loop() {
   [ -n "$BACKUP_BUCKET" ] || return 0
-  # One-time operator setup for real durability (run once, NOT here):
-  #   gcloud storage buckets update gs://$BACKUP_BUCKET --versioning
-  #   gcloud storage buckets update gs://$BACKUP_BUCKET \
-  #     --lifecycle-file=lifecycle.json   # e.g. keep 30 noncurrent versions
-  #   # and an uptime alert on the health path:
-  #   gcloud monitoring uptime create kascov-live --resource-type=uptime-url \
-  #     --host=<cloud-run-host> --path=/data/mainnet-live.json   # + a policy/channel
+  # Bucket versioning + lifecycle + the uptime alert are applied idempotently
+  # by scripts/deploy-worker.sh (see scripts/lifecycle.json).
   while true; do
     sleep "$BACKUP_EVERY"
     token=$(gcs_token) || continue
@@ -80,6 +75,32 @@ backup_loop() {
   done
 }
 
+# One last backup on shutdown. Cloud Run SIGTERMs on every redeploy/recycle
+# (grace ~10s); without this, up to BACKUP_EVERY seconds of state die with the
+# instance — and verified_sources / webhook_subscriptions / reorg_log are NOT
+# re-derivable from the chain. Timestamped log lines make a truncated grace
+# window visible after the fact.
+final_backup() {
+  [ -n "$BACKUP_BUCKET" ] || exit 0
+  echo "[entrypoint] $(date -u +%H:%M:%S) SIGTERM — final backup starting"
+  token=$(gcs_token) || exit 0
+  for n in $(echo "$NETWORKS" | tr ',' ' '); do
+    [ -f "$DB_DIR/$n.db" ] || continue
+    kascov --network "$n" --db "$DB_DIR/$n.db" backup --out "/tmp/$n.final.bak" 2>/dev/null || continue
+    if valid_sqlite "/tmp/$n.final.bak"; then
+      gcs_put "/tmp/$n.final.bak" "$token" "$n.db" \
+        && echo "[entrypoint] $(date -u +%H:%M:%S) final backup of $n.db uploaded"
+    fi
+    rm -f "/tmp/$n.final.bak"
+  done
+  echo "[entrypoint] $(date -u +%H:%M:%S) final backup done"
+  exit 0
+}
+
 restore
 backup_loop &
-exec kascov serve --listen "0.0.0.0:${PORT:-8080}" --networks "$NETWORKS" --db-dir "$DB_DIR"
+LOOP_PID=$!
+kascov serve --listen "0.0.0.0:${PORT:-8080}" --networks "$NETWORKS" --db-dir "$DB_DIR" &
+SERVE_PID=$!
+trap 'kill "$LOOP_PID" 2>/dev/null; kill "$SERVE_PID" 2>/dev/null; wait "$SERVE_PID" 2>/dev/null; final_backup' TERM INT
+wait "$SERVE_PID"
