@@ -116,7 +116,21 @@ pub async fn sync_once(
                 .map(|&hash| async move { node.block_with_txs(hash).await })
                 .collect();
             while let Some(block) = fetches.next().await {
-                let Ok(block) = block else { continue };
+                let block = match block {
+                    Ok(b) => b,
+                    Err(e) => {
+                        // Correctness is covered by the sequential retry below
+                        // (which hard-fails the pass) — but count what we
+                        // swallow here so a persistently flaky node is visible.
+                        static MERGESET_FETCH_ERRORS: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let n = MERGESET_FETCH_ERRORS
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            + 1;
+                        tracing::warn!("mergeset block fetch failed ({n} total): {e}");
+                        continue;
+                    }
+                };
                 for tx in block.transactions {
                     if wanted.contains(&tx.txid) {
                         bodies.insert(tx.txid, tx);

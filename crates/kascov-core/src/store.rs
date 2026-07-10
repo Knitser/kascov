@@ -432,6 +432,15 @@ impl Store {
             [],
         )
         .map_err(db_err)?;
+        // The grid orders by recency: without this index every page (and every
+        // 20s snapshot rebuild) full-scans + temp-sorts the covenants table —
+        // measured at ~6s per request at 168k covenants on the live worker.
+        // The compound key also serves list_page's (daa, id) cursor seek.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS cov_by_activity ON covenants(last_activity_daa DESC, covenant_id DESC)",
+            [],
+        )
+        .map_err(db_err)?;
 
         let mut store = Self { conn };
         match store.meta("network")? {
@@ -1433,6 +1442,26 @@ impl Store {
         Ok(out)
     }
 
+    /// Alive/burned per covenant in ONE grouped pass over covenant_utxos
+    /// (walks utxo_by_covenant). Replaces deriving the flag from
+    /// `list(u64::MAX)`, whose two correlated subqueries per row cost ~2N
+    /// index probes at N covenants. Covenants with no UTXO rows are absent —
+    /// callers treat missing as inactive.
+    pub fn active_flags(&self) -> Result<std::collections::HashMap<CovenantId, bool>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT covenant_id, MAX(spent_block IS NULL) FROM covenant_utxos GROUP BY covenant_id",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((CovenantId(r.get(0)?), r.get::<_, i64>(1)? != 0)))
+            .map_err(db_err)?
+            .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
     /// Recognized template per covenant — the most specific (non-p2pk/p2sh)
     /// name wins so a SilverScript coin is labeled by its contract, not by
     /// the generic shape of its commitment.
@@ -2062,5 +2091,55 @@ mod tests {
             store.revealed_template_counts().unwrap(),
             vec![("p2pk state".to_string(), 1)]
         );
+    }
+
+    #[test]
+    fn cov_by_activity_index_serves_list_page() {
+        let store = test_store("activity-index");
+        // the ordered list query must use the compound index, not a temp B-tree
+        for sql in [
+            "SELECT covenant_id FROM covenants ORDER BY last_activity_daa DESC, covenant_id DESC LIMIT 10",
+            "SELECT covenant_id FROM covenants WHERE last_activity_daa < 100 \
+               OR (last_activity_daa = 100 AND covenant_id < x'ff') \
+             ORDER BY last_activity_daa DESC, covenant_id DESC LIMIT 10",
+        ] {
+            let plan: Vec<String> = store
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            let joined = plan.join(" | ");
+            assert!(joined.contains("cov_by_activity"), "plan missing index: {joined}");
+            assert!(!joined.contains("TEMP B-TREE"), "plan still sorts: {joined}");
+        }
+    }
+
+    #[test]
+    fn active_flags_matches_list_derivation() {
+        let mut store = test_store("active-flags");
+        // A1: one live utxo (active) · B2: utxo created then spent (burned)
+        let mut b1 = block_with_events(1, 100, vec![(0xA1, EventKind::Genesis, 0x01), (0xB2, EventKind::Genesis, 0x02)]);
+        b1.created_utxos = vec![
+            NewUtxo { outpoint: Outpoint { txid: TxId([0x01; 32]), index: 0 }, covenant_id: CovenantId([0xA1; 32]), value: 5, spk_version: 0, spk_script: vec![] },
+            NewUtxo { outpoint: Outpoint { txid: TxId([0x02; 32]), index: 0 }, covenant_id: CovenantId([0xB2; 32]), value: 7, spk_version: 0, spk_script: vec![] },
+        ];
+        store.apply(&b1, BlockHash([1; 32])).unwrap();
+        let mut b2 = block_with_events(2, 200, vec![(0xB2, EventKind::Burn, 0x03)]);
+        b2.spent_utxos = vec![(Outpoint { txid: TxId([0x02; 32]), index: 0 }, TxId([0x03; 32]), vec![], 0)];
+        store.apply(&b2, BlockHash([2; 32])).unwrap();
+
+        let flags = store.active_flags().unwrap();
+        for c in store.list(u64::MAX).unwrap() {
+            assert_eq!(
+                flags.get(&c.covenant_id).copied().unwrap_or(false),
+                c.live_utxos > 0,
+                "flag mismatch for {:?}", c.covenant_id
+            );
+        }
+        assert_eq!(flags.get(&CovenantId([0xA1; 32])), Some(&true));
+        assert_eq!(flags.get(&CovenantId([0xB2; 32])), Some(&false));
     }
 }

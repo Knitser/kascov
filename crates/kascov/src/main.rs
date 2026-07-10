@@ -1070,6 +1070,30 @@ async fn serve(
         cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         build_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
     });
+    // Periodic cache sweep: the insert-time eviction only fires past 2048
+    // entries, so expired multi-MB bodies (galaxy, grid pages) could otherwise
+    // linger indefinitely on a quiet keyspace. Sweep every 60s; drop bodies
+    // older than 300s and build locks nobody holds.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                state
+                    .cache
+                    .lock()
+                    .await
+                    .retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(300));
+                state
+                    .build_locks
+                    .lock()
+                    .await
+                    .retain(|_, l| std::sync::Arc::strong_count(l) > 1);
+            }
+        });
+    }
     let app = axum::Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/data/{network}/simulate", post(simulate_handler))
@@ -1466,11 +1490,9 @@ fn build_galaxy(store: &Store, network: kascov_core::Network) -> Result<serde_js
     let edges_raw = store.multi_covenant_txs()?;
     let templates = store.covenant_templates()?;
 
-    // alive/burned per covenant, derived exactly like the grid (live_utxos > 0)
-    let mut active: HashMap<CovenantId, bool> = HashMap::new();
-    for c in store.list(u64::MAX)? {
-        active.insert(c.covenant_id, c.live_utxos > 0);
-    }
+    // alive/burned per covenant — one grouped pass; same semantics as the
+    // grid's live_utxos > 0 (missing entries read as inactive below).
+    let active = store.active_flags()?;
 
     // union-find over covenant ids (mirrors build_families)
     let mut parent: HashMap<CovenantId, CovenantId> = HashMap::new();
@@ -1814,6 +1836,16 @@ impl DeployLimiter {
         entry.1 += 1;
         Ok(())
     }
+
+    /// Give back a token charged by `try_take` — used when a deploy is aborted
+    /// for a reason that isn't the caller's fault (e.g. the faucet ran dry),
+    /// so a doomed request doesn't burn the day's budget.
+    fn refund(&mut self, ip: &str) {
+        self.tokens = (self.tokens + 1.0).min(DEPLOY_BUCKET_CAP);
+        if let Some(entry) = self.per_ip.get_mut(ip) {
+            entry.1 = entry.1.saturating_sub(1);
+        }
+    }
 }
 
 /// Best-effort client IP: the first hop in X-Forwarded-For (set by the CDN /
@@ -1896,18 +1928,47 @@ async fn deploy_handler(
     };
     // Only one custodial deploy in flight — they share one funding wallet, so
     // parallel builds would select the same UTXO and collide as double-spends.
+    // Error detail (labkit's rich messages embed the faucet address/balance and
+    // the RPC url) is logged server-side only; clients get a fixed message.
+    const DEPLOY_UNAVAILABLE: &str =
+        "deploy is temporarily unavailable — the lab faucet may be low; try again in a few minutes";
     let _inflight = state.deploy_inflight.lock().await;
     let client = match kascov_labkit::connect(state.rpc.as_deref()).await {
         Ok(c) => c,
-        Err(e) => return json_resp(serde_json::json!({ "ok": false, "error": format!("node unavailable: {e}") })),
+        Err(e) => {
+            tracing::warn!("deploy: node connect failed: {e}");
+            state.deploy_limiter.lock().await.refund(&ip);
+            return json_resp(serde_json::json!({ "ok": false, "error": DEPLOY_UNAVAILABLE }));
+        }
     };
+    // Pre-flight: a drained faucet answers cheaply, reveals nothing, and
+    // refunds the rate-limit token (not the caller's fault).
+    match kascov_labkit::spendable_balance(&client, &keypair).await {
+        Ok(available) if available < req.value + kascov_labkit::FEE => {
+            tracing::warn!(
+                "deploy: faucet low ({available} sompi available, {} requested)",
+                req.value
+            );
+            state.deploy_limiter.lock().await.refund(&ip);
+            return json_resp(serde_json::json!({ "ok": false, "error": DEPLOY_UNAVAILABLE }));
+        }
+        Err(e) => {
+            tracing::warn!("deploy: balance preflight failed: {e}");
+            state.deploy_limiter.lock().await.refund(&ip);
+            return json_resp(serde_json::json!({ "ok": false, "error": DEPLOY_UNAVAILABLE }));
+        }
+        Ok(_) => {}
+    }
     match kascov_labkit::deploy(&client, &keypair, &program, req.value).await {
         Ok(id) => json_resp(serde_json::json!({
             "ok": true,
             "covenant_id": id.to_string(),
             "network": network.to_string(),
         })),
-        Err(e) => json_resp(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        Err(e) => {
+            tracing::warn!("deploy failed: {e:#}");
+            json_resp(serde_json::json!({ "ok": false, "error": "deploy failed — try again in a few minutes" }))
+        }
     }
 }
 
@@ -1989,7 +2050,23 @@ async fn subscribe_handler(
     if !state.networks.contains(&network) || req.url.len() > 500 || !req.url.starts_with("http") {
         return json_resp(serde_json::json!({ "ok": false, "error": "a valid http(s) url is required" }));
     }
-    let cid = req.covenant_id.as_deref().and_then(|s| hex::decode(s).ok());
+    // A covenant filter must be exactly 64 hex chars. Anything else is a
+    // client error — silently mapping bad hex to None would register an
+    // accidental wildcard (all-events) subscription.
+    let cid = match req.covenant_id.as_deref() {
+        None => None,
+        Some(s) => {
+            let s = s.trim();
+            let mut bytes = [0u8; 32];
+            if hex::decode_to_slice(s, &mut bytes).is_err() {
+                return json_resp(serde_json::json!({
+                    "ok": false,
+                    "error": "covenant_id must be 64 hex characters (or omitted for all events)"
+                }));
+            }
+            Some(bytes.to_vec())
+        }
+    };
     let db = state.base_dir.join(format!("{network}.db"));
     let (kind, url) = (req.kind, req.url);
     let added = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {

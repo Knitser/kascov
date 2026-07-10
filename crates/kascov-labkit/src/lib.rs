@@ -171,6 +171,21 @@ struct SpendableUtxo {
     entry: UtxoEntry,
 }
 
+/// The largest plain (non-covenant) UTXO on the key's address, in sompi —
+/// the same funding selection `deploy` makes. Lets a server pre-flight
+/// affordability (value + FEE) without attempting a build, so a drained
+/// faucet can be answered cheaply and without leaking wallet details.
+pub async fn spendable_balance(client: &KaspaRpcClient, keypair: &Keypair) -> Result<u64> {
+    let address = address_of(keypair);
+    let utxos = client.get_utxos_by_addresses(vec![address.into()]).await?;
+    Ok(utxos
+        .iter()
+        .filter(|u| u.utxo_entry.covenant_id.is_none())
+        .map(|u| u.utxo_entry.amount)
+        .max()
+        .unwrap_or(0))
+}
+
 pub async fn submit(client: &KaspaRpcClient, tx: &Transaction) -> Result<String> {
     let rpc_tx: kaspa_rpc_core::RpcTransaction = tx.into();
     let id = client.submit_transaction(rpc_tx, false).await.context("submit failed")?;
