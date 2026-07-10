@@ -1,0 +1,32 @@
+[
+  {
+    "date": "2026-07-10",
+    "title": "every coin link is a billboard",
+    "body": "share a coin anywhere and it unfurls into a live picture card — name, avatar, holdings, story. plus a sitemap, so search engines can finally find the coins."
+  },
+  {
+    "date": "2026-07-10",
+    "title": "the big-network wave",
+    "body": "the galaxy streams in tiers (big clusters first, the rest behind), the grid paginates instead of downloading everything, and quiet tabs stop refetching — kascov now scales past 168k coins without breaking a sweat."
+  },
+  {
+    "date": "2026-07-09",
+    "title": "analytics · the network at a glance",
+    "body": "births against retirements over the whole history, coins by contract type, a survival curve, and the indexer's own reorg ledger — every chart drawn from the same feeds the page already serves."
+  },
+  {
+    "date": "2026-07-09",
+    "title": "make a smart coin without writing code",
+    "body": "pick a covenant, fill in the parties and amounts in plain terms, and deploy it on testnet-10 in one click — byte-perfect script assembled in your browser, no toolchain."
+  },
+  {
+    "date": "2026-07-09",
+    "title": "a page for every coin",
+    "body": "coin pages no longer depend on the loaded grid window — deep links, galaxy clicks and shared URLs resolve straight from the indexer, for all 168k+ coins."
+  },
+  {
+    "date": "2026-07-09",
+    "title": "the galaxy",
+    "body": "the whole network on one zoomable map — every app at once, each dot a smart coin, each link a shared transaction. scroll to zoom, click a dot to open its life story."
+  }
+]

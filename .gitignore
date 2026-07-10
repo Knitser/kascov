@@ -3,6 +3,10 @@
 *.db-wal
 *.db-shm
 .DS_Store
+
+# local preview fixtures — Firebase serves static files BEFORE rewrites,
+# so committing these would shadow the live /data/** worker API
+web/data/
 web/.claude/
 node_modules/
 .firebase/

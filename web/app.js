@@ -317,6 +317,13 @@ function renderLanes(network) {
     const w = Math.max((l.events / max) * 100, 3).toFixed(1);
     const name = l.kind === 'inscription' ? 'JSON inscriptions' : esc(l.label);
     const title = l.ascii ? ` title="0x${esc(l.hex)}"` : '';
+    /* KIP-21 lanes with a namespace hex get their own dashboard page (tag /
+       inscription buckets don't — the lane endpoint only tracks true lanes) */
+    if (l.kind === 'lane' && /^[0-9a-f]{8}$/i.test(l.hex || '')) {
+      return `<div class="lane-row"><a class="lane-ns lane-ns-link" href="#/${esc(network)}/lane/${esc(l.hex.toLowerCase())}"${title}>${name} <span class="lane-ns-arrow">→</span></a>` +
+        `<span class="lane-track"><span class="lane-fill" style="width:${w}%"></span></span>` +
+        `<span class="lane-counts dim">${fmtInt(l.events)} tx${l.events === 1 ? '' : 's'} · ${fmtInt(l.covenants)} coin${l.covenants === 1 ? '' : 's'}</span></div>`;
+    }
     return `<div class="lane-row"><span class="lane-ns"${title}>${name}</span>` +
       `<span class="lane-track"><span class="lane-fill" style="width:${w}%"></span></span>` +
       `<span class="lane-counts dim">${fmtInt(l.events)} tx${l.events === 1 ? '' : 's'} · ${fmtInt(l.covenants)} coin${l.covenants === 1 ? '' : 's'}</span></div>`;
@@ -425,11 +432,24 @@ function ensureScript(src) {
   return scriptPromises[src];
 }
 
-/* the app graph — the whole-network "galaxy": every app at once, positions +
+/* the galaxy — the whole-network map: every app at once, positions +
    weighted edges precomputed by the worker (data/<net>/galaxy.json). Rendered
    lazily by web/galaxy.js when the section is expanded. */
 let galaxyCtrl = null;
 let galaxyMounted = null;      // which network the live controller shows
+let galaxyLinkDone = false;    // '?galaxy=1' deep link honored once per load
+
+/* Collapsible-section promotion: default-open ONCE per user, then respect
+   whatever they last chose (the toggle listener persists open/closed under
+   the same key). Values: unset → first visit, 'open' / 'closed' after. */
+function promoteSection(sec, key) {
+  try {
+    const pref = localStorage.getItem(key);
+    if (pref === null) { sec.open = true; localStorage.setItem(key, 'open'); }
+    else if (pref === 'open') sec.open = true;
+    else if (pref === 'closed') sec.open = false;
+  } catch (e) { /* private mode — leave the default (closed) */ }
+}
 const galaxyCache = {};        // network -> { data, at }
 
 async function loadGalaxy(network) {
@@ -477,7 +497,7 @@ function upgradeGalaxy(network) {
 }
 
 function renderGalaxyLegend(data) {
-  const host = $('#appgraph-legend');
+  const host = $('#galaxy-legend');
   if (!host || !galaxyCtrl) return;
   const swatch = (label, color) =>
     `<span class="lg-item"><span class="lg-dot" style="background:${esc(color)}"></span>${esc(label)}</span>`;
@@ -488,14 +508,14 @@ function renderGalaxyLegend(data) {
   host.innerHTML = parts.join('');
 }
 
-function renderAppGraph() {
-  const gsec = $('#section-appgraph');
-  const canvas = $('#appgraph-canvas');
+function renderGalaxy() {
+  const gsec = $('#section-galaxy');
+  const canvas = $('#galaxy-canvas');
   if (!gsec || !gsec.open || !canvas) return;
   if (!window.kascovGalaxy) {
     /* first open: pull the renderer in, then come back */
     ensureScript('/galaxy.js').then(() => {
-      if (gsec.open && parseRoute().view === 'explore') renderAppGraph();
+      if (gsec.open && parseRoute().view === 'explore') renderGalaxy();
     }).catch(() => {});
     return;
   }
@@ -503,7 +523,7 @@ function renderAppGraph() {
   const cached = galaxyCache[network];
   if (!cached) {
     loadGalaxy(network).then(() => {
-      if (state.network === network && gsec.open && parseRoute().view === 'explore') renderAppGraph();
+      if (state.network === network && gsec.open && parseRoute().view === 'explore') renderGalaxy();
     });
     return;
   }
@@ -523,7 +543,7 @@ function renderAppGraph() {
     // refetch once.
     delete galaxyCache[network];
     loadGalaxy(network).then(() => {
-      if (state.network === network && gsec.open && parseRoute().view === 'explore') renderAppGraph();
+      if (state.network === network && gsec.open && parseRoute().view === 'explore') renderGalaxy();
     });
     return;
   }
@@ -583,15 +603,23 @@ function renderFamilies(network) {
   section.hidden = false;
   const fcnt = $('#families-count');
   if (fcnt) fcnt.textContent = `${fams.length} app${fams.length === 1 ? '' : 's'}`;
-  // the app-graph section shares this families data
-  const gsec = $('#section-appgraph');
+  // the galaxy section shares this families data
+  const gsec = $('#section-galaxy');
   if (gsec) {
     const graphable = fams.filter((f) => f.size >= 2).length;
     if (graphable) {
       gsec.hidden = false;
-      const gcnt = $('#appgraph-count');
+      const gcnt = $('#galaxy-count');
       if (gcnt) gcnt.textContent = `${fmtInt(graphable)} app${graphable === 1 ? '' : 's'}`;
-      if (gsec.open) renderAppGraph();
+      promoteSection(gsec, 'kascov-galaxy-seen');
+      /* '#/explore?galaxy=1' deep link (landing teaser card) — open the
+         galaxy and bring it into view, once per page load */
+      if (!galaxyLinkDone && parseRoute().galaxy) {
+        galaxyLinkDone = true;
+        gsec.open = true;
+        gsec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+      if (gsec.open) renderGalaxy();
     } else {
       gsec.hidden = true;
     }
@@ -691,6 +719,7 @@ function renderLiteLanding(live, network) {
   $('#landing-empty').hidden = !empty;
   $('#section-teaser').hidden = empty;
   renderDigestStrip(network, empty);
+  renderWhatsNew();
   if (empty) {
     $('#landing-empty').innerHTML = emptyCardHtml(network);
     return;
@@ -1310,11 +1339,15 @@ function renderGrid(entry, network) {
          older pages (nextAfterDaa set), say so plainly and offer to search on
          rather than dead-ending on a misleading "no match" */
       const moreOnChain = Boolean(state.query) && entry.nextAfterDaa != null;
+      /* ask the whole chain automatically (worker search endpoint) — matches
+         the grid never loaded render as cards below the miss message */
+      const remoteHtml = remoteGridCardsHtml(entry, network);
       grid.innerHTML = `<div class="no-results"><p>No smart coins match${state.query ? ` <strong>“${esc(state.query)}”</strong>` : ' that filter'}` +
         `${moreOnChain ? ` in the ${loaded} loaded coin${loaded === 1 ? '' : 's'}` : ''}.</p>` +
         (moreOnChain
           ? `<p class="dim">older coins from the chain aren’t loaded yet — search further back to keep looking.</p></div>`
-          : `<p class="dim">Try a friendly name like <em>${esc(example)}</em>, or paste a coin’s id or a transaction id.</p></div>`);
+          : `<p class="dim">Try a friendly name like <em>${esc(example)}</em>, or paste a coin’s id or a transaction id.</p></div>`) +
+        remoteHtml;
       if (moreOnChain) {
         /* reuse the grid's load-more path: after each page loadMoreGrid rebuilds
            the index and re-renders against the live query, so a newly fetched
@@ -1356,6 +1389,80 @@ function renderGrid(entry, network) {
 /* --------------------------------------------------- search suggestions */
 
 const suggest = { items: [], active: -1 };
+
+/* Server-side search (worker endpoint from M8). The grid only holds the
+   newest window, so a query can miss coins that live further back — the
+   endpoint sees the whole chain. Debounced and abortable so typing never
+   queues requests; a 404 means an older worker without the endpoint and
+   turns the feature off for the rest of the session. */
+const remoteSearch = { supported: null, cache: new Map(), timer: 0, ctrl: null };
+
+function remoteSearchRows(network, q) {
+  return remoteSearch.cache.get(`${network}|${q}`) || null;
+}
+
+function scheduleRemoteSearch(network, q) {
+  if (remoteSearch.supported === false) return;
+  if (typeof AbortController === 'undefined') return;
+  if (remoteSearch.cache.has(`${network}|${q}`)) return;
+  clearTimeout(remoteSearch.timer);
+  remoteSearch.timer = setTimeout(() => {
+    if (remoteSearch.ctrl) remoteSearch.ctrl.abort();
+    const ctrl = new AbortController();
+    remoteSearch.ctrl = ctrl;
+    fetch(`data/${network}/search?q=${encodeURIComponent(q)}&limit=10`, { signal: ctrl.signal })
+      .then((res) => {
+        if (res.status === 404) { remoteSearch.supported = false; return null; }
+        if (!res.ok) return null;
+        return res.json();
+      })
+      .then((data) => {
+        if (!data || !Array.isArray(data.results)) return;
+        remoteSearch.supported = true;
+        if (remoteSearch.cache.size > 300) remoteSearch.cache.clear(); /* typo-bounded */
+        remoteSearch.cache.set(`${network}|${q}`, data.results);
+        onRemoteSearchResults(network, q);
+      })
+      .catch(() => { /* aborted mid-typing or offline — the next keystroke retries */ });
+  }, 250);
+}
+
+/* results landed after the debounce — repaint whichever consumer still shows
+   this query (the type-ahead and/or the grid's zero-results rescue) */
+function onRemoteSearchResults(network, q) {
+  if (state.network !== network || state.query !== q) return;
+  const input = $('#search');
+  if (input && document.activeElement === input) renderSuggest();
+  const entry = state.cache[network];
+  if (entry && parseRoute().view === 'explore') renderGrid(entry, network);
+}
+
+/* remote rows the paginated grid never loaded, as lightweight cards — their
+   coin pages render via the off-grid detail path. Returns '' while the
+   endpoint hasn't answered (and quietly schedules the ask). */
+function remoteGridCardsHtml(entry, network) {
+  const q = state.query;
+  if (!q || q.length < 3 || /^[0-9a-f]{64}$/.test(q)) return '';
+  if (remoteSearch.supported === false) return '';
+  const rows = remoteSearchRows(network, q);
+  if (!rows) { scheduleRemoteSearch(network, q); return ''; }
+  const fresh = rows.filter((r) => r && typeof r.id === 'string' && !entry.index.byId.has(r.id));
+  if (!fresh.length) return '';
+  return `<p class="remote-found dim">found on the chain — older than the loaded window:</p>` +
+    fresh.map((r) => {
+      const alive = r.status === 'active';
+      const name = r.name || friendlyName(r.id);
+      const tpl = r.template && !/^p2(pk|sh)/.test(r.template) ? r.template : null;
+      return `<article class="card">` +
+        `<div class="card-head">${avatarSvg(r.id, 40)}` +
+        `<div class="card-id"><a class="card-link" href="#/${esc(network)}/c/${esc(r.id)}">${esc(name)}</a>` +
+        `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>` +
+        (tpl ? `<span class="flag flag-tpl">${esc(tpl)}</span>` : '') +
+        `</div></div>` +
+        `<p class="card-story">lives further back on the chain — tap to read its story.</p>` +
+        `</article>`;
+    }).join('');
+}
 
 function suggestionItems(entry) {
   const q = state.query;
@@ -1405,6 +1512,30 @@ function renderSuggest() {
   const host = $('#search-suggest');
   if (!host) return;
   suggest.items = suggestionItems(state.cache[state.network]);
+  /* thin local pickings on a real query — ask the chain too and merge
+     whatever the endpoint already answered (dedupe by id) */
+  const rq = state.query;
+  if (rq.length >= 3 && suggest.items.length < 3 && !/^[0-9a-f]{64}$/.test(rq) &&
+      remoteSearch.supported !== false) {
+    const rows = remoteSearchRows(state.network, rq);
+    if (!rows) {
+      scheduleRemoteSearch(state.network, rq);
+    } else {
+      const entry = state.cache[state.network];
+      const seen = new Set(suggest.items.map((s) => s.e.c.covenant_id));
+      for (const r of rows) {
+        if (suggest.items.length >= 8) break;
+        if (!r || typeof r.id !== 'string' || seen.has(r.id)) continue;
+        seen.add(r.id);
+        /* a row the grid DID load renders from its richer local record */
+        const local = entry && entry.index.byId.get(r.id);
+        suggest.items.push({
+          e: local || { c: { covenant_id: r.id, status: r.status }, name: r.name || friendlyName(r.id) },
+          why: 'remote', tx: null, score: 9,
+        });
+      }
+    }
+  }
   suggest.active = -1;
   if (!suggest.items.length) { closeSuggest(); return; }
   host.innerHTML = suggest.items.map((s, i) => {
@@ -1412,6 +1543,7 @@ function renderSuggest() {
     const href = `#/${esc(state.network)}/c/${esc(s.e.c.covenant_id)}` +
       (s.tx ? `?tx=${esc(s.tx)}` : '');
     const kind = s.why === 'name' ? '' :
+      s.why === 'remote' ? `<span class="suggest-kind">from the chain</span>` :
       `<span class="suggest-kind">${esc(s.why)} ${esc(shortHex(s.tx || s.e.c.covenant_id, 8, 6))}</span>`;
     return `<a class="suggest-item" id="sugg-${i}" role="option" href="${href}" data-suggest="${i}">` +
       avatarSvg(s.e.c.covenant_id, 26) +
@@ -1734,10 +1866,17 @@ function analyticsReorgsHtml(data) {
     const x = i * slot + (slot - bw) / 2;
     return `<rect x="${x.toFixed(1)}" y="${(H - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1" fill="var(--move)"/>`;
   }).join('');
-  const summary = `${fmtInt(list.length)} reorg${list.length === 1 ? '' : 's'} on record · ` +
+  /* headline the last hour, not the scary all-time total — most entries are
+     routine 1-2 block DAG tip-flips */
+  const hourAgo = Date.now() - 3600_000;
+  const lastHour = list.filter((r) => Number(r.at_ms) > hourAgo).length;
+  const summary = `<strong>${fmtInt(lastHour)} in the last hour</strong> · ` +
+    `${fmtInt(list.length)} on record · ` +
     `${fmtInt(totalBlocks)} chain block${totalBlocks === 1 ? '' : 's'} rolled back` +
     (latestMs ? ` · latest ${esc(relTime(latestMs))}` : '');
-  return `<p class="an-note dim">${summary}</p>` +
+  return `<p class="an-note dim">chain reorganizations the indexer rolled back through — ` +
+    `small tip-flips are normal on a blockDAG.</p>` +
+    `<p class="an-note">${summary}</p>` +
     `<svg viewBox="0 0 ${W} ${H}" class="an-spark" role="img" preserveAspectRatio="none" ` +
     `aria-label="Rollback depth of the ${esc(fmtInt(depths.length))} most recent reorgs, oldest to newest">${bars}</svg>`;
 }
@@ -1798,6 +1937,7 @@ function renderAnalytics(network) {
   else { show('reorg', ''); }
 
   section.hidden = visible === 0;
+  if (visible > 0) promoteSection(section, 'kascov-analytics-seen');
 }
 
 /* ---------------------------------------------------------------- landing */
@@ -1955,6 +2095,7 @@ function renderLanding(entry) {
   $('#landing-empty').hidden = !empty;
   $('#section-teaser').hidden = empty;
   renderDigestStrip(network, empty);
+  renderWhatsNew();
 
   if (empty) {
     $('#landing-empty').innerHTML = emptyCardHtml(network);
@@ -2393,27 +2534,47 @@ function simVerdictHtml(d) {
     rule + `<p class="sim-note dim">${esc(d.note)}</p>` + traceBtn;
 }
 
+/* engine trace steps ({op, dstack, astack}) → the debugger's step shape */
+function concreteSteps(trace) {
+  const short = (h) => (h && h.length > 18 ? h.slice(0, 10) + '…' + h.slice(-4) : h);
+  return trace.map((s, i) => ({
+    offset: i,
+    name: s.op.split(' ')[0],
+    note: s.op.includes(' ') ? s.op.slice(s.op.indexOf(' ') + 1) : '',
+    group: 'standard',
+    indent: 0,
+    dstack: (s.dstack || []).map(short),
+    astack: (s.astack || []).map(short),
+  }));
+}
+
 /* open the debugger on a CONCRETE engine trace (from a simulate run) — real
    stacks, real control flow, vs the symbolic decode-page trace */
 function openSimTrace(trace) {
   if (!trace || !trace.length) return;
-  const short = (h) => (h && h.length > 18 ? h.slice(0, 10) + '…' + h.slice(-4) : h);
-  dbg = {
-    concrete: true,
-    i: 0,
-    steps: trace.map((s, i) => ({
-      offset: i,
-      name: s.op.split(' ')[0],
-      note: s.op.includes(' ') ? s.op.slice(s.op.indexOf(' ') + 1) : '',
-      group: 'standard',
-      indent: 0,
-      dstack: (s.dstack || []).map(short),
-      astack: (s.astack || []).map(short),
-    })),
-  };
+  dbgHost = null; /* render into the page's #dbg-panel */
+  dbg = { concrete: true, i: 0, steps: concreteSteps(trace) };
   renderDebugger();
   const host = document.getElementById('dbg-panel');
   if (host) host.scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+
+/* open the debugger on a REAL on-chain spend replayed by the worker
+   (/debug/{txid}) — rendered into the utxo row's own panel on the coin page */
+function openRealTrace(d, host) {
+  if (!d || !d.trace || !d.trace.length || !host) return;
+  dbgHost = host;
+  dbg = {
+    concrete: true,
+    real: true,
+    pass: d.pass,
+    verdict: d.verdict || '',
+    truncated: Boolean(d.trace_truncated),
+    i: 0,
+    steps: concreteSteps(d.trace),
+  };
+  renderDebugger();
+  host.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 /* KIP-16 ZK-app detection. A covenant that calls OpZkPrecompile verifies a
@@ -2467,7 +2628,10 @@ function zkPanelHtml(instructions, hex, systemOverride) {
 }
 
 /* ---- the visual script debugger (symbolic stepper) ---- */
-let dbg = null; // { steps, i }
+let dbg = null; // { steps, i, concrete?, real?, pass?, verdict?, truncated? }
+/* where the debugger draws: an explicit element (real-spend replay renders
+   inside its utxo row) or, when null, the page's #dbg-panel */
+let dbgHost = null;
 
 function debugCtaHtml(bytes) {
   if (!window.kascovVm) return '';
@@ -2483,6 +2647,7 @@ function openDebugger(hex) {
   const bytes = D.parseHex(hex);
   if (!bytes || !window.kascovVm) return;
   const dec = D.disassemble(bytes);
+  dbgHost = null; /* render into the page's #dbg-panel */
   dbg = { steps: window.kascovVm.symbolicTrace(dec.instructions), i: 0 };
   renderDebugger();
 }
@@ -2495,7 +2660,7 @@ function dbgStep(delta, abs) {
 }
 
 function renderDebugger() {
-  const host = document.getElementById('dbg-panel');
+  const host = dbgHost && dbgHost.isConnected ? dbgHost : document.getElementById('dbg-panel');
   if (!host || !dbg) return;
   const n = dbg.steps.length;
   const i = Math.max(0, Math.min(n - 1, dbg.i));
@@ -2507,7 +2672,13 @@ function renderDebugger() {
     `<div class="dbg-op${k === i ? ' dbg-active' : ''}" style="padding-left:${(0.6 + st.indent * 0.9).toFixed(2)}rem" data-action="dbg-seek" data-i="${k}">` +
     `<span class="dbg-op-off">${st.offset.toString(16).padStart(4, '0')}</span>` +
     `<span class="dbg-op-name g-${esc(st.group)}">${esc(st.name)}</span></div>`).join('');
-  host.innerHTML = `<div class="dbg">` +
+  const realHead = dbg.real
+    ? `<div class="dbg-real"><span class="dbg-real-badge">⛓ real spend replay</span>` +
+      (dbg.pass === true ? ' <span class="flag flag-yes">engine: pass</span>'
+        : dbg.pass === false ? ' <span class="flag flag-no">engine: fail</span>' : '') +
+      (dbg.verdict ? ` <span class="dim">${esc(dbg.verdict)}</span>` : '') + `</div>`
+    : '';
+  host.innerHTML = `<div class="dbg">` + realHead +
     `<div class="dbg-controls">` +
     `<button type="button" class="btn dbg-btn" data-action="dbg-prev"${i === 0 ? ' disabled' : ''}>◀</button>` +
     `<input type="range" class="dbg-slider" min="0" max="${n - 1}" value="${i}" data-action="dbg-slider" aria-label="step">` +
@@ -2518,9 +2689,13 @@ function renderDebugger() {
     `<div class="dbg-stacks">${col('data stack', s.dstack)}${col('alt stack', s.astack)}</div>` +
     `<div class="dbg-oplist">${ops}</div>` +
     `<p class="dim dbg-footnote">` +
-    (dbg.concrete
-      ? 'concrete trace — the real engine&rsquo;s stacks for this simulated spend, opcode by opcode, following the actual control flow'
-      : 'symbolic trace — concrete for pushes &amp; stack ops, ‹symbolic› where a value only resolves against a real spend') +
+    (dbg.real
+      ? 'the real on-chain spend, opcode by opcode — the actual engine replaying the captured unlocking script against this state&rsquo;s program' +
+        (dbg.truncated ? ' (long run — the trace is truncated)' : '') +
+        '; the transaction context is reconstructed, so signature &amp; introspection checks can diverge from the original run'
+      : dbg.concrete
+        ? 'concrete trace — the real engine&rsquo;s stacks for this simulated spend, opcode by opcode, following the actual control flow'
+        : 'symbolic trace — concrete for pushes &amp; stack ops, ‹symbolic› where a value only resolves against a real spend') +
     `</p>` +
     `</div>`;
   // scroll the active op into view WITHIN the op-list only — never the page
@@ -2565,6 +2740,69 @@ function spentBudgetHtml(budget, network) {
   return `<span class="dim spent-budget" title="fee floor is 100 sompi × max(compute grams, 2 × tx bytes) — this is the compute-bound estimate and ignores transaction size, so the real fee is at least this much">` +
     `this spend budgeted ${esc(fmtInt(budget))} unit${budget === 1 ? '' : 's'} ` +
     `(≈ ${esc(fmtInt(grams))} script units, ~${esc(fmtAmount(sompi, network))} if compute-bound)</span>`;
+}
+
+/* "what changed between states" (M8): consecutive revealed_fields diffs,
+   ordered by created_daa. Pure data-in → data-out so it can be poked from
+   the console with synthetic input (window.kascovStateDiffs). */
+function stateDiffs(utxos) {
+  const reveals = (utxos || [])
+    .filter((u) => u && Array.isArray(u.revealed_fields) && u.revealed_fields.length)
+    .sort((a, b) => (a.created_daa || 0) - (b.created_daa || 0) ||
+      String(a.outpoint || '').localeCompare(String(b.outpoint || '')));
+  const diffs = [];
+  for (let i = 1; i < reveals.length; i++) {
+    const prev = new Map(reveals[i - 1].revealed_fields.map((f) => [f.name, f.value]));
+    const next = new Map(reveals[i].revealed_fields.map((f) => [f.name, f.value]));
+    const changed = [];
+    const added = [];
+    const removed = [];
+    for (const [name, value] of next) {
+      if (!prev.has(name)) added.push({ name, value });
+      else if (prev.get(name) !== value) changed.push({ name, from: prev.get(name), to: value });
+    }
+    for (const [name, value] of prev) {
+      if (!next.has(name)) removed.push({ name, value });
+    }
+    diffs.push({
+      fromDaa: reveals[i - 1].created_daa,
+      toDaa: reveals[i].created_daa,
+      changed, added, removed,
+      same: !changed.length && !added.length && !removed.length,
+    });
+  }
+  return diffs;
+}
+window.kascovStateDiffs = stateDiffs; /* console-testable */
+
+function stateDiffHtml(utxos) {
+  const diffs = stateDiffs(utxos);
+  if (!diffs.length) return '';
+  const val = (v) => `<span class="mono" title="${esc(v)}">${esc(shortHex(String(v), 10, 6))}</span>`;
+  const steps = diffs.map((d) => {
+    const bits = [];
+    for (const f of d.changed) {
+      bits.push(`<li class="diff-row"><span class="diff-name dim">${esc(f.name)}</span> ` +
+        `${val(f.from)} <span class="diff-arrow">→</span> ${val(f.to)}</li>`);
+    }
+    for (const f of d.added) {
+      bits.push(`<li class="diff-row"><span class="diff-name dim">${esc(f.name)}</span> ` +
+        `<span class="diff-add">added</span> ${val(f.value)}</li>`);
+    }
+    for (const f of d.removed) {
+      bits.push(`<li class="diff-row"><span class="diff-name dim">${esc(f.name)}</span> ` +
+        `<span class="diff-del">removed</span> ${val(f.value)}</li>`);
+    }
+    return `<div class="diff-step">` +
+      `<p class="diff-head dim">state at DAA ${esc(fmtInt(d.fromDaa))} → state at DAA ${esc(fmtInt(d.toDaa))}</p>` +
+      (d.same
+        ? `<p class="dim diff-same">no field changed — the same revealed state moved forward</p>`
+        : `<ul class="diff-list">${bits.join('')}</ul>`) +
+      `</div>`;
+  }).join('');
+  return `<h3 class="nerd-h">what changed between states</h3>` +
+    `<p class="dim diff-sub">fields revealed at spend, diffed across consecutive states</p>` +
+    steps;
 }
 
 function nerdPanel(entry, network, program) {
@@ -2617,6 +2855,14 @@ function nerdPanel(entry, network, program) {
       }
       if (bits.length) reveal = `<p class="spend-note dim">${bits.join(' · ')}</p>`;
     }
+    /* spent states can be REPLAYED: the worker reruns the captured unlocking
+       script through the real engine and returns a per-opcode trace
+       (feature-detected — an older worker just reports it's unavailable) */
+    const replay = !u.live && u.spent_txid
+      ? `<div class="replay-row"><button type="button" class="btn dbg-btn replay-btn" data-action="replay-spend" data-txid="${esc(u.spent_txid)}">⧉ replay this spend</button>` +
+        `<span class="dim replay-hint">the real on-chain spend, opcode by opcode</span>` +
+        `<span class="replay-result"></span></div><div class="replay-panel"></div>`
+      : '';
     return `<div class="utxo">` +
       `<div class="utxo-head"><span class="mono break">${esc(u.outpoint)}</span><span class="utxo-flags">${badges}</span></div>` +
       `<div class="utxo-meta"><span>${esc(fmtAmount(u.value, network))}</span><span class="dim">created at DAA ${esc(fmtInt(u.created_daa))}</span>` +
@@ -2626,14 +2872,20 @@ function nerdPanel(entry, network, program) {
       `<pre class="script">${esc((u.script_asm || []).join('\n'))}</pre>` +
       (u.script_hex ? `<a class="decode-open" href="#/decode?s=${esc(u.script_hex)}">open in decoder →</a>` : '') +
       reveal +
+      replay +
       revealPreviewHtml(u, program) +
       `</div>`;
   }).join('');
   return `<dl class="nerd-rows">${rows.map(([k, v]) => `<div class="nerd-row"><dt>${esc(k)}</dt><dd>${v}</dd></div>`).join('')}</dl>` +
+    stateDiffHtml(allUtxos) +
     `<h3 class="nerd-h">UTXOs (${allUtxos.length})</h3>` +
     (utxos || '<p class="dim">no UTXOs recorded.</p>') +
     utxoFoot;
 }
+
+/* canonical crawler-visible share link (worker /share route — OG card +
+   redirect); copying it never needs the route to exist locally */
+const shareUrl = (network, id) => `https://kascov.io/share/${network}/${id}`;
 
 /* long coins fold: show a window of events/UTXOs with expanders */
 const STORY_WINDOW = 8;
@@ -2683,6 +2935,16 @@ function renderDetail(entry, covId, flashTx, program) {
       .catch((e) => {
         if (state.detailId !== covId) return;
         if (/404/.test(String(e && e.message))) {
+          if (freshDeploys.has(covId)) {
+            /* a coin THIS tab just deployed — not unknown, just not settled:
+               testnet reorg churn can delay indexing by minutes */
+            document.title = 'smart coin still settling — kascov';
+            view.innerHTML = `<a class="back" href="#/explore">← all smart coins</a>` +
+              `<div class="empty-card"><h2>Born — still settling.</h2>` +
+              `<p class="dim">this coin was just deployed; the indexer is catching it through testnet reorgs. its page usually appears within a couple of minutes.</p>` +
+              `<button type="button" class="btn" data-action="retry-detail">check again</button></div>`;
+            return;
+          }
           document.title = 'smart coin not found — kascov';
           const other = network === 'mainnet' ? 'testnet-10' : 'mainnet';
           view.innerHTML = `<a class="back" href="#/explore">← all smart coins</a>` +
@@ -2721,7 +2983,8 @@ function renderDetail(entry, covId, flashTx, program) {
       lineageBadge(gridRec.c) +
       `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span></p>` +
       `<p class="id-chip"><span class="mono">${esc(shortHex(covId, 10, 8))}</span>` +
-      `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(covId)}" aria-label="copy this coin’s full id">copy id</button></p>` +
+      `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(covId)}" aria-label="copy this coin’s full id">copy id</button>` +
+      `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(shareUrl(network, covId))}" aria-label="copy a shareable link to this coin">share</button></p>` +
       `</div></header>` +
       `<p class="detail-summary">${esc(bits.join(' · '))}.</p>` +
       `<section aria-label="Life story"><h2>life story</h2>` +
@@ -2837,7 +3100,8 @@ function renderDetail(entry, covId, flashTx, program) {
     lineageBadge(c) +
     `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span></p>` +
     `<p class="id-chip"><span class="mono">${esc(shortHex(c.covenant_id, 10, 8))}</span>` +
-    `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(c.covenant_id)}" aria-label="copy this coin’s full id">copy id</button></p>` +
+    `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(c.covenant_id)}" aria-label="copy this coin’s full id">copy id</button>` +
+    `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(shareUrl(network, c.covenant_id))}" aria-label="copy a shareable link to this coin">share</button></p>` +
     `</div></header>` +
     `<p class="detail-summary">${esc(summaryBits.join(' · '))}.</p>` +
     coinContractSectionHtml(c) +
@@ -3292,10 +3556,106 @@ function guidedOutputsHtml() {
     deployPanel;
 }
 
+/* coins born from THIS tab's one-click deploys — their pages may 404 for a
+   few minutes while testnet reorg churn settles, so the not-found card and
+   the deploy panel both soften into a "still settling" state for them */
+const freshDeploys = new Set();
+
+/* Poll the per-coin endpoint after a deploy (10s cadence, up to 3 minutes)
+   and only swap in the coin link once the indexer actually serves the page.
+   Stops silently if the deploy panel was re-rendered away. */
+function awaitIndexed(net, cid, out) {
+  const started = Date.now();
+  const link = `<a class="btn btn-accent" href="#/${esc(net)}/c/${esc(cid)}">▶ open ${esc(cid.slice(0, 12))}… on kascov</a>`;
+  const settle = (html) => {
+    const wait = out.querySelector('.guided-deploy-wait');
+    if (wait) wait.outerHTML = html;
+  };
+  const tick = () => {
+    if (!out.isConnected || !out.querySelector('.guided-deploy-wait')) return;
+    fetch(`data/${net}/c/${cid}.json`, { cache: 'no-cache' })
+      .then((r) => {
+        if (r.ok) { settle(link); return; }
+        if (Date.now() - started > 180_000) {
+          settle(`<p class="guided-deploy-wait dim">still settling — the page below will fill in once the indexer catches up.</p>` + link);
+          return;
+        }
+        setTimeout(tick, 10_000);
+      })
+      .catch(() => {
+        if (Date.now() - started > 180_000) { settle(link); return; }
+        setTimeout(tick, 10_000);
+      });
+  };
+  tick();
+}
+
 function renderBuild() {
   document.title = 'make your own smart coin — kascov';
   renderGuidedBuilder();
   initCompiler();
+}
+
+/* -------------------------------------------------------------- changelog */
+
+/* web/changelog.json — a static file shipped with the frontend: an array of
+   { date, title, body }, newest first. Cached for the session; a missing
+   file (older deploy) hides everything that depends on it. */
+let changelogCache;
+async function loadChangelog() {
+  if (changelogCache !== undefined) return changelogCache;
+  try {
+    const res = await fetch('changelog.json', { cache: 'no-cache' });
+    const data = res.ok ? await res.json() : null;
+    changelogCache = Array.isArray(data) && data.length ? data : null;
+  } catch (e) {
+    changelogCache = null;
+  }
+  return changelogCache;
+}
+
+/* the "have you seen the newest entry" stamp — date alone can repeat across
+   entries shipped the same day, so the title disambiguates */
+const changelogStamp = (e) => `${e.date || ''}|${e.title || ''}`;
+
+/* the landing "what's new" card — the newest entry, with an unseen dot that
+   clears once the visitor opens #/changelog */
+function renderWhatsNew() {
+  const sec = $('#section-whatsnew');
+  const card = $('#whatsnew-card');
+  if (!sec || !card) return; /* stale cached index.html */
+  loadChangelog().then((list) => {
+    if (!list) { sec.hidden = true; return; }
+    if (parseRoute().view !== 'landing') return;
+    const latest = list[0];
+    let seen = null;
+    try { seen = localStorage.getItem('kascov-changelog-seen'); } catch (e) { /* private mode */ }
+    const fresh = seen !== changelogStamp(latest);
+    card.innerHTML =
+      `<h3>${fresh ? '<span class="new-dot" aria-hidden="true"></span>' : ''}what’s new</h3>` +
+      `<p><strong>${esc(latest.title || '')}</strong> — ${esc(latest.body || '')}</p>` +
+      `<span class="whatsnew-meta dim">${esc(latest.date || '')} · everything that changed →</span>`;
+    sec.hidden = false;
+  });
+}
+
+function renderChangelog() {
+  document.title = 'what’s new — kascov';
+  const host = $('#changelog-list');
+  if (!host) return;
+  host.innerHTML = '<li class="dim">loading…</li>';
+  loadChangelog().then((list) => {
+    if (parseRoute().view !== 'changelog') return;
+    if (!list) { host.innerHTML = '<li class="dim">nothing here yet.</li>'; return; }
+    host.innerHTML = list.map((e) =>
+      `<li class="changelog-item">` +
+      `<span class="changelog-date mono dim">${esc(String(e.date || ''))}</span>` +
+      `<div class="changelog-body"><h2>${esc(String(e.title || ''))}</h2>` +
+      `<p>${esc(String(e.body || ''))}</p></div></li>`
+    ).join('');
+    /* reading the page clears the landing card's unseen dot */
+    try { localStorage.setItem('kascov-changelog-seen', changelogStamp(list[0])); } catch (err) { /* private mode */ }
+  });
 }
 
 /* API docs: scroll-spy that highlights the sidebar entry for the endpoint
@@ -3401,6 +3761,140 @@ function renderAddress(route) {
         `<p class="dim">kascov matches p2pk covenant states only — plain payments to this address don’t appear here, and covenants with richer scripts may not name their owner.</p></div>`);
 }
 
+/* ------------------------------------------------------------ lane pages */
+
+/* one KIP-21 lane namespace's dashboard — served by its own worker endpoint
+   (feature-detected: an older worker / static hosting 404s → graceful note) */
+const LANE_PAGE_TTL_MS = 60_000;
+const lanePages = new Map(); // `${network}/${ns}` -> { data|missing, at }
+
+async function loadLanePage(network, ns) {
+  const key = `${network}/${ns}`;
+  const t = lanePages.get(key);
+  if (t && Date.now() - t.at < LANE_PAGE_TTL_MS) return t;
+  const res = await fetch(`data/${network}/lane/${ns}`, { cache: 'no-cache' });
+  if (res.status === 404 || res.status === 400) {
+    /* a worker that serves lanes always answers a well-formed namespace with
+       200 (even for an empty lane) — a 404 means the route doesn't exist */
+    const rec = { missing: true, at: Date.now() };
+    lanePages.set(key, rec);
+    return rec;
+  }
+  if (!res.ok) throw new Error(`lane ${res.status}`);
+  const rec = { data: await res.json(), at: Date.now() };
+  lanePages.set(key, rec);
+  return rec;
+}
+
+/* hour-bucketed event bars over the lane's recent life (same visual language
+   as the analytics sparklines) — gaps between buckets render as quiet hours */
+function laneActivitySvg(data) {
+  const raw = (data.activity || [])
+    .map((a) => ({ daa: Number(a.daa) || 0, count: Number(a.count) || 0 }))
+    .filter((a) => a.count >= 0);
+  if (!raw.length) return '';
+  const width = Math.max(1, Number(data.bucket_daa) || 36_000);
+  /* fill omitted (empty) buckets, capped to the last 72 so the SVG stays small */
+  const last = raw[raw.length - 1].daa;
+  const first = Math.max(raw[0].daa, last - 71 * width);
+  const byDaa = new Map(raw.map((a) => [a.daa, a.count]));
+  const series = [];
+  for (let d = first; d <= last; d += width) series.push(byDaa.get(d) || 0);
+  const max = Math.max(1, ...series);
+  const W = 720, H = 56, gap = 2;
+  const slot = W / series.length;
+  const bw = Math.max(1, slot - gap);
+  const bars = series.map((c, i) => {
+    const h = c > 0 ? Math.max((c / max) * (H - 4), 2) : 1;
+    const x = i * slot + (slot - bw) / 2;
+    return `<rect x="${x.toFixed(1)}" y="${(H - h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1" fill="var(--accent)"${c > 0 ? '' : ' opacity="0.35"'}/>`;
+  }).join('');
+  const spanMs = series.length * width * MS_PER_DAA;
+  return `<h2>activity · events per hour</h2>` +
+    `<p class="an-note dim">the last ${esc(fmtSpan(spanMs))} of this lane, oldest to newest · peak ${esc(fmtInt(max))} event${max === 1 ? '' : 's'}/hour</p>` +
+    `<svg viewBox="0 0 ${W} ${H}" class="an-spark lane-spark" role="img" preserveAspectRatio="none" ` +
+    `aria-label="Lane activity per hour over the last ${esc(fmtSpan(spanMs))}, oldest to newest, peaking at ${esc(fmtInt(max))} events per hour">${bars}</svg>`;
+}
+
+function renderLane(route) {
+  const network = state.network;
+  const view = $('#view-lane');
+  const ns = route.id;
+  const net = NETWORKS[network];
+  const bytes = ns.match(/../g) || [];
+  const printable = bytes.length === 4 && bytes.every((b) => { const c = parseInt(b, 16); return c >= 0x20 && c <= 0x7e; });
+  const plain = printable ? bytes.map((b) => String.fromCharCode(parseInt(b, 16))).join('') : `0x${ns}`;
+  document.title = `lane ${plain} — kascov`;
+  const back = `<a class="back" href="#/${esc(network)}/explore">← all smart coins</a>`;
+  const head = (sub) => back +
+    `<header class="page-head lane-head"><h1>lane ${nsLabel(ns)}</h1>` +
+    `<p class="page-sub">a KIP-21 payload lane — every transaction stamped with this 4-byte namespace <span class="dim">on ${esc(net.label)}</span></p>` +
+    (sub ? `<p class="page-sub dim">${sub}</p>` : '') + `</header>`;
+  const cached = lanePages.get(`${network}/${ns}`);
+  const fresh = cached && Date.now() - cached.at < LANE_PAGE_TTL_MS;
+  if (!fresh) {
+    /* stale-while-revalidate: keep showing an expired record while the
+       refetch runs; only the very first visit shows the loading line */
+    loadLanePage(network, ns)
+      .then(() => {
+        const r = parseRoute();
+        if (state.network === network && r.view === 'lane' && r.id === ns) renderLane(r);
+      })
+      .catch(() => {
+        if (cached) return; /* stale data beats an error card */
+        const r = parseRoute();
+        if (state.network === network && r.view === 'lane' && r.id === ns) {
+          view.innerHTML = head('') + `<div class="empty-card"><h2>couldn’t load this lane.</h2>` +
+            `<p class="dim">the lookup didn’t answer — the worker may be busy. it’s not you.</p>` +
+            `<button type="button" class="btn" data-action="retry-lane">try again</button></div>`;
+        }
+      });
+  }
+  if (!cached) {
+    view.innerHTML = head('reading this lane’s traffic…');
+    return;
+  }
+  if (cached.missing) {
+    view.innerHTML = head('') + `<div class="empty-card"><h2>lane pages need a newer worker.</h2>` +
+      `<p class="dim">this kascov worker doesn’t serve per-lane dashboards yet — the based-app overview on the explore page still works.</p></div>`;
+    return;
+  }
+  const data = cached.data || {};
+  const events = Number(data.events) || 0;
+  const covenants = Number(data.covenants) || 0;
+  const stats =
+    `<div class="lane-stats">` +
+    `<div class="stat"><span class="stat-n">${esc(fmtInt(events))}</span><span class="stat-label">event${events === 1 ? '' : 's'} in this lane</span></div>` +
+    `<div class="stat"><span class="stat-n">${esc(fmtInt(covenants))}</span><span class="stat-label">smart coin${covenants === 1 ? '' : 's'} involved</span></div>` +
+    `</div>`;
+  if (!events) {
+    view.innerHTML = head('') + stats +
+      `<div class="empty-card"><h2>nothing in this lane yet.</h2>` +
+      `<p class="dim">no indexed covenant transaction carries the <span class="mono">0x${esc(ns)}</span> namespace so far.</p></div>`;
+    return;
+  }
+  const entry = state.cache[network];
+  const recent = (data.recent || []).slice(0, 20).map((e) => {
+    const covId = String(e.covenant_id || '');
+    const gridRec = entry && entry.index.byId.get(covId);
+    const name = gridRec ? gridRec.name : friendlyName(covId);
+    const txid = String(e.txid || '');
+    return `<li class="lane-ev">` +
+      `<span class="lane-ev-kind">${esc(String(e.kind || 'event'))}</span>` +
+      `<a class="lane-ev-coin" href="#/${esc(network)}/c/${esc(covId)}${txid ? `?tx=${esc(txid)}` : ''}">${avatarSvg(covId, 22)} ${esc(name)}</a>` +
+      (txid ? `<span class="mono dim lane-ev-tx">tx ${esc(shortHex(txid, 8, 6))}</span>` : '') +
+      `<span class="dim lane-ev-daa">DAA ${esc(fmtInt(e.accepting_daa || 0))}</span></li>`;
+  }).join('');
+  view.innerHTML = head('') + stats +
+    `<section class="lane-activity" aria-label="Lane activity">${laneActivitySvg(data)}</section>` +
+    `<section class="lane-recent" aria-label="Recent lane events"><h2>recent events</h2>` +
+    (recent
+      ? `<ul class="lane-ev-list">${recent}</ul>` +
+        ((data.recent || []).length < events ? `<p class="dim">showing the ${fmtInt(Math.min(20, (data.recent || []).length))} newest of ${fmtInt(events)} events.</p>` : '')
+      : '<p class="dim">no events recorded.</p>') +
+    `</section>`;
+}
+
 /* ---------------------------------------------------------------- routing */
 
 function parseRoute() {
@@ -3428,9 +3922,13 @@ function parseRoute() {
   /* '#/<network>/addr/<address-or-pubkey>' and bare '#/addr/…' (current network) */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?addr\/([a-zA-Z0-9:]{6,120})$/);
   if (m) return { view: 'address', network: m[1] || null, id: m[2] };
-  /* '#/explore' and '#/<network>/explore' */
+  /* '#/<network>/lane/<8-hex namespace>' — one KIP-21 lane's dashboard */
+  m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?lane\/([0-9a-fA-F]{8})$/);
+  if (m) return { view: 'lane', network: m[1] || null, id: m[2].toLowerCase() };
+  /* '#/explore' and '#/<network>/explore' — '?galaxy=1' opens the galaxy */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
-  if (m) return { view: 'explore', network: m[1] || null };
+  if (m) return { view: 'explore', network: m[1] || null, galaxy: params.get('galaxy') === '1' };
+  if (/^#\/changelog\/?$/.test(path)) return { view: 'changelog', network: null };
   if (/^#\/decode\/?$/.test(path)) return { view: 'decode', network: null, s: params.get('s') || '' };
   if (/^#\/playground\/?$/.test(path)) return { view: 'decode', network: null, s: params.get('s') || '' };
   if (/^#\/build\/?$/.test(path)) return { view: 'build', network: null };
@@ -3445,9 +3943,11 @@ function routeHash(view, id) {
   if (view === 'detail') return `#/${state.network}/c/${id}`;
   /* pubkeys are network-independent — an address page survives a network switch */
   if (view === 'address') return `#/${state.network}/addr/${id}`;
+  /* a lane namespace exists on any network — keep the page, switch the data */
+  if (view === 'lane') return `#/${state.network}/lane/${id}`;
   if (view === 'explore') return `#/${state.network}/explore`;
-  /* decode/dev are network-free — switching networks keeps the page (and its query) */
-  if (view === 'decode' || view === 'dev' || view === 'build') return location.hash || `#/${view}`;
+  /* decode/dev/changelog are network-free — switching networks keeps the page (and its query) */
+  if (view === 'decode' || view === 'dev' || view === 'build' || view === 'changelog') return location.hash || `#/${view}`;
   return '#/';
 }
 
@@ -3482,15 +3982,18 @@ async function render() {
     state.watchNet = state.network;
   }
   syncStream();
+  syncDetailStream();
   const panel = $('#panel');
   const views = {
     landing: $('#view-landing'),
     explore: $('#view-explore'),
     detail: $('#view-detail'),
     address: $('#view-address'),
+    lane: $('#view-lane'),
     decode: $('#view-decode'),
     build: $('#view-build'),
     dev: $('#view-dev'),
+    changelog: $('#view-changelog'),
   };
   /* a stale cached index.html may predate newer views — never crash on them */
   for (const k of Object.keys(views)) if (!views[k]) delete views[k];
@@ -3507,15 +4010,17 @@ async function render() {
   });
   $('#header-search').hidden = route.view !== 'explore';
 
-  /* the decoder, dev docs, and address pages never need a snapshot — don't
-     block them on data (address pages fetch from their own endpoint) */
-  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'build' || route.view === 'address') && views[route.view]) {
+  /* the decoder, dev docs, changelog, address and lane pages never need a
+     snapshot — don't block them on data (address/lane pages fetch their own) */
+  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'build' || route.view === 'address' || route.view === 'lane' || route.view === 'changelog') && views[route.view]) {
     panel.hidden = true;
     for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
     views.detail.innerHTML = '';
     if (route.view === 'decode') renderDecode(route);
     else if (route.view === 'address') renderAddress(route);
+    else if (route.view === 'lane') renderLane(route);
     else if (route.view === 'build') renderBuild();
+    else if (route.view === 'changelog') renderChangelog();
     else renderDev();
     fadeIn(views[route.view]);
     if (route.view !== lastView) {
@@ -3788,12 +4293,80 @@ function syncStream() {
   };
 }
 
+/* Per-coin stream: the coin page follows its own subject so the life story
+   appends live (M8). New workers filter server-side via ?covenant=; OLD
+   workers ignore the param and fan out network-wide — every event is
+   re-checked client-side by covenant_id before acting, so both are safe. */
+const DETAIL_REFETCH_DEBOUNCE_MS = 600;
+const detailStream = { es: null, key: null, retryMs: STREAM_RETRY_BASE_MS, retryTimer: 0, refetchTimer: 0 };
+
+function closeDetailStream() {
+  if (detailStream.es) { detailStream.es.close(); detailStream.es = null; }
+  detailStream.key = null;
+  clearTimeout(detailStream.retryTimer);
+  clearTimeout(detailStream.refetchTimer);
+  detailStream.retryTimer = 0;
+  detailStream.refetchTimer = 0;
+}
+
+function syncDetailStream() {
+  if (typeof EventSource === 'undefined') return;
+  const route = parseRoute();
+  const want = document.visibilityState === 'visible' && route.view === 'detail' &&
+    route.id && /^[0-9a-f]{64}$/.test(route.id); /* short back-compat ids can't be filtered */
+  if (!want) { closeDetailStream(); return; }
+  const network = state.network;
+  const covId = route.id;
+  const key = `${network}|${covId}`;
+  if (detailStream.es && detailStream.key === key) return;
+  closeDetailStream();
+  const es = new EventSource(`data/${network}/stream?covenant=${covId}`);
+  detailStream.es = es;
+  detailStream.key = key;
+  es.onopen = () => { detailStream.retryMs = STREAM_RETRY_BASE_MS; };
+  es.onmessage = (ev) => {
+    let msg = null;
+    try { msg = JSON.parse(ev.data); } catch (err) { return; }
+    if (!msg || msg.covenant_id !== covId) return;
+    flashLiveBadge();
+    /* the coin moved — refetch its story (debounced: one tx can emit
+       several events, and testnet bursts shouldn't hammer the endpoint) */
+    clearTimeout(detailStream.refetchTimer);
+    detailStream.refetchTimer = setTimeout(() => refetchDetail(network, covId), DETAIL_REFETCH_DEBOUNCE_MS);
+  };
+  es.onerror = () => {
+    if (detailStream.es !== es) return;
+    closeDetailStream();
+    detailStream.retryTimer = setTimeout(syncDetailStream, detailStream.retryMs);
+    detailStream.retryMs = Math.min(detailStream.retryMs * 2, STREAM_RETRY_MAX_MS);
+  };
+}
+
+/* Drop the cached story, refetch it, and repaint in place if the user is
+   still on that coin's page (scroll preserved — no jump mid-read). */
+function refetchDetail(network, covId) {
+  const map = state.details[network];
+  if (map) map.delete(covId);
+  loadDetail(network, covId)
+    .then(() => {
+      const route = parseRoute();
+      if (state.network !== network || route.view !== 'detail' || route.id !== covId) return;
+      const entry = state.cache[network];
+      if (!entry) return;
+      const y = window.scrollY;
+      renderDetail(entry, covId, route.tx, route.program);
+      window.scrollTo({ top: y, behavior: 'instant' });
+    })
+    .catch(() => { /* transient refetch miss — the page keeps its last story */ });
+}
+
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     refreshSnapshot();
     pollLive();
   }
   syncStream();
+  syncDetailStream();
 });
 
 /* ----------------------------------------------------------------- events */
@@ -4031,12 +4604,17 @@ document.addEventListener('click', (e) => {
       .then((d) => {
         if (d === null) return; /* fallback already shown, or gated off */
         if (d && d.ok && d.covenant_id) {
-          const net = esc(String(d.network || 'testnet-10'));
-          const cid = esc(String(d.covenant_id));
+          const net = String(d.network || 'testnet-10');
+          const cid = String(d.covenant_id).toLowerCase();
+          freshDeploys.add(cid);
+          /* the coin page can 404 for minutes during reorg churn — hold the
+             link back until the indexer actually serves it (awaitIndexed) */
           out.innerHTML = `<div class="guided-deploy-ok">` +
-            `<p>✓ deployed on ${net} — your covenant is live.</p>` +
-            `<a class="btn btn-accent" href="#/testnet-10/c/${cid}">▶ open ${cid.slice(0, 12)}… on kascov</a>` +
+            `<p>✓ deployed on ${esc(net)} — your covenant is live.</p>` +
+            `<p class="guided-deploy-wait dim"><span class="radar" aria-hidden="true"></span>` +
+            `born — waiting for the indexer to catch it through testnet reorgs…</p>` +
             `</div>`;
+          awaitIndexed(net, cid, out);
         } else {
           out.innerHTML = `<p class="guided-deploy-err">deploy failed${d && d.error ? ' — ' + esc(String(d.error)) : ''}. the download-deploy.sh path above still works.</p>`;
         }
@@ -4155,12 +4733,18 @@ document.addEventListener('click', (e) => {
       })
       .catch(() => { result.innerHTML = ' <span class="dim">verifier unavailable</span>'; });
   } else if (action === 'galaxy-status') {
-    const box = el.closest('.appgraph-chips');
-    if (box) box.querySelectorAll('.chip').forEach((c) => c.classList.toggle('chip-on', c === el));
+    const box = el.closest('.galaxy-chips');
+    if (box) box.querySelectorAll('.chip').forEach((c) => {
+      c.classList.toggle('chip-on', c === el);
+      c.setAttribute('aria-pressed', String(c === el));
+    });
     if (galaxyCtrl) galaxyCtrl.setFilter({ status: el.dataset.val });
   } else if (action === 'galaxy-color') {
-    const box = el.closest('.appgraph-chips');
-    if (box) box.querySelectorAll('.chip').forEach((c) => c.classList.toggle('chip-on', c === el));
+    const box = el.closest('.galaxy-chips');
+    if (box) box.querySelectorAll('.chip').forEach((c) => {
+      c.classList.toggle('chip-on', c === el);
+      c.setAttribute('aria-pressed', String(c === el));
+    });
     if (galaxyCtrl) galaxyCtrl.setColorMode(el.dataset.val);
   } else if (action === 'sim-run') {
     const panel = el.closest('.sim-panel');
@@ -4178,6 +4762,29 @@ document.addEventListener('click', (e) => {
       .catch(() => { out.innerHTML = '<div class="sim-verdict sim-na">simulation unavailable</div>'; });
   } else if (action === 'sim-trace') {
     openSimTrace(lastSimTrace);
+  } else if (action === 'replay-spend') {
+    /* replay a REAL on-chain spend through the engine (worker /debug/{txid});
+       feature-detected — any failure degrades to a one-line note */
+    const row = el.closest('.replay-row');
+    const out = row && row.querySelector('.replay-result');
+    const panel = row && row.nextElementSibling && row.nextElementSibling.classList.contains('replay-panel')
+      ? row.nextElementSibling : null;
+    const txid = el.dataset.txid || '';
+    if (!row || !out || !panel || !/^[0-9a-f]{64}$/i.test(txid)) return;
+    out.innerHTML = '<span class="dim">replaying through the script engine…</span>';
+    fetch(`data/${state.network}/debug/${txid.toLowerCase()}`, { cache: 'no-cache' })
+      .then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
+      .then((d) => {
+        if (d && d.ok && d.trace && d.trace.length) {
+          out.innerHTML = '';
+          openRealTrace(d, panel);
+        } else {
+          out.innerHTML = `<span class="dim">can’t replay — ${esc((d && (d.reason || d.verdict)) || 'no trace came back for this spend')}</span>`;
+        }
+      })
+      .catch(() => {
+        out.innerHTML = '<span class="dim">replay unavailable — this needs a newer kascov worker</span>';
+      });
   } else if (action === 'dbg-open') {
     openDebugger(el.dataset.prog || '');
   } else if (action === 'dbg-prev') {
@@ -4188,12 +4795,17 @@ document.addEventListener('click', (e) => {
     dbgStep(0, parseInt(el.dataset.i, 10));
   } else if (action === 'dbg-close') {
     dbg = null;
-    const host = document.getElementById('dbg-panel');
+    /* clear whichever host the debugger was drawn into (a replay panel on the
+       coin page, or the decode page's #dbg-panel) */
+    const host = dbgHost && dbgHost.isConnected ? dbgHost : document.getElementById('dbg-panel');
+    dbgHost = null;
     if (host) host.innerHTML = '';
   } else if (action === 'retry-detail') {
     render(); /* the detail map has no entry for a failed fetch — this refetches */
   } else if (action === 'retry-addr') {
     render(); /* failed lookups are never cached — this refetches */
+  } else if (action === 'retry-lane') {
+    render(); /* failed lane loads are never cached — this refetches */
   }
 });
 
@@ -4203,10 +4815,19 @@ document.addEventListener('input', (e) => {
   if (el) dbgStep(0, parseInt(el.value, 10));
 });
 
-/* render the app-graph lazily when its section is expanded (toggle doesn't
+/* render the galaxy lazily when its section is expanded (toggle doesn’t
    bubble, so capture) */
 document.addEventListener('toggle', (e) => {
-  if (e.target && e.target.id === 'section-appgraph' && e.target.open) renderAppGraph();
+  const t = e.target;
+  if (!t || !t.id) return;
+  if (t.id === 'section-galaxy' && t.open) renderGalaxy();
+  /* promoted sections: remember the user's last choice (promoteSection
+     replays it on later visits) */
+  const seenKey = t.id === 'section-galaxy' ? 'kascov-galaxy-seen'
+    : t.id === 'section-analytics' ? 'kascov-analytics-seen' : null;
+  if (seenKey) {
+    try { localStorage.setItem(seenKey, t.open ? 'open' : 'closed'); } catch (err) { /* private mode */ }
+  }
 }, true);
 
 $('#search').addEventListener('input', (e) => {
@@ -4397,7 +5018,7 @@ if (decodeInput) {
 }
 
 /* galaxy search — center + highlight the matching coin */
-const galaxySearch = $('#appgraph-search');
+const galaxySearch = $('#galaxy-search');
 let galaxySearchTimer = 0;
 if (galaxySearch) {
   galaxySearch.addEventListener('input', () => {
@@ -4420,9 +5041,9 @@ document.querySelectorAll('.guide-icon').forEach((el) => {
 
 /* ------------------------------------------------ first-visit story tour */
 
-/* Six steps over the LIVE page: watch → understand → touch. Vanilla,
-   dismissible everywhere, never nags twice (localStorage flag), replay via
-   ?tour=1 or the landing's "take the tour" link. */
+/* Eight steps over the LIVE page: watch → understand → see it whole → touch.
+   Vanilla, dismissible everywhere, never nags twice (localStorage flag),
+   replay via ?tour=1 or the landing's "take the tour" link. */
 const tour = { step: -1, el: null };
 
 const TOUR_STEPS = [
@@ -4433,6 +5054,26 @@ const TOUR_STEPS = [
   {
     target: () => document.querySelector('#story-list .story'),
     text: 'smart coins are <strong>born</strong>, they <strong>move</strong>, they <strong>retire</strong>. these are real events, moments old.',
+  },
+  {
+    /* opening the section is part of targeting — the canvas only paints once
+       the <details> is open, and a network without apps skips the step */
+    target: () => {
+      const sec = $('#section-galaxy');
+      if (!sec || sec.hidden) return null;
+      sec.open = true;
+      return $('#galaxy-canvas');
+    },
+    text: 'the <strong>galaxy</strong> — every app on the network, one map. each dot is a smart coin; scroll to zoom, click a dot to open it.',
+  },
+  {
+    target: () => {
+      const sec = $('#section-analytics');
+      if (!sec || sec.hidden) return null;
+      sec.open = true;
+      return sec;
+    },
+    text: 'the same feeds behind this page, drawn as <strong>charts</strong> — births against retirements, survival, contract types.',
   },
   {
     target: () => document.querySelector('#story-list .story'),
@@ -4449,9 +5090,10 @@ const TOUR_STEPS = [
     text: 'the raw scripts live under <strong>nerd mode</strong> — decoded, labeled, and hash-verified when a spend reveals a hidden program.',
   },
   {
-    target: () => document.querySelector('.nav-link[data-nav="decode"]'),
-    text: 'the decoder reads <strong>any</strong> script — and if it’s a known contract, you can <strong>make your own from it</strong> and birth it on the testnet. enjoy the telescope 🔭',
+    target: () => document.querySelector('.nav-link[data-nav="playground"]'),
+    text: 'and the playground: <strong>build a covenant without code</strong> — fill in the blanks, deploy in one click on the testnet. enjoy the telescope 🔭',
     last: true,
+    cta: 'try the builder →',
   },
 ];
 
@@ -4460,7 +5102,7 @@ function endTour(finished) {
   tour.el = null;
   tour.step = -1;
   try { localStorage.setItem('kascov-tour', 'done'); } catch (e) { /* private mode */ }
-  if (finished) location.hash = '#/decode?s=' + (DECODE_EXAMPLES.mecenas || '');
+  if (finished) location.hash = '#/build';
 }
 
 function showTourStep(i) {
@@ -4491,7 +5133,7 @@ function showTourStep(i) {
     `<div class="tour-nav">` +
     `<span class="dim tour-count">${i + 1}/${TOUR_STEPS.length}</span>` +
     `<button type="button" class="btn tour-skip" data-tour="skip">skip</button>` +
-    `<button type="button" class="btn btn-accent" data-tour="${step.last ? 'finish' : 'next'}">${step.last ? 'try the decoder →' : 'next →'}</button>` +
+    `<button type="button" class="btn btn-accent" data-tour="${step.last ? 'finish' : 'next'}">${step.last ? (step.cta || 'finish →') : 'next →'}</button>` +
     `</div></div>`;
   if (step.enter) {
     step.enter(target);

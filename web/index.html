@@ -135,6 +135,10 @@
       </div>
 
       <section class="devcards" aria-label="Developer tools">
+        <a class="devcard" href="#/explore?galaxy=1">
+          <h3>the galaxy</h3>
+          <p>every app at once, live — one zoomable map of the whole network. each dot is a smart coin, each link a shared transaction.</p>
+        </a>
         <a class="devcard" href="#/decode">
           <h3>script decoder</h3>
           <p>paste any Kaspa script, read its post-Toccata opcodes — covenant ops highlighted. runs in your browser, nothing leaves the page.</p>
@@ -143,10 +147,14 @@
           <h3>JSON API</h3>
           <p>everything kascov sees, as plain JSON with CORS on. build a bot, a chart, a better explorer.</p>
         </a>
-        <a class="devcard" href="#/decode">
+        <a class="devcard" href="#/build">
           <h3>make a smart coin</h3>
-          <p>deploy a real contract on testnet and watch it run itself — one command, no Rust knowledge needed. it reveals itself here, named forever.</p>
+          <p>build a covenant without writing code and deploy it on testnet in one click — it reveals itself here, named forever.</p>
         </a>
+      </section>
+
+      <section class="whats-new" id="section-whatsnew" aria-label="What's new" hidden>
+        <a class="whatsnew-card" id="whatsnew-card" href="#/changelog"></a>
       </section>
     </section>
 
@@ -197,24 +205,24 @@
         <div id="inscriptions-row"></div>
       </details>
 
-      <details class="lanes collapse-sec" id="section-appgraph" aria-label="App graph" hidden>
-        <summary><h2>app graph · the whole network</h2><span class="collapse-count dim" id="appgraph-count"></span></summary>
+      <details class="lanes collapse-sec" id="section-galaxy" aria-label="Galaxy" hidden>
+        <summary><h2>the galaxy · the whole network</h2><span class="collapse-count dim" id="galaxy-count"></span></summary>
         <p class="dim families-sub">every app at once — each dot is a smart coin, each link a shared transaction. scroll to zoom, drag to pan, click a dot to open the coin.</p>
-        <div class="appgraph-toolbar">
-          <input type="search" id="appgraph-search" class="appgraph-search" placeholder="find a coin…" autocomplete="off" spellcheck="false" aria-label="Find a coin in the graph">
-          <span class="appgraph-chips" role="group" aria-label="Filter">
-            <button type="button" class="chip chip-on" data-action="galaxy-status" data-val="all">all</button>
-            <button type="button" class="chip" data-action="galaxy-status" data-val="active">alive</button>
-            <button type="button" class="chip" data-action="galaxy-status" data-val="burned">retired</button>
+        <div class="galaxy-toolbar">
+          <input type="search" id="galaxy-search" class="galaxy-search" placeholder="find a coin…" autocomplete="off" spellcheck="false" aria-label="Find a coin in the graph">
+          <span class="galaxy-chips" role="group" aria-label="Filter">
+            <button type="button" class="chip chip-on" data-action="galaxy-status" data-val="all" aria-pressed="true">all</button>
+            <button type="button" class="chip" data-action="galaxy-status" data-val="active" aria-pressed="false">alive</button>
+            <button type="button" class="chip" data-action="galaxy-status" data-val="burned" aria-pressed="false">retired</button>
           </span>
-          <span class="appgraph-chips" role="group" aria-label="Color by">
-            <button type="button" class="chip chip-on" data-action="galaxy-color" data-val="template">by type</button>
-            <button type="button" class="chip" data-action="galaxy-color" data-val="status">by status</button>
+          <span class="galaxy-chips" role="group" aria-label="Color by">
+            <button type="button" class="chip chip-on" data-action="galaxy-color" data-val="template" aria-pressed="true">by type</button>
+            <button type="button" class="chip" data-action="galaxy-color" data-val="status" aria-pressed="false">by status</button>
           </span>
         </div>
-        <div class="appgraph-wrap">
-          <canvas id="appgraph-canvas" class="appgraph-canvas"></canvas>
-          <div class="appgraph-legend" id="appgraph-legend" aria-hidden="true"></div>
+        <div class="galaxy-wrap">
+          <canvas id="galaxy-canvas" class="galaxy-canvas" role="img" aria-label="The galaxy — a zoomable map of every covenant app on the network; each dot is a smart coin, each link a shared transaction"></canvas>
+          <div class="galaxy-legend" id="galaxy-legend" aria-hidden="true"></div>
         </div>
       </details>
 
@@ -283,6 +291,8 @@
 
     <!-- ============ ADDRESS ============ -->
     <section id="view-address" class="view-fade" aria-label="Address lookup" hidden></section>
+
+    <section id="view-lane" class="view-fade" aria-label="Lane dashboard" hidden></section>
 
     <!-- ============ DECODER ============ -->
     <section id="view-decode" class="view-fade" aria-label="Playground — read" hidden>
@@ -688,12 +698,21 @@
       </div>
     </section>
 
+    <!-- ============ CHANGELOG ============ -->
+    <section id="view-changelog" class="view-fade" aria-label="What's new" hidden>
+      <header class="page-head">
+        <h1>what&rsquo;s new</h1>
+        <p class="page-sub">the milestones — what kascov learned to do, newest first.</p>
+      </header>
+      <ol class="changelog-list" id="changelog-list"></ol>
+    </section>
+
   </main>
 
   <footer class="site-footer">
     <div class="container footer-inner">
       <p class="footer-motto">Kaspa nodes forget after ~3 days. <strong>kascov remembers.</strong></p>
-      <p class="footer-nav"><a class="footer-link" href="#/explore">explorer</a> · <a class="footer-link" href="#/decode">playground</a> · <a class="footer-link" href="#/dev">JSON API &amp; docs</a></p>
+      <p class="footer-nav"><a class="footer-link" href="#/explore">explorer</a> · <a class="footer-link" href="#/decode">playground</a> · <a class="footer-link" href="#/dev">JSON API &amp; docs</a> · <a class="footer-link" href="#/changelog">what&rsquo;s new</a></p>
       <p><a class="footer-link" href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov</a></p>
       <p class="footer-dim">data streams live from the kascov indexer — it never stops watching</p>
       <p class="footer-dim">not affiliated with the Kaspa Foundation</p>
