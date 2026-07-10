@@ -4268,6 +4268,14 @@ function flashLiveBadge() {
   });
 }
 
+/* Firebase Hosting rewrites BUFFER responses, so SSE never gets through the
+   CDN path — streams must connect straight to the worker, which sends
+   Access-Control-Allow-Origin: * on the stream route. Everything else keeps
+   the same-origin /data/** rewrite (that path is what the CDN caches). */
+const STREAM_ORIGIN = /(^|\.)kascov\.io$|(^|\.)kascov-explorer\.web\.app$|\.firebaseapp\.com$/.test(location.hostname)
+  ? 'https://kascov-worker-12056584181.europe-west4.run.app/'
+  : '';
+
 /* Open/close/retarget the stream to match the current view + network.
    Idempotent — called from render() and visibilitychange. */
 function syncStream() {
@@ -4276,7 +4284,7 @@ function syncStream() {
   if (stream.es && stream.network === state.network) return;
   closeStream();
   const network = state.network;
-  const es = new EventSource(`data/${network}/stream`);
+  const es = new EventSource(`${STREAM_ORIGIN}data/${network}/stream`);
   stream.es = es;
   stream.network = network;
   es.onopen = () => { stream.retryMs = STREAM_RETRY_BASE_MS; };
@@ -4320,7 +4328,7 @@ function syncDetailStream() {
   const key = `${network}|${covId}`;
   if (detailStream.es && detailStream.key === key) return;
   closeDetailStream();
-  const es = new EventSource(`data/${network}/stream?covenant=${covId}`);
+  const es = new EventSource(`${STREAM_ORIGIN}data/${network}/stream?covenant=${covId}`);
   detailStream.es = es;
   detailStream.key = key;
   es.onopen = () => { detailStream.retryMs = STREAM_RETRY_BASE_MS; };
