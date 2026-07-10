@@ -39,6 +39,9 @@ IMAGE="$REGION-docker.pkg.dev/$PROJECT/kascov/kascov-worker:latest"
 echo "==> building $IMAGE via Cloud Build (kaniko layer cache)"
 gcloud builds submit --config cloudbuild.yaml --project $PROJECT .
 
+# --update-env-vars MERGES with the previous revision's env — never use
+# --set-env-vars here: it REPLACES the whole env and once silently disarmed
+# KASCOV_DEPLOY_KEY (the operator-set one-click-deploy key) on a redeploy.
 echo "==> deploying $SERVICE to Cloud Run ($REGION)"
 gcloud run deploy $SERVICE \
   --image "$IMAGE" \
@@ -50,7 +53,7 @@ gcloud run deploy $SERVICE \
   --no-cpu-throttling \
   --memory 4Gi \
   --cpu 2 \
-  --set-env-vars "^@^BACKUP_BUCKET=$BUCKET@NETWORKS=testnet-10,mainnet" \
+  --update-env-vars "^@^BACKUP_BUCKET=$BUCKET@NETWORKS=testnet-10,mainnet" \
   --port 8080
 
 # Uptime check on the small always-cheap health path; alerting needs a
