@@ -284,6 +284,11 @@
       lastX = ev.clientX; lastY = ev.clientY;
       canvas.setPointerCapture && canvas.setPointerCapture(ev.pointerId);
     }
+    // Hover hit-testing is O(N) over every node; at tens of thousands of
+    // coins an unthrottled pointermove burns a linear scan per event. Queue
+    // the latest position and resolve it at most once per frame.
+    let hoverQueued = false;
+    let hoverPx = 0, hoverPy = 0;
     function onMove(ev) {
       const rect = canvas.getBoundingClientRect();
       const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
@@ -296,7 +301,12 @@
         requestDraw();
         return;
       }
-      // hover
+      hoverPx = px; hoverPy = py;
+      if (hoverQueued) return;
+      hoverQueued = true;
+      requestAnimationFrame(() => { hoverQueued = false; resolveHover(hoverPx, hoverPy); });
+    }
+    function resolveHover(px, py) {
       const far = zoomFactor() < 2.2;
       if (far) {
         const a = appAt(px, py);

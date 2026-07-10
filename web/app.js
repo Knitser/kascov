@@ -387,6 +387,21 @@ function balancesByEventDaa(c) {
 /* Build a derived index so rendering stays cheap. The grid feed carries one
    summary row per covenant (no timelines, no scripts — those come from the
    per-coin detail endpoint), so this stays linear even at 40k+ coins. */
+
+/* one index entry from a grid row (name collisions handled by the callers) */
+function indexEntry(c, data, name) {
+  /* transitions = events minus the birth (if seen) and the burn (if retired) */
+  const moves = Math.max(0, c.event_count -
+    (c.genesis_daa != null ? 1 : 0) -
+    (c.status !== 'active' ? 1 : 0));
+  const bornMs = c.genesis_daa != null ? daaToMs(c.genesis_daa, data)
+    : (c.last_activity_daa ? daaToMs(c.last_activity_daa, data) : data.generated_at_ms);
+  const lastMs = c.last_activity_daa ? daaToMs(c.last_activity_daa, data) : bornMs;
+  const birthValue = c.born_value || 0;
+  const blob = (name + ' ' + c.covenant_id).toLowerCase();
+  return { c, name, moves, bornMs, lastMs, birthValue, blob };
+}
+
 function buildIndex(data) {
   /* friendly names can collide; count them so duplicates get a suffix */
   const nameCounts = new Map();
@@ -397,20 +412,52 @@ function buildIndex(data) {
   const covs = data.covenants.map((c) => {
     let name = friendlyName(c.covenant_id);
     if (nameCounts.get(name) > 1) name += `-${c.covenant_id.slice(0, 4)}`;
-    /* transitions = events minus the birth (if seen) and the burn (if retired) */
-    const moves = Math.max(0, c.event_count -
-      (c.genesis_daa != null ? 1 : 0) -
-      (c.status !== 'active' ? 1 : 0));
-    const bornMs = c.genesis_daa != null ? daaToMs(c.genesis_daa, data)
-      : (c.last_activity_daa ? daaToMs(c.last_activity_daa, data) : data.generated_at_ms);
-    const lastMs = c.last_activity_daa ? daaToMs(c.last_activity_daa, data) : bornMs;
-    const birthValue = c.born_value || 0;
-    const blob = (name + ' ' + c.covenant_id).toLowerCase();
-    return { c, name, moves, bornMs, lastMs, birthValue, blob };
+    return indexEntry(c, data, name);
   });
   covs.sort((a, b) => (b.c.last_activity_daa || 0) - (a.c.last_activity_daa || 0));
   const byId = new Map(covs.map((e) => [e.c.covenant_id, e]));
-  return { covs, byId };
+  /* nameCounts + generation persist so load-more can append incrementally
+     (O(page), not a full O(n log n) rebuild) and renders can memoize.
+     generation is globally unique — a rebuilt index (45s refresh) must never
+     collide with the memo key of the index it replaces. */
+  return { covs, byId, nameCounts, generation: ++indexSeq };
+}
+let indexSeq = 0;
+
+/* Merge newly loaded (older) grid rows into an existing index in O(page).
+   Cursor pages arrive in descending-activity order strictly below what's
+   loaded, so appending preserves the sort; a cheap boundary check catches the
+   rare out-of-order page (server refreshed mid-walk) and falls back to one
+   sort. A name colliding with an already-indexed coin retro-suffixes the
+   existing entry, matching what a full rebuild would have produced. */
+function appendToIndex(index, data, newRows) {
+  const covs = index.covs;
+  for (const c of newRows) {
+    const base = friendlyName(c.covenant_id);
+    const count = (index.nameCounts.get(base) || 0) + 1;
+    index.nameCounts.set(base, count);
+    if (count === 2) {
+      /* retro-suffix the existing holder of this name (rare; linear scan) */
+      const prev = covs.find((e) => e.name === base);
+      if (prev) {
+        prev.name = base + `-${prev.c.covenant_id.slice(0, 4)}`;
+        prev.blob = (prev.name + ' ' + prev.c.covenant_id).toLowerCase();
+      }
+    }
+    const name = count > 1 ? base + `-${c.covenant_id.slice(0, 4)}` : base;
+    const entry = indexEntry(c, data, name);
+    covs.push(entry);
+    index.byId.set(c.covenant_id, entry);
+  }
+  /* boundary guard: if the first appended row is newer than what precedes it,
+     the pages interleaved — restore order with one sort */
+  const at = covs.length - newRows.length;
+  if (at > 0 && newRows.length &&
+      (covs[at].c.last_activity_daa || 0) > (covs[at - 1].c.last_activity_daa || 0)) {
+    covs.sort((a, b) => (b.c.last_activity_daa || 0) - (a.c.last_activity_daa || 0));
+  }
+  index.generation = ++indexSeq; /* same global sequence as buildIndex — no key collisions */
+  return index;
 }
 
 /* Fetch one grid page. The compound cursor `afterDaa`+`afterId` and `limit` are
@@ -455,11 +502,13 @@ async function loadMoreGrid(network) {
   try {
     const page = await fetchGridPage(network, entry.nextAfterDaa, entry.nextAfterId, GRID_PAGE);
     const rows = Array.isArray(page.covenants) ? page.covenants : [];
-    const seen = new Set(entry.data.covenants.map((c) => c.covenant_id));
-    for (const c of rows) if (!seen.has(c.covenant_id)) entry.data.covenants.push(c);
+    /* dedup against the index (byId covers everything loaded), then merge the
+       genuinely-new rows incrementally — O(page), not a full rebuild */
+    const fresh = rows.filter((c) => !entry.index.byId.has(c.covenant_id));
+    entry.data.covenants.push(...fresh);
     entry.nextAfterDaa = page.next_after_daa != null ? page.next_after_daa : null;
     entry.nextAfterId = page.next_after_id != null ? page.next_after_id : null;
-    entry.index = buildIndex(entry.data);
+    appendToIndex(entry.index, entry.data, fresh);
   } finally {
     entry.loadingMore = false;
   }
@@ -693,6 +742,23 @@ function renderLifespans(network) {
   }).join('');
 }
 
+/* Load a script on demand, once. galaxy.js is the largest optional lib and
+   most visits never open the galaxy section — so it stays out of index.html
+   and arrives only when actually needed. */
+const scriptPromises = {};
+function ensureScript(src) {
+  if (!scriptPromises[src]) {
+    scriptPromises[src] = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => { delete scriptPromises[src]; reject(new Error(`failed to load ${src}`)); };
+      document.head.appendChild(s);
+    });
+  }
+  return scriptPromises[src];
+}
+
 /* the app graph — the whole-network "galaxy": every app at once, positions +
    weighted edges precomputed by the worker (data/<net>/galaxy.json). Rendered
    lazily by web/galaxy.js when the section is expanded. */
@@ -729,7 +795,14 @@ function renderGalaxyLegend(data) {
 function renderAppGraph() {
   const gsec = $('#section-appgraph');
   const canvas = $('#appgraph-canvas');
-  if (!gsec || !gsec.open || !canvas || !window.kascovGalaxy) return;
+  if (!gsec || !gsec.open || !canvas) return;
+  if (!window.kascovGalaxy) {
+    /* first open: pull the renderer in, then come back */
+    ensureScript('/galaxy.js').then(() => {
+      if (gsec.open && parseRoute().view === 'explore') renderAppGraph();
+    }).catch(() => {});
+    return;
+  }
   const network = state.network;
   const cached = galaxyCache[network];
   if (!cached) {
@@ -741,8 +814,19 @@ function renderAppGraph() {
   const data = cached.data;
   // galaxy.json missing/empty (e.g. an older worker without the endpoint):
   // hide the section rather than leave a blank canvas + empty legend.
-  if (!data || !(data.nodes && data.nodes.length)) { gsec.hidden = true; return; }
+  // nodeCount survives the heavy-array release below, so remounts still pass.
+  const nodeCount = data && (data.nodeCount || (data.nodes && data.nodes.length) || 0);
+  if (!data || !nodeCount) { gsec.hidden = true; return; }
   if (galaxyCtrl && galaxyMounted === network) { galaxyCtrl.resize(); return; }
+  if (!data.nodes) {
+    // heavy arrays were released after an earlier mount (below) — a fresh
+    // mount (network switch back) needs them again; refetch once.
+    delete galaxyCache[network];
+    loadGalaxy(network).then(() => {
+      if (state.network === network && gsec.open && parseRoute().view === 'explore') renderAppGraph();
+    });
+    return;
+  }
   if (galaxyCtrl) galaxyCtrl.destroy();
   galaxyCtrl = window.kascovGalaxy.create(canvas, {
     friendlyName,
@@ -750,6 +834,12 @@ function renderAppGraph() {
   });
   galaxyMounted = network;
   galaxyCtrl.load(data);
+  // the controller copied everything into typed arrays — release the raw
+  // JSON arrays (multi-MB at production scale) instead of caching them twice.
+  // Keep the light fields (templates for the legend, nodeCount for the gate).
+  data.nodeCount = data.nodes.length;
+  data.nodes = null;
+  data.edges = null;
   renderGalaxyLegend(data);
 }
 
@@ -1437,8 +1527,47 @@ const SORTS = {
   moves: (a, b) => b.moves - a.moves,
 };
 
+/* one grid card — shared by the full render and the append-only path */
+function coinCardHtml(e, network) {
+  const alive = e.c.status === 'active';
+  const watched = state.watch.has(e.c.covenant_id);
+  const namedTpl = e.c.template && !/^p2(pk|sh)/.test(e.c.template) ? e.c.template : null;
+  return `<article class="card">` +
+    `<div class="card-head">${avatarSvg(e.c.covenant_id, 40)}` +
+    `<div class="card-id"><a class="card-link" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">${esc(e.name)}</a>` +
+    `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>` +
+    (namedTpl ? `<span class="flag flag-tpl" title="recognized contract: a compiled ${esc(namedTpl)} — constructor arguments labeled on the coin page">${esc(namedTpl)}</span>` : '') +
+    lineageBadge(e.c) +
+    `</div>` +
+    `<button type="button" class="star${watched ? ' starred' : ''}" data-action="watch" data-id="${esc(e.c.covenant_id)}"` +
+    ` aria-pressed="${watched}" aria-label="${watched ? 'stop watching' : 'watch'} ${esc(e.name)}">★</button></div>` +
+    `<p class="card-story">${esc(cardStory(e, network))}</p>` +
+    `</article>`;
+}
+
+/* renderGrid memo: the filtered/sorted list is recomputed only when its
+   inputs change (filter/query/sort/index generation/watchlist), and "show
+   more" appends just the newly revealed cards instead of rebuilding every
+   card on screen. watchGen bumps on any ★ toggle so watch state stays live. */
+let watchGen = 0;
+const gridMemo = { key: '', list: null, renderedKey: '', shown: 0 };
+
 function renderGrid(entry, network) {
-  const list = entry.index.covs.filter(matchesFilter).sort(SORTS[state.sort] || SORTS.activity);
+  const memoKey = [
+    network, state.filter, state.query, state.sort,
+    entry.index.generation, watchGen, entry.index.covs.length,
+  ].join('');
+  let list;
+  if (gridMemo.key === memoKey && gridMemo.list) {
+    list = gridMemo.list;
+  } else {
+    /* index.covs is already activity-sorted — the default sort is a no-op,
+       and filter() preserves order, so only non-default sorts pay for one */
+    list = entry.index.covs.filter(matchesFilter);
+    if (state.sort !== 'activity' && SORTS[state.sort]) list = list.sort(SORTS[state.sort]);
+    gridMemo.key = memoKey;
+    gridMemo.list = list;
+  }
   const loaded = entry.index.covs.length;
   /* the headline count is the whole network (from stats) when paginating; the
      filtered denominator stays the rows actually searched so "of N" is honest */
@@ -1492,22 +1621,18 @@ function renderGrid(entry, network) {
     foot.innerHTML = '';
     return;
   }
-  grid.innerHTML = list.slice(0, state.shown).map((e) => {
-    const alive = e.c.status === 'active';
-    const watched = state.watch.has(e.c.covenant_id);
-    const namedTpl = e.c.template && !/^p2(pk|sh)/.test(e.c.template) ? e.c.template : null;
-    return `<article class="card">` +
-      `<div class="card-head">${avatarSvg(e.c.covenant_id, 40)}` +
-      `<div class="card-id"><a class="card-link" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">${esc(e.name)}</a>` +
-      `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>` +
-      (namedTpl ? `<span class="flag flag-tpl" title="recognized contract: a compiled ${esc(namedTpl)} — constructor arguments labeled on the coin page">${esc(namedTpl)}</span>` : '') +
-      lineageBadge(e.c) +
-      `</div>` +
-      `<button type="button" class="star${watched ? ' starred' : ''}" data-action="watch" data-id="${esc(e.c.covenant_id)}"` +
-      ` aria-pressed="${watched}" aria-label="${watched ? 'stop watching' : 'watch'} ${esc(e.name)}">★</button></div>` +
-      `<p class="card-story">${esc(cardStory(e, network))}</p>` +
-      `</article>`;
-  }).join('');
+  const shown = Math.min(state.shown, list.length);
+  if (gridMemo.renderedKey === memoKey && gridMemo.shown > 0 && gridMemo.shown <= shown && grid.children.length === gridMemo.shown) {
+    /* same list, only the window grew — append the newly revealed cards */
+    if (shown > gridMemo.shown) {
+      grid.insertAdjacentHTML('beforeend',
+        list.slice(gridMemo.shown, shown).map((e) => coinCardHtml(e, network)).join(''));
+    }
+  } else {
+    grid.innerHTML = list.slice(0, shown).map((e) => coinCardHtml(e, network)).join('');
+  }
+  gridMemo.renderedKey = memoKey;
+  gridMemo.shown = shown;
   if (entry.loadingMore) {
     foot.innerHTML = `<button type="button" class="btn" disabled>loading more…</button>`;
   } else if (list.length > state.shown) {
@@ -3720,14 +3845,26 @@ async function render() {
   }
 }
 
-/* Live refresh: refetch the current network's snapshot periodically (only
-   while the tab is visible) and re-render in place when it actually changed.
-   The detail view is left alone mid-visit so open sections don't collapse;
-   its cache still updates for the next navigation. */
+/* Live refresh: refetch the current network's snapshot and re-render in
+   place when it actually changed. The detail view is left alone mid-visit so
+   open sections don't collapse; its cache still updates for the next
+   navigation.
+
+   The 45s timer is a FALLBACK, not the driver: when the tiny -live.json feed
+   works, pollLive's stats-delta triggers the (forced) refetch — so the timer
+   only downloads the multi-MB snapshot itself when the live feed is
+   unsupported (old worker) or stale. On a quiet chain, per-tab steady-state
+   traffic is the 12s live poll alone. */
 const REFRESH_MS = 45_000;
-async function refreshSnapshot() {
+function liveFeedCoversRefresh(network) {
+  const ls = state.live[network];
+  if (!ls || ls.supported === false) return false;
+  return ls.at != null && Date.now() - ls.at < 2 * REFRESH_MS;
+}
+async function refreshSnapshot(force) {
   if (document.visibilityState !== 'visible') return;
   const network = state.network;
+  if (!force && liveFeedCoversRefresh(network)) return;
   try {
     const old = state.cache[network];
     /* re-request a window at least as wide as what's already loaded so a
@@ -3824,13 +3961,14 @@ async function pollLive() {
     const live = await res.json();
     ls.supported = true;
     ls.data = live;
+    ls.at = Date.now(); /* freshness stamp — lets the 45s fallback stand down */
     updateLiveBadge();
     const cached = state.cache[network];
     if (cached && live.stats && (
       live.stats.events !== cached.data.stats.events ||
       live.stats.covenants !== cached.data.stats.covenants
     )) {
-      refreshSnapshot();
+      refreshSnapshot(true);
       schedulePulseRefresh();
     }
   } catch (e) {
@@ -4008,6 +4146,7 @@ document.addEventListener('click', (e) => {
     if (!id) return;
     if (state.watch.has(id)) state.watch.delete(id);
     else state.watch.add(id);
+    watchGen++; /* invalidates the grid render memo — stars must repaint */
     saveWatch(state.network, state.watch);
     const route = parseRoute();
     const entry = state.cache[state.network];

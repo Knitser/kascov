@@ -701,14 +701,17 @@
   </footer>
 
   <noscript><div class="container panel"><p>kascov needs JavaScript to show its smart coins.</p></div></noscript>
+  <!-- all deferred: parsing never blocks on script download/execution, and
+       defer preserves document order so app.js still runs after its deps.
+       galaxy.js is absent on purpose — app.js lazy-loads it the first time
+       the galaxy section is actually opened (it's the largest optional lib). -->
   <script src="/dag.js" defer></script>
-  <script src="/blake2b.js"></script>
-  <script src="/disasm.js"></script>
-  <script src="/vm.js"></script>
-  <script src="/graph.js"></script>
-  <script src="/galaxy.js"></script>
-  <script src="/gen.js"></script>
-  <script src="/decode-payload.js"></script>
-  <script src="/app.js"></script>
+  <script src="/blake2b.js" defer></script>
+  <script src="/disasm.js" defer></script>
+  <script src="/vm.js" defer></script>
+  <script src="/graph.js" defer></script>
+  <script src="/gen.js" defer></script>
+  <script src="/decode-payload.js" defer></script>
+  <script src="/app.js" defer></script>
 </body>
 </html>
