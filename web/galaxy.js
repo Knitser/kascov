@@ -327,7 +327,15 @@
       panY = py - wpy * scale;
       requestDraw();
     }
+    // onUp lives on WINDOW (so drags can release outside the canvas), which
+    // means it hears every pointerup on the whole page for as long as the
+    // controller exists — including on other views where the canvas is hidden
+    // and its rect degenerates to (0,0), making arbitrary page clicks hit-test
+    // against phantom node positions ("random coin opens"). A click only
+    // counts if the pointer went DOWN on the canvas.
+    let pointerFromCanvas = false;
     function onDown(ev) {
+      pointerFromCanvas = true;
       dragging = true; dragMoved = false;
       lastX = ev.clientX; lastY = ev.clientY;
       canvas.setPointerCapture && canvas.setPointerCapture(ev.pointerId);
@@ -378,7 +386,12 @@
       }
     }
     function onUp(ev) {
+      const fromCanvas = pointerFromCanvas;
+      pointerFromCanvas = false;
       dragging = false;
+      // ignore pointerups that didn't start on the canvas, and anything that
+      // arrives while the canvas isn't actually on screen (hidden view)
+      if (!fromCanvas || !canvas.isConnected || canvas.offsetParent === null) return;
       const rect = canvas.getBoundingClientRect();
       const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
       if (dragMoved) return;
