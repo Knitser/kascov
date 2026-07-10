@@ -269,6 +269,11 @@ fn build_activity_snapshot(
     }))
 }
 
+/// Hard ceiling on one grid page — also the size of the bare (param-less)
+/// response, which is a first page with a continuation cursor rather than the
+/// whole table (168k rows would be tens of MB in flight).
+const MAX_PAGE: u64 = 20_000;
+
 /// The explorer grid: stats + one summary row per covenant, no timelines and
 /// no scripts. This is what the web app loads up front; per-coin detail comes
 /// from `/data/{network}/c/{id}.json` on demand. At 42k covenants the old
@@ -279,31 +284,25 @@ fn build_grid_snapshot(
     after: Option<(u64, [u8; 32])>,
     limit: Option<u64>,
 ) -> Result<serde_json::Value> {
-    // Back-compat: with no paging params we still serialize every covenant
-    // (`store.list(u64::MAX)`). A caller that passes `?after_daa=`/`?limit=`
-    // opts into a page window ordered by `last_activity_daa DESC`, default
-    // 5000 most-recent; `next_after_daa` appears when more rows remain.
+    // A caller that passes `?after_daa=`/`?limit=` opts into a page window
+    // ordered by `last_activity_daa DESC`, default 5000 most-recent. A bare
+    // request is the same shape, just a MAX_PAGE-sized first page: small nets
+    // still fit in one response, and when more rows remain `next_after_daa`/
+    // `next_after_id` are set so any consumer can keep walking.
     const DEFAULT_PAGE: u64 = 5000;
     let paged = after.is_some() || limit.is_some();
     let mut next_after_daa: Option<u64> = None;
     let mut next_after_id: Option<String> = None;
-    let covenants = if paged {
-        let page = limit.unwrap_or(DEFAULT_PAGE).max(1);
-        // Over-fetch by one to detect whether another page exists.
-        let mut rows = store.list_page(after, page.saturating_add(1))?;
-        if rows.len() as u64 > page {
-            rows.truncate(page as usize);
-            if let Some(last) = rows.last() {
-                next_after_daa = Some(last.last_activity_daa);
-                next_after_id = Some(last.covenant_id.to_string());
-            }
+    let page = if paged { limit.unwrap_or(DEFAULT_PAGE).max(1) } else { MAX_PAGE };
+    // Over-fetch by one to detect whether another page exists.
+    let mut covenants = store.list_page(after, page.saturating_add(1))?;
+    if covenants.len() as u64 > page {
+        covenants.truncate(page as usize);
+        if let Some(last) = covenants.last() {
+            next_after_daa = Some(last.last_activity_daa);
+            next_after_id = Some(last.covenant_id.to_string());
         }
-        rows
-    } else {
-        store.list(u64::MAX)?
-    };
-    let born = store.born_values()?;
-    let templates = store.covenant_templates()?;
+    }
     let tip = store.tip()?;
     let rows: Vec<_> = covenants
         .iter()
@@ -317,8 +316,8 @@ fn build_grid_snapshot(
                 "last_activity_daa": c.last_activity_daa,
                 "live_utxos": c.live_utxos,
                 "live_value": c.live_value,
-                "born_value": born.get(&c.covenant_id).copied().unwrap_or(0),
-                "template": templates.get(&c.covenant_id),
+                "born_value": c.born_value,
+                "template": c.template,
             })
         })
         .collect();
@@ -1352,10 +1351,9 @@ async fn data_handler(
     };
     // Grid paging: `?after_daa=` (exclusive cursor) and `?limit=` (page size,
     // capped) walk the grid newest-first. Invalid numbers are ignored so a bad
-    // param degrades to the full snapshot rather than erroring. Params are only
+    // param degrades to the bare first page rather than erroring. Params are only
     // meaningful for the grid, and are folded into the cache key so each page
     // caches independently.
-    const MAX_PAGE: u64 = 20_000;
     let (after, limit) = if live {
         (None, None)
     } else {
@@ -1483,7 +1481,42 @@ fn build_families(store: &Store, network: kascov_core::Network) -> Result<serde_
 /// cumulative-area sunflower packing: big apps near the galactic core, size-2
 /// dust at the rim. Coordinates are centered on the origin and quantized to
 /// integers to keep the payload small. See docs plan Wave 1.
+/// Payload variants for `galaxy.json`, selected by query params (the bare
+/// request is the legacy shape forever):
+///   `?fmt=2`    → `columnar`: the per-node objects are replaced by parallel
+///                 arrays `ids`/`nx`/`ny`/`nr`/`nt`/`ns`/`na` (same order and
+///                 index-aligned with the legacy `nodes[]`; `ids[i]` is the
+///                 64-hex covenant id, the rest mirror node fields x/y/r/t/s/a),
+///                 and the per-app objects by `acx`/`acy`/`ar`/`asz`/`at`
+///                 (index-aligned with the legacy `apps[]`, mirroring
+///                 cx/cy/r/size/t). `edges`, `bounds`, … are unchanged.
+///   `?tier=core`→ `core_only`: `apps[]` in full, but nodes/edges only for
+///                 clusters of size >= GALAXY_CORE_MIN_SIZE. The layout always
+///                 runs over the FULL cluster set first, so node positions and
+///                 `bounds` are identical across tiers — a client can hot-swap
+///                 the full set in without anything moving. The payload gains
+///                 `"tier":"core"` and `"nodes_total"` (full node count).
+/// The two compose; `edges_total` always counts the full pre-cap edge set.
+#[derive(Clone, Copy, Default)]
+struct GalaxyFmt {
+    columnar: bool,
+    core_only: bool,
+}
+
+/// `?tier=core` keeps only clusters at least this big.
+const GALAXY_CORE_MIN_SIZE: usize = 8;
+
+/// The bare (legacy) shape — kept as the named entrypoint the tests pin.
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_galaxy(store: &Store, network: kascov_core::Network) -> Result<serde_json::Value> {
+    build_galaxy_fmt(store, network, GalaxyFmt::default())
+}
+
+fn build_galaxy_fmt(
+    store: &Store,
+    network: kascov_core::Network,
+    fmt: GalaxyFmt,
+) -> Result<serde_json::Value> {
     use kascov_core::CovenantId;
     use std::collections::HashMap;
 
@@ -1562,8 +1595,26 @@ fn build_galaxy(store: &Store, network: kascov_core::Network) -> Result<serde_js
     const SPACING: f64 = 0.62; // ~ disk area == total cluster area
     let ring_radius = |size: usize| -> f64 { 14.0 + 10.0 * (size as f64).sqrt() };
 
-    let mut nodes: Vec<serde_json::Value> = Vec::new();
-    let mut apps: Vec<serde_json::Value> = Vec::new();
+    // intermediate node records — layout ALWAYS covers the full cluster set;
+    // tier filtering happens at emission time only (position stability).
+    struct NodeRec {
+        id: CovenantId,
+        t: i64,
+        s: u8,
+        x: i64,
+        y: i64,
+        r: i64,
+        app: usize,
+    }
+    struct AppRec {
+        cx: i64,
+        cy: i64,
+        r: i64,
+        size: usize,
+        t: i64,
+    }
+    let mut recs: Vec<NodeRec> = Vec::new();
+    let mut apps: Vec<AppRec> = Vec::new();
     let mut node_index: HashMap<CovenantId, usize> = HashMap::new();
     let (mut min_x, mut min_y, mut max_x, mut max_y) =
         (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
@@ -1589,13 +1640,13 @@ fn build_galaxy(store: &Store, network: kascov_core::Network) -> Result<serde_js
             .map(|(t, _)| *t)
             .unwrap_or(-1);
 
-        apps.push(serde_json::json!({
-            "cx": cx.round() as i64,
-            "cy": cy.round() as i64,
-            "r": cr.round() as i64,
-            "size": size,
-            "t": dom_t,
-        }));
+        apps.push(AppRec {
+            cx: cx.round() as i64,
+            cy: cy.round() as i64,
+            r: cr.round() as i64,
+            size,
+            t: dom_t,
+        });
 
         for (mi, m) in cluster.iter().enumerate() {
             let a = (mi as f64 / size as f64) * TAU;
@@ -1605,16 +1656,16 @@ fn build_galaxy(store: &Store, network: kascov_core::Network) -> Result<serde_js
             max_x = max_x.max(x);
             max_y = max_y.max(y);
             let nr = 3 + degree.get(m).copied().unwrap_or(1).min(6);
-            node_index.insert(*m, nodes.len());
-            nodes.push(serde_json::json!({
-                "id": m,
-                "t": tpl_of(m),
-                "s": if *active.get(m).unwrap_or(&false) { 1 } else { 0 },
-                "x": x.round() as i64,
-                "y": y.round() as i64,
-                "r": nr,
-                "a": i,
-            }));
+            node_index.insert(*m, recs.len());
+            recs.push(NodeRec {
+                id: *m,
+                t: tpl_of(m),
+                s: if *active.get(m).unwrap_or(&false) { 1 } else { 0 },
+                x: x.round() as i64,
+                y: y.round() as i64,
+                r: nr as i64,
+                app: i,
+            });
         }
     }
 
@@ -1651,9 +1702,30 @@ fn build_galaxy(store: &Store, network: kascov_core::Network) -> Result<serde_js
         edges.sort_by(|a, b| b.2.cmp(&a.2)); // keep the heaviest links
         edges.truncate(MAX_EDGES);
     }
+    // deterministic order (HashMap iteration isn't) — makes the emitted body
+    // stable across rebuilds and lets the tiers compare edge-for-edge
+    edges.sort_unstable();
+
+    // tier filter — decided AFTER the full layout and the (capped) full edge
+    // set, so core-tier positions/edges are an exact subset of the full tier.
+    // Clusters are sorted biggest-first, so the core set happens to be a
+    // prefix of the node list; the remap stays general anyway.
+    let keep: Vec<bool> = recs
+        .iter()
+        .map(|r| !fmt.core_only || cluster_list[r.app].len() >= GALAXY_CORE_MIN_SIZE)
+        .collect();
+    let mut remap: Vec<usize> = vec![usize::MAX; recs.len()];
+    let mut kept = 0usize;
+    for (i, k) in keep.iter().enumerate() {
+        if *k {
+            remap[i] = kept;
+            kept += 1;
+        }
+    }
     let edges_json: Vec<serde_json::Value> = edges
         .iter()
-        .map(|(a, b, w)| serde_json::json!([a, b, w]))
+        .filter(|(a, b, _)| keep[*a] && keep[*b])
+        .map(|(a, b, w)| serde_json::json!([remap[*a], remap[*b], w]))
         .collect();
 
     if !min_x.is_finite() {
@@ -1663,7 +1735,7 @@ fn build_galaxy(store: &Store, network: kascov_core::Network) -> Result<serde_js
         max_y = 0.0;
     }
     let tip = store.tip()?;
-    Ok(serde_json::json!({
+    let mut out = serde_json::json!({
         "network": network.to_string(),
         "generated_at_ms": now_ms(),
         "tip_daa": tip.map(|t| t.0),
@@ -1675,11 +1747,61 @@ fn build_galaxy(store: &Store, network: kascov_core::Network) -> Result<serde_js
             "h": (max_y - min_y).ceil() as i64,
         },
         "templates": tpl_names,
-        "apps": apps,
-        "nodes": nodes,
         "edges": edges_json,
         "edges_total": edge_total,
-    }))
+    });
+    let obj = out.as_object_mut().expect("galaxy payload is an object");
+    let sel = || recs.iter().zip(&keep).filter(|(_, k)| **k).map(|(r, _)| r);
+    if fmt.columnar {
+        // ?fmt=2 — parallel arrays; index-aligned with the legacy nodes[]
+        obj.insert("ids".into(), sel().map(|r| serde_json::json!(r.id)).collect::<Vec<_>>().into());
+        obj.insert("nx".into(), sel().map(|r| r.x.into()).collect::<Vec<serde_json::Value>>().into());
+        obj.insert("ny".into(), sel().map(|r| r.y.into()).collect::<Vec<serde_json::Value>>().into());
+        obj.insert("nr".into(), sel().map(|r| r.r.into()).collect::<Vec<serde_json::Value>>().into());
+        obj.insert("nt".into(), sel().map(|r| r.t.into()).collect::<Vec<serde_json::Value>>().into());
+        obj.insert("ns".into(), sel().map(|r| r.s.into()).collect::<Vec<serde_json::Value>>().into());
+        obj.insert("na".into(), sel().map(|r| r.app.into()).collect::<Vec<serde_json::Value>>().into());
+        // …and the apps, index-aligned with the legacy apps[] (still ALL
+        // clusters, in both tiers — the far-zoom LOD must look complete)
+        obj.insert("acx".into(), apps.iter().map(|a| a.cx.into()).collect::<Vec<serde_json::Value>>().into());
+        obj.insert("acy".into(), apps.iter().map(|a| a.cy.into()).collect::<Vec<serde_json::Value>>().into());
+        obj.insert("ar".into(), apps.iter().map(|a| a.r.into()).collect::<Vec<serde_json::Value>>().into());
+        obj.insert("asz".into(), apps.iter().map(|a| a.size.into()).collect::<Vec<serde_json::Value>>().into());
+        obj.insert("at".into(), apps.iter().map(|a| a.t.into()).collect::<Vec<serde_json::Value>>().into());
+    } else {
+        let nodes: Vec<serde_json::Value> = sel()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "t": r.t,
+                    "s": r.s,
+                    "x": r.x,
+                    "y": r.y,
+                    "r": r.r,
+                    "a": r.app,
+                })
+            })
+            .collect();
+        obj.insert("nodes".into(), nodes.into());
+        let apps_json: Vec<serde_json::Value> = apps
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "cx": a.cx,
+                    "cy": a.cy,
+                    "r": a.r,
+                    "size": a.size,
+                    "t": a.t,
+                })
+            })
+            .collect();
+        obj.insert("apps".into(), apps_json.into());
+    }
+    if fmt.core_only {
+        obj.insert("tier".into(), "core".into());
+        obj.insert("nodes_total".into(), (recs.len() as u64).into());
+    }
+    Ok(out)
 }
 
 /// POST /data/{network}/compile — compile SilverScript source + constructor
@@ -2310,6 +2432,7 @@ async fn reorgs_handler(
 async fn galaxy_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path(net_name): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
@@ -2321,11 +2444,24 @@ async fn galaxy_handler(
     if !state.networks.contains(&network) {
         return (StatusCode::NOT_FOUND, "unknown network").into_response();
     }
+    // Opt-in payload variants (see GalaxyFmt). Unknown params and unknown
+    // values degrade to the legacy shape, so old and new clients both work.
+    let fmt = GalaxyFmt {
+        columnar: q.get("fmt").is_some_and(|v| v == "2"),
+        core_only: q.get("tier").is_some_and(|v| v == "core"),
+    };
     let db = state.base_dir.join(format!("{network}.db"));
     let cc = "public, max-age=30, s-maxage=120, stale-while-revalidate=600";
-    serve_cached(&state, format!("{network}/galaxy"), 60, cc, accepts_gzip(&headers), move || {
+    // fold the (parsed, hence bounded: 4 combos) variant into the cache key;
+    // the bare request keeps its historical key.
+    let key = if fmt.columnar || fmt.core_only {
+        format!("{network}/galaxy?fmt={}&tier={}", fmt.columnar as u8, fmt.core_only as u8)
+    } else {
+        format!("{network}/galaxy")
+    };
+    serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
-        Ok(Some(serde_json::to_string(&build_galaxy(&store, network)?)?))
+        Ok(Some(serde_json::to_string(&build_galaxy_fmt(&store, network, fmt)?)?))
     })
     .await
 }
@@ -2602,7 +2738,7 @@ async fn addr_handler(
                 "last_activity_daa": c.last_activity_daa,
                 "live_utxos": c.live_utxos,
                 "live_value": c.live_value,
-                "born_value": store.born_value(&c.covenant_id)?,
+                "born_value": c.born_value,
                 // …plus this key's role in it
                 "controls_now": r.controls_now,
                 "states_seen": r.states_seen,
@@ -2697,22 +2833,25 @@ mod galaxy_tests {
 
     // A synthetic index with two "apps": {A1,B2} share tx 0x10, and
     // {C3,D4,E5} share tx 0x20; a lone F6 is a size-1 cluster (excluded).
-    // A1 gets a live utxo so it reads as active.
-    fn galaxy_store() -> serde_json::Value {
-        let path = std::env::temp_dir().join(format!("kascov-galaxy-{}.db", std::process::id()));
+    // A1 gets a live utxo so it reads as active. Extra events extend it.
+    fn galaxy_store(tag: &str, extra: Vec<NewEvent>) -> Store {
+        let path = std::env::temp_dir()
+            .join(format!("kascov-galaxy-{tag}-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut store = Store::open(&path, Network::Testnet(10)).unwrap();
+        let mut events = vec![
+            ev(0xA1, EventKind::Genesis, 0x10),
+            ev(0xB2, EventKind::Genesis, 0x10),
+            ev(0xC3, EventKind::Genesis, 0x20),
+            ev(0xD4, EventKind::Genesis, 0x20),
+            ev(0xE5, EventKind::Genesis, 0x20),
+            ev(0xF6, EventKind::Genesis, 0x30),
+        ];
+        events.extend(extra);
         let block = BlockEvents {
             accepting_block: BlockHash([1; 32]),
             accepting_daa: 100,
-            events: vec![
-                ev(0xA1, EventKind::Genesis, 0x10),
-                ev(0xB2, EventKind::Genesis, 0x10),
-                ev(0xC3, EventKind::Genesis, 0x20),
-                ev(0xD4, EventKind::Genesis, 0x20),
-                ev(0xE5, EventKind::Genesis, 0x20),
-                ev(0xF6, EventKind::Genesis, 0x30),
-            ],
+            events,
             created_utxos: vec![NewUtxo {
                 outpoint: Outpoint { txid: TxId([0x10; 32]), index: 0 },
                 covenant_id: CovenantId([0xA1; 32]),
@@ -2723,12 +2862,13 @@ mod galaxy_tests {
             spent_utxos: vec![],
         };
         store.apply(&block, BlockHash([1; 32])).unwrap();
-        build_galaxy(&store, Network::Testnet(10)).unwrap()
+        store
     }
 
     #[test]
     fn galaxy_clusters_nodes_and_edges() {
-        let g = galaxy_store();
+        let store = galaxy_store("legacy", vec![]);
+        let g = build_galaxy(&store, Network::Testnet(10)).unwrap();
         // two apps (size>=2), five member nodes (F6 excluded)
         assert_eq!(g["apps"].as_array().unwrap().len(), 2);
         assert_eq!(g["nodes"].as_array().unwrap().len(), 5);
@@ -2757,5 +2897,121 @@ mod galaxy_tests {
         for k in ["minx", "miny", "w", "h"] {
             assert!(g["bounds"].get(k).is_some(), "bounds missing {k}");
         }
+    }
+
+    // ?fmt=2 — the parallel arrays must be index-aligned with legacy nodes[]
+    // and everything else identical.
+    #[test]
+    fn galaxy_fmt2_columnar_is_index_aligned_with_legacy() {
+        let store = galaxy_store("fmt2", vec![]);
+        let net = Network::Testnet(10);
+        let legacy = build_galaxy(&store, net).unwrap();
+        let col =
+            build_galaxy_fmt(&store, net, GalaxyFmt { columnar: true, core_only: false }).unwrap();
+
+        assert!(col.get("nodes").is_none(), "fmt=2 must not carry nodes[]");
+        assert!(col.get("tier").is_none(), "full tier must not be tagged");
+        let nodes = legacy["nodes"].as_array().unwrap();
+        assert_eq!(col["ids"].as_array().unwrap().len(), nodes.len());
+        for (i, n) in nodes.iter().enumerate() {
+            assert_eq!(col["ids"][i], n["id"], "ids[{i}]");
+            assert_eq!(col["nx"][i], n["x"], "nx[{i}]");
+            assert_eq!(col["ny"][i], n["y"], "ny[{i}]");
+            assert_eq!(col["nr"][i], n["r"], "nr[{i}]");
+            assert_eq!(col["nt"][i], n["t"], "nt[{i}]");
+            assert_eq!(col["ns"][i], n["s"], "ns[{i}]");
+            assert_eq!(col["na"][i], n["a"], "na[{i}]");
+        }
+        for k in ["edges", "edges_total", "bounds", "templates"] {
+            assert_eq!(col[k], legacy[k], "{k} must be unchanged under fmt=2");
+        }
+        // apps go columnar too, index-aligned with the legacy apps[]
+        assert!(col.get("apps").is_none(), "fmt=2 must not carry apps[]");
+        let apps = legacy["apps"].as_array().unwrap();
+        assert_eq!(col["acx"].as_array().unwrap().len(), apps.len());
+        for (i, a) in apps.iter().enumerate() {
+            assert_eq!(col["acx"][i], a["cx"], "acx[{i}]");
+            assert_eq!(col["acy"][i], a["cy"], "acy[{i}]");
+            assert_eq!(col["ar"][i], a["r"], "ar[{i}]");
+            assert_eq!(col["asz"][i], a["size"], "asz[{i}]");
+            assert_eq!(col["at"][i], a["t"], "at[{i}]");
+        }
+    }
+
+    // ?tier=core — layout runs over the full set, so every core node's
+    // position is byte-identical to its full-tier twin; apps/bounds unchanged.
+    #[test]
+    fn galaxy_core_tier_positions_match_full_tier() {
+        // add a 9-member cluster (all sharing tx 0x40) so one cluster crosses
+        // GALAXY_CORE_MIN_SIZE while {A1,B2} and {C3,D4,E5} stay below it
+        let extra: Vec<NewEvent> =
+            (0x60..0x69).map(|c| ev(c, EventKind::Genesis, 0x40)).collect();
+        let store = galaxy_store("core", extra);
+        let net = Network::Testnet(10);
+        let full = build_galaxy(&store, net).unwrap();
+        let core =
+            build_galaxy_fmt(&store, net, GalaxyFmt { columnar: false, core_only: true }).unwrap();
+
+        assert_eq!(core["tier"], "core");
+        let full_nodes = full["nodes"].as_array().unwrap();
+        let core_nodes = core["nodes"].as_array().unwrap();
+        assert_eq!(full_nodes.len(), 14); // 9 + 3 + 2
+        assert_eq!(core_nodes.len(), 9); // only the big cluster survives
+        assert_eq!(core["nodes_total"].as_u64().unwrap(), full_nodes.len() as u64);
+
+        // apps + bounds emitted in full — the client viewport must not shift
+        assert_eq!(core["apps"], full["apps"]);
+        assert_eq!(core["bounds"], full["bounds"]);
+
+        // every core node equals its full-tier twin, matched by covenant id
+        let full_by_id: std::collections::HashMap<&str, &serde_json::Value> =
+            full_nodes.iter().map(|n| (n["id"].as_str().unwrap(), n)).collect();
+        for n in core_nodes {
+            let twin = full_by_id[n["id"].as_str().unwrap()];
+            assert_eq!(n, twin, "core node must be byte-identical to its full twin");
+        }
+
+        // core edges are the full edges restricted to core nodes, re-indexed:
+        // resolve both sides to id pairs and compare as sets
+        let pairs = |g: &serde_json::Value, nodes: &[serde_json::Value]| {
+            g["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    let (a, b) = (e[0].as_u64().unwrap() as usize, e[1].as_u64().unwrap() as usize);
+                    let (ia, ib) =
+                        (nodes[a]["id"].as_str().unwrap(), nodes[b]["id"].as_str().unwrap());
+                    let (lo, hi) = if ia < ib { (ia, ib) } else { (ib, ia) };
+                    (lo.to_string(), hi.to_string(), e[2].as_u64().unwrap())
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let core_pairs = pairs(&core, core_nodes);
+        let full_pairs = pairs(&full, full_nodes);
+        assert!(!core_pairs.is_empty());
+        assert!(core_pairs.is_subset(&full_pairs), "core edges must be a subset of full edges");
+        // and exactly the full edges whose two ends are both core members
+        let expected = full_pairs
+            .iter()
+            .filter(|(a, b, _)| {
+                let is_core = |id: &str| core_nodes.iter().any(|n| n["id"] == *id);
+                is_core(a) && is_core(b)
+            })
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(core_pairs, expected);
+
+        // composed: fmt=2 + tier=core keeps the same filtered set, columnar
+        let both =
+            build_galaxy_fmt(&store, net, GalaxyFmt { columnar: true, core_only: true }).unwrap();
+        assert_eq!(both["tier"], "core");
+        assert_eq!(both["ids"].as_array().unwrap().len(), core_nodes.len());
+        for (i, n) in core_nodes.iter().enumerate() {
+            assert_eq!(both["ids"][i], n["id"]);
+            assert_eq!(both["nx"][i], n["x"]);
+            assert_eq!(both["ny"][i], n["y"]);
+        }
+        assert_eq!(both["edges"], core["edges"]);
     }
 }

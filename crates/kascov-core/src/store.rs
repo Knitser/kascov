@@ -32,6 +32,13 @@ CREATE TABLE IF NOT EXISTS covenant_events (
     -- KIP-21 lane namespace: the 4-byte app tag (hex) of a payload shaped as
     -- <4-byte namespace><16 zero bytes>… — NULL when the payload isn't a lane.
     lane_namespace TEXT,
+    -- Precomputed payload classification (write-time stamps, backfilled on
+    -- open): payload_tag is 'json' / 'jsonhex' / 'tag:<8 hex>' ('' when the
+    -- payload is shorter than 4 bytes); inscription_kind is the decoded
+    -- inscription label ('' when the payload isn't a parseable inscription).
+    -- Both are NULL only when payload is NULL or the row predates the stamp.
+    payload_tag TEXT,
+    inscription_kind TEXT,
     PRIMARY KEY (covenant_id, seq)
 );
 CREATE INDEX IF NOT EXISTS ev_by_accepting ON covenant_events(accepting_block);
@@ -103,6 +110,53 @@ pub struct CovenantSummary {
     pub last_activity_daa: u64,
     pub live_utxos: u64,
     pub live_value: u64,
+    /// Sum of state outputs created at the genesis DAA — same definition as
+    /// `born_value()`/`born_values()` (folded into the row query so grid
+    /// builders don't need a separate full-table pass).
+    pub born_value: u64,
+    /// Recognized template, `covenant_templates()` pick rule: the most
+    /// specific (non-p2pk/p2sh) revealed or state template wins, else any.
+    pub template: Option<String>,
+}
+
+/// Shared SELECT for `CovenantSummary` rows (`list`/`list_page`/`summary`).
+/// Every correlated subselect probes `utxo_by_covenant`, so cost stays
+/// O(states-of-covenant) per row. The born-value subselect mirrors
+/// `born_value()` exactly (outputs created at the genesis DAA; NULL
+/// genesis_daa matches nothing → 0). The template COALESCE mirrors
+/// `covenant_templates()` exactly: prefer a non-p2* revealed_template, then a
+/// non-p2* state template, else any template at all — over the same
+/// has-any-template row filter.
+const SUMMARY_SELECT: &str = "SELECT c.covenant_id, c.genesis_txid, c.genesis_daa, c.lineage_complete,
+        c.event_count, c.last_activity_daa,
+        (SELECT COUNT(*) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL),
+        (SELECT COALESCE(SUM(value), 0) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL),
+        (SELECT COALESCE(SUM(u.value), 0) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.created_daa = c.genesis_daa),
+        COALESCE(
+          (SELECT MAX(CASE WHEN u.revealed_template IS NOT NULL AND u.revealed_template <> '' AND u.revealed_template NOT LIKE 'p2%' THEN u.revealed_template
+                           WHEN u.template NOT LIKE 'p2%' THEN u.template END)
+             FROM covenant_utxos u
+             WHERE u.covenant_id = c.covenant_id
+               AND ((u.template IS NOT NULL AND u.template <> '') OR (u.revealed_template IS NOT NULL AND u.revealed_template <> ''))),
+          (SELECT MAX(COALESCE(NULLIF(u.revealed_template, ''), u.template))
+             FROM covenant_utxos u
+             WHERE u.covenant_id = c.covenant_id
+               AND ((u.template IS NOT NULL AND u.template <> '') OR (u.revealed_template IS NOT NULL AND u.revealed_template <> ''))))
+ FROM covenants c";
+
+fn map_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CovenantSummary> {
+    Ok(CovenantSummary {
+        covenant_id: CovenantId(row.get(0)?),
+        genesis_txid: row.get::<_, Option<[u8; 32]>>(1)?.map(TxId),
+        genesis_daa: row.get(2)?,
+        lineage_complete: row.get(3)?,
+        event_count: row.get(4)?,
+        last_activity_daa: row.get(5)?,
+        live_utxos: row.get(6)?,
+        live_value: row.get(7)?,
+        born_value: row.get(8)?,
+        template: row.get(9)?,
+    })
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -374,6 +428,32 @@ fn inscription_kind(v: &serde_json::Value) -> String {
     label.chars().filter(|c| !c.is_control()).collect()
 }
 
+/// Classify a payload for the based-app tag buckets — the exact Rust port of
+/// the CASE the legacy `based_app_namespaces` scan computed per row:
+/// `json` for raw `{"…`, `jsonhex` for ASCII-hex `7b22…`, else `tag:<hex>` of
+/// the leading 4 bytes. Payloads shorter than 4 bytes stamp `''` (the legacy
+/// query's `length(payload) >= 4` filter excluded them).
+fn payload_tag(payload: &[u8]) -> String {
+    if payload.len() < 4 {
+        return String::new();
+    }
+    if payload.starts_with(b"{\"") {
+        "json".into()
+    } else if payload.starts_with(b"7b22") {
+        "jsonhex".into()
+    } else {
+        format!("tag:{}", hex::encode(&payload[..4]))
+    }
+}
+
+/// Decode a payload's inscription label for the precomputed stamp — the same
+/// first-512-bytes window + parse the legacy `inscription_breakdown` scan
+/// used per row. `''` when the payload isn't a parseable inscription.
+fn inscription_kind_of(payload: &[u8]) -> String {
+    let head = &payload[..payload.len().min(512)];
+    extract_inscription_json(head).map(|v| inscription_kind(&v)).unwrap_or_default()
+}
+
 /// Process-wide decode registry for write-time template recognition —
 /// construction derives the SilverScript skeletons once, and Registry is
 /// Send + Sync (its decoders are `Box<dyn StateDecoder: Send + Sync>`).
@@ -405,6 +485,8 @@ impl Store {
             "ALTER TABLE covenant_events ADD COLUMN lane_namespace TEXT",
             "ALTER TABLE covenant_utxos ADD COLUMN template TEXT",
             "ALTER TABLE covenant_utxos ADD COLUMN revealed_template TEXT",
+            "ALTER TABLE covenant_events ADD COLUMN payload_tag TEXT",
+            "ALTER TABLE covenant_events ADD COLUMN inscription_kind TEXT",
         ];
         for sql in &migrations {
             if let Err(e) = conn.execute(sql, []) {
@@ -432,6 +514,28 @@ impl Store {
             [],
         )
         .map_err(db_err)?;
+        // Payload-tag backfill todo (payload_tag and inscription_kind are
+        // always stamped together — insert path and backfill both set the
+        // pair — so one probe covers both columns).
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ev_payload_tag_todo ON covenant_events(payload_tag) WHERE payload IS NOT NULL AND payload_tag IS NULL",
+            [],
+        )
+        .map_err(db_err)?;
+        // Covering partial indexes so the lanes/inscriptions analytics are
+        // pure index-order GROUP BYs instead of full event-table scans. Their
+        // predicates must match the queries in based_app_namespaces /
+        // inscription_breakdown verbatim.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ev_tag_stats ON covenant_events(payload_tag, covenant_id) WHERE lane_namespace IS NULL AND payload_tag IS NOT NULL AND payload_tag <> ''",
+            [],
+        )
+        .map_err(db_err)?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ev_inscription_stats ON covenant_events(inscription_kind, covenant_id) WHERE inscription_kind IS NOT NULL AND inscription_kind <> ''",
+            [],
+        )
+        .map_err(db_err)?;
         // The grid orders by recency: without this index every page (and every
         // 20s snapshot rebuild) full-scans + temp-sorts the covenants table —
         // measured at ~6s per request at 168k covenants on the live worker.
@@ -455,6 +559,7 @@ impl Store {
         }
         // After the ownership check — a wrong-network database is never mutated.
         store.backfill_templates()?;
+        store.backfill_payload_tags()?;
         Ok(store)
     }
 
@@ -601,6 +706,68 @@ impl Store {
         Ok(())
     }
 
+    /// Stamp payload_tag + inscription_kind onto event rows that predate the
+    /// columns: one-shot after a migration, an O(1) probe against the empty
+    /// ev_payload_tag_todo partial index on every open after that. Both
+    /// columns are stamped together (see the todo index comment). Only the
+    /// first 512 payload bytes are fetched — the tag needs 4 and the
+    /// inscription decode always used the same 512-byte window.
+    fn backfill_payload_tags(&mut self) -> Result<()> {
+        const BATCH: i64 = 5000;
+        let mut stamped = 0u64;
+        loop {
+            let rows: Vec<(i64, Vec<u8>)> = {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT rowid, substr(payload, 1, 512) FROM covenant_events
+                         WHERE payload IS NOT NULL AND payload_tag IS NULL LIMIT ?1",
+                    )
+                    .map_err(db_err)?;
+                let collected = stmt
+                    .query_map([BATCH], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?;
+                collected
+            };
+            if rows.is_empty() {
+                break;
+            }
+            let tx = self.conn.transaction().map_err(db_err)?;
+            for (rowid, head) in &rows {
+                tx.execute(
+                    "UPDATE covenant_events SET payload_tag = ?1, inscription_kind = ?2 WHERE rowid = ?3",
+                    params![payload_tag(head), inscription_kind_of(head), rowid],
+                )
+                .map_err(db_err)?;
+            }
+            tx.commit().map_err(db_err)?;
+            stamped += rows.len() as u64;
+            if stamped % 50_000 == 0 {
+                tracing::info!("payload-tag backfill: {stamped} events stamped…");
+            }
+        }
+        if stamped > 0 {
+            tracing::info!("payload-tag backfill: {stamped} events stamped");
+        }
+        Ok(())
+    }
+
+    /// True while any payload-carrying event row still lacks its payload_tag /
+    /// inscription_kind stamp (an old binary wrote after this one's backfill,
+    /// or a backfill is racing on another connection). O(1) via the
+    /// ev_payload_tag_todo partial index.
+    fn payload_tags_pending(&self) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM covenant_events WHERE payload IS NOT NULL AND payload_tag IS NULL)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(db_err)
+    }
+
     /// Is this outpoint a live covenant UTXO? Returns its covenant id.
     pub fn live_covenant_utxo(&self, outpoint: &Outpoint) -> Result<Option<CovenantId>> {
         self.conn
@@ -709,11 +876,18 @@ impl Store {
                 ],
             )
             .map_err(db_err)?;
+            // Payload classification is stamped at write time (like the UTXO
+            // templates above) so the lanes/inscriptions analytics stay pure
+            // GROUP BYs at read time. NULL payload → NULL stamps.
+            let (tag, kind) = match &event.payload {
+                Some(p) => (Some(payload_tag(p)), Some(inscription_kind_of(p))),
+                None => (None, None),
+            };
             tx.execute(
-                "INSERT INTO covenant_events (covenant_id, seq, kind, txid, accepting_block, accepting_daa, payload, lane_namespace)
+                "INSERT INTO covenant_events (covenant_id, seq, kind, txid, accepting_block, accepting_daa, payload, lane_namespace, payload_tag, inscription_kind)
                  VALUES (?1,
                    (SELECT COALESCE(MAX(seq), -1) + 1 FROM covenant_events WHERE covenant_id = ?1),
-                   ?2, ?3, ?4, ?5, ?6, ?7)",
+                   ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     event.covenant_id.0.as_slice(),
                     event.kind.as_str(),
@@ -721,7 +895,9 @@ impl Store {
                     block.accepting_block.0.as_slice(),
                     block.accepting_daa,
                     event.payload,
-                    event.lane_namespace
+                    event.lane_namespace,
+                    tag,
+                    kind
                 ],
             )
             .map_err(db_err)?;
@@ -818,30 +994,11 @@ impl Store {
     }
 
     pub fn list(&self, limit: u64) -> Result<Vec<CovenantSummary>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT c.covenant_id, c.genesis_txid, c.genesis_daa, c.lineage_complete,
-                        c.event_count, c.last_activity_daa,
-                        (SELECT COUNT(*) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL),
-                        (SELECT COALESCE(SUM(value), 0) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL)
-                 FROM covenants c ORDER BY c.last_activity_daa DESC LIMIT ?1",
-            )
-            .map_err(db_err)?;
+        let sql = format!("{SUMMARY_SELECT} ORDER BY c.last_activity_daa DESC LIMIT ?1");
+        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
         let limit = limit.min(i64::MAX as u64) as i64;
         let rows = stmt
-            .query_map([limit], |row| {
-                Ok(CovenantSummary {
-                    covenant_id: CovenantId(row.get(0)?),
-                    genesis_txid: row.get::<_, Option<[u8; 32]>>(1)?.map(TxId),
-                    genesis_daa: row.get(2)?,
-                    lineage_complete: row.get(3)?,
-                    event_count: row.get(4)?,
-                    last_activity_daa: row.get(5)?,
-                    live_utxos: row.get(6)?,
-                    live_value: row.get(7)?,
-                })
-            })
+            .query_map([limit], map_summary_row)
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
@@ -854,45 +1011,28 @@ impl Store {
     /// `None` starts from the tip. The compound key means covenants sharing a
     /// boundary DAA page deterministically instead of being skipped.
     pub fn list_page(&self, after: Option<(u64, [u8; 32])>, limit: u64) -> Result<Vec<CovenantSummary>> {
-        let select = "SELECT c.covenant_id, c.genesis_txid, c.genesis_daa, c.lineage_complete,
-                        c.event_count, c.last_activity_daa,
-                        (SELECT COUNT(*) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL),
-                        (SELECT COALESCE(SUM(value), 0) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL)
-                 FROM covenants c";
         let order = "ORDER BY c.last_activity_daa DESC, c.covenant_id DESC";
         let limit = limit.min(i64::MAX as u64) as i64;
-        let map_row = |row: &rusqlite::Row| {
-            Ok(CovenantSummary {
-                covenant_id: CovenantId(row.get(0)?),
-                genesis_txid: row.get::<_, Option<[u8; 32]>>(1)?.map(TxId),
-                genesis_daa: row.get(2)?,
-                lineage_complete: row.get(3)?,
-                event_count: row.get(4)?,
-                last_activity_daa: row.get(5)?,
-                live_utxos: row.get(6)?,
-                live_value: row.get(7)?,
-            })
-        };
         let rows = match after {
             Some((daa, id)) => {
                 let sql = format!(
-                    "{select} WHERE c.last_activity_daa < ?1 \
+                    "{SUMMARY_SELECT} WHERE c.last_activity_daa < ?1 \
                        OR (c.last_activity_daa = ?1 AND c.covenant_id < ?2) {order} LIMIT ?3"
                 );
                 let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
                 let daa = daa.min(i64::MAX as u64) as i64;
                 let out = stmt
-                    .query_map(params![daa, id.as_slice(), limit], map_row)
+                    .query_map(params![daa, id.as_slice(), limit], map_summary_row)
                     .map_err(db_err)?
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(db_err)?;
                 out
             }
             None => {
-                let sql = format!("{select} {order} LIMIT ?1");
+                let sql = format!("{SUMMARY_SELECT} {order} LIMIT ?1");
                 let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
                 let out = stmt
-                    .query_map([limit], map_row)
+                    .query_map([limit], map_summary_row)
                     .map_err(db_err)?
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(db_err)?;
@@ -903,29 +1043,10 @@ impl Store {
     }
 
     pub fn summary(&self, id: &CovenantId) -> Result<Option<CovenantSummary>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT c.covenant_id, c.genesis_txid, c.genesis_daa, c.lineage_complete,
-                        c.event_count, c.last_activity_daa,
-                        (SELECT COUNT(*) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL),
-                        (SELECT COALESCE(SUM(value), 0) FROM covenant_utxos u WHERE u.covenant_id = c.covenant_id AND u.spent_block IS NULL)
-                 FROM covenants c WHERE c.covenant_id = ?1",
-            )
-            .map_err(db_err)?;
+        let sql = format!("{SUMMARY_SELECT} WHERE c.covenant_id = ?1");
+        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
         let row = stmt
-            .query_map([id.0.as_slice()], |row| {
-                Ok(CovenantSummary {
-                    covenant_id: CovenantId(row.get(0)?),
-                    genesis_txid: row.get::<_, Option<[u8; 32]>>(1)?.map(TxId),
-                    genesis_daa: row.get(2)?,
-                    lineage_complete: row.get(3)?,
-                    event_count: row.get(4)?,
-                    last_activity_daa: row.get(5)?,
-                    live_utxos: row.get(6)?,
-                    live_value: row.get(7)?,
-                })
-            })
+            .query_map([id.0.as_slice()], map_summary_row)
             .map_err(db_err)?
             .next()
             .transpose()
@@ -1262,7 +1383,44 @@ impl Store {
     /// its leading 4-byte tag. Returns (key, event_count, distinct_covenants);
     /// key is `json` / `jsonhex` / `tag:<hex>`. The worker turns these into
     /// human labels. Busiest first.
+    ///
+    /// Reads the precomputed `payload_tag` stamp (covering ev_tag_stats
+    /// index); while any row is still unstamped it falls back to the legacy
+    /// per-row scan so results never go partial mid-backfill.
     pub fn based_app_namespaces(&self) -> Result<Vec<(String, u64, u64)>> {
+        if self.payload_tags_pending()? {
+            return self.based_app_namespaces_scan();
+        }
+        let mut stmt = self
+            .conn
+            .prepare(
+                // The WHERE terms must stay verbatim-identical to the
+                // ev_tag_stats partial-index predicate. payload_tag <> ''
+                // encodes the legacy `payload IS NOT NULL AND
+                // length(payload) >= 4` filter; lane_namespace IS NULL keeps
+                // the strict complement with lane_namespaces().
+                "SELECT payload_tag,
+                        COUNT(*) AS events,
+                        COUNT(DISTINCT covenant_id) AS coins
+                 FROM covenant_events
+                 WHERE lane_namespace IS NULL AND payload_tag IS NOT NULL AND payload_tag <> ''
+                 GROUP BY payload_tag
+                 ORDER BY events DESC, payload_tag
+                 LIMIT 200",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64)))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Legacy per-row scan of [`based_app_namespaces`] — classifies payloads
+    /// with substr/hex on every call. Kept as the mid-backfill fallback (and
+    /// as the ground truth the tests compare the stamped path against).
+    fn based_app_namespaces_scan(&self) -> Result<Vec<(String, u64, u64)>> {
         let mut stmt = self
             .conn
             .prepare(
@@ -1320,7 +1478,42 @@ impl Store {
     /// ASCII-hex-encoded) and group by what they actually are — protocol/op/
     /// tick for KRC-20-style tokens, or the `t`/top-level type for others.
     /// Returns (kind_label, event_count, distinct_covenants), busiest first.
+    ///
+    /// Reads the precomputed `inscription_kind` stamp (covering
+    /// ev_inscription_stats index); while any row is still unstamped it falls
+    /// back to the legacy parse-every-payload scan so results never go
+    /// partial mid-backfill.
     pub fn inscription_breakdown(&self) -> Result<Vec<(String, u64, u64)>> {
+        if self.payload_tags_pending()? {
+            return self.inscription_breakdown_scan();
+        }
+        let mut stmt = self
+            .conn
+            .prepare(
+                // WHERE terms verbatim-identical to the ev_inscription_stats
+                // partial-index predicate; '' marks non-inscription payloads.
+                "SELECT inscription_kind,
+                        COUNT(*) AS events,
+                        COUNT(DISTINCT covenant_id) AS coins
+                 FROM covenant_events
+                 WHERE inscription_kind IS NOT NULL AND inscription_kind <> ''
+                 GROUP BY inscription_kind
+                 ORDER BY events DESC, inscription_kind
+                 LIMIT 60",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64)))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Legacy scan of [`inscription_breakdown`] — JSON-parses every candidate
+    /// payload on each call. Kept as the mid-backfill fallback (and as the
+    /// ground truth the tests compare the stamped path against).
+    fn inscription_breakdown_scan(&self) -> Result<Vec<(String, u64, u64)>> {
         let mut stmt = self
             .conn
             .prepare(
@@ -1704,11 +1897,15 @@ impl Store {
 mod tests {
     use super::*;
 
-    fn test_store(name: &str) -> Store {
+    fn test_store_path(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir()
             .join(format!("kascov-store-test-{}-{name}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        Store::open(&path, Network::Testnet(10)).unwrap()
+        path
+    }
+
+    fn test_store(name: &str) -> Store {
+        Store::open(&test_store_path(name), Network::Testnet(10)).unwrap()
     }
 
     fn block_with_events(hash: u8, daa: u64, events: Vec<(u8, EventKind, u8)>) -> BlockEvents {
@@ -1787,6 +1984,94 @@ mod tests {
         // generic tagged payload.
         let tags = store.based_app_namespaces().unwrap();
         assert_eq!(tags, vec![("tag:aabbccdd".to_string(), 1, 1)]);
+        // Everything was stamped at write time, so this went through the
+        // payload_tag fast path — and it must agree with the legacy scan.
+        assert!(!store.payload_tags_pending().unwrap());
+        assert_eq!(tags, store.based_app_namespaces_scan().unwrap());
+    }
+
+    /// The full stamp lifecycle: write-time stamping, the legacy-scan
+    /// fallback while stamps are missing, and the on-open backfill — the
+    /// grouped fast-path results must match the legacy scans at every step,
+    /// and the lane-vs-tag complement must survive the round trip.
+    #[test]
+    fn payload_tag_backfill_matches_scan() {
+        let path = test_store_path("tag-backfill");
+        let lane_ns = "01020304".to_string();
+        let mut lane_payload = hex::decode(&lane_ns).unwrap();
+        lane_payload.extend_from_slice(&[0u8; 16]);
+        let json = br#"{"p":"krc-20","op":"mint","tick":"KAS"}"#.to_vec();
+        let jsonhex = hex::encode(br#"{"t":"note"}"#).into_bytes();
+        let ev = |cov: u8, tx: u8, payload: Option<Vec<u8>>, lane: Option<String>| NewEvent {
+            covenant_id: CovenantId([cov; 32]),
+            kind: EventKind::Genesis,
+            txid: TxId([tx; 32]),
+            payload,
+            lane_namespace: lane,
+        };
+        let block = BlockEvents {
+            accepting_block: BlockHash([9; 32]),
+            accepting_daa: 100,
+            events: vec![
+                ev(1, 1, Some(lane_payload), Some(lane_ns.clone())),
+                ev(2, 2, Some(vec![0xaa, 0xbb, 0xcc, 0xdd, 0x01]), None),
+                ev(3, 3, Some(json.clone()), None),
+                ev(4, 4, Some(json), None),  // same kind, second covenant
+                ev(5, 5, Some(jsonhex), None),
+                ev(6, 6, Some(vec![0x01]), None), // < 4 bytes: excluded everywhere
+                ev(7, 7, None, None),
+            ],
+            created_utxos: vec![],
+            spent_utxos: vec![],
+        };
+        let mut store = Store::open(&path, Network::Testnet(10)).unwrap();
+        store.apply(&block, BlockHash([9; 32])).unwrap();
+
+        // The legacy scans leave the order of equal-count groups to SQLite's
+        // sorter / HashMap; the fast path breaks ties by key. Normalize scan
+        // output to the fast path's deterministic (events DESC, key) order.
+        let norm = |mut v: Vec<(String, u64, u64)>| {
+            v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            v
+        };
+
+        // Write-time stamps: fast path active and agreeing with the scans.
+        assert!(!store.payload_tags_pending().unwrap());
+        let tags = store.based_app_namespaces().unwrap();
+        let kinds = store.inscription_breakdown().unwrap();
+        assert_eq!(tags, norm(store.based_app_namespaces_scan().unwrap()));
+        assert_eq!(kinds, norm(store.inscription_breakdown_scan().unwrap()));
+        assert_eq!(
+            tags,
+            vec![
+                ("json".to_string(), 2, 2),
+                ("jsonhex".to_string(), 1, 1),
+                ("tag:aabbccdd".to_string(), 1, 1),
+            ]
+        );
+        assert_eq!(
+            kinds,
+            vec![("krc-20 · mint · KAS".to_string(), 2, 2), ("note".to_string(), 1, 1)]
+        );
+        // Complement: the lane row lives in lane_namespaces, never in tags.
+        assert_eq!(store.lane_namespaces().unwrap(), vec![(lane_ns, 1, 1)]);
+
+        // Wipe the stamps (rows as an old binary would have written them):
+        // both public fns must notice and fall back to the legacy scans.
+        store
+            .conn
+            .execute("UPDATE covenant_events SET payload_tag = NULL, inscription_kind = NULL", [])
+            .unwrap();
+        assert!(store.payload_tags_pending().unwrap());
+        assert_eq!(norm(store.based_app_namespaces().unwrap()), tags);
+        assert_eq!(norm(store.inscription_breakdown().unwrap()), kinds);
+
+        // Reopen: the backfill stamps everything and the fast path returns.
+        drop(store);
+        let store = Store::open(&path, Network::Testnet(10)).unwrap();
+        assert!(!store.payload_tags_pending().unwrap());
+        assert_eq!(store.based_app_namespaces().unwrap(), tags);
+        assert_eq!(store.inscription_breakdown().unwrap(), kinds);
     }
 
     #[test]
@@ -2141,5 +2426,90 @@ mod tests {
         }
         assert_eq!(flags.get(&CovenantId([0xA1; 32])), Some(&true));
         assert_eq!(flags.get(&CovenantId([0xB2; 32])), Some(&false));
+    }
+
+    /// The born_value/template columns folded into the summary row queries
+    /// must agree, row for row, with the standalone map builders they mirror
+    /// (`born_values()` / `covenant_templates()`) and the point query
+    /// `born_value()` — across `list()`, `list_page()` and `summary()`.
+    #[test]
+    fn folded_born_value_and_template_match_map_queries() {
+        let mut store = test_store("folded-summary");
+        let junk = vec![0x51, 0x51]; // OpTrue OpTrue — recognizes as '' (no template)
+        let utxo = |tx: u8, cov: u8, value: u64| NewUtxo {
+            outpoint: Outpoint { txid: TxId([tx; 32]), index: 0 },
+            covenant_id: CovenantId([cov; 32]),
+            value,
+            spk_version: 1,
+            spk_script: junk.clone(),
+        };
+        // genesis block: A1 born with two outputs (5+7), B2 with one (9), C3 bare
+        let mut b1 = block_with_events(
+            1,
+            100,
+            vec![
+                (0xA1, EventKind::Genesis, 0x01),
+                (0xB2, EventKind::Genesis, 0x02),
+                (0xC3, EventKind::Genesis, 0x07),
+            ],
+        );
+        b1.created_utxos = vec![utxo(0x01, 0xA1, 5), utxo(0x08, 0xA1, 7), utxo(0x02, 0xB2, 9)];
+        store.apply(&b1, BlockHash([1; 32])).unwrap();
+        // later block: A1 gains a post-genesis state (NOT born value), B2 is swept
+        let mut b2 = block_with_events(
+            2,
+            200,
+            vec![(0xA1, EventKind::Transition, 0x03), (0xB2, EventKind::Burn, 0x04)],
+        );
+        b2.created_utxos = vec![utxo(0x03, 0xA1, 11)];
+        b2.spent_utxos =
+            vec![(Outpoint { txid: TxId([0x02; 32]), index: 0 }, TxId([0x04; 32]), vec![], 0)];
+        store.apply(&b2, BlockHash([2; 32])).unwrap();
+
+        // Stamp templates directly to exercise every pick-rule branch:
+        // A1: a generic p2 state row plus a non-p2 reveal → the reveal wins;
+        // B2: p2-only → the any-template fallback picks it; C3: no rows → None.
+        // (A1's third row keeps the write-time '' stamp: excluded by the filter.)
+        for (tx, sql) in [
+            (0x01u8, "UPDATE covenant_utxos SET template = 'p2pk state' WHERE txid = ?1"),
+            (0x08, "UPDATE covenant_utxos SET template = 'p2sh commitment', revealed_template = 'mecenas' WHERE txid = ?1"),
+            (0x02, "UPDATE covenant_utxos SET template = 'p2sh commitment' WHERE txid = ?1"),
+        ] {
+            store.conn.execute(sql, [[tx; 32].as_slice()]).unwrap();
+        }
+
+        let born = store.born_values().unwrap();
+        let templates = store.covenant_templates().unwrap();
+        let listed = store.list(u64::MAX).unwrap();
+        assert_eq!(listed.len(), 3);
+        let paged = store.list_page(None, 10).unwrap();
+        assert_eq!(paged.len(), 3);
+        for c in listed.iter().chain(paged.iter()) {
+            assert_eq!(
+                c.born_value,
+                born.get(&c.covenant_id).copied().unwrap_or(0),
+                "born_value mismatch for {:?}", c.covenant_id
+            );
+            assert_eq!(
+                c.born_value,
+                store.born_value(&c.covenant_id).unwrap(),
+                "point born_value mismatch for {:?}", c.covenant_id
+            );
+            assert_eq!(
+                c.template.as_ref(),
+                templates.get(&c.covenant_id),
+                "template mismatch for {:?}", c.covenant_id
+            );
+            let s = store.summary(&c.covenant_id).unwrap().unwrap();
+            assert_eq!((s.born_value, &s.template), (c.born_value, &c.template));
+        }
+        // pinned expectations, so the folded columns and the maps can't both
+        // drift in the same direction unnoticed
+        let a1 = store.summary(&CovenantId([0xA1; 32])).unwrap().unwrap();
+        assert_eq!((a1.born_value, a1.template.as_deref()), (12, Some("mecenas")));
+        let b2 = store.summary(&CovenantId([0xB2; 32])).unwrap().unwrap();
+        assert_eq!((b2.born_value, b2.template.as_deref()), (9, Some("p2sh commitment")));
+        let c3 = store.summary(&CovenantId([0xC3; 32])).unwrap().unwrap();
+        assert_eq!((c3.born_value, c3.template), (0, None));
     }
 }

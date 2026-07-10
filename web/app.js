@@ -876,7 +876,9 @@ function renderAppGraph() {
   data.nodeCount = nodeCount;
   data.nodes = null;
   data.edges = null;
+  data.apps = null;
   data.ids = data.nx = data.ny = data.nr = data.nt = data.ns = data.na = null;
+  data.acx = data.acy = data.ar = data.asz = data.at = null;
   renderGalaxyLegend(data);
   // core tier on screen → pull the full set in behind it and hot-swap
   if (isCoreTier) upgradeGalaxy(network);

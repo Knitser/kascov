@@ -10,6 +10,12 @@
        apps:[{cx,cy,r,size,t}…],                  // one super-node per cluster
        nodes:[{id,t,s,x,y,r,a}…],                 // t=template idx (-1=none), s=1 active
        edges:[[i,j,w]…] }                          // pairwise, weighted
+   Columnar shape (?fmt=2, feature-detected by `ids`): nodes[] is replaced by
+   parallel arrays ids/nx/ny/nr/nt/ns/na that map 1:1 onto our typed arrays,
+   and apps[] by acx/acy/ar/asz/at (mirroring cx/cy/r/size/t).
+   Either shape may be the reduced core tier (tier:'core', big clusters only);
+   load(full, {preserveView:true}) hot-swaps the full set without moving the
+   camera (the worker keeps positions + bounds identical across tiers).
 */
 (() => {
   'use strict';
@@ -56,31 +62,64 @@
     let anim = null; // {t0, dur, from:{scale,panX,panY}, to:{…}}
 
     // ---- data load ----
-    function load(d) {
+    function load(d, o) {
+      // preserveView (tier hot-swap): keep the current pan/zoom — bounds are
+      // identical across tiers, so the fit wouldn't change anyway, and we
+      // must not yank the camera mid-interaction. Hover indices may not
+      // survive the swap, so they reset.
+      const keepView = !!(o && o.preserveView) && (N > 0 || apps.length > 0);
       data_reset(d);
-      resize(); // sizes the backing store, computes fit, draws
+      if (keepView) {
+        hoverNode = -1;
+        hoverApp = -1;
+        requestDraw();
+      } else {
+        resize(); // sizes the backing store, computes fit, draws
+      }
     }
 
     function data_reset(d) {
       templates = d.templates || [];
-      apps = d.apps || [];
       bounds = d.bounds || { minx: 0, miny: 0, w: 1, h: 1 };
-      const nodes = d.nodes || [];
-      N = nodes.length;
-      nx = new Float32Array(N);
-      ny = new Float32Array(N);
-      nr = new Float32Array(N);
-      nt = new Int16Array(N);
-      ns = new Uint8Array(N);
-      na = new Int32Array(N);
-      ids = new Array(N);
-      for (let i = 0; i < N; i++) {
-        const n = nodes[i];
-        nx[i] = n.x; ny[i] = n.y; nr[i] = n.r || 3;
-        nt[i] = n.t == null ? -1 : n.t;
-        ns[i] = n.s ? 1 : 0;
-        na[i] = n.a == null ? -1 : n.a;
-        ids[i] = n.id;
+      if (d.acx) {
+        // columnar apps (?fmt=2) — rebuild the small per-app objects locally
+        const M = d.acx.length;
+        apps = new Array(M);
+        for (let i = 0; i < M; i++) {
+          apps[i] = { cx: d.acx[i], cy: d.acy[i], r: d.ar[i], size: d.asz[i], t: d.at[i] };
+        }
+      } else {
+        apps = d.apps || [];
+      }
+      if (d.ids) {
+        // columnar payload (?fmt=2) — the parallel arrays map straight onto
+        // our typed arrays; ids is adopted as-is (no per-node objects at all)
+        N = d.ids.length;
+        ids = d.ids;
+        nx = Float32Array.from(d.nx || []);
+        ny = Float32Array.from(d.ny || []);
+        nr = Float32Array.from(d.nr || []);
+        nt = Int16Array.from(d.nt || []);
+        ns = Uint8Array.from(d.ns || []);
+        na = Int32Array.from(d.na || []);
+      } else {
+        const nodes = d.nodes || [];
+        N = nodes.length;
+        nx = new Float32Array(N);
+        ny = new Float32Array(N);
+        nr = new Float32Array(N);
+        nt = new Int16Array(N);
+        ns = new Uint8Array(N);
+        na = new Int32Array(N);
+        ids = new Array(N);
+        for (let i = 0; i < N; i++) {
+          const n = nodes[i];
+          nx[i] = n.x; ny[i] = n.y; nr[i] = n.r || 3;
+          nt[i] = n.t == null ? -1 : n.t;
+          ns[i] = n.s ? 1 : 0;
+          na[i] = n.a == null ? -1 : n.a;
+          ids[i] = n.id;
+        }
       }
       const es = d.edges || [];
       edges = new Int32Array(es.length * 3);
@@ -156,7 +195,12 @@
       // edges: the hovered app's connections always; all in-view edges when near
       if (edges && (near || hoverApp >= 0)) drawEdges(vx0, vy0, vx1, vy1, near);
 
-      // coin nodes (culled)
+      // coin nodes (culled). Labels only render deep-zoom AND spaced out —
+      // in dense mega-clusters hundreds of adjacent names smear into noise,
+      // so each label reserves a screen-space cell and neighbors stay quiet
+      // (hover still names any dot at any zoom).
+      const labels = zf >= 10;
+      const labelCells = labels ? new Set() : null;
       let drawnLabels = 0;
       for (let i = 0; i < N; i++) {
         if (!visible[i]) continue;
@@ -176,12 +220,16 @@
           ctx.stroke();
         }
         ctx.globalAlpha = 1;
-        // labels only when zoomed in close, and sparingly
-        if (near && drawnLabels < 120 && r >= 3) {
-          ctx.fillStyle = 'rgba(220,230,240,0.85)';
-          ctx.font = '11px ui-monospace, monospace';
-          ctx.fillText(friendlyName(ids[i]), px + r + 3, py + 3);
-          drawnLabels++;
+        if (labels && drawnLabels < 40 && r >= 3) {
+          /* one label per ~140x24px cell keeps names legible in dense areas */
+          const cell = `${Math.floor(px / 140)},${Math.floor(py / 24)}`;
+          if (!labelCells.has(cell)) {
+            labelCells.add(cell);
+            ctx.fillStyle = 'rgba(220,230,240,0.85)';
+            ctx.font = '11px ui-monospace, monospace';
+            ctx.fillText(friendlyName(ids[i]), px + r + 3, py + 3);
+            drawnLabels++;
+          }
         }
       }
       drawHud();
