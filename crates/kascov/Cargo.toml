@@ -28,3 +28,4 @@ hex = { workspace = true }
 blake2b_simd = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+resvg = { workspace = true }

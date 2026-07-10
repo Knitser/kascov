@@ -9,6 +9,18 @@
         "run": { "serviceId": "kascov-worker", "region": "europe-west4" }
       },
       {
+        "source": "/share/**",
+        "run": { "serviceId": "kascov-worker", "region": "europe-west4" }
+      },
+      {
+        "source": "/og/**",
+        "run": { "serviceId": "kascov-worker", "region": "europe-west4" }
+      },
+      {
+        "source": "/sitemap.xml",
+        "run": { "serviceId": "kascov-worker", "region": "europe-west4" }
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }

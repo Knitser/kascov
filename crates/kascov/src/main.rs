@@ -1,3 +1,5 @@
+mod og;
+
 use std::collections::{HashSet, VecDeque};
 
 use anyhow::{Context, Result};
@@ -1116,6 +1118,12 @@ async fn serve(
         .route("/data/{network}/activity.json", get(activity_handler))
         .route("/data/{network}/addr/{address}", get(addr_handler))
         .route("/data/{network}/stream", get(stream_handler))
+        // share surface: crawler-visible per-coin pages (the SPA is
+        // hash-routed, so scrapers never see #/… urls) + PNG OG cards
+        // (Facebook/X reject SVG og:images) + the sitemap that feeds them.
+        .route("/og/{network}/{id}", get(og_card_handler))
+        .route("/share/{network}/{id}", get(share_handler))
+        .route("/sitemap.xml", get(sitemap_handler))
         // compresses the small dynamic responses; the big cached bodies are
         // pre-gzipped (Content-Encoding already set, so this layer skips them)
         .layer(tower_http::compression::CompressionLayer::new())
@@ -2500,6 +2508,258 @@ async fn detail_handler(
         }
     })
     .await
+}
+
+/// Presentation bits shared by the /og card and the /share shell — computed
+/// from the same `CovenantSummary` the detail endpoint serves.
+struct ShareInfo {
+    name: String,
+    alive: bool,
+    balance_line: String,
+    born_line: String,
+    description: String,
+}
+
+fn share_info(
+    store: &kascov_core::store::Store,
+    summary: &kascov_core::store::CovenantSummary,
+    network: Network,
+) -> Result<ShareInfo> {
+    let name = og::friendly_name(&summary.covenant_id.to_string());
+    let alive = summary.live_utxos > 0;
+    let unit = match network {
+        Network::Mainnet => "KAS",
+        Network::Testnet(_) => "TKAS",
+    };
+    let balance_line = if alive {
+        format!("{} live on chain", og::fmt_amount(summary.live_value, unit))
+    } else {
+        format!("{} at birth · story ended", og::fmt_amount(summary.born_value, unit))
+    };
+    // DAA -> wall clock, anchored on the indexer's tip (~10 DAA per second;
+    // same estimate the frontend makes in daaToMs).
+    let born_date = match (store.tip()?, summary.genesis_daa) {
+        (Some((tip_daa, tip_ms)), Some(genesis_daa)) => {
+            Some(og::fmt_date(tip_ms.saturating_sub(tip_daa.saturating_sub(genesis_daa) * 100)))
+        }
+        _ => None,
+    };
+    let events = format!(
+        "{} event{}",
+        summary.event_count,
+        if summary.event_count == 1 { "" } else { "s" }
+    );
+    let born_line = match &born_date {
+        Some(date) => format!("born {date} · {events}"),
+        None => format!("adopted mid-life · {events}"),
+    };
+    let mut description = format!(
+        "{} smart coin on Kaspa {network} — {balance_line} · {born_line}",
+        if alive { "A living" } else { "A retired" },
+    );
+    if let Some(t) = summary.template.as_deref().filter(|t| !t.is_empty()) {
+        description.push_str(&format!(" · {t}"));
+    }
+    Ok(ShareInfo { name, alive, balance_line, born_line, description })
+}
+
+/// GET /og/{network}/{id}.png — the 1200x630 Open Graph card. Rendered on
+/// demand (SVG -> resvg -> PNG, embedded fonts); the CDN holds it for a week,
+/// so no in-process cache (serve_cached stores strings, this is bytes).
+async fn og_card_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let Ok(network) = net_name.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    let Some(id_hex) = id.strip_suffix(".png") else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    let Ok(covenant_id) = id_hex.parse::<kascov_core::CovenantId>() else {
+        return (StatusCode::BAD_REQUEST, "bad covenant id").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let Some(summary) = store.summary(&covenant_id)? else { return Ok(None) };
+        let info = share_info(&store, &summary, network)?;
+        let card = og::CardData {
+            id: covenant_id.to_string(),
+            name: info.name,
+            alive: info.alive,
+            balance_line: info.balance_line,
+            born_line: info.born_line,
+            network: network.to_string(),
+        };
+        let started = std::time::Instant::now();
+        let png = og::render_png(&og::card_svg(&card))?;
+        tracing::info!(
+            "og card {network}/{covenant_id}: {} bytes in {}ms",
+            png.len(),
+            started.elapsed().as_millis()
+        );
+        Ok(Some(png))
+    })
+    .await;
+    match result {
+        Ok(Ok(Some(png))) => (
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "public, max-age=86400, s-maxage=604800"),
+            ],
+            png,
+        )
+            .into_response(),
+        Ok(Ok(None)) => (StatusCode::NOT_FOUND, "unknown covenant").into_response(),
+        Ok(Err(err)) => {
+            tracing::error!("{network}: og card failed: {err}");
+            (StatusCode::SERVICE_UNAVAILABLE, "card unavailable").into_response()
+        }
+        Err(err) => {
+            tracing::error!("{network}: og card panicked: {err}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
+}
+
+/// GET /share/{network}/{id} — a ~1KB crawler-visible shell: OG/Twitter meta
+/// tags pointing at the PNG card, a canonical url, a visible fallback link,
+/// and a JS redirect into the hash-routed SPA for humans.
+async fn share_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let Ok(network) = net_name.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    let Ok(covenant_id) = id.parse::<kascov_core::CovenantId>() else {
+        return (StatusCode::BAD_REQUEST, "bad covenant id").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let Some(summary) = store.summary(&covenant_id)? else { return Ok(None) };
+        let info = share_info(&store, &summary, network)?;
+        // id is validated hex and the name comes from fixed word lists, but
+        // everything interpolated is escaped anyway — belt and braces.
+        let id = og::esc(&covenant_id.to_string());
+        let net = og::esc(&network.to_string());
+        let status = if info.alive { "alive" } else { "retired" };
+        let title = og::esc(&format!("{} ({status})", info.name));
+        let desc = og::esc(&info.description);
+        let page = og::esc(&format!("https://kascov.io/share/{network}/{covenant_id}"));
+        let image = og::esc(&format!("https://kascov.io/og/{network}/{covenant_id}.png"));
+        let app = format!("/#/{net}/c/{id}");
+        Ok(Some(format!(
+            r#"<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title} — kascov</title>
+<meta name="description" content="{desc}">
+<link rel="canonical" href="{page}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="kascov">
+<meta property="og:title" content="{title}">
+<meta property="og:description" content="{desc}">
+<meta property="og:url" content="{page}">
+<meta property="og:image" content="{image}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{title}">
+<meta name="twitter:description" content="{desc}">
+<meta name="twitter:image" content="{image}">
+</head><body style="background:#0a100f;color:#e9f1ef;font-family:system-ui,sans-serif;padding:2rem">
+<p>{title} — {desc}. <a href="{app}" style="color:#70c7ba">Open in the kascov explorer</a></p>
+<script>location.replace('{app}');</script>
+</body></html>
+"#
+        )))
+    })
+    .await;
+    match result {
+        Ok(Ok(Some(html))) => (
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "public, max-age=300, s-maxage=3600"),
+            ],
+            html,
+        )
+            .into_response(),
+        Ok(Ok(None)) => (StatusCode::NOT_FOUND, "unknown covenant").into_response(),
+        Ok(Err(err)) => {
+            tracing::error!("{network}: share page failed: {err}");
+            (StatusCode::SERVICE_UNAVAILABLE, "share page unavailable").into_response()
+        }
+        Err(err) => {
+            tracing::error!("{network}: share page panicked: {err}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
+}
+
+/// GET /sitemap.xml — the root plus the newest 5000 MAINNET coins as /share
+/// urls. Testnets are excluded on purpose: resets would churn the sitemap.
+async fn sitemap_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::header;
+
+    let include_mainnet = state.networks.contains(&Network::Mainnet);
+    let db = state.base_dir.join("mainnet.db");
+    let mut resp = serve_cached(
+        &state,
+        "sitemap".to_string(),
+        600,
+        "public, max-age=600, s-maxage=3600",
+        accepts_gzip(&headers),
+        move || {
+            let mut xml = String::from(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                 <urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n\
+                 <url><loc>https://kascov.io/</loc></url>\n",
+            );
+            if include_mainnet {
+                let store = kascov_core::store::Store::open(&db, Network::Mainnet)?;
+                for c in store.list_page(None, 5000)? {
+                    xml.push_str(&format!(
+                        "<url><loc>https://kascov.io/share/mainnet/{}</loc></url>\n",
+                        c.covenant_id
+                    ));
+                }
+            }
+            xml.push_str("</urlset>\n");
+            Ok(Some(xml))
+        },
+    )
+    .await;
+    // serve_cached stamps application/json on everything it serves; the body
+    // here is XML, so correct the label (success path only — error bodies are
+    // plain text and never cached).
+    if resp.status().is_success() {
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/xml; charset=utf-8"),
+        );
+    }
+    resp
 }
 
 async fn tx_handler(
