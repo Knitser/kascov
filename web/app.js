@@ -770,7 +770,12 @@ async function loadGalaxy(network) {
   const t = galaxyCache[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
   try {
-    const res = await fetch(`data/${network}/galaxy.json`, { cache: 'no-cache' });
+    /* first paint asks for the compact columnar core tier (?fmt=2&tier=core:
+       big clusters only, parallel arrays). An older worker ignores the params
+       and answers with the full legacy shape — galaxy.js feature-detects
+       either. When the reply IS the core tier, upgradeGalaxy() streams the
+       full set in behind it and hot-swaps without moving the camera. */
+    const res = await fetch(`data/${network}/galaxy.json?fmt=2&tier=core`, { cache: 'no-cache' });
     if (!res.ok) { galaxyCache[network] = { data: null, at: Date.now() }; return null; }
     const data = await res.json();
     galaxyCache[network] = { data, at: Date.now() };
@@ -778,6 +783,31 @@ async function loadGalaxy(network) {
   } catch (e) {
     return t ? t.data : null;
   }
+}
+
+/* core-tier first paint → fetch the full node set (?fmt=2) in the background
+   and hot-swap it into the live controller. Positions and bounds are
+   identical across tiers (worker invariant), so nothing jumps and the
+   current pan/zoom is preserved. */
+const galaxyUpgrading = {};
+function upgradeGalaxy(network) {
+  if (galaxyUpgrading[network]) return;
+  galaxyUpgrading[network] = true;
+  fetch(`data/${network}/galaxy.json?fmt=2`, { cache: 'no-cache' })
+    .then((res) => (res.ok ? res.json() : null))
+    .then((full) => {
+      delete galaxyUpgrading[network];
+      const count = full && (((full.ids && full.ids.length) || (full.nodes && full.nodes.length)) || 0);
+      if (!count) return;
+      if (galaxyCtrl && galaxyMounted === network) {
+        galaxyCtrl.load(full, { preserveView: true });
+      }
+      /* the cache entry keeps only the light fields (heavy arrays live in the
+         controller's typed arrays now) — record that it's the full set */
+      const entry = galaxyCache[network];
+      if (entry && entry.data) { entry.data.nodeCount = count; delete entry.data.tier; }
+    })
+    .catch(() => { delete galaxyUpgrading[network]; });
 }
 
 function renderGalaxyLegend(data) {
@@ -815,12 +845,16 @@ function renderAppGraph() {
   // galaxy.json missing/empty (e.g. an older worker without the endpoint):
   // hide the section rather than leave a blank canvas + empty legend.
   // nodeCount survives the heavy-array release below, so remounts still pass.
-  const nodeCount = data && (data.nodeCount || (data.nodes && data.nodes.length) || 0);
+  // A core-tier reply may carry zero nodes (all clusters small) while the
+  // network still has some — nodes_total is the full count in that case.
+  const nodeCount = data && (data.nodeCount || data.nodes_total ||
+    (data.nodes && data.nodes.length) || (data.ids && data.ids.length) || 0);
   if (!data || !nodeCount) { gsec.hidden = true; return; }
   if (galaxyCtrl && galaxyMounted === network) { galaxyCtrl.resize(); return; }
-  if (!data.nodes) {
-    // heavy arrays were released after an earlier mount (below) — a fresh
-    // mount (network switch back) needs them again; refetch once.
+  if (!data.nodes && !data.ids) {
+    // heavy arrays (row or columnar) were released after an earlier mount
+    // (below) — a fresh mount (network switch back) needs them again;
+    // refetch once.
     delete galaxyCache[network];
     loadGalaxy(network).then(() => {
       if (state.network === network && gsec.open && parseRoute().view === 'explore') renderAppGraph();
@@ -833,14 +867,19 @@ function renderAppGraph() {
     onPickCoin: (id) => { location.hash = `#/${network}/c/${id}`; },
   });
   galaxyMounted = network;
+  const isCoreTier = data.tier === 'core';
   galaxyCtrl.load(data);
-  // the controller copied everything into typed arrays — release the raw
-  // JSON arrays (multi-MB at production scale) instead of caching them twice.
-  // Keep the light fields (templates for the legend, nodeCount for the gate).
-  data.nodeCount = data.nodes.length;
+  // the controller adopted/copied everything into typed arrays — release the
+  // raw JSON arrays (multi-MB at production scale) instead of caching them
+  // twice. Keep the light fields (templates for the legend, nodeCount for
+  // the gate). Columnar payloads release their parallel arrays the same way.
+  data.nodeCount = nodeCount;
   data.nodes = null;
   data.edges = null;
+  data.ids = data.nx = data.ny = data.nr = data.nt = data.ns = data.na = null;
   renderGalaxyLegend(data);
+  // core tier on screen → pull the full set in behind it and hot-swap
+  if (isCoreTier) upgradeGalaxy(network);
 }
 
 async function loadFamilies(network) {
@@ -1894,7 +1933,13 @@ function analyticsFlowSvg(data) {
   for (let i = 0; i < n; i++) { cb += births[i]; cd += burns[i]; cumB[i] = cb; cumD[i] = cd; }
   const totalB = cb, totalD = cd;
   if (totalB === 0) return '';
-  const alive = Math.max(0, totalB - totalD);
+  /* The curves are EVENT flows — but a coin with several UTXOs can emit more
+     than one burn event, so "coins retired/alive" must come from the grid
+     stats, not event arithmetic (event math once claimed "0 alive" while 11k
+     coins lived). Fall back to event counts only when stats are absent. */
+  const stats = state.cache[state.network] && state.cache[state.network].data.stats;
+  const retiredCoins = stats && stats.burned != null ? stats.burned : totalD;
+  const alive = stats && stats.active != null ? stats.active : Math.max(0, totalB - totalD);
   const yMax = Math.max(1, totalB, totalD);
 
   const W = 720, H = 200, padT = 14, padB = 28, padX = 10;
@@ -1915,14 +1960,18 @@ function analyticsFlowSvg(data) {
       `${esc(fmtClock(activityMs(data, (first + i) * width), false, withDate))}</text>`;
   }).join('');
 
+  /* the shaded "still alive" band only makes sense while births lead burns;
+     with multi-UTXO coins the burn-event curve can cross above and the
+     polygon would invert into visual noise */
+  const area = totalD <= totalB ? `<polygon points="${areaPts}" fill="var(--accent)" opacity="0.12"/>` : '';
   return `<div class="an-legend" aria-hidden="true">` +
     `<span><i class="dot dot-born"></i>${fmtInt(totalB)} born</span>` +
     `<span><i class="dot" style="background:var(--accent)"></i>${fmtInt(alive)} alive</span>` +
-    `<span><i class="dot dot-burn"></i>${fmtInt(totalD)} retired</span></div>` +
+    `<span><i class="dot dot-burn"></i>${fmtInt(retiredCoins)} retired</span></div>` +
     `<svg viewBox="0 0 ${W} ${H}" class="an-svg" role="img" preserveAspectRatio="xMidYMid meet" ` +
-    `aria-label="Cumulative births versus retirements over ${esc(fmtSpan(spanMs))}: ${fmtInt(totalB)} born, ${fmtInt(totalD)} retired, ${fmtInt(alive)} alive">` +
+    `aria-label="Cumulative births versus retirement events over ${esc(fmtSpan(spanMs))}: ${fmtInt(totalB)} born, ${fmtInt(retiredCoins)} coins retired, ${fmtInt(alive)} alive">` +
     `<line x1="${padX}" y1="${(H - padB + 0.5).toFixed(1)}" x2="${W - padX}" y2="${(H - padB + 0.5).toFixed(1)}" class="pulse-axis"/>` +
-    `<polygon points="${areaPts}" fill="var(--accent)" opacity="0.12"/>` +
+    area +
     `<polyline points="${ptsB}" fill="none" stroke="var(--born)" stroke-width="2" stroke-linejoin="round"/>` +
     `<polyline points="${ptsD}" fill="none" stroke="var(--burn)" stroke-width="2" stroke-linejoin="round"/>` +
     ticks + `</svg>`;
@@ -2937,20 +2986,54 @@ function renderDetail(entry, covId, flashTx, program) {
     state.utxoAll = false;
   }
 
-  if (!gridRec) {
-    document.title = 'smart coin not found — kascov';
-    const other = network === 'mainnet' ? 'testnet-10' : 'mainnet';
-    view.innerHTML = `<a class="back" href="#/explore">← all smart coins</a>` +
-      `<div class="empty-card"><h2>We haven’t met this smart coin.</h2>` +
-      `<p class="dim">It isn’t in the ${esc(NETWORKS[network].label)} snapshot — it may live on the other network, or the id might be mistyped.</p>` +
-      `<button type="button" class="btn" data-action="network" data-network="${other}">look on ${other}</button></div>`;
+  const detMap = state.details[network];
+  const rec = detMap && detMap.get(covId);
+
+  if (!gridRec && !rec) {
+    /* Not in the loaded grid window — which no longer means unknown: the grid
+       paginates, so galaxy clicks, share links and deep links routinely point
+       past it. Ask the per-coin detail endpoint before declaring the coin
+       unknown; only a 404 from THERE earns the not-found card. */
+    const name = friendlyName(covId);
+    document.title = `${name} — kascov`;
+    view.innerHTML =
+      `<a class="back" href="#/explore">← all smart coins</a>` +
+      `<header class="detail-head">` +
+      `<span role="img" aria-label="avatar of ${esc(name)}">${avatarSvg(covId, 88)}</span>` +
+      `<div class="detail-id"><h1>${esc(name)}</h1>` +
+      `<p class="id-chip"><span class="mono">${esc(shortHex(covId, 10, 8))}</span>` +
+      `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(covId)}" aria-label="copy this coin’s full id">copy id</button></p>` +
+      `</div></header>` +
+      `<section aria-label="Life story"><h2>life story</h2>` +
+      `<p class="dim">reading this coin’s full story…</p></section>`;
+    loadDetail(network, covId)
+      .then(() => {
+        if (state.network === network && state.detailId === covId && parseRoute().view === 'detail') {
+          renderDetail(entry, covId, flashTx, program);
+        }
+      })
+      .catch((e) => {
+        if (state.detailId !== covId) return;
+        if (/404/.test(String(e && e.message))) {
+          document.title = 'smart coin not found — kascov';
+          const other = network === 'mainnet' ? 'testnet-10' : 'mainnet';
+          view.innerHTML = `<a class="back" href="#/explore">← all smart coins</a>` +
+            `<div class="empty-card"><h2>We haven’t met this smart coin.</h2>` +
+            `<p class="dim">kascov hasn’t seen it on ${esc(NETWORKS[network].label)} — it may live on the other network, or the id might be mistyped.</p>` +
+            `<button type="button" class="btn" data-action="network" data-network="${other}">look on ${other}</button></div>`;
+        } else {
+          const story = view.querySelector('section[aria-label="Life story"]');
+          if (story) {
+            story.innerHTML = `<h2>life story</h2><p class="dim">couldn’t load this coin’s story.</p>` +
+              `<button type="button" class="btn" data-action="retry-detail">try again</button>`;
+          }
+        }
+      });
     return;
   }
 
   /* the life story and scripts come from the per-coin detail endpoint —
      paint the header from the grid row instantly, fill in when it lands */
-  const detMap = state.details[network];
-  const rec = detMap && detMap.get(covId);
   if (!rec) {
     const alive0 = gridRec.c.status === 'active';
     const watched0 = state.watch.has(covId);
