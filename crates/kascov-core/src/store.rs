@@ -286,6 +286,22 @@ pub struct UtxoRow {
     pub spent_budget: Option<u16>,
 }
 
+/// A state UTXO some transaction spent, with the captured witness — what the
+/// real-spend debugger replays through the script engine.
+#[derive(Clone, Debug, Serialize)]
+pub struct SpentStateRow {
+    pub covenant_id: CovenantId,
+    pub outpoint: Outpoint,
+    pub value: u64,
+    pub spk_version: u16,
+    #[serde(serialize_with = "crate::detect::hex_ser")]
+    pub spk_script: Vec<u8>,
+    /// The spend's unlocking script, when captured.
+    pub spent_sig: Option<Vec<u8>>,
+    /// The spending input's v1 compute-budget commitment.
+    pub spent_budget: Option<u16>,
+}
+
 /// Events produced while processing one accepting chain block, applied atomically.
 pub struct BlockEvents {
     pub accepting_block: BlockHash,
@@ -542,6 +558,21 @@ impl Store {
         // The compound key also serves list_page's (daa, id) cursor seek.
         conn.execute(
             "CREATE INDEX IF NOT EXISTS cov_by_activity ON covenants(last_activity_daa DESC, covenant_id DESC)",
+            [],
+        )
+        .map_err(db_err)?;
+        // Per-lane dashboards: recent events + activity buckets for one
+        // namespace are index-order walks instead of event-table scans. The
+        // partial predicate keeps it tiny (lanes are rare next to events).
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ev_by_lane ON covenant_events(lane_namespace, accepting_daa) WHERE lane_namespace IS NOT NULL",
+            [],
+        )
+        .map_err(db_err)?;
+        // The real-spend debugger looks up state UTXOs by the txid that spent
+        // them — without this, every /debug/<txid> is a full utxo-table scan.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS utxo_by_spent_txid ON covenant_utxos(spent_txid) WHERE spent_txid IS NOT NULL",
             [],
         )
         .map_err(db_err)?;
@@ -1600,6 +1631,109 @@ impl Store {
         self.conn.query_row("SELECT COUNT(*) FROM webhook_subscriptions", [], |r| r.get::<_, i64>(0)).map(|n| n as u64).map_err(db_err)
     }
 
+    /// Like [`subscriptions_for`] but returns `(id, url)` — the delivery loop
+    /// needs the id to retire a subscription after repeated failures.
+    pub fn subscriptions_matching(&self, covenant_id: &[u8], kind: &str) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, url FROM webhook_subscriptions WHERE (covenant_id IS NULL OR covenant_id = ?1) AND (kind IS NULL OR kind = ?2)")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![covenant_id, kind], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(db_err)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(db_err)
+    }
+
+    /// One lane's headline numbers: (event count, distinct covenants).
+    /// Walks the ev_by_lane partial index.
+    pub fn lane_stats(&self, namespace: &str) -> Result<(u64, u64)> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT covenant_id)
+                 FROM covenant_events WHERE lane_namespace = ?1",
+                params![namespace],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
+            .map_err(db_err)
+    }
+
+    /// The newest events inside one lane namespace, newest first.
+    pub fn lane_recent(&self, namespace: &str, limit: u64) -> Result<Vec<GlobalEventRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT covenant_id, seq, kind, txid, accepting_daa
+                 FROM covenant_events WHERE lane_namespace = ?1
+                 ORDER BY accepting_daa DESC, rowid DESC LIMIT ?2",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![namespace, limit.min(i64::MAX as u64) as i64], |row| {
+                Ok(GlobalEventRow {
+                    covenant_id: CovenantId(row.get(0)?),
+                    seq: row.get(1)?,
+                    kind: row.get(2)?,
+                    txid: TxId(row.get(3)?),
+                    accepting_daa: row.get(4)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// One lane's event counts per fixed-width DAA bucket, oldest first.
+    /// Returns `(bucket_start_daa, count)`; empty buckets are omitted.
+    pub fn lane_activity(&self, namespace: &str, bucket_daa: u64) -> Result<Vec<(u64, u64)>> {
+        let width = bucket_daa.max(1);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT accepting_daa / ?2 AS bucket, COUNT(*)
+                 FROM covenant_events WHERE lane_namespace = ?1
+                 GROUP BY bucket ORDER BY bucket",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![namespace, width as i64], |row| {
+                Ok((row.get::<_, u64>(0)? * width, row.get::<_, i64>(1)? as u64))
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// The state UTXOs a transaction spent (with the captured unlocking
+    /// scripts) — the raw material of the real-spend debugger. Walks the
+    /// utxo_by_spent_txid partial index.
+    pub fn spent_by_txid(&self, txid: &TxId) -> Result<Vec<SpentStateRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT covenant_id, txid, output_index, value, spk_version, spk_script, spent_sig, spent_budget
+                 FROM covenant_utxos WHERE spent_txid = ?1 ORDER BY txid, output_index",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([txid.0.as_slice()], |row| {
+                Ok(SpentStateRow {
+                    covenant_id: CovenantId(row.get(0)?),
+                    outpoint: Outpoint { txid: TxId(row.get(1)?), index: row.get(2)? },
+                    value: row.get(3)?,
+                    spk_version: row.get(4)?,
+                    spk_script: row.get(5)?,
+                    spent_sig: row.get(6)?,
+                    spent_budget: row.get(7)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
     /// Transactions that touched more than one covenant, with the covenants
     /// they moved together — the raw edges of multi-contract "apps".
     /// (A single tx moving several covenants is a Toccata multi-contract flow.)
@@ -1683,6 +1817,55 @@ impl Store {
                 Err(e) => Some(Err(e)),
             })
             .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Every covenant id, nothing else — one cheap primary-key scan with none
+    /// of the per-row summary subselects. Feeds the worker's in-memory search
+    /// index (friendly names derive from the id alone).
+    pub fn covenant_ids(&self) -> Result<Vec<[u8; 32]>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT covenant_id FROM covenants")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, [u8; 32]>(0))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// COUNT(*) over covenants — the cheap staleness probe for caches built
+    /// from `covenant_ids()` (ids are append-only, so a stable count means a
+    /// stable id set).
+    pub fn covenant_count(&self) -> Result<u64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM covenants", [], |r| r.get(0))
+            .map_err(db_err)
+    }
+
+    /// Covenants whose 32-byte id lies in the inclusive `[lo, hi]` byte range,
+    /// id order. This is how a hex prefix search maps onto the BLOB primary
+    /// key: prefix bytes padded with 0x00 form `lo`, padded with 0xff form
+    /// `hi`, and BLOB comparison (memcmp) turns the BETWEEN into a bounded
+    /// index range scan.
+    pub fn covenants_by_id_range(
+        &self,
+        lo: &[u8; 32],
+        hi: &[u8; 32],
+        limit: u64,
+    ) -> Result<Vec<CovenantSummary>> {
+        let sql = format!(
+            "{SUMMARY_SELECT} WHERE c.covenant_id BETWEEN ?1 AND ?2 ORDER BY c.covenant_id LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
+        let limit = limit.min(i64::MAX as u64) as i64;
+        let rows = stmt
+            .query_map(params![lo.as_slice(), hi.as_slice(), limit], map_summary_row)
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
         Ok(rows)
     }
@@ -1925,6 +2108,49 @@ mod tests {
             created_utxos: vec![],
             spent_utxos: vec![],
         }
+    }
+
+    #[test]
+    fn id_range_scan_maps_hex_prefixes() {
+        let mut store = test_store("id-range");
+        // ids 0xA0.., 0xA1.., 0xA1(0xA1 everywhere), 0xB0..
+        let mut id_a1_zero = [0u8; 32];
+        id_a1_zero[0] = 0xa1;
+        let block = BlockEvents {
+            accepting_block: BlockHash([9; 32]),
+            accepting_daa: 100,
+            events: vec![
+                NewEvent { covenant_id: CovenantId([0xa0; 32]), kind: EventKind::Genesis, txid: TxId([1; 32]), payload: None, lane_namespace: None },
+                NewEvent { covenant_id: CovenantId(id_a1_zero), kind: EventKind::Genesis, txid: TxId([2; 32]), payload: None, lane_namespace: None },
+                NewEvent { covenant_id: CovenantId([0xa1; 32]), kind: EventKind::Genesis, txid: TxId([3; 32]), payload: None, lane_namespace: None },
+                NewEvent { covenant_id: CovenantId([0xb0; 32]), kind: EventKind::Genesis, txid: TxId([4; 32]), payload: None, lane_namespace: None },
+            ],
+            created_utxos: vec![],
+            spent_utxos: vec![],
+        };
+        store.apply(&block, BlockHash([9; 32])).unwrap();
+
+        assert_eq!(store.covenant_count().unwrap(), 4);
+        assert_eq!(store.covenant_ids().unwrap().len(), 4);
+
+        // prefix "a1" → [a1 00…00, a1 ff…ff]: both a1-led ids, in id order.
+        let mut lo = [0u8; 32];
+        lo[0] = 0xa1;
+        let mut hi = [0xffu8; 32];
+        hi[0] = 0xa1;
+        let rows = store.covenants_by_id_range(&lo, &hi, 20).unwrap();
+        let ids: Vec<[u8; 32]> = rows.iter().map(|r| r.covenant_id.0).collect();
+        assert_eq!(ids, vec![id_a1_zero, [0xa1; 32]]);
+
+        // limit is honored
+        assert_eq!(store.covenants_by_id_range(&lo, &hi, 1).unwrap().len(), 1);
+
+        // a range with no members is empty, not an error
+        let mut lo2 = [0u8; 32];
+        lo2[0] = 0xc0;
+        let mut hi2 = [0xffu8; 32];
+        hi2[0] = 0xc0;
+        assert!(store.covenants_by_id_range(&lo2, &hi2, 20).unwrap().is_empty());
     }
 
     #[test]
@@ -2511,5 +2737,79 @@ mod tests {
         assert_eq!((b2.born_value, b2.template.as_deref()), (9, Some("p2sh commitment")));
         let c3 = store.summary(&CovenantId([0xC3; 32])).unwrap().unwrap();
         assert_eq!((c3.born_value, c3.template), (0, None));
+    }
+
+    #[test]
+    fn lane_dashboard_buckets_and_recent() {
+        let mut store = test_store("lane-dashboard");
+        let ns = "deadbeef".to_string();
+        let mut lane_payload = hex::decode(&ns).unwrap();
+        lane_payload.extend_from_slice(&[0u8; 16]);
+        let ev = |cov: u8, tx: u8, lane: Option<&str>| NewEvent {
+            covenant_id: CovenantId([cov; 32]),
+            kind: EventKind::Transition,
+            txid: TxId([tx; 32]),
+            payload: Some(lane_payload.clone()),
+            lane_namespace: lane.map(str::to_string),
+        };
+        // daa 100: two lane events (two covenants) + one foreign-lane event.
+        let mut b1 = BlockEvents::empty(BlockHash([1; 32]));
+        b1.accepting_daa = 100;
+        b1.events = vec![ev(1, 1, Some(&ns)), ev(2, 2, Some(&ns)), ev(3, 3, Some("cafebabe"))];
+        store.apply(&b1, BlockHash([1; 32])).unwrap();
+        // daa 150: same bucket (width 100) as 100.
+        let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
+        b2.accepting_daa = 150;
+        b2.events = vec![ev(1, 4, Some(&ns))];
+        store.apply(&b2, BlockHash([2; 32])).unwrap();
+        // daa 250: next bucket. Also a non-lane event that must not count.
+        let mut b3 = BlockEvents::empty(BlockHash([3; 32]));
+        b3.accepting_daa = 250;
+        b3.events = vec![ev(2, 5, Some(&ns)), ev(9, 6, None)];
+        store.apply(&b3, BlockHash([3; 32])).unwrap();
+
+        assert_eq!(store.lane_stats(&ns).unwrap(), (4, 2));
+        assert_eq!(store.lane_activity(&ns, 100).unwrap(), vec![(100, 3), (200, 1)]);
+        let recent = store.lane_recent(&ns, 2).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].txid, TxId([5; 32])); // newest first
+        assert_eq!(recent[0].accepting_daa, 250);
+        // unknown lane: empty, not an error
+        assert_eq!(store.lane_stats("00000000").unwrap(), (0, 0));
+        assert!(store.lane_activity("00000000", 100).unwrap().is_empty());
+        assert!(store.lane_recent("00000000", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn spent_by_txid_returns_witness() {
+        let mut store = test_store("spent-by-txid");
+        let outpoint = Outpoint { txid: TxId([0x10; 32]), index: 0 };
+        let mut b1 = BlockEvents::empty(BlockHash([1; 32]));
+        b1.accepting_daa = 100;
+        b1.created_utxos = vec![NewUtxo {
+            outpoint,
+            covenant_id: CovenantId([0xA1; 32]),
+            value: 5_000,
+            spk_version: 1,
+            spk_script: vec![0xaa, 0x20],
+        }];
+        store.apply(&b1, BlockHash([1; 32])).unwrap();
+
+        let spender = TxId([0x20; 32]);
+        assert!(store.spent_by_txid(&spender).unwrap().is_empty());
+
+        let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
+        b2.accepting_daa = 200;
+        b2.spent_utxos = vec![(outpoint, spender, vec![0x01, 0x51], 60)];
+        store.apply(&b2, BlockHash([2; 32])).unwrap();
+
+        let rows = store.spent_by_txid(&spender).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].covenant_id, CovenantId([0xA1; 32]));
+        assert_eq!(rows[0].outpoint, outpoint);
+        assert_eq!(rows[0].value, 5_000);
+        assert_eq!(rows[0].spk_script, vec![0xaa, 0x20]);
+        assert_eq!(rows[0].spent_sig.as_deref(), Some([0x01, 0x51].as_slice()));
+        assert_eq!(rows[0].spent_budget, Some(60));
     }
 }

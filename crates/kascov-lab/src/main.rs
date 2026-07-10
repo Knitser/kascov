@@ -77,14 +77,19 @@ enum Command {
         value: u64,
     },
     /// Spend a deployed contract coin — reveals the program on-chain, so
-    /// kascov shows it as your named contract, permanently. v1 supports the
-    /// pure-signature entrypoints (Mecenas.reclaim, LastWill.cold/inherit):
-    /// they need only a signature from the matching key.
+    /// kascov shows it as your named contract, permanently. Pure-signature
+    /// entrypoints (Mecenas.reclaim, LastWill.cold/inherit) need only a
+    /// signature from the matching key and send the funds to --to.
+    /// Output-constrained entrypoints (Mecenas.receive, LastWill.refresh)
+    /// build the outputs the contract's introspection demands — the pledge
+    /// to the recipient / the timer reset — with a second plain input
+    /// paying the real network fee (like settle-escrow).
     Spend {
         /// Compiled contract hex of the deployed coin
         #[arg(long)]
         program_hex: String,
-        /// Which entrypoint to satisfy (reclaim | cold | inherit)
+        /// Which entrypoint to satisfy
+        /// (reclaim | cold | inherit | receive | refresh)
         #[arg(long, default_value = "reclaim")]
         entrypoint: String,
         /// Which covenant to spend, when several coins share this program

@@ -2173,6 +2173,7 @@ dependencies = [
  "kascov-sim",
  "kaspa-addresses",
  "kaspa-wrpc-client",
+ "reqwest",
  "resvg",
  "secp256k1",
  "serde",

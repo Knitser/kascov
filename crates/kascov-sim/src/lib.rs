@@ -264,6 +264,83 @@ pub fn simulate(req: &SimRequest) -> SimResult {
     }
 }
 
+/// A real on-chain spend replayed through the engine: the verdict plus the
+/// concrete per-opcode trace of the ACTUAL witness running against the ACTUAL
+/// locking script.
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugResult {
+    /// The replay ran (inputs were non-empty and an engine could be built).
+    pub ok: bool,
+    /// Did the replay execute cleanly inside the fabricated context?
+    pub pass: bool,
+    pub verdict: String,
+    /// Per-opcode execution steps (stacks as they stood before each opcode).
+    pub trace: Vec<TraceStep>,
+    /// Honest framing of the fabricated-context limitation.
+    pub note: String,
+}
+
+/// Replay a REAL captured spend — the state coin's locking script
+/// (`spk_version` + `spk_script`), its value, and the on-chain unlocking
+/// script (`sig_script`) — through Kaspa's `TxScriptEngine`, capturing the
+/// per-opcode trace. When the coin's covenant id is known, the fabricated
+/// UTXO carries it and output 0 is bound as a same-covenant continuation, so
+/// covenant introspection opcodes resolve instead of erroring immediately.
+///
+/// LIMITATION: the transaction context is fabricated (one input, one
+/// state-continuation output), not the original tx. Signature checks hash
+/// THIS tx, so an `OpCheckSig` that passed on-chain fails here; introspection
+/// opcodes (output amounts/scripts, covenant bindings) read the fabricated
+/// context and may diverge from the original too. What IS faithful: the
+/// witness data, the revealed program, the P2SH hash check, and every
+/// data/control-flow opcode in between — which is what the visual debugger
+/// walks.
+pub fn debug_witness(
+    spk_version: u16,
+    spk_script: &[u8],
+    sig_script: &[u8],
+    value: u64,
+    budget: Option<u16>,
+    covenant_id: Option<[u8; 32]>,
+) -> DebugResult {
+    const NOTE: &str = "replayed against a fabricated 1-in/1-out transaction — the witness, revealed program and data flow are the real on-chain bytes, but signature and introspection checks see this fabricated context, not the original tx, so they can fail here even though the spend passed on-chain";
+    if spk_script.is_empty() || sig_script.is_empty() {
+        return DebugResult {
+            ok: false,
+            pass: false,
+            verdict: "no locking or unlocking script to replay".into(),
+            trace: Vec::new(),
+            note: NOTE.into(),
+        };
+    }
+    let state_spk = ScriptPublicKey::from_vec(spk_version, spk_script.to_vec());
+    let outpoint = TransactionOutpoint::new(kaspa_consensus_core::Hash::from_bytes([0x11; 32]), 0);
+    let input = TransactionInput::new_with_mass(
+        outpoint,
+        sig_script.to_vec(),
+        0,
+        // The real budget commitment when captured; otherwise generous, so a
+        // fabricated budget shortfall never masks the rules under test.
+        ComputeCommit::ComputeBudget(ComputeBudget(budget.unwrap_or(u16::MAX))),
+    );
+    // A deterministic fabricated continuation: output 0 re-locks value−1000
+    // to the SAME state script, bound to the same covenant when known — the
+    // closest generic stand-in for "the state moves forward one step".
+    let cov_hash = covenant_id.map(kaspa_consensus_core::Hash::from_bytes);
+    let output = TransactionOutput::with_covenant(
+        value.saturating_sub(1000),
+        state_spk.clone(),
+        cov_hash.map(|id| kaspa_consensus_core::tx::CovenantBinding::new(0, id)),
+    );
+    let tx = Transaction::new(TX_VERSION_TOCCATA, vec![input], vec![output], 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+    // block_daa_score = 0 → the coin reads as maximally old, so relative
+    // timelocks don't mask the data flow under inspection.
+    let entry = UtxoEntry::new(value, state_spk, 0, false, cov_hash);
+    let mtx = MutableTransaction::with_entries(tx, vec![entry]);
+    let (pass, verdict, trace) = run_engine(&mtx, true);
+    DebugResult { ok: true, pass, verdict, trace, note: NOTE.into() }
+}
+
 /// Run a self-contained ZK verification script (public inputs + proof + vk +
 /// OpZkPrecompile) through the real engine — invoking the exact ark_groth16 /
 /// RISC-Zero verification a Kaspa node performs. Returns (valid, reason).
@@ -281,6 +358,13 @@ fn run_engine(mtx: &MutableTransaction<Transaction>, trace: bool) -> (bool, Stri
     let vtx = mtx.as_verifiable();
     let sig_cache = Cache::new(10_000);
     let entry = mtx.entries[0].clone().expect("entry present");
+    // The covenant introspection context a node would precompute for this tx
+    // (input/output indices per covenant id) — without it every OpCov* opcode
+    // sees an empty map and errors out immediately.
+    let cov_ctx = match kaspa_txscript::covenants::CovenantsContext::from_tx(&vtx) {
+        Ok(ctx) => ctx,
+        Err(e) => return (false, format!("covenant bindings invalid: {e}"), Vec::new()),
+    };
     let mut buf: Vec<u8> = Vec::new();
     let (pass, verdict) = {
         let mut vm = TxScriptEngine::from_transaction_input(
@@ -288,7 +372,7 @@ fn run_engine(mtx: &MutableTransaction<Transaction>, trace: bool) -> (bool, Stri
             &mtx.tx.inputs[0],
             0,
             &entry,
-            EngineCtx::new(&sig_cache).with_reused(&reused),
+            EngineCtx::new(&sig_cache).with_reused(&reused).with_covenants_ctx(&cov_ctx),
             EngineFlags { covenants_enabled: true, ..Default::default() },
         );
         if trace {
@@ -408,6 +492,44 @@ mod trace_tests {
         eprintln!("trace steps: {}", r.trace.len());
         eprintln!("first: {:?}", r.trace.first());
         eprintln!("last:  {:?}", r.trace.last());
+    }
+}
+
+#[cfg(test)]
+mod debug_witness_tests {
+    use super::*;
+
+    #[test]
+    fn replays_a_real_p2sh_witness_with_trace() {
+        // A seeded spent p2sh state: program = OpTrue, witness = push(program).
+        // The P2SH hash check and the program itself both run for real.
+        let program = vec![0x51]; // OpTrue
+        let spk = pay_to_script_hash_script(&program);
+        let sig_script = kascov_decode::encode_push(&program);
+        let r = debug_witness(spk.version(), spk.script(), &sig_script, 100_000_000, Some(60), Some([0xAB; 32]));
+        assert!(r.ok, "replay should run: {}", r.verdict);
+        assert!(r.pass, "OpTrue p2sh reveal should pass: {}", r.verdict);
+        assert!(!r.trace.is_empty(), "trace must be captured");
+        assert!(r.trace.iter().any(|s| s.op.contains("Op")), "trace has opcodes");
+    }
+
+    #[test]
+    fn wrong_program_fails_the_p2sh_hash_check() {
+        let program = vec![0x51];
+        let spk = pay_to_script_hash_script(&program);
+        // Reveal a DIFFERENT program than the one committed to.
+        let sig_script = kascov_decode::encode_push(&[0x52]);
+        let r = debug_witness(spk.version(), spk.script(), &sig_script, 100_000_000, None, None);
+        assert!(r.ok);
+        assert!(!r.pass, "a mismatched reveal must fail");
+    }
+
+    #[test]
+    fn empty_inputs_are_not_runnable() {
+        let r = debug_witness(1, &[], &[0x51], 1_000, None, None);
+        assert!(!r.ok);
+        let r = debug_witness(1, &[0x51], &[], 1_000, None, None);
+        assert!(!r.ok);
     }
 }
 

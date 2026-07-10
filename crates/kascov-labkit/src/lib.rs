@@ -78,20 +78,85 @@ pub fn p2sh_spk(program: &[u8]) -> ScriptPublicKey {
     pay_to_script_hash_script(program)
 }
 
-/// For a recognized contract + entrypoint: (selector to push, the committed
-/// hash field the signer must match). v1 = pure-signature entrypoints only.
-pub fn entrypoint_spec(template: &str, entrypoint: &str) -> Result<(Option<i64>, &'static str)> {
+/// How a recognized contract entrypoint is satisfied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntrypointPlan {
+    /// Pure-signature: witness = push(pk) ++ push(sig) ++ [push(selector)] ++
+    /// push(program); the contract doesn't constrain the outputs, so the
+    /// spender takes the funds wherever they like. `sequence` is the value
+    /// input 0 must carry when the entrypoint has an age gate
+    /// (`OpCheckSequenceVerify` compares the contract's period against the
+    /// input's sequence field), 0 otherwise.
+    PureSig { selector: Option<i64>, signer_field: &'static str, sequence: u64 },
+    /// Output-constrained: the contract introspects the outputs, so the tx is
+    /// built to the contract's own math (see `build_constrained_spend`).
+    /// `signer_field` is None when no signature is required at all (anyone
+    /// may trigger the entrypoint).
+    Constrained { kind: ConstrainedKind, selector: i64, signer_field: Option<&'static str> },
+}
+
+/// The output-constrained entrypoints the lab knows how to build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstrainedKind {
+    /// Mecenas.receive (selector 0, NO signature — anyone may trigger it once
+    /// `period` has elapsed): outputs[0] pays the recipient exactly `pledge`
+    /// and the remainder continues the covenant at outputs[1] (the same P2SH,
+    /// re-bound) — unless what would remain is ≤ pledge + 1000, in which case
+    /// outputs[0] takes everything − 1000 and the covenant ends.
+    MecenasReceive,
+    /// LastWill.refresh (selector 2, hot key): outputs[0] = the same P2SH
+    /// re-bound with value − 1000 — the "I'm alive" timer reset.
+    LastWillRefresh,
+}
+
+/// For a recognized contract + entrypoint: how to build a spend of it.
+/// The selector values mirror kascov-sim's `spec` and the compiled branch
+/// order in the skeleton dumps (LastWill: inherit=0, cold=1, refresh=2).
+pub fn entrypoint_spec(template: &str, entrypoint: &str) -> Result<EntrypointPlan> {
     let spec = match (template, entrypoint) {
-        ("SilverScript · Mecenas", "reclaim") => (Some(1), "funder_hash"),
-        ("SilverScript · LastWill", "cold") => (Some(1), "cold_hash"),
-        ("SilverScript · LastWill", "inherit") => (Some(0), "inheritor_hash"),
-        (_, "receive" | "refresh" | "spend") => bail!(
-            "entrypoint '{entrypoint}' constrains the transaction outputs (introspection) — \
-             not supported by this lab yet; use a pure-signature entrypoint (reclaim/cold/inherit)"
+        ("SilverScript · Mecenas", "reclaim") => {
+            EntrypointPlan::PureSig { selector: Some(1), signer_field: "funder_hash", sequence: 0 }
+        }
+        ("SilverScript · LastWill", "cold") => {
+            EntrypointPlan::PureSig { selector: Some(1), signer_field: "cold_hash", sequence: 0 }
+        }
+        // inherit is age-gated: the compiled branch runs `<180> OpCheckSequenceVerify`
+        // (the contract's fixed timer), so input 0 must state sequence ≥ 180.
+        ("SilverScript · LastWill", "inherit") => {
+            EntrypointPlan::PureSig { selector: Some(0), signer_field: "inheritor_hash", sequence: 180 }
+        }
+        ("SilverScript · Mecenas", "receive") => {
+            EntrypointPlan::Constrained { kind: ConstrainedKind::MecenasReceive, selector: 0, signer_field: None }
+        }
+        ("SilverScript · LastWill", "refresh") => {
+            EntrypointPlan::Constrained { kind: ConstrainedKind::LastWillRefresh, selector: 2, signer_field: Some("hot_hash") }
+        }
+        ("SilverScript · Escrow", "spend") => bail!(
+            "Escrow's spend entrypoint needs a --release-to party — use `settle-escrow` instead of `spend`"
         ),
         _ => bail!("don't know how to satisfy {template} . {entrypoint}"),
     };
     Ok(spec)
+}
+
+/// Decode a minimally-encoded script number (little-endian, MSB sign bit) —
+/// the encoding `kascov_decode::snum` and the SilverScript compiler emit for
+/// int fields like pledge/period.
+fn snum_to_i64(bytes: &[u8]) -> Result<i64> {
+    if bytes.len() > 8 {
+        bail!("script number wider than 8 bytes");
+    }
+    let mut v: u64 = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        v |= (b as u64) << (8 * i);
+    }
+    if let Some(&msb) = bytes.last() {
+        if msb & 0x80 != 0 {
+            let sign_bit = 0x80u64 << (8 * (bytes.len() - 1));
+            return Ok(-((v & !sign_bit) as i64));
+        }
+    }
+    i64::try_from(v).context("script number out of i64 range")
 }
 
 /// Load a 32-byte hex secret key from disk (creating a fresh one if `create`).
@@ -166,9 +231,10 @@ pub async fn balance(client: &KaspaRpcClient, keypair: &Keypair) -> Result<()> {
     Ok(())
 }
 
-struct SpendableUtxo {
-    outpoint: TransactionOutpoint,
-    entry: UtxoEntry,
+/// A UTXO by outpoint + entry — enough to build and sign a spend offline.
+pub struct SpendableUtxo {
+    pub outpoint: TransactionOutpoint,
+    pub entry: UtxoEntry,
 }
 
 /// The largest plain (non-covenant) UTXO on the key's address, in sompi —
@@ -542,11 +608,260 @@ fn parse_covenant(s: Option<&str>) -> Result<Option<Hash>> {
     s.map(|c| c.parse::<Hash>().context("bad covenant id")).transpose()
 }
 
-/// Spend a deployed contract coin by satisfying one of its pure-signature
-/// entrypoints. The unlocking script is the revealed contract program:
+/// Build (entirely offline) an output-constrained entrypoint spend, the
+/// settle_escrow pattern generalized: input 0 = the covenant state (P2SH
+/// reveal witness), input 1 = a plain fee UTXO owned by `keypair`, outputs
+/// shaped to satisfy the contract's own introspection math, and the covenant
+/// binding re-bound wherever the state continues. Pure function of its
+/// inputs — no network; the result is ready for `simulate_input` or submit.
+pub fn build_constrained_spend(
+    keypair: &Keypair,
+    program: &[u8],
+    entrypoint: &str,
+    state: &SpendableUtxo,
+    funding: &SpendableUtxo,
+    compute_budget: u16,
+) -> Result<MutableTransaction<Transaction>> {
+    let decoded = kascov_decode::Registry::default().decode(0, program);
+    let template = decoded.template.context("not a recognized contract")?;
+    let EntrypointPlan::Constrained { kind, selector, signer_field } = entrypoint_spec(template, entrypoint)? else {
+        bail!("{template} . {entrypoint} is a pure-signature entrypoint — `spend` handles it directly");
+    };
+    let field = |n: &str| {
+        decoded
+            .fields
+            .iter()
+            .find(|f| f.name == n)
+            .map(|f| f.value.clone())
+            .with_context(|| format!("{template} has no {n} field"))
+    };
+
+    // The signature gate, when the entrypoint demands one.
+    let pk = xonly(keypair);
+    if let Some(sf) = signer_field {
+        let committed = field(sf)?;
+        if committed != blake2b32(&pk).to_vec() {
+            bail!(
+                "this coin's {sf} is {}, but your key's blake2b is {} — you can't {entrypoint} it",
+                hex::encode(&committed),
+                hex::encode(blake2b32(&pk))
+            );
+        }
+    }
+
+    let state_value = state.entry.amount;
+    let state_spk = state.entry.script_public_key.clone();
+    if state_spk != p2sh_spk(program) {
+        bail!("the state UTXO's scriptPubKey isn't this program's P2SH commitment");
+    }
+    if state_value <= 1000 {
+        bail!("coin holds {state_value} sompi — not even the contract's own 1000-sompi fee");
+    }
+    // Continuation binding: where the state lives on, the covenant id rides
+    // along, authorized by input 0. (A stateless P2SH coin continues unbound.)
+    let binding = state.entry.covenant_id.map(|id| CovenantBinding::new(0, id));
+
+    // Fee-input math, same shape as settle_escrow: both inputs commit
+    // `compute_budget`; the plain change absorbs the 1000 sompi the contract's
+    // internal math already "spent", so the tx balances at exactly `fee`.
+    let fee = 100 * (2 * compute_budget as u64 * 100 + 5000) + 200_000;
+    if funding.entry.amount <= fee + 100_000 {
+        bail!(
+            "fee UTXO holds {} sompi — need more than {} (network fee + dust floor)",
+            funding.entry.amount,
+            fee + 100_000
+        );
+    }
+    let my_spk = pay_to_address_script(&address_of(keypair));
+    let fee_change = TransactionOutput::new(funding.entry.amount + 1000 - fee, my_spk);
+
+    // Outputs + input-0 sequence, per the contract's own math.
+    let mut sequence0 = 0u64;
+    let mut outputs: Vec<TransactionOutput> = Vec::new();
+    match kind {
+        ConstrainedKind::MecenasReceive => {
+            let recipient = field("recipient")?;
+            let pledge = snum_to_i64(&field("pledge")?)?;
+            let period = snum_to_i64(&field("period")?)?;
+            if pledge <= 0 || period < 0 {
+                bail!("nonsensical pledge ({pledge}) / period ({period})");
+            }
+            // `this.age >= period` compiled to OpCheckSequenceVerify: the tx
+            // states the coin's age via input 0's sequence field, and
+            // consensus holds the tx until the UTXO really is that old.
+            sequence0 = period as u64;
+            let recipient_addr = Address::new(Prefix::Testnet, AddrVersion::PubKey, &recipient);
+            let recipient_spk = pay_to_address_script(&recipient_addr);
+            // Contract math (all in its own units; the real network fee rides
+            // on input 1): change = value − pledge − 1000.
+            let change = state_value as i128 - pledge as i128 - 1000;
+            if change <= pledge as i128 + 1000 {
+                // Terminal payout: everything − 1000 to the recipient, the
+                // covenant ends.
+                outputs.push(TransactionOutput::new(state_value - 1000, recipient_spk));
+            } else {
+                // Pledge out, remainder continues the covenant at the same P2SH.
+                outputs.push(TransactionOutput::new(pledge as u64, recipient_spk));
+                outputs.push(TransactionOutput::with_covenant(change as u64, state_spk.clone(), binding));
+            }
+        }
+        ConstrainedKind::LastWillRefresh => {
+            // The whole coin (− the contract's 1000) stays at the same P2SH:
+            // a keep-alive that resets the inheritance timer.
+            outputs.push(TransactionOutput::with_covenant(state_value - 1000, state_spk.clone(), binding));
+        }
+    }
+    outputs.push(fee_change);
+
+    let covenant_input = TransactionInput::new_with_mass(
+        state.outpoint,
+        vec![],
+        sequence0,
+        ComputeCommit::ComputeBudget(ComputeBudget(compute_budget)),
+    );
+    let fee_input = TransactionInput::new_with_mass(
+        funding.outpoint,
+        vec![],
+        0,
+        ComputeCommit::ComputeBudget(ComputeBudget(compute_budget)),
+    );
+    let tx = Transaction::new(
+        TX_VERSION_TOCCATA,
+        vec![covenant_input, fee_input],
+        outputs,
+        0,
+        SUBNETWORK_ID_NATIVE,
+        0,
+        vec![],
+    );
+    let entries = vec![state.entry.clone(), funding.entry.clone()];
+    let mut mtx = MutableTransaction::with_entries(tx, entries);
+
+    let reused = SigHashReusedValuesUnsync::new();
+    // input 0: reveal witness — [push(pk) push(sig)] ++ push(selector) ++ push(program).
+    // Mecenas.receive takes no arguments at all (its branch only consumes the
+    // selector), so the witness is just selector + program.
+    let mut witness = Vec::new();
+    if signer_field.is_some() {
+        let h0 = calc_schnorr_signature_hash(&mtx.as_verifiable(), 0, SIG_HASH_ALL, &reused);
+        let sig0 = keypair.sign_schnorr(secp256k1::Message::from_digest_slice(h0.as_bytes().as_slice())?);
+        let mut sig0_arg = sig0.as_ref().to_vec();
+        sig0_arg.push(SIG_HASH_ALL.to_u8());
+        witness.extend_from_slice(&kascov_decode::encode_push(&pk));
+        witness.extend_from_slice(&kascov_decode::encode_push(&sig0_arg));
+    }
+    witness.extend_from_slice(&kascov_decode::encode_push(&kascov_decode::snum(selector)));
+    witness.extend_from_slice(&kascov_decode::encode_push(program));
+    mtx.tx.inputs[0].signature_script = witness;
+    // input 1: plain p2pk spend of the fee UTXO.
+    let h1 = calc_schnorr_signature_hash(&mtx.as_verifiable(), 1, SIG_HASH_ALL, &reused);
+    let sig1 = keypair.sign_schnorr(secp256k1::Message::from_digest_slice(h1.as_bytes().as_slice())?);
+    let mut sig1_full = sig1.as_ref().to_vec();
+    sig1_full.push(SIG_HASH_ALL.to_u8());
+    mtx.tx.inputs[1].signature_script = kascov_decode::encode_push(&sig1_full);
+
+    Ok(mtx)
+}
+
+/// Network half of an output-constrained spend: locate the live state UTXO
+/// and a plain fee UTXO, build via `build_constrained_spend`, then simulate
+/// or broadcast — `spend` dispatches here for receive/refresh.
+#[allow(clippy::too_many_arguments)]
+async fn spend_constrained(
+    client: &KaspaRpcClient,
+    keypair: &Keypair,
+    program: &[u8],
+    entrypoint: &str,
+    template: &str,
+    target_covenant: Option<Hash>,
+    to: Option<&str>,
+    compute_budget: u16,
+    dry_run: bool,
+) -> Result<()> {
+    if to.is_some() {
+        bail!("--to doesn't apply to {entrypoint} — the contract itself dictates where the funds go");
+    }
+
+    // The coin's live state UTXO, via its P2SH address.
+    let spk = p2sh_spk(program);
+    let p2sh_addr = extract_script_pub_key_address(&spk, Prefix::Testnet)
+        .map_err(|e| anyhow::anyhow!("cannot derive P2SH address: {e:?}"))?;
+    let states = client.get_utxos_by_addresses(vec![p2sh_addr.clone().into()]).await?;
+    let state = match target_covenant {
+        Some(t) => states
+            .iter()
+            .find(|u| u.utxo_entry.covenant_id == Some(t))
+            .with_context(|| format!("covenant {t} has no live UTXO at {p2sh_addr} (spent already?)"))?,
+        None => states
+            .iter()
+            .find(|u| u.utxo_entry.covenant_id.is_some())
+            .or_else(|| states.first())
+            .with_context(|| format!("no live state UTXO at {p2sh_addr} — is the coin deployed and unspent?"))?,
+    };
+    let state_utxo = SpendableUtxo {
+        outpoint: TransactionOutpoint::new(state.outpoint.transaction_id, state.outpoint.index),
+        entry: UtxoEntry::new(
+            state.utxo_entry.amount,
+            state.utxo_entry.script_public_key.clone(),
+            state.utxo_entry.block_daa_score,
+            state.utxo_entry.is_coinbase,
+            state.utxo_entry.covenant_id,
+        ),
+    };
+
+    // …and a plain UTXO of ours to pay the real network fee.
+    let my_addr = address_of(keypair);
+    let mine = client.get_utxos_by_addresses(vec![my_addr.clone().into()]).await?;
+    let fee = 100 * (2 * compute_budget as u64 * 100 + 5000) + 200_000;
+    let funding = mine
+        .iter()
+        .filter(|u| u.utxo_entry.covenant_id.is_none() && u.utxo_entry.amount > fee + 100_000)
+        .max_by_key(|u| u.utxo_entry.amount)
+        .with_context(|| format!("no fee-funding UTXO on {my_addr} — faucet it first"))?;
+    let funding_utxo = SpendableUtxo {
+        outpoint: TransactionOutpoint::new(funding.outpoint.transaction_id, funding.outpoint.index),
+        entry: UtxoEntry::new(
+            funding.utxo_entry.amount,
+            funding.utxo_entry.script_public_key.clone(),
+            funding.utxo_entry.block_daa_score,
+            funding.utxo_entry.is_coinbase,
+            None,
+        ),
+    };
+
+    let mtx = build_constrained_spend(keypair, program, entrypoint, &state_utxo, &funding_utxo, compute_budget)?;
+    let covenant_id_opt = state_utxo.entry.covenant_id;
+
+    if dry_run {
+        let (pass, verdict) = simulate_input(&mtx, 0);
+        println!("SIMULATE   {template} . {entrypoint}  (not broadcast)");
+        println!("           {}  {verdict}", if pass { "✓ PASS —" } else { "✗ FAIL —" });
+        for (i, out) in mtx.tx.outputs.iter().enumerate() {
+            let tag = if out.covenant.is_some() { " [covenant continues]" } else { "" };
+            println!("           output[{i}] {:.8} TKAS{tag}", out.value as f64 / 1e8);
+        }
+        return Ok(());
+    }
+    let txid = submit(client, &mtx.tx).await?;
+    println!("SPEND      {template} . {entrypoint}");
+    println!("           tx {txid}");
+    if let Some(id) = covenant_id_opt {
+        println!();
+        println!("the program is now revealed on-chain. give the indexer ~a minute, then:");
+        println!("  https://kascov-explorer.web.app/testnet-10/c/{id}");
+    }
+    Ok(())
+}
+
+/// Spend a deployed contract coin by satisfying one of its entrypoints.
+/// Pure-signature entrypoints (reclaim/cold/inherit) are handled inline: the
+/// unlocking script is the revealed contract program,
 ///   push(pubkey) ++ push(sig) ++ [push(selector)] ++ push(program)
-/// The spend reveals the program on-chain; kascov's indexer then shows the
-/// coin as its named contract for everyone, permanently.
+/// and the funds go wherever you point --to. Output-constrained entrypoints
+/// (Mecenas.receive, LastWill.refresh) dispatch to `spend_constrained`, which
+/// builds the outputs the contract's introspection demands. Either way the
+/// spend reveals the program on-chain; kascov's indexer then shows the coin
+/// as its named contract for everyone, permanently.
 pub async fn spend(
     client: &KaspaRpcClient,
     keypair: &Keypair,
@@ -565,7 +880,15 @@ pub async fn spend(
     let template = decoded.template.context(
         "this program isn't a recognized SilverScript contract — the lab only knows how to spend Mecenas/Escrow/LastWill",
     )?;
-    let (selector, signer_field) = entrypoint_spec(template, entrypoint)?;
+    let (selector, signer_field, sequence) = match entrypoint_spec(template, entrypoint)? {
+        EntrypointPlan::Constrained { .. } => {
+            return spend_constrained(
+                client, keypair, program, entrypoint, template, target_covenant, to, compute_budget, dry_run,
+            )
+            .await;
+        }
+        EntrypointPlan::PureSig { selector, signer_field, sequence } => (selector, signer_field, sequence),
+    };
 
     // The key that signs must be the one the contract checks for this entrypoint.
     let pk = xonly(keypair);
@@ -632,7 +955,7 @@ pub async fn spend(
     let input = TransactionInput::new_with_mass(
         outpoint,
         vec![],
-        0,
+        sequence, // age-gated entrypoints (inherit) state the coin's age here
         ComputeCommit::ComputeBudget(ComputeBudget(compute_budget)),
     );
     let output = TransactionOutput::new(value - fee, dest_spk);
@@ -726,4 +1049,256 @@ pub async fn contract_demo(client: &KaspaRpcClient, keypair: &Keypair, key_path:
     println!("done — the coin was born as a p2sh commitment and revealed itself as");
     println!("SilverScript · Mecenas when you reclaimed it. watch its story on kascov.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BUDGET: u16 = 40;
+    // Must match build_constrained_spend's fee formula.
+    const NET_FEE: u64 = 100 * (2 * BUDGET as u64 * 100 + 5000) + 200_000;
+
+    fn kp(byte: u8) -> Keypair {
+        Keypair::from_seckey_slice(SECP256K1, &[byte; 32]).unwrap()
+    }
+
+    fn state_utxo(program: &[u8], value: u64, covenant: Option<Hash>) -> SpendableUtxo {
+        SpendableUtxo {
+            outpoint: TransactionOutpoint::new(Hash::from_bytes([0x11; 32]), 0),
+            entry: UtxoEntry::new(value, p2sh_spk(program), 0, false, covenant),
+        }
+    }
+
+    fn fee_utxo(keypair: &Keypair, value: u64) -> SpendableUtxo {
+        SpendableUtxo {
+            outpoint: TransactionOutpoint::new(Hash::from_bytes([0x22; 32]), 1),
+            entry: UtxoEntry::new(value, pay_to_address_script(&address_of(keypair)), 0, false, None),
+        }
+    }
+
+    fn mecenas(recipient: &[u8; 32], funder_hash: &[u8; 32], pledge: i64, period: i64) -> Vec<u8> {
+        let skels = kascov_decode::silverscript_skeletons();
+        let skel = skels.iter().find(|s| s.name == "SilverScript · Mecenas").unwrap();
+        let pledge = kascov_decode::snum(pledge);
+        let period = kascov_decode::snum(period);
+        let args: Vec<(&str, &[u8])> = vec![
+            ("recipient", recipient),
+            ("funder_hash", funder_hash),
+            ("pledge", &pledge),
+            ("period", &period),
+        ];
+        skel.emit(&args).unwrap()
+    }
+
+    fn lastwill(inheritor_hash: &[u8; 32], cold_hash: &[u8; 32], hot_hash: &[u8; 32]) -> Vec<u8> {
+        let skels = kascov_decode::silverscript_skeletons();
+        let skel = skels.iter().find(|s| s.name == "SilverScript · LastWill").unwrap();
+        let args: Vec<(&str, &[u8])> = vec![
+            ("inheritor_hash", inheritor_hash),
+            ("cold_hash", cold_hash),
+            ("hot_hash", hot_hash),
+        ];
+        skel.emit(&args).unwrap()
+    }
+
+    #[test]
+    fn entrypoint_spec_maps_all_known_entrypoints() {
+        assert_eq!(
+            entrypoint_spec("SilverScript · Mecenas", "receive").unwrap(),
+            EntrypointPlan::Constrained { kind: ConstrainedKind::MecenasReceive, selector: 0, signer_field: None }
+        );
+        assert_eq!(
+            entrypoint_spec("SilverScript · LastWill", "refresh").unwrap(),
+            EntrypointPlan::Constrained {
+                kind: ConstrainedKind::LastWillRefresh,
+                selector: 2,
+                signer_field: Some("hot_hash")
+            }
+        );
+        assert_eq!(
+            entrypoint_spec("SilverScript · Mecenas", "reclaim").unwrap(),
+            EntrypointPlan::PureSig { selector: Some(1), signer_field: "funder_hash", sequence: 0 }
+        );
+        assert_eq!(
+            entrypoint_spec("SilverScript · LastWill", "inherit").unwrap(),
+            EntrypointPlan::PureSig { selector: Some(0), signer_field: "inheritor_hash", sequence: 180 }
+        );
+        assert!(entrypoint_spec("SilverScript · Escrow", "spend").unwrap_err().to_string().contains("settle-escrow"));
+        assert!(entrypoint_spec("SilverScript · Mecenas", "yolo").is_err());
+    }
+
+    #[test]
+    fn snum_round_trips() {
+        for v in [0i64, 1, 6, 180, 1000, 100_000_000, 250_000_000, i64::from(u32::MAX)] {
+            assert_eq!(snum_to_i64(&kascov_decode::snum(v)).unwrap(), v, "snum({v})");
+        }
+    }
+
+    #[test]
+    fn mecenas_receive_continuation_shape_and_engine_pass() {
+        let key = kp(7);
+        let recipient = xonly(&kp(9)); // some other party
+        let funder = [0xf0u8; 32];
+        let pledge: u64 = 100_000_000;
+        let period: u64 = 1000;
+        let program = mecenas(&recipient, &funder, pledge as i64, period as i64);
+        let id = Hash::from_bytes([0x42; 32]);
+
+        let cv: u64 = 1_000_000_000; // change = cv − pledge − 1000 > pledge + 1000 → covenant continues
+        let state = state_utxo(&program, cv, Some(id));
+        let funding = fee_utxo(&key, 50_000_000);
+        let mtx = build_constrained_spend(&key, &program, "receive", &state, &funding, BUDGET).unwrap();
+
+        // exact tx shape
+        assert_eq!(mtx.tx.inputs.len(), 2);
+        assert_eq!(mtx.tx.outputs.len(), 3);
+        // outputs[0]: exactly the pledge, P2PK(recipient), NOT covenant-bound
+        let recipient_spk =
+            pay_to_address_script(&Address::new(Prefix::Testnet, AddrVersion::PubKey, &recipient));
+        assert_eq!(mtx.tx.outputs[0].value, pledge);
+        assert_eq!(mtx.tx.outputs[0].script_public_key, recipient_spk);
+        assert!(mtx.tx.outputs[0].covenant.is_none());
+        // outputs[1]: the continuation — same P2SH, cv − pledge − 1000, re-bound
+        assert_eq!(mtx.tx.outputs[1].value, cv - pledge - 1000);
+        assert_eq!(mtx.tx.outputs[1].script_public_key, p2sh_spk(&program));
+        assert_eq!(mtx.tx.outputs[1].covenant, Some(CovenantBinding::new(0, id)));
+        // outputs[2]: fee change back to us; tx balances at exactly NET_FEE
+        assert_eq!(mtx.tx.outputs[2].value, 50_000_000 + 1000 - NET_FEE);
+        assert_eq!(mtx.tx.outputs[2].script_public_key, pay_to_address_script(&address_of(&key)));
+        let in_sum = cv + 50_000_000;
+        let out_sum: u64 = mtx.tx.outputs.iter().map(|o| o.value).sum();
+        assert_eq!(in_sum - out_sum, NET_FEE);
+        // input 0 states the coin's age (the compiled CSV gate) via sequence
+        assert_eq!(mtx.tx.inputs[0].sequence, period);
+        // receive takes no pk/sig: witness = push(selector 0) ++ push(program)
+        let mut expect = kascov_decode::encode_push(&kascov_decode::snum(0));
+        expect.extend_from_slice(&kascov_decode::encode_push(&program));
+        assert_eq!(mtx.tx.inputs[0].signature_script, expect);
+
+        // the real script engine accepts both inputs
+        let (pass0, verdict0) = simulate_input(&mtx, 0);
+        assert!(pass0, "covenant input rejected: {verdict0}");
+        let (pass1, verdict1) = simulate_input(&mtx, 1);
+        assert!(pass1, "fee input rejected: {verdict1}");
+    }
+
+    #[test]
+    fn mecenas_receive_terminal_pays_everything_minus_1000() {
+        let key = kp(7);
+        let recipient = xonly(&kp(9));
+        let pledge: u64 = 100_000_000;
+        let program = mecenas(&recipient, &[0xf0; 32], pledge as i64, 1000);
+
+        let cv = pledge + 1500; // change = 500 ≤ pledge + 1000 → terminal payout
+        let state = state_utxo(&program, cv, Some(Hash::from_bytes([0x42; 32])));
+        let funding = fee_utxo(&key, 50_000_000);
+        let mtx = build_constrained_spend(&key, &program, "receive", &state, &funding, BUDGET).unwrap();
+
+        assert_eq!(mtx.tx.outputs.len(), 2, "terminal receive: recipient payout + fee change only");
+        assert_eq!(mtx.tx.outputs[0].value, cv - 1000);
+        assert_eq!(
+            mtx.tx.outputs[0].script_public_key,
+            pay_to_address_script(&Address::new(Prefix::Testnet, AddrVersion::PubKey, &recipient))
+        );
+        assert!(mtx.tx.outputs.iter().all(|o| o.covenant.is_none()), "covenant must end here");
+        let (pass, verdict) = simulate_input(&mtx, 0);
+        assert!(pass, "terminal receive rejected: {verdict}");
+    }
+
+    #[test]
+    fn mecenas_receive_age_gate_is_modeled() {
+        let key = kp(7);
+        let recipient = xonly(&kp(9));
+        let program = mecenas(&recipient, &[0xf0; 32], 100_000_000, 1000);
+        let state = state_utxo(&program, 1_000_000_000, Some(Hash::from_bytes([0x42; 32])));
+        let funding = fee_utxo(&key, 50_000_000);
+        let mut mtx = build_constrained_spend(&key, &program, "receive", &state, &funding, BUDGET).unwrap();
+
+        // pretend the coin is younger than the period: CSV must reject
+        mtx.tx.inputs[0].sequence = 0;
+        let (pass, verdict) = simulate_input(&mtx, 0);
+        assert!(!pass, "engine accepted an under-age receive");
+        assert!(verdict.to_lowercase().contains("lock"), "unexpected rejection reason: {verdict}");
+    }
+
+    #[test]
+    fn mecenas_receive_wrong_payout_is_rejected_by_the_contract() {
+        let key = kp(7);
+        let recipient = xonly(&kp(9));
+        let program = mecenas(&recipient, &[0xf0; 32], 100_000_000, 1000);
+        let state = state_utxo(&program, 1_000_000_000, Some(Hash::from_bytes([0x42; 32])));
+        let funding = fee_utxo(&key, 50_000_000);
+        let mut mtx = build_constrained_spend(&key, &program, "receive", &state, &funding, BUDGET).unwrap();
+
+        // skim one sompi off the recipient — introspection must catch it
+        // (input 0 carries no signature, so this is purely the contract's check)
+        mtx.tx.outputs[0].value -= 1;
+        let (pass, _) = simulate_input(&mtx, 0);
+        assert!(!pass, "engine accepted a wrong pledge payout");
+    }
+
+    #[test]
+    fn lastwill_refresh_shape_and_engine_pass() {
+        let key = kp(7); // the hot key
+        let hot_hash = blake2b32(&xonly(&key));
+        let program = lastwill(&[0xaa; 32], &[0xbb; 32], &hot_hash);
+        let id = Hash::from_bytes([0x43; 32]);
+
+        let cv: u64 = 500_000_000;
+        let state = state_utxo(&program, cv, Some(id));
+        let funding = fee_utxo(&key, 50_000_000);
+        let mtx = build_constrained_spend(&key, &program, "refresh", &state, &funding, BUDGET).unwrap();
+
+        assert_eq!(mtx.tx.inputs.len(), 2);
+        assert_eq!(mtx.tx.outputs.len(), 2);
+        // outputs[0]: the same P2SH, cv − 1000, covenant re-bound
+        assert_eq!(mtx.tx.outputs[0].value, cv - 1000);
+        assert_eq!(mtx.tx.outputs[0].script_public_key, p2sh_spk(&program));
+        assert_eq!(mtx.tx.outputs[0].covenant, Some(CovenantBinding::new(0, id)));
+        // outputs[1]: fee change; balances at exactly NET_FEE
+        assert_eq!(mtx.tx.outputs[1].value, 50_000_000 + 1000 - NET_FEE);
+        let out_sum: u64 = mtx.tx.outputs.iter().map(|o| o.value).sum();
+        assert_eq!(cv + 50_000_000 - out_sum, NET_FEE);
+        // witness ends with push(selector 2) ++ push(program), after pk+sig
+        let mut suffix = kascov_decode::encode_push(&kascov_decode::snum(2));
+        suffix.extend_from_slice(&kascov_decode::encode_push(&program));
+        assert!(mtx.tx.inputs[0].signature_script.ends_with(&suffix));
+        assert_eq!(mtx.tx.inputs[0].signature_script[0], 0x20, "witness starts with the 32-byte pubkey push");
+
+        let (pass0, verdict0) = simulate_input(&mtx, 0);
+        assert!(pass0, "refresh rejected: {verdict0}");
+        let (pass1, verdict1) = simulate_input(&mtx, 1);
+        assert!(pass1, "fee input rejected: {verdict1}");
+    }
+
+    #[test]
+    fn lastwill_refresh_wrong_key_bails() {
+        let key = kp(7);
+        let program = lastwill(&[0xaa; 32], &[0xbb; 32], &[0xcc; 32]); // hot ≠ our key
+        let state = state_utxo(&program, 500_000_000, None);
+        let funding = fee_utxo(&key, 50_000_000);
+        let err = build_constrained_spend(&key, &program, "refresh", &state, &funding, BUDGET).unwrap_err();
+        assert!(err.to_string().contains("hot_hash"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn constrained_builder_rejects_pure_sig_entrypoints_and_bad_state() {
+        let key = kp(7);
+        let recipient = xonly(&kp(9));
+        let program = mecenas(&recipient, &[0xf0; 32], 100_000_000, 1000);
+        let state = state_utxo(&program, 1_000_000_000, None);
+        let funding = fee_utxo(&key, 50_000_000);
+        // reclaim is pure-signature — this builder must refuse it
+        assert!(build_constrained_spend(&key, &program, "reclaim", &state, &funding, BUDGET).is_err());
+        // state spk that isn't the program's P2SH must refuse
+        let wrong = SpendableUtxo {
+            outpoint: state.outpoint,
+            entry: UtxoEntry::new(1_000_000_000, pay_to_address_script(&address_of(&key)), 0, false, None),
+        };
+        assert!(build_constrained_spend(&key, &program, "receive", &wrong, &funding, BUDGET).is_err());
+        // fee UTXO too small must refuse
+        let broke = fee_utxo(&key, 100_000);
+        assert!(build_constrained_spend(&key, &program, "receive", &state, &broke, BUDGET).is_err());
+    }
 }
