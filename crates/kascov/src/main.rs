@@ -1030,6 +1030,11 @@ struct ServeState {
     /// builds OOM-killed the container). Different keys still build in
     /// parallel, so one slow network can't starve the others.
     build_locks: tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-network search index (friendly names + templates), keyed by the
+    /// network name. `(built_at, covenant_count, index)` — the count is the
+    /// cheap staleness probe (ids are append-only). A std Mutex because it's
+    /// taken inside spawn_blocking; held only for map lookups, never builds.
+    search_index: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, u64, std::sync::Arc<SearchIndex>)>>,
 }
 
 async fn serve(
@@ -1056,7 +1061,11 @@ async fn serve(
     for &network in &networks {
         let channel = LiveChannel::new();
         let db = base_dir.join(format!("{network}.db"));
-        tokio::spawn(follow_forever(network, cli.rpc.clone(), db, channel.tx.clone()));
+        // Webhook delivery rides the same event callback as SSE: the follower
+        // try_sends into this queue and a per-network task does the POSTs.
+        let (hook_tx, hook_rx) = tokio::sync::mpsc::channel::<HookEvent>(HOOK_QUEUE);
+        tokio::spawn(webhook_delivery_forever(network, db.clone(), hook_rx));
+        tokio::spawn(follow_forever(network, cli.rpc.clone(), db, channel.tx.clone(), hook_tx));
         live.push((network, channel));
     }
 
@@ -1070,7 +1079,51 @@ async fn serve(
         live,
         cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         build_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        search_index: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
+    // Galaxy keep-warm: a build costs ~5-8s at production scale, and the
+    // section reads as "broken" when a visitor pays that at the door (the
+    // user-reported 10s blank canvas). Rebuild the two variants the frontend
+    // actually requests (?fmt=2&tier=core for first paint, ?fmt=2 for the
+    // hot-swap) every ~4min per network so the cache never goes cold — data
+    // staleness ≤4min is fine for a network-wide visualization. Runs inside
+    // spawn_blocking; ~5% of one core on the busiest testnet.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(240));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await; // first tick fires immediately = boot prewarm
+                for &network in &state.networks {
+                    let db = state.base_dir.join(format!("{network}.db"));
+                    if !db.exists() {
+                        continue;
+                    }
+                    for core_only in [true, false] {
+                        let fmt = GalaxyFmt { columnar: true, core_only };
+                        let db = db.clone();
+                        let built = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+                            let store = kascov_core::store::Store::open(&db, network)?;
+                            Ok(serde_json::to_string(&build_galaxy_fmt(&store, network, fmt)?)?)
+                        })
+                        .await;
+                        match built {
+                            Ok(Ok(json)) => {
+                                let key = format!("{network}/galaxy?fmt=1&tier={}", core_only as u8);
+                                state.cache.lock().await.insert(
+                                    key,
+                                    (std::time::Instant::now(), std::sync::Arc::new(CachedBody::new(json))),
+                                );
+                            }
+                            Ok(Err(e)) => tracing::warn!("{network}: galaxy keep-warm build failed: {e}"),
+                            Err(e) => tracing::warn!("{network}: galaxy keep-warm task failed: {e}"),
+                        }
+                    }
+                }
+            }
+        });
+    }
     // Periodic cache sweep: the insert-time eviction only fires past 2048
     // entries, so expired multi-MB bodies (galaxy, grid pages) could otherwise
     // linger indefinitely on a quiet keyspace. Sweep every 60s; drop bodies
@@ -1104,6 +1157,9 @@ async fn serve(
         .route("/data/{network}/publish", post(publish_handler))
         .route("/data/{network}/verified/{hash}", get(verified_handler))
         .route("/data/{network}/subscribe", post(subscribe_handler))
+        .route("/data/{network}/unsubscribe", post(unsubscribe_handler))
+        .route("/data/{network}/lane/{ns}", get(lane_handler))
+        .route("/data/{network}/debug/{txid}", get(debug_handler))
         .route("/data/{file}", get(data_handler))
         .route("/data/{network}/c/{id}", get(detail_handler))
         .route("/data/{network}/tx/{txid}", get(tx_handler))
@@ -1117,6 +1173,7 @@ async fn serve(
         .route("/data/{network}/templates.json", get(templates_handler))
         .route("/data/{network}/activity.json", get(activity_handler))
         .route("/data/{network}/addr/{address}", get(addr_handler))
+        .route("/data/{network}/search", get(search_handler))
         .route("/data/{network}/stream", get(stream_handler))
         // share surface: crawler-visible per-coin pages (the SPA is
         // hash-routed, so scrapers never see #/… urls) + PNG OG cards
@@ -1158,6 +1215,7 @@ async fn follow_forever(
     rpc: Option<String>,
     db: std::path::PathBuf,
     live_tx: tokio::sync::broadcast::Sender<std::sync::Arc<str>>,
+    hook_tx: tokio::sync::mpsc::Sender<HookEvent>,
 ) {
     use kascov_core::sync::SyncUpdate;
     // Lives across reconnects: every sync failure breaks to a fresh session,
@@ -1199,6 +1257,16 @@ async fn follow_forever(
                         .to_string();
                         let _ = live_tx.send(msg.into());
                     }
+                    // Webhook queue: try_send so a slow/stalled delivery task
+                    // can never block the indexer — under backpressure (e.g.
+                    // the initial full sync) extra events are dropped, which
+                    // is fine: webhooks are hints, not a durable feed.
+                    let _ = hook_tx.try_send(HookEvent {
+                        covenant_id,
+                        kind: kind.as_str(),
+                        txid,
+                        accepting_daa,
+                    });
                 }
                 SyncUpdate::Reorg { rolled_back } => {
                     tracing::info!("{network}: reorg — rolled back {rolled_back} chain blocks");
@@ -1233,6 +1301,191 @@ async fn follow_forever(
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     break;
                 }
+            }
+        }
+    }
+}
+
+/// Webhook delivery queue depth per network. Full queue = events dropped
+/// (webhooks are best-effort hints; the polled feeds are the truth).
+const HOOK_QUEUE: usize = 1024;
+/// Consecutive delivery failures before a subscription is deleted.
+const WEBHOOK_MAX_FAILURES: u32 = 10;
+
+/// One covenant event bound for webhook delivery.
+struct HookEvent {
+    covenant_id: CovenantId,
+    kind: &'static str,
+    txid: TxId,
+    accepting_daa: u64,
+}
+
+/// Is this IP off-limits for webhook POSTs? Loopback, RFC1918 private,
+/// link-local (incl. the 169.254.169.254 cloud metadata endpoint), CGNAT,
+/// unspecified/broadcast, IPv6 unique-local (fc00::/7) and link-local
+/// (fe80::/10) — anything that would let a subscription URL reach the
+/// worker's own network instead of the public internet.
+fn ip_is_forbidden(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()          // 127.0.0.0/8
+                || v4.is_private()    // 10/8, 172.16/12, 192.168/16
+                || v4.is_link_local() // 169.254/16 (metadata service)
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || o[0] == 0 // 0.0.0.0/8 ("this network")
+                || (o[0] == 100 && (o[1] & 0xc0) == 64) // 100.64/10 CGNAT
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24 IETF
+        }
+        std::net::IpAddr::V6(v6) => {
+            // IPv4-mapped (::ffff:a.b.c.d) inherits the V4 verdict.
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return ip_is_forbidden(std::net::IpAddr::V4(mapped));
+            }
+            let seg = v6.segments();
+            v6.is_loopback()                  // ::1
+                || v6.is_unspecified()        // ::
+                || (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
+                || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link local
+        }
+    }
+}
+
+/// SSRF pre-flight for a webhook URL: http(s) only, and every address the
+/// host resolves to must be public. Blocking (std DNS) — call it off the
+/// async runtime. Best effort by nature: a DNS rebind between this check and
+/// reqwest's own resolution can still slip through, so the egress network
+/// policy remains the real backstop.
+fn webhook_target_allowed(url: &str) -> std::result::Result<(), &'static str> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "unparseable url")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("only http(s) urls are delivered");
+    }
+    let host = parsed.host_str().ok_or("url has no host")?;
+    let port = parsed.port_or_known_default().ok_or("url has no port")?;
+    // Literal IPs (host_str keeps IPv6 brackets) skip DNS entirely.
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return if ip_is_forbidden(ip) { Err("address is private/internal") } else { Ok(()) };
+    }
+    use std::net::ToSocketAddrs;
+    let mut addrs = (bare, port).to_socket_addrs().map_err(|_| "host does not resolve")?.peekable();
+    if addrs.peek().is_none() {
+        return Err("host does not resolve");
+    }
+    if addrs.any(|a| ip_is_forbidden(a.ip())) {
+        return Err("host resolves to a private/internal address");
+    }
+    Ok(())
+}
+
+/// POST one event to one subscriber: SSRF pre-flight, then up to 3 attempts
+/// with exponential backoff (1s, 2s between attempts). True iff a 2xx landed.
+async fn deliver_webhook(client: &reqwest::Client, url: &str, payload: &serde_json::Value) -> bool {
+    // The guard does blocking DNS — keep it off the runtime workers. A
+    // rejected target counts as a failure, so a private URL that slipped into
+    // the store retires itself after WEBHOOK_MAX_FAILURES events.
+    let check_url = url.to_string();
+    let allowed = tokio::task::spawn_blocking(move || webhook_target_allowed(&check_url))
+        .await
+        .unwrap_or(Err("ssrf guard panicked"));
+    if let Err(reason) = allowed {
+        tracing::warn!("webhook {url}: rejected ({reason})");
+        return false;
+    }
+    for attempt in 0u32..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(500u64 << attempt)).await;
+        }
+        match client.post(url).json(payload).send().await {
+            Ok(resp) if resp.status().is_success() => return true,
+            Ok(resp) => tracing::debug!("webhook {url}: attempt {} got {}", attempt + 1, resp.status()),
+            Err(err) => tracing::debug!("webhook {url}: attempt {} failed: {err}", attempt + 1),
+        }
+    }
+    false
+}
+
+/// Per-network webhook delivery: drain the event queue, look up matching
+/// subscriptions, POST to each. Sequential by design — a per-url failure
+/// counter (in memory; resets on restart) retires subscriptions that fail
+/// WEBHOOK_MAX_FAILURES deliveries in a row.
+async fn webhook_delivery_forever(
+    network: Network,
+    db: std::path::PathBuf,
+    mut rx: tokio::sync::mpsc::Receiver<HookEvent>,
+) {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("kascov-webhook/0.1")
+        .build()
+    {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!("{network}: webhook client unavailable ({err}) — delivery disabled");
+            return;
+        }
+    };
+    let mut failures: std::collections::HashMap<i64, u32> = std::collections::HashMap::new();
+    // "Anyone subscribed at all?" probe, cached 10s, so the initial full sync
+    // (hundreds of thousands of events) doesn't open the DB once per event.
+    let mut subs_probe: Option<(std::time::Instant, bool)> = None;
+    while let Some(ev) = rx.recv().await {
+        let stale = subs_probe.is_none_or(|(at, _)| at.elapsed() > std::time::Duration::from_secs(10));
+        if stale {
+            let db = db.clone();
+            let any = tokio::task::spawn_blocking(move || -> Result<bool> {
+                let store = Store::open(&db, network)?;
+                Ok(store.subscription_count()? > 0)
+            })
+            .await;
+            subs_probe = Some((std::time::Instant::now(), matches!(any, Ok(Ok(true)))));
+        }
+        if !subs_probe.map(|(_, any)| any).unwrap_or(false) {
+            continue;
+        }
+        let subs = {
+            let db = db.clone();
+            let cid = ev.covenant_id;
+            let kind = ev.kind;
+            tokio::task::spawn_blocking(move || -> Result<Vec<(i64, String)>> {
+                let store = Store::open(&db, network)?;
+                Ok(store.subscriptions_matching(cid.0.as_slice(), kind)?)
+            })
+            .await
+        };
+        let Ok(Ok(subs)) = subs else { continue };
+        if subs.is_empty() {
+            continue;
+        }
+        let payload = serde_json::json!({
+            "network": network.to_string(),
+            "covenant_id": ev.covenant_id,
+            "kind": ev.kind,
+            "txid": ev.txid,
+            "accepting_daa": ev.accepting_daa,
+        });
+        for (id, url) in subs {
+            if deliver_webhook(&client, &url, &payload).await {
+                failures.remove(&id);
+                continue;
+            }
+            let n = failures.entry(id).or_insert(0);
+            *n += 1;
+            if *n >= WEBHOOK_MAX_FAILURES {
+                failures.remove(&id);
+                let db = db.clone();
+                let deleted = tokio::task::spawn_blocking(move || -> Result<bool> {
+                    let store = Store::open(&db, network)?;
+                    Ok(store.delete_subscription(id)?)
+                })
+                .await;
+                tracing::warn!(
+                    "{network}: webhook subscription {id} ({url}) removed after {WEBHOOK_MAX_FAILURES} consecutive failures (deleted: {})",
+                    matches!(deleted, Ok(Ok(true)))
+                );
             }
         }
     }
@@ -2210,6 +2463,169 @@ async fn subscribe_handler(
     }
 }
 
+/// POST /data/{network}/unsubscribe — remove a webhook subscription by the id
+/// /subscribe returned.
+#[derive(serde::Deserialize)]
+struct UnsubscribeReq {
+    id: i64,
+}
+
+async fn unsubscribe_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<UnsubscribeReq>,
+) -> axum::response::Response {
+    let net = net_name.strip_suffix("/unsubscribe").unwrap_or(&net_name);
+    let Ok(network) = net.parse::<Network>() else {
+        return json_resp(serde_json::json!({ "ok": false, "error": "unknown network" }));
+    };
+    if !state.networks.contains(&network) {
+        return json_resp(serde_json::json!({ "ok": false, "error": "unknown network" }));
+    }
+    let db = state.base_dir.join(format!("{network}.db"));
+    let deleted = tokio::task::spawn_blocking(move || -> Result<bool> {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        Ok(store.delete_subscription(req.id)?)
+    })
+    .await;
+    match deleted {
+        Ok(Ok(deleted)) => json_resp(serde_json::json!({ "ok": true, "deleted": deleted })),
+        _ => json_resp(serde_json::json!({ "ok": false, "error": "couldn't unsubscribe" })),
+    }
+}
+
+/// GET /data/{network}/lane/{ns} — one KIP-21 lane namespace's dashboard:
+/// headline counts, the newest events, and a bucketed activity series.
+async fn lane_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, ns)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let Ok(network) = net_name.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+    // Namespaces are the 4-byte app tag as 8 lowercase hex chars — anything
+    // else is a client error (and never reaches the cache/DB).
+    let ns = ns.strip_suffix(".json").unwrap_or(&ns).to_ascii_lowercase();
+    if ns.len() != 8 || !ns.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return (StatusCode::BAD_REQUEST, "namespace must be 8 hex characters").into_response();
+    }
+    // 36_000 DAA ≈ 1 hour at 10 blocks/s — hour buckets over the lane's life.
+    const LANE_BUCKET_DAA: u64 = 36_000;
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/lane/{ns}");
+    let cc = "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
+    serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let (events, covenants) = store.lane_stats(&ns)?;
+        let recent: Vec<_> = store
+            .lane_recent(&ns, 50)?
+            .into_iter()
+            .map(|e| {
+                serde_json::json!({
+                    "covenant_id": e.covenant_id,
+                    "txid": e.txid,
+                    "accepting_daa": e.accepting_daa,
+                    "kind": e.kind,
+                })
+            })
+            .collect();
+        let activity: Vec<_> = store
+            .lane_activity(&ns, LANE_BUCKET_DAA)?
+            .into_iter()
+            .map(|(daa, count)| serde_json::json!({ "daa": daa, "count": count }))
+            .collect();
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "namespace": ns,
+            "generated_at_ms": now_ms(),
+            "events": events,
+            "covenants": covenants,
+            "recent": recent,
+            "activity": activity,
+            "bucket_daa": LANE_BUCKET_DAA,
+        }))?))
+    })
+    .await
+}
+
+/// GET /data/{network}/debug/{txid} — replay a REAL on-chain covenant spend:
+/// find the state UTXO this txid spent, take its locking script and the
+/// captured witness, and run them through the actual TxScriptEngine with a
+/// per-opcode trace. The tx context is fabricated (see kascov_sim::
+/// debug_witness), so signature/introspection checks may diverge from the
+/// original — the response says so.
+async fn debug_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, txid)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let Ok(network) = net_name.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+    let tx_hex = txid.strip_suffix(".json").unwrap_or(&txid);
+    let Ok(txid) = tx_hex.parse::<TxId>() else {
+        return (StatusCode::BAD_REQUEST, "bad txid").into_response();
+    };
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/debug/{txid}");
+    // The result is immutable once the spend is indexed — cache hard.
+    let cc = "public, max-age=300, s-maxage=3600, stale-while-revalidate=3600";
+    serve_cached(&state, key, 3600, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let spent = store.spent_by_txid(&txid)?;
+        // Prefer an input whose witness was captured (P2SH reveals).
+        let Some(row) = spent.iter().find(|r| r.spent_sig.as_ref().is_some_and(|s| !s.is_empty()))
+        else {
+            let reason = if spent.is_empty() {
+                "this txid didn't spend any covenant state we track"
+            } else {
+                "no unlocking script was captured for this spend"
+            };
+            return Ok(Some(serde_json::to_string(&serde_json::json!({
+                "ok": false,
+                "reason": reason,
+            }))?));
+        };
+        let sig = row.spent_sig.as_deref().unwrap_or_default();
+        let result = kascov_sim::debug_witness(
+            row.spk_version,
+            &row.spk_script,
+            sig,
+            row.value,
+            row.spent_budget,
+            Some(row.covenant_id.0),
+        );
+        // Bound the body: pathological programs could log tens of thousands
+        // of opcodes; the debugger UI walks far fewer.
+        let mut trace = result.trace;
+        let truncated = trace.len() > 2000;
+        trace.truncate(2000);
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "ok": result.ok,
+            "pass": result.pass,
+            "verdict": result.verdict,
+            "covenant_id": row.covenant_id,
+            "outpoint": { "txid": row.outpoint.txid, "index": row.outpoint.index },
+            "value": row.value,
+            "trace": trace,
+            "trace_truncated": truncated,
+            "note": result.note,
+        }))?))
+    })
+    .await
+}
+
 /// POST /data/{network}/simulate — run a hypothetical covenant spend through
 /// the real script engine (kascov-sim), off-chain. Network-agnostic (pure
 /// computation); the {network} segment just keeps it under the /data rewrite.
@@ -2467,7 +2883,11 @@ async fn galaxy_handler(
     } else {
         format!("{network}/galaxy")
     };
-    serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
+    // TTL 300s (not the usual 60): a galaxy build costs ~5-8s at 168k
+    // covenants, and the keep-warm task in serve() re-inserts the frontend's
+    // two variants every ~240s — so requests always land inside the fresh
+    // window instead of paying a cold rebuild at the door.
+    serve_cached(&state, key, 300, cc, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
         Ok(Some(serde_json::to_string(&build_galaxy_fmt(&store, network, fmt)?)?))
     })
@@ -3020,12 +3440,270 @@ async fn addr_handler(
     .await
 }
 
+/* --------------------------------------------------------------- search */
+
+/// In-memory search index for one network. Names sit in a Vec sorted by
+/// (name, id) so a prefix query is a binary search + forward walk; templates
+/// are the distinct recognized names, each with a capped sample of covenant
+/// ids (search shows "a few of this template", not all of them).
+struct SearchIndex {
+    names: Vec<(String, [u8; 32])>,
+    templates: Vec<(String, Vec<[u8; 32]>)>,
+}
+
+/// Ids a single template contributes to the index — search returns at most
+/// `SEARCH_MAX_LIMIT` rows total, so a handful per template is plenty.
+const SEARCH_TEMPLATE_IDS: usize = 32;
+const SEARCH_MAX_LIMIT: usize = 20;
+/// How long a cached index is trusted without even re-checking the covenant
+/// count. Past this we probe COUNT(*) and rebuild only if it moved.
+const SEARCH_INDEX_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn build_search_index(store: &kascov_core::store::Store) -> Result<SearchIndex> {
+    let ids = store.covenant_ids()?;
+    // friendly_name only reads the first 6 bytes; feeding it the full hex id
+    // keeps byte-parity with the frontend obvious.
+    let mut names: Vec<(String, [u8; 32])> = ids
+        .into_iter()
+        .map(|id| (og::friendly_name(&hex::encode(id)), id))
+        .collect();
+    names.sort_unstable();
+    let mut by_template: std::collections::HashMap<String, Vec<[u8; 32]>> =
+        std::collections::HashMap::new();
+    for (id, template) in store.covenant_templates()? {
+        let slot = by_template.entry(template.to_lowercase()).or_default();
+        if slot.len() < SEARCH_TEMPLATE_IDS {
+            slot.push(id.0);
+        }
+    }
+    let mut templates: Vec<(String, Vec<[u8; 32]>)> = by_template.into_iter().collect();
+    for (_, ids) in &mut templates {
+        ids.sort_unstable();
+    }
+    templates.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    Ok(SearchIndex { names, templates })
+}
+
+/// The current index for `network`, rebuilding at most when the covenant set
+/// actually grew. Runs on a blocking thread (SQLite + a ~168k-row sort).
+/// Two racing cold requests may both build; the loser's work is discarded —
+/// harmless, and it keeps the lock scope to plain map lookups.
+fn search_index_for(
+    state: &ServeState,
+    network: Network,
+    store: &kascov_core::store::Store,
+) -> Result<std::sync::Arc<SearchIndex>> {
+    let key = network.to_string();
+    if let Some((at, _, idx)) = state.search_index.lock().unwrap().get(&key) {
+        if at.elapsed() < SEARCH_INDEX_FRESH {
+            return Ok(idx.clone());
+        }
+    }
+    let count = store.covenant_count()?;
+    {
+        let mut cache = state.search_index.lock().unwrap();
+        if let Some(entry) = cache.get_mut(&key) {
+            if entry.1 == count {
+                entry.0 = std::time::Instant::now();
+                return Ok(entry.2.clone());
+            }
+        }
+    }
+    let built = std::sync::Arc::new(build_search_index(store)?);
+    state
+        .search_index
+        .lock()
+        .unwrap()
+        .insert(key, (std::time::Instant::now(), count, built.clone()));
+    Ok(built)
+}
+
+/// A hex prefix (even or odd nibble count) → the inclusive `[lo, hi]` 32-byte
+/// range it covers on the BLOB primary key. Even pairs pin whole bytes; an odd
+/// trailing nibble pins the high half of its byte (`lo = p·0`, `hi = p·f`).
+/// None when `q` isn't plausible hex or is longer than a full id.
+fn hex_prefix_range(q: &str) -> Option<([u8; 32], [u8; 32])> {
+    if q.is_empty() || q.len() > 64 || !q.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let nib = |b: u8| (b as char).to_digit(16).expect("hexdigit checked") as u8;
+    let bytes = q.as_bytes();
+    let mut lo = [0u8; 32];
+    let mut hi = [0xffu8; 32];
+    for i in 0..q.len() / 2 {
+        let v = (nib(bytes[2 * i]) << 4) | nib(bytes[2 * i + 1]);
+        lo[i] = v;
+        hi[i] = v;
+    }
+    if q.len() % 2 == 1 {
+        let i = q.len() / 2;
+        let v = nib(bytes[q.len() - 1]);
+        lo[i] = v << 4;
+        hi[i] = (v << 4) | 0x0f;
+    }
+    Some((lo, hi))
+}
+
+/// Ids whose friendly name starts with `q`, in name order.
+fn name_prefix_matches(names: &[(String, [u8; 32])], q: &str, limit: usize) -> Vec<[u8; 32]> {
+    let start = names.partition_point(|(n, _)| n.as_str() < q);
+    names[start..]
+        .iter()
+        .take_while(|(n, _)| n.starts_with(q))
+        .take(limit)
+        .map(|(_, id)| *id)
+        .collect()
+}
+
+/// GET /data/{network}/search?q=&limit= — find covenants by id hex prefix,
+/// friendly-name prefix, or template substring. Deliberately NOT behind
+/// serve_cached: `q` is an unbounded keyspace, so caching bodies per query
+/// would let strangers grow the cache without limit. Every path is either a
+/// bounded PK range scan or an in-memory probe, cheap enough to serve raw.
+async fn search_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let Ok(network) = net_name.parse::<Network>() else {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    if !state.networks.contains(&network) {
+        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    }
+    let q = params
+        .get("q")
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+    if q.is_empty() || q.len() > 64 {
+        return (StatusCode::BAD_REQUEST, "q must be 1..=64 characters").into_response();
+    }
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(10)
+        .clamp(1, SEARCH_MAX_LIMIT);
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    let state2 = state.clone();
+    let built = tokio::task::spawn_blocking(move || -> Result<String> {
+        use kascov_core::store::CovenantSummary;
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        let push = |s: &CovenantSummary, matched: &str, rows: &mut Vec<serde_json::Value>| {
+            let id_hex = s.covenant_id.to_string();
+            rows.push(serde_json::json!({
+                "id": id_hex,
+                "name": og::friendly_name(&id_hex),
+                "template": s.template,
+                "status": if s.live_utxos > 0 { "active" } else { "burned" },
+                "matched": matched,
+            }));
+        };
+
+        // (a) id hex prefix — a bounded range scan on the PK.
+        if q.len() >= 4 {
+            if let Some((lo, hi)) = hex_prefix_range(&q) {
+                for s in store.covenants_by_id_range(&lo, &hi, limit as u64)? {
+                    if seen.insert(s.covenant_id.0) {
+                        push(&s, "id", &mut rows);
+                    }
+                }
+            }
+        }
+        // (b) friendly-name prefix, (c) template substring — via the index.
+        if rows.len() < limit {
+            let idx = search_index_for(&state2, network, &store)?;
+            for id in name_prefix_matches(&idx.names, &q, limit - rows.len()) {
+                if !seen.contains(&id) {
+                    if let Some(s) = store.summary(&kascov_core::CovenantId(id))? {
+                        seen.insert(id);
+                        push(&s, "name", &mut rows);
+                    }
+                }
+            }
+            'templates: for (template, ids) in &idx.templates {
+                if !template.contains(&q) {
+                    continue;
+                }
+                for id in ids {
+                    if rows.len() >= limit {
+                        break 'templates;
+                    }
+                    if !seen.contains(id) {
+                        if let Some(s) = store.summary(&kascov_core::CovenantId(*id))? {
+                            seen.insert(*id);
+                            push(&s, "template", &mut rows);
+                        }
+                    }
+                }
+            }
+        }
+        let out = serde_json::json!({
+            "network": network.to_string(),
+            "query": q,
+            "results": rows,
+        });
+        Ok(serde_json::to_string(&out)?)
+    })
+    .await;
+
+    match built {
+        Ok(Ok(json)) => (
+            [
+                (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+                // short shared TTL: repeated keystrokes hit the CDN, but a
+                // hostile keyspace ages out fast
+                (header::CACHE_CONTROL, "public, max-age=15, s-maxage=60"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            json,
+        )
+            .into_response(),
+        Ok(Err(err)) => {
+            tracing::error!("{network}: search failed: {err}");
+            (StatusCode::SERVICE_UNAVAILABLE, "search unavailable").into_response()
+        }
+        Err(err) => {
+            tracing::error!("{network}: search task panicked: {err}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
+}
+
+/* --------------------------------------------------------------- stream */
+
+/// Parses the optional `?covenant=` SSE filter. `Ok(None)` when absent; the
+/// substring needle to probe fan-out messages with when it's a well-formed
+/// 64-hex id; `Err` on anything else (a typo'd filter must fail loudly, not
+/// silently stream the whole firehose).
+fn covenant_filter(param: Option<&str>) -> std::result::Result<Option<String>, ()> {
+    let Some(raw) = param else { return Ok(None) };
+    let id = raw.trim().to_ascii_lowercase();
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(());
+    }
+    Ok(Some(format!("\"covenant_id\":\"{id}\"")))
+}
+
+/// Substring probe, no JSON parse: fan-out messages are compact serde_json
+/// strings, so a covenant event embeds `"covenant_id":"<hex>"` verbatim.
+/// Non-covenant messages (reorg notices) don't match a filtered stream.
+fn sse_event_matches(msg: &str, needle: Option<&str>) -> bool {
+    needle.map_or(true, |n| msg.contains(n))
+}
+
 /// Push covenant events over SSE the moment the follower indexes them.
 /// Hints only — no replay, no backlog, lagged subscribers skip ahead;
 /// consumers confirm state through the polled feeds.
 async fn stream_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path(net_name): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
     use axum::http::{header, HeaderName, HeaderValue, StatusCode};
     use axum::response::sse::{Event, KeepAlive, Sse};
@@ -3034,6 +3712,10 @@ async fn stream_handler(
 
     let Ok(network) = net_name.parse::<Network>() else {
         return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    };
+    // Optional ?covenant=<64 hex>: narrow the fan-out to one coin's events.
+    let Ok(needle) = covenant_filter(params.get("covenant").map(String::as_str)) else {
+        return (StatusCode::BAD_REQUEST, "bad covenant filter (want 64 hex chars)").into_response();
     };
     let Some((_, channel)) = state.live.iter().find(|(n, _)| *n == network) else {
         return (StatusCode::NOT_FOUND, "unknown network").into_response();
@@ -3053,12 +3735,17 @@ async fn stream_handler(
     // TCP buffers without erroring) — after the deadline the stream ends
     // cleanly and well-behaved clients (EventSource) reconnect on their own.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
-    let stream = futures::stream::unfold((rx, slot), move |(mut rx, slot)| async move {
+    let stream = futures::stream::unfold((rx, slot, needle), move |(mut rx, slot, needle)| async move {
         loop {
             match tokio::time::timeout_at(deadline, rx.recv()).await {
                 Ok(Ok(msg)) => {
+                    // Filtered streams drop non-matching events pre-emit; the
+                    // keep-alive layer still shows the client a live socket.
+                    if !sse_event_matches(&msg, needle.as_deref()) {
+                        continue;
+                    }
                     let event = Event::default().data(&*msg);
-                    return Some((Ok::<_, std::convert::Infallible>(event), (rx, slot)));
+                    return Some((Ok::<_, std::convert::Infallible>(event), (rx, slot, needle)));
                 }
                 // Fell behind the buffer: skip ahead — clients resync by polling.
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
@@ -3079,6 +3766,93 @@ async fn stream_handler(
     // ask proxies not to buffer (nginx-style hint; Firebase may ignore it)
     headers.insert(HeaderName::from_static("x-accel-buffering"), HeaderValue::from_static("no"));
     resp
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn hex_prefix_range_even_and_odd() {
+        // even prefix pins whole bytes
+        let (lo, hi) = hex_prefix_range("a1b2").unwrap();
+        assert_eq!(&lo[..2], &[0xa1, 0xb2]);
+        assert_eq!(&hi[..2], &[0xa1, 0xb2]);
+        assert!(lo[2..].iter().all(|&b| b == 0x00));
+        assert!(hi[2..].iter().all(|&b| b == 0xff));
+        // odd trailing nibble pins the high half of its byte
+        let (lo, hi) = hex_prefix_range("a1b").unwrap();
+        assert_eq!(&lo[..2], &[0xa1, 0xb0]);
+        assert_eq!(&hi[..2], &[0xa1, 0xbf]);
+        // a full 64-char id degenerates to a point range
+        let full = "ff".repeat(32);
+        let (lo, hi) = hex_prefix_range(&full).unwrap();
+        assert_eq!(lo, [0xff; 32]);
+        assert_eq!(hi, [0xff; 32]);
+        // junk is rejected
+        assert!(hex_prefix_range("").is_none());
+        assert!(hex_prefix_range("xyz1").is_none());
+        assert!(hex_prefix_range("brave-teal").is_none());
+        assert!(hex_prefix_range(&"a".repeat(65)).is_none());
+    }
+
+    #[test]
+    fn name_prefix_binary_search() {
+        let names = vec![
+            ("brave-teal-otter".to_string(), [1u8; 32]),
+            ("brave-teal-owl".to_string(), [2u8; 32]),
+            ("quiet-slate-tapir".to_string(), [3u8; 32]),
+        ];
+        assert_eq!(name_prefix_matches(&names, "brave-te", 10).len(), 2);
+        assert_eq!(name_prefix_matches(&names, "brave-te", 1).len(), 1);
+        assert_eq!(name_prefix_matches(&names, "quiet", 10), vec![[3u8; 32]]);
+        assert!(name_prefix_matches(&names, "zesty", 10).is_empty());
+        // prefix past the last entry must not walk off the slice
+        assert!(name_prefix_matches(&names, "quiet-slate-tapirx", 10).is_empty());
+    }
+
+    #[test]
+    fn covenant_filter_parses_and_rejects() {
+        assert_eq!(covenant_filter(None), Ok(None));
+        let id = "ab".repeat(32);
+        assert_eq!(
+            covenant_filter(Some(&id)),
+            Ok(Some(format!("\"covenant_id\":\"{id}\"")))
+        );
+        // uppercase input normalizes to the lowercase hex the follower emits
+        assert_eq!(
+            covenant_filter(Some(&"AB".repeat(32))),
+            Ok(Some(format!("\"covenant_id\":\"{id}\"")))
+        );
+        assert_eq!(covenant_filter(Some("abcd")), Err(())); // too short
+        assert_eq!(covenant_filter(Some(&"zz".repeat(32))), Err(())); // not hex
+    }
+
+    /// The filter must match exactly the JSON the follower's fan-out builds
+    /// (same serde_json compact encoding, same field name).
+    #[test]
+    fn sse_filter_matches_fanout_shape() {
+        let id = kascov_core::CovenantId([0xab; 32]);
+        let other = kascov_core::CovenantId([0xcd; 32]);
+        let msg = serde_json::json!({
+            "covenant_id": id,
+            "kind": "genesis",
+            "txid": kascov_core::TxId([1; 32]),
+            "accepting_daa": 12345,
+        })
+        .to_string();
+        let reorg = serde_json::json!({ "kind": "reorg", "rolled_back": 2 }).to_string();
+
+        let needle = covenant_filter(Some(&id.to_string())).unwrap();
+        let wrong = covenant_filter(Some(&other.to_string())).unwrap();
+        assert!(sse_event_matches(&msg, needle.as_deref()));
+        assert!(!sse_event_matches(&msg, wrong.as_deref()));
+        // reorg notices don't match a filtered stream
+        assert!(!sse_event_matches(&reorg, needle.as_deref()));
+        // unfiltered streams pass everything through
+        assert!(sse_event_matches(&msg, None));
+        assert!(sse_event_matches(&reorg, None));
+    }
 }
 
 #[cfg(test)]
@@ -3273,5 +4047,96 @@ mod galaxy_tests {
             assert_eq!(both["ny"][i], n["y"]);
         }
         assert_eq!(both["edges"], core["edges"]);
+    }
+}
+
+#[cfg(test)]
+mod webhook_guard_tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn private_and_internal_ips_are_forbidden() {
+        for s in [
+            "127.0.0.1",
+            "127.8.8.8",
+            "10.0.0.1",
+            "10.255.255.255",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.1.1",
+            "169.254.169.254", // cloud metadata
+            "169.254.0.1",
+            "0.0.0.0",
+            "0.1.2.3",
+            "255.255.255.255",
+            "100.64.0.1", // CGNAT
+            "100.127.255.254",
+            "192.0.0.1",
+            "::1",
+            "::",
+            "fc00::1",
+            "fdab::2", // unique local
+            "fe80::1", // link local
+            "::ffff:10.0.0.1", // v4-mapped private
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(ip_is_forbidden(ip(s)), "{s} must be forbidden");
+        }
+    }
+
+    #[test]
+    fn public_ips_are_allowed() {
+        for s in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "93.184.216.34",
+            "172.15.0.1",  // just below 172.16/12
+            "172.32.0.1",  // just above 172.16/12
+            "100.63.0.1",  // just below CGNAT
+            "100.128.0.1", // just above CGNAT
+            "11.0.0.1",
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            "::ffff:8.8.8.8", // v4-mapped public
+        ] {
+            assert!(!ip_is_forbidden(ip(s)), "{s} must be allowed");
+        }
+    }
+
+    #[test]
+    fn url_guard_rejects_internal_targets() {
+        // Literal IPs — no DNS involved, deterministic in CI.
+        for url in [
+            "http://127.0.0.1:8080/hook",
+            "http://10.1.2.3/x",
+            "https://192.168.0.10/x",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]:9999/hook",
+            "http://[fe80::1]/x",
+            "http://[fc00::2]/x",
+            "http://0.0.0.0/x",
+        ] {
+            assert!(webhook_target_allowed(url).is_err(), "{url} must be rejected");
+        }
+    }
+
+    #[test]
+    fn url_guard_rejects_non_http_and_garbage() {
+        assert!(webhook_target_allowed("ftp://example.com/x").is_err());
+        assert!(webhook_target_allowed("file:///etc/passwd").is_err());
+        assert!(webhook_target_allowed("not a url").is_err());
+        assert!(webhook_target_allowed("http://").is_err());
+    }
+
+    #[test]
+    fn url_guard_allows_public_literal_ips() {
+        assert!(webhook_target_allowed("http://8.8.8.8/hook").is_ok());
+        assert!(webhook_target_allowed("https://93.184.216.34:8443/hook").is_ok());
+        assert!(webhook_target_allowed("http://[2606:4700:4700::1111]/hook").is_ok());
     }
 }

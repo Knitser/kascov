@@ -220,14 +220,19 @@
           ctx.stroke();
         }
         ctx.globalAlpha = 1;
-        if (labels && drawnLabels < 40 && r >= 3) {
-          /* one label per ~140x24px cell keeps names legible in dense areas */
-          const cell = `${Math.floor(px / 140)},${Math.floor(py / 24)}`;
+        if (labels && drawnLabels < 24 && r >= 3) {
+          /* one label per cell WIDER than a worst-case name (~26 chars at
+             12px mono ≈ 190px) so neighbors can't overlap, and a dark halo
+             so text stays readable over dense ring clusters */
+          const cell = `${Math.floor(px / 240)},${Math.floor(py / 30)}`;
           if (!labelCells.has(cell)) {
             labelCells.add(cell);
-            ctx.fillStyle = 'rgba(220,230,240,0.85)';
-            ctx.font = '11px ui-monospace, monospace';
-            ctx.fillText(friendlyName(ids[i]), px + r + 3, py + 3);
+            ctx.font = '12px ui-monospace, monospace';
+            ctx.lineWidth = 3.5;
+            ctx.strokeStyle = 'rgba(4,12,10,0.9)';
+            ctx.strokeText(friendlyName(ids[i]), px + r + 4, py + 4);
+            ctx.fillStyle = 'rgba(230,240,248,0.95)';
+            ctx.fillText(friendlyName(ids[i]), px + r + 4, py + 4);
             drawnLabels++;
           }
         }
