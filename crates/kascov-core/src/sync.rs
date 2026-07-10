@@ -23,7 +23,14 @@ pub struct SyncStats {
 pub enum SyncUpdate {
     Progress(SyncStats),
     Reorg { rolled_back: u64 },
-    Event { covenant_id: CovenantId, kind: EventKind, txid: TxId, accepting_daa: u64 },
+    Event {
+        covenant_id: CovenantId,
+        kind: EventKind,
+        txid: TxId,
+        accepting_daa: u64,
+        /// 0-based index in the accepting block's accepted-tx list.
+        tx_index: u32,
+    },
 }
 
 /// How often the cursor advances through event-less chain blocks.
@@ -164,11 +171,18 @@ pub async fn sync_once(
             }
         }
 
+        // Enumerate BEFORE the body filter so each index is the tx's position
+        // in the node's accepted-tx list (acceptance = UTXO application
+        // order); unresolved bodies hard-fail above, so none are skipped.
         let block_events = classify(
             store,
             &accepted,
-            accepting.daa_score,
-            accepted.accepted_tx_ids.iter().filter_map(|id| bodies.get(id)),
+            &accepting,
+            accepted
+                .accepted_tx_ids
+                .iter()
+                .enumerate()
+                .filter_map(|(i, id)| bodies.get(id).map(|tx| (i as u32, tx))),
         )?;
 
         if !block_events.events.is_empty() {
@@ -179,6 +193,7 @@ pub async fn sync_once(
                     kind: event.kind,
                     txid: event.txid,
                     accepting_daa: block_events.accepting_daa,
+                    tx_index: event.tx_index,
                 });
             }
             store.apply(&block_events, accepted.accepting_block)?;
@@ -208,16 +223,89 @@ pub async fn sync_once(
     Ok(stats)
 }
 
-/// Classify the covenant activity of one accepting chain block's accepted txs.
+/// One-shot backfill of `tx_index` onto event rows written before capture,
+/// bounded by node retention: walk the selected chain from the pruning point
+/// (the oldest block with acceptance data) to the store's sync cursor,
+/// stamping each accepted tx's list position onto matching rows. UPDATE-only —
+/// no block bodies are fetched. Rows older than the pruning point stay NULL
+/// forever (their acceptance data is pruned); that is expected, not an error.
+/// Progress persists in meta, so interrupted runs resume and completed runs
+/// return in O(1). Returns how many rows were stamped this run.
+pub async fn backfill_tx_index(node: &impl ChainSource, store: &mut Store) -> Result<u64> {
+    if store.tx_index_backfill_done()? {
+        return Ok(0);
+    }
+    let Some(stop) = store.cursor()? else {
+        // Fresh index: every future row is written with capture.
+        store.set_tx_index_backfill_done()?;
+        return Ok(0);
+    };
+    let resume = store.tx_index_backfill_resume()?;
+    let mut cursor = match resume {
+        Some(hash) => hash,
+        None => node.dag_info().await?.pruning_point,
+    };
+    let mut stamped = 0u64;
+    loop {
+        let step = match node.virtual_chain_from(cursor).await {
+            Ok(step) => step,
+            Err(e) => {
+                // A stale resume point (pruned since the interrupted run)
+                // restarts from the current pruning point instead of wedging;
+                // re-walked blocks are cheap NULL-probe no-ops.
+                let pruning_point = node.dag_info().await?.pruning_point;
+                if cursor == pruning_point {
+                    return Err(e);
+                }
+                cursor = pruning_point;
+                node.virtual_chain_from(cursor).await?
+            }
+        };
+        if step.added.is_empty() {
+            break; // reached the chain tip — everything reachable is stamped
+        }
+        // The node caps each response (mergeset_size_limit * 10 merged
+        // blocks); one write transaction per response.
+        let mut batch = Vec::with_capacity(step.added.len());
+        let mut reached_stop = false;
+        for accepted in step.added {
+            let indices: Vec<(TxId, u32)> = accepted
+                .accepted_tx_ids
+                .iter()
+                .enumerate()
+                .map(|(i, &id)| (id, i as u32))
+                .collect();
+            let block = accepted.accepting_block;
+            batch.push((block, indices));
+            if block == stop {
+                reached_stop = true;
+                break;
+            }
+        }
+        stamped += store.stamp_tx_indices(&batch)?;
+        cursor = batch.last().expect("non-empty added").0;
+        store.set_tx_index_backfill_progress(cursor)?;
+        if reached_stop {
+            break; // rows past the sync cursor are written with capture
+        }
+    }
+    store.set_tx_index_backfill_done()?;
+    Ok(stamped)
+}
+
+/// Classify the covenant activity of one accepting chain block's accepted
+/// txs, given as `(index in the accepted-tx list, body)`.
 fn classify<'a>(
     store: &Store,
     accepted: &AcceptedBlock,
-    accepting_daa: u64,
-    txs: impl Iterator<Item = &'a Transaction>,
+    accepting: &Block,
+    txs: impl Iterator<Item = (u32, &'a Transaction)>,
 ) -> Result<BlockEvents> {
     let mut block_events = BlockEvents {
         accepting_block: accepted.accepting_block,
-        accepting_daa,
+        accepting_daa: accepting.daa_score,
+        accepting_time_ms: accepting.timestamp_ms,
+        accepting_blue_score: accepting.blue_score,
         events: vec![],
         created_utxos: vec![],
         spent_utxos: vec![],
@@ -227,7 +315,7 @@ fn classify<'a>(
     let mut created_overlay: HashMap<Outpoint, CovenantId> = HashMap::new();
     let mut known_overlay: HashSet<CovenantId> = HashSet::new();
 
-    for tx in txs {
+    for (tx_index, tx) in txs {
         // covenant_id -> (spent utxos, created outputs)
         let mut touched: HashMap<CovenantId, (u32, u32)> = HashMap::new();
 
@@ -284,6 +372,7 @@ fn classify<'a>(
                 covenant_id,
                 kind,
                 txid: tx.txid,
+                tx_index,
                 payload: (!tx.payload.is_empty()).then(|| tx.payload.clone()),
                 lane_namespace: crate::store::lane_namespace(&tx.payload),
             });
@@ -313,4 +402,176 @@ fn is_valid_genesis(tx: &Transaction, id: &CovenantId) -> bool {
         .map(|&(i, o)| (i, o.value, o.spk_version, o.spk_script.as_slice()))
         .collect();
     crate::node::compute_covenant_id(&input.previous_outpoint, &fields) == *id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn h(n: u8) -> BlockHash {
+        BlockHash([n; 32])
+    }
+    fn tx_id(n: u8) -> TxId {
+        TxId([n; 32])
+    }
+
+    /// Acceptance data only — the backfill must never ask for block bodies.
+    struct FakeAcceptance {
+        pruning_point: BlockHash,
+        /// cursor -> the step returned for it
+        steps: HashMap<BlockHash, ChainStep>,
+        rpc_calls: AtomicU64,
+    }
+
+    impl ChainSource for FakeAcceptance {
+        async fn dag_info(&self) -> crate::Result<DagInfo> {
+            self.rpc_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(DagInfo {
+                network: "testnet-10".into(),
+                sink: self.pruning_point,
+                virtual_daa_score: 0,
+                pruning_point: self.pruning_point,
+            })
+        }
+        async fn block_with_txs(&self, hash: BlockHash) -> crate::Result<Block> {
+            panic!("backfill must be UPDATE-only, but fetched block {hash}");
+        }
+        async fn virtual_chain_from(&self, cursor: BlockHash) -> crate::Result<ChainStep> {
+            self.rpc_calls.fetch_add(1, Ordering::Relaxed);
+            self.steps
+                .get(&cursor)
+                .cloned()
+                .ok_or(crate::Error::Rpc(format!("unknown cursor {cursor}")))
+        }
+    }
+
+    fn event(cov: u8, txid: TxId, tx_index: u32) -> crate::store::NewEvent {
+        NewEvent {
+            covenant_id: CovenantId([cov; 32]),
+            kind: EventKind::Genesis,
+            txid,
+            tx_index,
+            payload: None,
+            lane_namespace: None,
+        }
+    }
+
+    fn block_events(hash: BlockHash, daa: u64, events: Vec<NewEvent>) -> BlockEvents {
+        let mut block = BlockEvents::empty(hash);
+        block.accepting_daa = daa;
+        block.events = events;
+        block
+    }
+
+    /// The retention-window walk stamps NULL rows with the node's acceptance
+    /// order, resumes across responses, marks itself done, and skips in O(1)
+    /// (zero RPC) once complete.
+    #[tokio::test]
+    async fn backfill_stamps_pre_capture_rows_and_completes() {
+        let db = std::env::temp_dir()
+            .join(format!("kascov-sync-backfill-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
+
+        // Two accepting blocks; accepted lists carry a coinbase (index 0) and
+        // a plain payment that never produced covenant rows.
+        store
+            .apply(
+                &block_events(
+                    h(1),
+                    100,
+                    vec![event(0xA1, tx_id(0xA0), 1), event(0xB2, tx_id(0xB0), 2)],
+                ),
+                h(1),
+            )
+            .unwrap();
+        store
+            .apply(&block_events(h(2), 200, vec![event(0xA1, tx_id(0xC0), 1)]), h(2))
+            .unwrap();
+        store.wipe_tx_indices_for_test().unwrap();
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index, None);
+
+        // The node answers in two capped responses: pruning point -> h1, h1 -> h2.
+        let node = FakeAcceptance {
+            pruning_point: h(0),
+            steps: HashMap::from([
+                (
+                    h(0),
+                    ChainStep {
+                        removed: vec![],
+                        added: vec![AcceptedBlock {
+                            accepting_block: h(1),
+                            accepted_tx_ids: vec![tx_id(0xEE), tx_id(0xA0), tx_id(0xB0)],
+                        }],
+                    },
+                ),
+                (
+                    h(1),
+                    ChainStep {
+                        removed: vec![],
+                        added: vec![AcceptedBlock {
+                            accepting_block: h(2),
+                            accepted_tx_ids: vec![tx_id(0xEF), tx_id(0xC0)],
+                        }],
+                    },
+                ),
+            ]),
+            rpc_calls: AtomicU64::new(0),
+        };
+
+        let stamped = backfill_tx_index(&node, &mut store).await.unwrap();
+        assert_eq!(stamped, 3);
+        let a1 = store.events(&CovenantId([0xA1; 32])).unwrap();
+        assert_eq!(a1[0].tx_index, Some(1));
+        assert_eq!(a1[1].tx_index, Some(1)); // h2's list: coinbase, then 0xC0
+        assert_eq!(store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index, Some(2));
+        assert!(store.tx_index_backfill_done().unwrap());
+
+        // Completed runs are O(1): no RPC at all.
+        node.rpc_calls.store(0, Ordering::Relaxed);
+        assert_eq!(backfill_tx_index(&node, &mut store).await.unwrap(), 0);
+        assert_eq!(node.rpc_calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// Rows older than the pruning point are unreachable — the walk stamps
+    /// what it can, leaves the rest NULL, and still completes (graceful, not
+    /// an error).
+    #[tokio::test]
+    async fn backfill_leaves_pruned_history_null() {
+        let db = std::env::temp_dir()
+            .join(format!("kascov-sync-backfill-pruned-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
+
+        // h1 predates the pruning point (h2); only h3 is walkable.
+        store
+            .apply(&block_events(h(1), 100, vec![event(0xA1, tx_id(0xA0), 1)]), h(1))
+            .unwrap();
+        store
+            .apply(&block_events(h(3), 300, vec![event(0xB2, tx_id(0xB0), 1)]), h(3))
+            .unwrap();
+        store.wipe_tx_indices_for_test().unwrap();
+
+        let node = FakeAcceptance {
+            pruning_point: h(2),
+            steps: HashMap::from([(
+                h(2),
+                ChainStep {
+                    removed: vec![],
+                    added: vec![AcceptedBlock {
+                        accepting_block: h(3),
+                        accepted_tx_ids: vec![tx_id(0xEE), tx_id(0xB0)],
+                    }],
+                },
+            )]),
+            rpc_calls: AtomicU64::new(0),
+        };
+
+        let stamped = backfill_tx_index(&node, &mut store).await.unwrap();
+        assert_eq!(stamped, 1);
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index, None);
+        assert_eq!(store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index, Some(1));
+        assert!(store.tx_index_backfill_done().unwrap());
+    }
 }

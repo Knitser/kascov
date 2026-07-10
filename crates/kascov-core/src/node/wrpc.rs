@@ -133,6 +133,7 @@ fn map_block(block: RpcBlock) -> Block {
     Block {
         hash: from_hash(block.header.hash),
         daa_score: block.header.daa_score,
+        blue_score: block.header.blue_score,
         timestamp_ms: block.header.timestamp,
         parents: block.header.direct_parents().iter().map(|h| from_hash(*h)).collect(),
         mergeset,

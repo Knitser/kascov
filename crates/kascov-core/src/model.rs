@@ -140,6 +140,10 @@ pub struct Transaction {
 pub struct Block {
     pub hash: BlockHash,
     pub daa_score: u64,
+    /// GHOSTDAG blue score — unlike DAA, strictly increasing along the
+    /// selected chain, so it anchors the event ordering contract.
+    #[serde(default)]
+    pub blue_score: u64,
     pub timestamp_ms: u64,
     pub parents: Vec<BlockHash>,
     /// Blocks merged by this block (blues + reds), when the node provided

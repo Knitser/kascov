@@ -670,13 +670,13 @@ async fn sync_session(
                     println!("REORG      rolled back {rolled_back} chain blocks");
                 }
             }
-            SyncUpdate::Event { covenant_id, kind, txid, accepting_daa } => {
+            SyncUpdate::Event { covenant_id, kind, txid, accepting_daa, tx_index } => {
                 if json {
                     println!(
                         "{}",
                         serde_json::json!({
                             "type": "event", "kind": kind, "covenant_id": covenant_id,
-                            "txid": txid, "accepting_daa": accepting_daa,
+                            "txid": txid, "accepting_daa": accepting_daa, "tx_index": tx_index,
                         })
                     );
                 } else {
@@ -1160,6 +1160,8 @@ async fn serve(
         .route("/data/{network}/unsubscribe", post(unsubscribe_handler))
         .route("/data/{network}/lane/{ns}", get(lane_handler))
         .route("/data/{network}/debug/{txid}", get(debug_handler))
+        // static path beats the {file} capture below (axum route priority)
+        .route("/data/price.json", get(price_handler))
         .route("/data/{file}", get(data_handler))
         .route("/data/{network}/c/{id}", get(detail_handler))
         .route("/data/{network}/tx/{txid}", get(tx_handler))
@@ -1239,10 +1241,18 @@ async fn follow_forever(
                 continue;
             }
         };
+        // One-shot per database: stamp tx_index onto pre-capture event rows
+        // still inside node retention. Best-effort — a failed walk resumes
+        // next session and never blocks following the chain.
+        match kascov_core::sync::backfill_tx_index(&node, &mut store).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("{network}: tx_index backfill stamped {n} event rows"),
+            Err(err) => tracing::warn!("{network}: tx_index backfill interrupted ({err}) — will resume next session"),
+        }
         tracing::info!("{network}: following the chain");
         loop {
             let result = kascov_core::sync::sync_once(&node, &mut store, None, |update| match update {
-                SyncUpdate::Event { covenant_id, kind, txid, accepting_daa } => {
+                SyncUpdate::Event { covenant_id, kind, txid, accepting_daa, tx_index } => {
                     tracing::info!("{network}: {} covenant {covenant_id}", kind.as_str());
                     // Fan out to any open SSE streams; serialization is skipped
                     // entirely when nobody is listening, and send() failing
@@ -1253,6 +1263,7 @@ async fn follow_forever(
                             "kind": kind.as_str(),
                             "txid": txid,
                             "accepting_daa": accepting_daa,
+                            "tx_index": tx_index,
                         })
                         .to_string();
                         let _ = live_tx.send(msg.into());
@@ -1266,6 +1277,7 @@ async fn follow_forever(
                         kind: kind.as_str(),
                         txid,
                         accepting_daa,
+                        tx_index,
                     });
                 }
                 SyncUpdate::Reorg { rolled_back } => {
@@ -1318,6 +1330,7 @@ struct HookEvent {
     kind: &'static str,
     txid: TxId,
     accepting_daa: u64,
+    tx_index: u32,
 }
 
 /// Is this IP off-limits for webhook POSTs? Loopback, RFC1918 private,
@@ -1466,6 +1479,7 @@ async fn webhook_delivery_forever(
             "kind": ev.kind,
             "txid": ev.txid,
             "accepting_daa": ev.accepting_daa,
+            "tx_index": ev.tx_index,
         });
         for (id, url) in subs {
             if deliver_webhook(&client, &url, &payload).await {
@@ -1577,6 +1591,128 @@ fn accepts_gzip(headers: &axum::http::HeaderMap) -> bool {
         .get(axum::http::header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains("gzip"))
+}
+
+/// How long a fetched KAS/USD price is served from the in-process cache.
+const PRICE_TTL_OK: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long a total fetch failure short-circuits to 503 before retrying —
+/// a failure must never be pinned longer than this.
+const PRICE_TTL_ERR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The last price fetch: when it ran and the serialized response body
+/// (None = every provider failed).
+struct PriceState {
+    fetched_at: std::time::Instant,
+    body: Option<String>,
+}
+
+fn price_cache() -> &'static tokio::sync::Mutex<Option<PriceState>> {
+    static CACHE: std::sync::OnceLock<tokio::sync::Mutex<Option<PriceState>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
+/// Kraken public ticker: `{"error":[],"result":{"KASUSD":{"c":["0.0777",…]…}}}`
+/// — the last-trade price is `c[0]`. The pair key is read from the result map
+/// rather than hardcoded (Kraken is known to alias pair names).
+fn parse_kraken_price(body: &str) -> Option<f64> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    if v["error"].as_array().is_some_and(|e| !e.is_empty()) {
+        return None;
+    }
+    let price = v["result"].as_object()?.values().next()?["c"][0].as_str()?.parse::<f64>().ok()?;
+    (price.is_finite() && price > 0.0).then_some(price)
+}
+
+/// CoinGecko simple price: `{"kaspa":{"usd":0.0777}}`.
+fn parse_coingecko_price(body: &str) -> Option<f64> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let price = v["kaspa"]["usd"].as_f64()?;
+    (price.is_finite() && price > 0.0).then_some(price)
+}
+
+/// KAS/USD spot from Kraken, falling back to CoinGecko. Fixed URLs only —
+/// no user input reaches the fetch.
+async fn fetch_price() -> Option<(f64, &'static str)> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("kascov-price/0.1")
+        .build()
+        .ok()?;
+    let get = |url: &'static str| {
+        let client = client.clone();
+        async move { client.get(url).send().await.ok()?.error_for_status().ok()?.text().await.ok() }
+    };
+    if let Some(body) = get("https://api.kraken.com/0/public/Ticker?pair=KASUSD").await {
+        if let Some(price) = parse_kraken_price(&body) {
+            return Some((price, "kraken"));
+        }
+    }
+    if let Some(body) =
+        get("https://api.coingecko.com/api/v3/simple/price?ids=kaspa&vs_currencies=usd").await
+    {
+        if let Some(price) = parse_coingecko_price(&body) {
+            return Some((price, "coingecko"));
+        }
+    }
+    None
+}
+
+/// GET /data/price.json — network-independent KAS/USD spot for the UI.
+/// serve_cached doesn't fit (its builders are blocking; this fetch is async),
+/// so a single-entry cache with the same single-flight idea: the fetch runs
+/// under the cache lock, so concurrent cold misses share one upstream call
+/// (bounded by the client's 5s timeout).
+async fn price_handler() -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let mut cache = price_cache().lock().await;
+    let stale = match &*cache {
+        Some(state) => {
+            let ttl = if state.body.is_some() { PRICE_TTL_OK } else { PRICE_TTL_ERR };
+            state.fetched_at.elapsed() >= ttl
+        }
+        None => true,
+    };
+    if stale {
+        let body = fetch_price().await.map(|(price, source)| {
+            serde_json::json!({
+                "kas_usd": price,
+                "updated_at_ms": now_ms(),
+                "source": source,
+            })
+            .to_string()
+        });
+        *cache = Some(PriceState { fetched_at: std::time::Instant::now(), body });
+    }
+    let body = cache.as_ref().and_then(|state| state.body.clone());
+    drop(cache);
+
+    match body {
+        Some(json) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+                (header::CACHE_CONTROL, "public, max-age=30, s-maxage=60"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            json,
+        )
+            .into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+                // the CDN must drop a failure at least as fast as we retry it
+                (header::CACHE_CONTROL, "public, max-age=15"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            r#"{"error":"price unavailable"}"#,
+        )
+            .into_response(),
+    }
 }
 
 async fn data_handler(
@@ -3862,7 +3998,7 @@ mod galaxy_tests {
     use kascov_core::{BlockHash, CovenantId, Network, Outpoint, TxId};
 
     fn ev(cov: u8, kind: EventKind, tx: u8) -> NewEvent {
-        NewEvent { covenant_id: CovenantId([cov; 32]), kind, txid: TxId([tx; 32]), payload: None, lane_namespace: None }
+        NewEvent { covenant_id: CovenantId([cov; 32]), kind, txid: TxId([tx; 32]), tx_index: tx as u32, payload: None, lane_namespace: None }
     }
 
     // A synthetic index with two "apps": {A1,B2} share tx 0x10, and
@@ -3885,6 +4021,8 @@ mod galaxy_tests {
         let block = BlockEvents {
             accepting_block: BlockHash([1; 32]),
             accepting_daa: 100,
+            accepting_time_ms: 100_000,
+            accepting_blue_score: 100,
             events,
             created_utxos: vec![NewUtxo {
                 outpoint: Outpoint { txid: TxId([0x10; 32]), index: 0 },
@@ -4138,5 +4276,58 @@ mod webhook_guard_tests {
         assert!(webhook_target_allowed("http://8.8.8.8/hook").is_ok());
         assert!(webhook_target_allowed("https://93.184.216.34:8443/hook").is_ok());
         assert!(webhook_target_allowed("http://[2606:4700:4700::1111]/hook").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod price_tests {
+    use super::*;
+
+    #[test]
+    fn kraken_ticker_shape_parses() {
+        // Trimmed from a real Kraken /0/public/Ticker?pair=KASUSD response.
+        let body = r#"{"error":[],"result":{"KASUSD":{
+            "a":["0.077710","24896","24896.000"],
+            "b":["0.077630","1553","1553.000"],
+            "c":["0.077650","310.27216455"],
+            "v":["4381437.63177596","10023973.86077098"],
+            "p":["0.077034","0.077416"],
+            "t":[382,1290],
+            "l":["0.076250","0.076250"],
+            "h":["0.077810","0.078710"],
+            "o":"0.076850"}}}"#;
+        assert_eq!(parse_kraken_price(body), Some(0.077650));
+        // an unexpected pair alias still parses (key read from the map)
+        let aliased = r#"{"error":[],"result":{"KASZUSD":{"c":["1.25","10"]}}}"#;
+        assert_eq!(parse_kraken_price(aliased), Some(1.25));
+    }
+
+    #[test]
+    fn kraken_errors_and_junk_are_rejected() {
+        // Kraken signals failure via a non-empty error array, HTTP 200.
+        assert_eq!(
+            parse_kraken_price(r#"{"error":["EQuery:Unknown asset pair"]}"#),
+            None
+        );
+        assert_eq!(parse_kraken_price(r#"{"error":[],"result":{}}"#), None);
+        assert_eq!(
+            parse_kraken_price(r#"{"error":[],"result":{"KASUSD":{"c":["nope","1"]}}}"#),
+            None
+        );
+        assert_eq!(
+            parse_kraken_price(r#"{"error":[],"result":{"KASUSD":{"c":["-1.0","1"]}}}"#),
+            None
+        );
+        assert_eq!(parse_kraken_price("not json"), None);
+    }
+
+    #[test]
+    fn coingecko_shape_parses_and_rejects_junk() {
+        assert_eq!(parse_coingecko_price(r#"{"kaspa":{"usd":0.077612}}"#), Some(0.077612));
+        assert_eq!(parse_coingecko_price(r#"{}"#), None);
+        assert_eq!(parse_coingecko_price(r#"{"kaspa":{}}"#), None);
+        assert_eq!(parse_coingecko_price(r#"{"kaspa":{"usd":"0.07"}}"#), None); // string, not number
+        assert_eq!(parse_coingecko_price(r#"{"kaspa":{"usd":0}}"#), None);
+        assert_eq!(parse_coingecko_price("not json"), None);
     }
 }

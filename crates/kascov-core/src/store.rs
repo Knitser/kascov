@@ -39,6 +39,15 @@ CREATE TABLE IF NOT EXISTS covenant_events (
     -- Both are NULL only when payload is NULL or the row predates the stamp.
     payload_tag TEXT,
     inscription_kind TEXT,
+    -- 0-based index of the tx within its accepting chain block's accepted-tx
+    -- list (node acceptance order = UTXO application order). NULL on rows
+    -- written before capture / beyond node retention.
+    tx_index INTEGER,
+    -- Accepting chain-block header fields, captured with tx_index (free — the
+    -- header is already fetched). NULL on pre-capture rows: readers fall back
+    -- to DAA estimates (time) / accepting_daa (ordering).
+    accepting_time_ms INTEGER,
+    accepting_blue_score INTEGER,
     PRIMARY KEY (covenant_id, seq)
 );
 CREATE INDEX IF NOT EXISTS ev_by_accepting ON covenant_events(accepting_block);
@@ -166,6 +175,10 @@ pub struct EventRow {
     pub txid: TxId,
     pub accepting_block: BlockHash,
     pub accepting_daa: u64,
+    /// 0-based index in the accepting block's accepted-tx list (consensus
+    /// acceptance order). None on rows written before capture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_index: Option<u64>,
     /// The transaction's v1 payload, when it carried one.
     #[serde(skip_serializing_if = "Option::is_none", serialize_with = "opt_hex_ser")]
     pub payload: Option<Vec<u8>>,
@@ -211,6 +224,10 @@ pub struct GlobalEventRow {
     pub kind: String,
     pub txid: TxId,
     pub accepting_daa: u64,
+    /// 0-based index in the accepting block's accepted-tx list (consensus
+    /// acceptance order). None on rows written before capture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_index: Option<u64>,
 }
 
 /// One fixed-width DAA bucket of covenant activity: kind counts inside
@@ -306,6 +323,11 @@ pub struct SpentStateRow {
 pub struct BlockEvents {
     pub accepting_block: BlockHash,
     pub accepting_daa: u64,
+    /// Accepting block header timestamp (ms) — real chain time for events.
+    pub accepting_time_ms: u64,
+    /// Accepting block blue score — the strictly-increasing chain key that
+    /// makes (blue_score, tx_index) a total order over transactions.
+    pub accepting_blue_score: u64,
     pub events: Vec<NewEvent>,
     pub created_utxos: Vec<NewUtxo>,
     /// (outpoint, spending txid, spending input's signature script, budget)
@@ -317,6 +339,8 @@ impl BlockEvents {
         Self {
             accepting_block,
             accepting_daa: 0,
+            accepting_time_ms: 0,
+            accepting_blue_score: 0,
             events: vec![],
             created_utxos: vec![],
             spent_utxos: vec![],
@@ -328,6 +352,9 @@ pub struct NewEvent {
     pub covenant_id: CovenantId,
     pub kind: EventKind,
     pub txid: TxId,
+    /// 0-based index of the tx in the accepting block's accepted-tx list —
+    /// the node's acceptance order, which is the UTXO application order.
+    pub tx_index: u32,
     /// The tx's v1 payload, stored only when non-empty.
     pub payload: Option<Vec<u8>>,
     /// The KIP-21 lane namespace (4-byte app tag, hex) when the payload has the
@@ -503,6 +530,9 @@ impl Store {
             "ALTER TABLE covenant_utxos ADD COLUMN revealed_template TEXT",
             "ALTER TABLE covenant_events ADD COLUMN payload_tag TEXT",
             "ALTER TABLE covenant_events ADD COLUMN inscription_kind TEXT",
+            "ALTER TABLE covenant_events ADD COLUMN tx_index INTEGER",
+            "ALTER TABLE covenant_events ADD COLUMN accepting_time_ms INTEGER",
+            "ALTER TABLE covenant_events ADD COLUMN accepting_blue_score INTEGER",
         ];
         for sql in &migrations {
             if let Err(e) = conn.execute(sql, []) {
@@ -915,10 +945,10 @@ impl Store {
                 None => (None, None),
             };
             tx.execute(
-                "INSERT INTO covenant_events (covenant_id, seq, kind, txid, accepting_block, accepting_daa, payload, lane_namespace, payload_tag, inscription_kind)
+                "INSERT INTO covenant_events (covenant_id, seq, kind, txid, accepting_block, accepting_daa, payload, lane_namespace, payload_tag, inscription_kind, tx_index, accepting_time_ms, accepting_blue_score)
                  VALUES (?1,
                    (SELECT COALESCE(MAX(seq), -1) + 1 FROM covenant_events WHERE covenant_id = ?1),
-                   ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                   ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     event.covenant_id.0.as_slice(),
                     event.kind.as_str(),
@@ -928,7 +958,10 @@ impl Store {
                     event.payload,
                     event.lane_namespace,
                     tag,
-                    kind
+                    kind,
+                    event.tx_index,
+                    block.accepting_time_ms,
+                    block.accepting_blue_score
                 ],
             )
             .map_err(db_err)?;
@@ -1004,6 +1037,79 @@ impl Store {
             .map_err(db_err)?;
         }
         tx.commit().map_err(db_err)
+    }
+
+    /// Stamp acceptance-order indices onto event rows that predate capture:
+    /// `blocks` is one RPC response's worth of `(accepting block, [(txid,
+    /// index)])`, applied in a single write transaction (the batch discipline
+    /// of `backfill_templates`). Only rows still NULL are touched — several
+    /// covenant rows sharing one txid all get the same index (it's a property
+    /// of the tx). Returns how many rows were stamped.
+    pub fn stamp_tx_indices(&mut self, blocks: &[(BlockHash, Vec<(TxId, u32)>)]) -> Result<u64> {
+        let tx = self.conn.transaction().map_err(db_err)?;
+        let mut stamped = 0u64;
+        {
+            // Most chain blocks carry no covenant events: one indexed probe
+            // (ev_by_accepting) per block skips them without per-tx UPDATEs.
+            let mut probe = tx
+                .prepare(
+                    "SELECT EXISTS(SELECT 1 FROM covenant_events
+                     WHERE accepting_block = ?1 AND tx_index IS NULL)",
+                )
+                .map_err(db_err)?;
+            let mut update = tx
+                .prepare(
+                    "UPDATE covenant_events SET tx_index = ?1
+                     WHERE accepting_block = ?2 AND txid = ?3 AND tx_index IS NULL",
+                )
+                .map_err(db_err)?;
+            for (block, indices) in blocks {
+                let any: bool =
+                    probe.query_row([block.0.as_slice()], |r| r.get(0)).map_err(db_err)?;
+                if !any {
+                    continue;
+                }
+                for (txid, index) in indices {
+                    stamped += update
+                        .execute(params![index, block.0.as_slice(), txid.0.as_slice()])
+                        .map_err(db_err)? as u64;
+                }
+            }
+        }
+        tx.commit().map_err(db_err)?;
+        Ok(stamped)
+    }
+
+    /// Has the one-shot tx_index backfill walked its whole reachable range?
+    /// Completed runs make `backfill_tx_index` an O(1) no-op per session.
+    pub fn tx_index_backfill_done(&self) -> Result<bool> {
+        Ok(self.meta("tx_index_backfilled_to")?.as_deref() == Some("done"))
+    }
+
+    /// Where an interrupted tx_index backfill should resume (the last
+    /// accepting block already stamped), if it ever recorded progress.
+    pub fn tx_index_backfill_resume(&self) -> Result<Option<BlockHash>> {
+        Ok(self.meta("tx_index_backfilled_to")?.and_then(|s| s.parse().ok()))
+    }
+
+    pub fn set_tx_index_backfill_progress(&self, at: BlockHash) -> Result<()> {
+        self.set_meta("tx_index_backfilled_to", &at.to_string())
+    }
+
+    pub fn set_tx_index_backfill_done(&self) -> Result<()> {
+        self.set_meta("tx_index_backfilled_to", "done")
+    }
+
+    /// Simulate rows written by a pre-capture binary (tests only).
+    #[cfg(test)]
+    pub(crate) fn wipe_tx_indices_for_test(&self) -> Result<()> {
+        self.conn
+            .execute("UPDATE covenant_events SET tx_index = NULL", [])
+            .map_err(db_err)?;
+        self.conn
+            .execute("DELETE FROM meta WHERE key = 'tx_index_backfilled_to'", [])
+            .map_err(db_err)?;
+        Ok(())
     }
 
     /// The most recent applied reorgs, newest first. Backs the public reorg
@@ -1662,7 +1768,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT covenant_id, seq, kind, txid, accepting_daa
+                "SELECT covenant_id, seq, kind, txid, accepting_daa, tx_index
                  FROM covenant_events WHERE lane_namespace = ?1
                  ORDER BY accepting_daa DESC, rowid DESC LIMIT ?2",
             )
@@ -1675,6 +1781,7 @@ impl Store {
                     kind: row.get(2)?,
                     txid: TxId(row.get(3)?),
                     accepting_daa: row.get(4)?,
+                    tx_index: row.get(5)?,
                 })
             })
             .map_err(db_err)?
@@ -1998,7 +2105,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT seq, kind, txid, accepting_block, accepting_daa, payload
+                "SELECT seq, kind, txid, accepting_block, accepting_daa, payload, tx_index
                  FROM covenant_events WHERE covenant_id = ?1 ORDER BY seq",
             )
             .map_err(db_err)?;
@@ -2011,6 +2118,7 @@ impl Store {
                     accepting_block: BlockHash(row.get(3)?),
                     accepting_daa: row.get(4)?,
                     payload: row.get(5)?,
+                    tx_index: row.get(6)?,
                 })
             })
             .map_err(db_err)?
@@ -2024,7 +2132,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT covenant_id, seq, kind, txid, accepting_daa
+                "SELECT covenant_id, seq, kind, txid, accepting_daa, tx_index
                  FROM covenant_events ORDER BY accepting_daa DESC, rowid DESC LIMIT ?1",
             )
             .map_err(db_err)?;
@@ -2037,6 +2145,7 @@ impl Store {
                     kind: row.get(2)?,
                     txid: TxId(row.get(3)?),
                     accepting_daa: row.get(4)?,
+                    tx_index: row.get(5)?,
                 })
             })
             .map_err(db_err)?
@@ -2095,12 +2204,16 @@ mod tests {
         BlockEvents {
             accepting_block: BlockHash([hash; 32]),
             accepting_daa: daa,
+            accepting_time_ms: daa * 1000,
+            accepting_blue_score: daa,
             events: events
                 .into_iter()
-                .map(|(cov, kind, tx)| NewEvent {
+                .enumerate()
+                .map(|(i, (cov, kind, tx))| NewEvent {
                     covenant_id: CovenantId([cov; 32]),
                     kind,
                     txid: TxId([tx; 32]),
+                    tx_index: i as u32,
                     payload: None,
                     lane_namespace: None,
                 })
@@ -2119,11 +2232,13 @@ mod tests {
         let block = BlockEvents {
             accepting_block: BlockHash([9; 32]),
             accepting_daa: 100,
+            accepting_time_ms: 100_000,
+            accepting_blue_score: 100,
             events: vec![
-                NewEvent { covenant_id: CovenantId([0xa0; 32]), kind: EventKind::Genesis, txid: TxId([1; 32]), payload: None, lane_namespace: None },
-                NewEvent { covenant_id: CovenantId(id_a1_zero), kind: EventKind::Genesis, txid: TxId([2; 32]), payload: None, lane_namespace: None },
-                NewEvent { covenant_id: CovenantId([0xa1; 32]), kind: EventKind::Genesis, txid: TxId([3; 32]), payload: None, lane_namespace: None },
-                NewEvent { covenant_id: CovenantId([0xb0; 32]), kind: EventKind::Genesis, txid: TxId([4; 32]), payload: None, lane_namespace: None },
+                NewEvent { covenant_id: CovenantId([0xa0; 32]), kind: EventKind::Genesis, txid: TxId([1; 32]), tx_index: 0, payload: None, lane_namespace: None },
+                NewEvent { covenant_id: CovenantId(id_a1_zero), kind: EventKind::Genesis, txid: TxId([2; 32]), tx_index: 1, payload: None, lane_namespace: None },
+                NewEvent { covenant_id: CovenantId([0xa1; 32]), kind: EventKind::Genesis, txid: TxId([3; 32]), tx_index: 2, payload: None, lane_namespace: None },
+                NewEvent { covenant_id: CovenantId([0xb0; 32]), kind: EventKind::Genesis, txid: TxId([4; 32]), tx_index: 3, payload: None, lane_namespace: None },
             ],
             created_utxos: vec![],
             spent_utxos: vec![],
@@ -2181,11 +2296,14 @@ mod tests {
         let block = BlockEvents {
             accepting_block: BlockHash([9; 32]),
             accepting_daa: 100,
+            accepting_time_ms: 100_000,
+            accepting_blue_score: 100,
             events: vec![
                 NewEvent {
                     covenant_id: CovenantId([1; 32]),
                     kind: EventKind::Genesis,
                     txid: TxId([1; 32]),
+                    tx_index: 0,
                     payload: Some(lane_payload.clone()),
                     lane_namespace: Some(lane_ns.clone()),
                 },
@@ -2195,6 +2313,7 @@ mod tests {
                     covenant_id: CovenantId([2; 32]),
                     kind: EventKind::Genesis,
                     txid: TxId([2; 32]),
+                    tx_index: 1,
                     payload: Some(vec![0xaa, 0xbb, 0xcc, 0xdd, 0x01]),
                     lane_namespace: None,
                 },
@@ -2232,12 +2351,15 @@ mod tests {
             covenant_id: CovenantId([cov; 32]),
             kind: EventKind::Genesis,
             txid: TxId([tx; 32]),
+            tx_index: tx as u32,
             payload,
             lane_namespace: lane,
         };
         let block = BlockEvents {
             accepting_block: BlockHash([9; 32]),
             accepting_daa: 100,
+            accepting_time_ms: 100_000,
+            accepting_blue_score: 100,
             events: vec![
                 ev(1, 1, Some(lane_payload), Some(lane_ns.clone())),
                 ev(2, 2, Some(vec![0xaa, 0xbb, 0xcc, 0xdd, 0x01]), None),
@@ -2749,6 +2871,7 @@ mod tests {
             covenant_id: CovenantId([cov; 32]),
             kind: EventKind::Transition,
             txid: TxId([tx; 32]),
+            tx_index: tx as u32,
             payload: Some(lane_payload.clone()),
             lane_namespace: lane.map(str::to_string),
         };
@@ -2811,5 +2934,126 @@ mod tests {
         assert_eq!(rows[0].spk_script, vec![0xaa, 0x20]);
         assert_eq!(rows[0].spent_sig.as_deref(), Some([0x01, 0x51].as_slice()));
         assert_eq!(rows[0].spent_budget, Some(60));
+    }
+
+    /// The tx_index/accepting_time_ms/accepting_blue_score ALTERs must apply
+    /// once and no-op forever after (duplicate-column swallow), and captured
+    /// values must survive a reopen; wiped rows read back as NULL.
+    #[test]
+    fn tx_index_migration_idempotent_and_roundtrip() {
+        let path = test_store_path("tx-index-migrate");
+        let mut store = Store::open(&path, Network::Testnet(10)).unwrap();
+        store
+            .apply(
+                &block_with_events(
+                    1,
+                    100,
+                    vec![(0xA1, EventKind::Genesis, 0x01), (0xB2, EventKind::Genesis, 0x02)],
+                ),
+                BlockHash([1; 32]),
+            )
+            .unwrap();
+        drop(store);
+
+        // Second and third opens rerun the migration list — must be no-ops.
+        let store = Store::open(&path, Network::Testnet(10)).unwrap();
+        drop(store);
+        let store = Store::open(&path, Network::Testnet(10)).unwrap();
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index, Some(0));
+        assert_eq!(store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index, Some(1));
+        // The bundled header fields landed too (block_with_events: daa*1000, daa).
+        let (time_ms, blue): (u64, u64) = store
+            .conn
+            .query_row(
+                "SELECT accepting_time_ms, accepting_blue_score FROM covenant_events LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((time_ms, blue), (100_000, 100));
+
+        // Pre-capture rows read back as None and serialize without the field.
+        store.wipe_tx_indices_for_test().unwrap();
+        let event = &store.events(&CovenantId([0xA1; 32])).unwrap()[0];
+        assert_eq!(event.tx_index, None);
+        let json = serde_json::to_value(event).unwrap();
+        assert!(json.get("tx_index").is_none(), "None tx_index must be omitted");
+    }
+
+    /// The backfill's write helper: only NULL rows are stamped, unknown txids
+    /// are no-ops, and already-stamped rows are never overwritten.
+    #[test]
+    fn stamp_tx_indices_fills_only_null_rows() {
+        let mut store = test_store("tx-index-stamp");
+        store
+            .apply(
+                &block_with_events(
+                    1,
+                    100,
+                    vec![(0xA1, EventKind::Genesis, 0x01), (0xB2, EventKind::Genesis, 0x02)],
+                ),
+                BlockHash([1; 32]),
+            )
+            .unwrap();
+        store
+            .apply(
+                &block_with_events(2, 200, vec![(0xA1, EventKind::Transition, 0x03)]),
+                BlockHash([2; 32]),
+            )
+            .unwrap();
+        store.wipe_tx_indices_for_test().unwrap();
+
+        // Stamp block 1 only, with the coinbase offset a real accepted list
+        // has (index 0 = coinbase, never a covenant event) and an accepted
+        // txid we never indexed (a plain payment — must be a no-op).
+        let stamped = store
+            .stamp_tx_indices(&[(
+                BlockHash([1; 32]),
+                vec![(TxId([0xEE; 32]), 0), (TxId([0x01; 32]), 1), (TxId([0x02; 32]), 2)],
+            )])
+            .unwrap();
+        assert_eq!(stamped, 2);
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index, Some(1));
+        assert_eq!(store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index, Some(2));
+        // Block 2 was not in the batch: still NULL.
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[1].tx_index, None);
+
+        // Re-stamping with different indices must not touch stamped rows.
+        let restamped = store
+            .stamp_tx_indices(&[(BlockHash([1; 32]), vec![(TxId([0x01; 32]), 9)])])
+            .unwrap();
+        assert_eq!(restamped, 0);
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index, Some(1));
+    }
+
+    /// The consumer ordering contract: (accepting_daa, tx_index) sorts an
+    /// interleaving of blocks and intra-block positions into acceptance order,
+    /// regardless of insertion (rowid) order.
+    #[test]
+    fn ordering_key_daa_then_tx_index_sorts_interleaving() {
+        let mut store = test_store("tx-index-order");
+        let ev = |cov: u8, tx: u8, tx_index: u32| NewEvent {
+            covenant_id: CovenantId([cov; 32]),
+            kind: EventKind::Genesis,
+            txid: TxId([tx; 32]),
+            tx_index,
+            payload: None,
+            lane_namespace: None,
+        };
+        // Newer block applied first, and intra-block events inserted with
+        // indices out of rowid order — the key alone must recover the order.
+        let mut newer = BlockEvents::empty(BlockHash([2; 32]));
+        newer.accepting_daa = 200;
+        newer.events = vec![ev(0xC3, 0x30, 7)];
+        store.apply(&newer, BlockHash([2; 32])).unwrap();
+        let mut older = BlockEvents::empty(BlockHash([1; 32]));
+        older.accepting_daa = 100;
+        older.events = vec![ev(0xA1, 0x10, 5), ev(0xB2, 0x20, 2)];
+        store.apply(&older, BlockHash([1; 32])).unwrap();
+
+        let mut rows = store.recent_events(10).unwrap();
+        rows.sort_by_key(|r| (r.accepting_daa, r.tx_index));
+        let order: Vec<TxId> = rows.iter().map(|r| r.txid).collect();
+        assert_eq!(order, vec![TxId([0x20; 32]), TxId([0x10; 32]), TxId([0x30; 32])]);
     }
 }

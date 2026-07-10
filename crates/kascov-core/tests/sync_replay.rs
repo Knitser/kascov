@@ -66,6 +66,7 @@ impl FakeChain {
             Block {
                 hash,
                 daa_score: daa,
+                blue_score: daa,
                 timestamp_ms: daa * 1000,
                 parents: vec![],
                 mergeset: vec![],
@@ -265,4 +266,12 @@ async fn intra_block_create_and_spend_is_marked_spent() {
     assert!(!a0.live, "intra-block-spent UTXO must not stay live");
     assert_eq!(a0.spent_txid, Some(tx_id(0xB0)));
     assert!(a0.spent_sig.is_some(), "the spend's signature script must be captured");
+
+    // Write-time tx_index capture: each event carries its tx's 0-based
+    // position in the accepting block's accepted-tx list.
+    let events = store.events(&id).unwrap();
+    assert_eq!(events[0].txid, tx_id(0xA0));
+    assert_eq!(events[0].tx_index, Some(0));
+    assert_eq!(events[1].txid, tx_id(0xB0));
+    assert_eq!(events[1].tx_index, Some(1));
 }
