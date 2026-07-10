@@ -168,7 +168,7 @@
       <section class="empty-net" id="empty-net" hidden></section>
 
       <section class="watch-strip" id="watch-strip" aria-label="Your coins" hidden>
-        <h2>your coins <span class="dim watch-hint">— the ones you starred</span></h2>
+        <h2>your coins <span class="dim watch-hint">— the ones you starred</span> <span id="watch-usd-slot"></span></h2>
         <div id="watch-row" class="mini-grid"></div>
       </section>
 
@@ -257,6 +257,12 @@
 
       <section class="stories" id="section-stories" aria-label="Latest stories">
         <h2>latest stories</h2>
+        <div class="chips story-chips" role="group" aria-label="Filter stories by event">
+          <button type="button" class="chip" data-action="story-kind" data-kind="all" aria-pressed="true">all</button>
+          <button type="button" class="chip" data-action="story-kind" data-kind="born" aria-pressed="false">born</button>
+          <button type="button" class="chip" data-action="story-kind" data-kind="moved" aria-pressed="false">moved</button>
+          <button type="button" class="chip" data-action="story-kind" data-kind="retired" aria-pressed="false">retired</button>
+        </div>
         <ol class="story-list" id="story-list"></ol>
       </section>
 
@@ -506,6 +512,7 @@
           <a href="#ep-live">Live feed</a>
           <a href="#ep-snapshot">Full snapshot</a>
           <a href="#ep-stream">Event stream</a>
+          <a href="#ep-price">Price</a>
           <div class="api-nav-group">Coins</div>
           <a href="#ep-coin">One coin</a>
           <a href="#ep-tx">Transaction</a>
@@ -615,6 +622,24 @@
               <div class="ep-example"><div class="ep-ex-head">Each message</div><pre class="codeblock"><code>data: {"covenant_id":"b11acf6c…","kind":"genesis",
        "txid":"a86041…","accepting_daa":508951007}</code></pre></div>
             </div>
+          </article>
+
+          <article class="api-endpoint" id="ep-price">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/price.json</code></div>
+            <p class="ep-desc">The KAS→USD rate behind the site's <code class="mono">≈ $</code> hints — one tiny object, no network segment. Answers <code class="mono">503</code> while no fresh rate is available; treat any non-200 as "no price right now".</p>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -s https://kascov.io/data/price.json</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "kas_usd": 0.1132,
+  "updated_at_ms": 1751799000000,
+  "source": "median of spot venues"
+}</code></pre></div>
+            </div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">kas_usd</td><td>number</td><td>US dollars per 1 KAS</td></tr>
+              <tr><td class="mono">updated_at_ms</td><td>int</td><td>when the rate was last refreshed (unix ms)</td></tr>
+              <tr><td class="mono">source</td><td>string</td><td>where the rate came from</td></tr>
+            </tbody></table>
           </article>
 
           <article class="api-endpoint" id="ep-coin">

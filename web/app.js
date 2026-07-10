@@ -762,17 +762,82 @@ function renderLiteExplore(live, network) {
     return;
   }
   renderAnalytics(network);
-  $('#story-list').innerHTML = dedupByCovenant(live.recent_events)
-    .slice(0, STORY_COUNT)
-    .map((ev) => liteStoryRow(ev, live, network))
-    .join('');
+  const liteEvents = filterEventsByKind(dedupByCovenant(live.recent_events), state.storyKind)
+    .slice(0, STORY_COUNT);
+  $('#story-list').innerHTML = liteEvents.length
+    ? liteEvents.map((ev) => liteStoryRow(ev, live, network)).join('')
+    : storyEmptyHtml();
   $('#result-count').textContent = `${fmtInt(s.covenants)} smart coins`;
   $('#coin-grid').innerHTML =
     `<div class="no-results"><p class="dim">loading all ${esc(fmtInt(s.covenants))} smart coins…</p></div>`;
   $('#grid-foot').innerHTML = '';
 }
 
+/* ------------------------------------------------------ USD hints (mainnet) */
+
+/* KAS→USD tails on real-money amounts. The rate rides a feature-detected
+   /data/price.json: one probe per 5 minutes while a mainnet view is up, and
+   any miss (404/503/network error) silences the feature for the session — an
+   older worker without the route must leave zero trace in the UI. Testnet
+   never fetches and never shows a dollar sign (play money). */
+const PRICE_TTL_MS = 5 * 60_000;
+const price = { data: null, at: 0, dead: false, inflight: null };
+let usdOn = true;
+try { usdOn = localStorage.getItem('kascov-usd') !== '0'; } catch (e) { /* private mode */ }
+
+/* returns a promise ONLY when this call started a fetch — callers hang their
+   one repaint off it without stacking repaints on a shared in-flight probe */
+function loadPrice() {
+  if (price.dead || state.network !== 'mainnet') return null;
+  if (price.data && Date.now() - price.at < PRICE_TTL_MS) return null;
+  if (price.inflight) return null;
+  price.inflight = fetch('data/price.json', { cache: 'no-cache' })
+    .then(async (res) => {
+      if (!res.ok) { price.dead = true; return null; }
+      const d = await res.json();
+      if (!d || typeof d.kas_usd !== 'number' || !(d.kas_usd > 0)) { price.dead = true; return null; }
+      price.data = d;
+      price.at = Date.now();
+      return d;
+    })
+    .catch(() => { price.dead = true; return null; })
+    .finally(() => { price.inflight = null; });
+  return price.inflight;
+}
+
+/* dollar formatting: 2 significant decimals under $1, cents above */
+function fmtUsd(usd) {
+  const str = usd >= 1
+    ? usd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : usd.toLocaleString('en-US', { maximumSignificantDigits: 2 });
+  return `$${str}`;
+}
+
+/* fmtAmount plus an "≈ $X" tail — plain text, so the esc()'d call sites on
+   coin pages, address pages and the watch strip keep working unchanged */
+function amountWithUsd(sompi, network) {
+  const base = fmtAmount(sompi, network);
+  if (network !== 'mainnet' || !usdOn || !price.data || !(sompi > 0)) return base;
+  return `${base} ≈ ${fmtUsd((sompi / 1e8) * price.data.kas_usd)}`;
+}
+
+/* the toggle chip — only rendered where dollar tails can actually appear */
+function usdToggleHtml() {
+  if (state.network !== 'mainnet' || !price.data) return '';
+  return `<button type="button" class="chip chip-usd" data-action="usd" aria-pressed="${usdOn}"` +
+    ` title="show approximate US-dollar values next to KAS amounts">≈ USD</button>`;
+}
+
 /* ------------------------------------------------------------- sentences */
+
+/* stories/timeline chip label → wire event kind; 'all' passes everything */
+const KIND_BY_CHIP = { born: 'genesis', moved: 'transition', retired: 'burn' };
+function filterEventsByKind(events, chip) {
+  const kind = KIND_BY_CHIP[chip];
+  return kind ? events.filter((ev) => ev.kind === kind) : events;
+}
+const storyEmptyHtml = () =>
+  `<li class="story-none dim">nothing ${esc(state.storyKind)} in the latest events — try another filter</li>`;
 
 /* what one event did to the coin's pieces — derived from the utxo set */
 function eventShape(entry, ev) {
@@ -793,14 +858,14 @@ function eventSentence(entry, ev, network, withBalance) {
     const pieces = (entry.c.utxos || []).filter((u) => u.created_daa === entry.c.genesis_daa).length;
     const pieceBit = pieces > 1 ? ` in ${pieces} pieces` : '';
     return entry.birthValue > 0
-      ? `<strong>${esc(name)}</strong> was born, holding ${esc(fmtAmount(entry.birthValue, network))}${esc(pieceBit)}`
+      ? `<strong>${esc(name)}</strong> was born, holding ${esc(amountWithUsd(entry.birthValue, network))}${esc(pieceBit)}`
       : `<strong>${esc(name)}</strong> was born`;
   }
   if (ev.kind === 'transition') {
     /* count by seq value, not array index — older events may be truncated */
     const nth = entry.c.events.filter((e) => e.kind === 'transition' && e.seq <= ev.seq).length;
     const bal = withBalance ? entry.balances.get(ev.accepting_daa) : null;
-    const balBit = bal ? ` — now holding ${esc(fmtAmount(bal, network))}` : '';
+    const balBit = bal ? ` — now holding ${esc(amountWithUsd(bal, network))}` : '';
     const shape = eventShape(entry, ev);
     let shapeBit = '';
     if (shape.consumedN && shape.createdN && shape.consumedN !== shape.createdN) {
@@ -817,10 +882,10 @@ function eventSentence(entry, ev, network, withBalance) {
   const lastEvent = entry.c.events[entry.c.events.length - 1];
   const isFinal = entry.c.status !== 'active' && lastEvent && ev.seq === lastEvent.seq;
   const gone = eventShape(entry, ev).consumedValue;
-  const goneBit = gone > 0 ? ` — ${esc(fmtAmount(gone, network))} left the covenant` : '';
+  const goneBit = gone > 0 ? ` — ${esc(amountWithUsd(gone, network))} left the covenant` : '';
   if (!isFinal) {
     const bal = withBalance ? entry.balances.get(ev.accepting_daa) : null;
-    const balBit = bal ? `, ${esc(fmtAmount(bal, network))} lives on` : '';
+    const balBit = bal ? `, ${esc(amountWithUsd(bal, network))} lives on` : '';
     return `<strong>${esc(name)}</strong> lost a piece${goneBit}${balBit}`;
   }
   const m = entry.moves;
@@ -1237,10 +1302,26 @@ function storyRow(ev, entry, live, network) {
 
 function renderStories(entry, network) {
   const { live, events } = buildFeed(entry, network);
-  $('#story-list').innerHTML = events
-    .slice(0, STORY_COUNT)
-    .map((ev) => storyRow(ev, entry, live, network))
-    .join('');
+  /* the kind chip narrows BEFORE the truncation so a filter can surface
+     matches from the whole feed, not just the top slice */
+  const shown = filterEventsByKind(events, state.storyKind).slice(0, STORY_COUNT);
+  $('#story-list').innerHTML = shown.length
+    ? shown.map((ev) => storyRow(ev, entry, live, network)).join('')
+    : storyEmptyHtml();
+}
+
+/* stories chip click: repaint whichever feed variant is on screen */
+function repaintStories() {
+  const network = state.network;
+  const entry = state.cache[network];
+  if (entry) { renderStories(entry, network); return; }
+  const live = state.live[network] && state.live[network].data;
+  if (!live || !Array.isArray(live.recent_events)) return;
+  const evs = filterEventsByKind(dedupByCovenant(live.recent_events), state.storyKind)
+    .slice(0, STORY_COUNT);
+  $('#story-list').innerHTML = evs.length
+    ? evs.map((ev) => liteStoryRow(ev, live, network)).join('')
+    : storyEmptyHtml();
 }
 
 /* ------------------------------------------------------------------- grid */
@@ -1597,10 +1678,12 @@ function renderWatchStrip(entry, network) {
     .sort((a, b) => (b.c.last_activity_daa || 0) - (a.c.last_activity_daa || 0));
   strip.hidden = watched.length === 0;
   if (!watched.length) return;
+  const usdSlot = $('#watch-usd-slot');
+  if (usdSlot) usdSlot.innerHTML = usdToggleHtml(); /* stale cached index.html */
   $('#watch-row').innerHTML = watched.map((e) => {
     const alive = e.c.status === 'active';
     const sub = alive
-      ? `holds ${fmtAmount(e.c.live_value, network)} · active ${relTimeShort(e.lastMs)}`
+      ? `holds ${amountWithUsd(e.c.live_value, network)} · active ${relTimeShort(e.lastMs)}`
       : `retired ${relTimeShort(e.lastMs)}`;
     return miniCard(e, network, null, sub);
   }).join('');
@@ -2739,7 +2822,7 @@ function spentBudgetHtml(budget, network) {
   const sompi = grams * SOMPI_PER_COMPUTE_GRAM;
   return `<span class="dim spent-budget" title="fee floor is 100 sompi × max(compute grams, 2 × tx bytes) — this is the compute-bound estimate and ignores transaction size, so the real fee is at least this much">` +
     `this spend budgeted ${esc(fmtInt(budget))} unit${budget === 1 ? '' : 's'} ` +
-    `(≈ ${esc(fmtInt(grams))} script units, ~${esc(fmtAmount(sompi, network))} if compute-bound)</span>`;
+    `(≈ ${esc(fmtInt(grams))} script units, ~${esc(amountWithUsd(sompi, network))} if compute-bound)</span>`;
 }
 
 /* "what changed between states" (M8): consecutive revealed_fields diffs,
@@ -2816,7 +2899,7 @@ function nerdPanel(entry, network, program) {
     ['last activity DAA', `<span class="mono">${esc(fmtInt(c.last_activity_daa))}</span>`],
     ['lineage complete', c.lineage_complete ? '<span class="flag flag-yes">yes</span>' : '<span class="flag flag-no">no — earlier history is missing</span>'],
     ['events indexed', `<span class="mono">${esc(fmtInt(c.event_count))}</span>${c.events_truncated ? ' <span class="flag flag-no">truncated</span>' : ''}`],
-    ['live UTXOs', `<span class="mono">${esc(fmtInt(c.live_utxos))}</span> holding <span class="mono">${esc(fmtAmount(c.live_value, network))}</span>`],
+    ['live UTXOs', `<span class="mono">${esc(fmtInt(c.live_utxos))}</span> holding <span class="mono">${esc(amountWithUsd(c.live_value, network))}</span>`],
   ];
   const allUtxos = c.utxos || [];
   const foldUtxos = allUtxos.length > UTXO_WINDOW + 4 && !state.utxoAll;
@@ -2865,7 +2948,7 @@ function nerdPanel(entry, network, program) {
       : '';
     return `<div class="utxo">` +
       `<div class="utxo-head"><span class="mono break">${esc(u.outpoint)}</span><span class="utxo-flags">${badges}</span></div>` +
-      `<div class="utxo-meta"><span>${esc(fmtAmount(u.value, network))}</span><span class="dim">created at DAA ${esc(fmtInt(u.created_daa))}</span>` +
+      `<div class="utxo-meta"><span>${esc(amountWithUsd(u.value, network))}</span><span class="dim">created at DAA ${esc(fmtInt(u.created_daa))}</span>` +
       (u.spent_budget != null ? spentBudgetHtml(u.spent_budget, network) : '') +
       `</div>` +
       templateLine(u.template, u.state_fields) +
@@ -2904,6 +2987,8 @@ function renderDetail(entry, covId, flashTx, program) {
     state.detailId = covId;
     state.storyAll = false;
     state.utxoAll = false;
+    state.tlKind = 'all';   /* per-coin timeline chips reset with the coin */
+    state.tlLabel = 'all';
   }
 
   const detMap = state.details[network];
@@ -2971,7 +3056,7 @@ function renderDetail(entry, covId, flashTx, program) {
     const bits = [];
     bits.push(`${gridRec.c.genesis_daa != null ? 'born' : 'first seen'} ${relTime(gridRec.bornMs)}`);
     bits.push(gridRec.moves === 0 ? 'never moved' : gridRec.moves === 1 ? 'moved once' : `moved ${gridRec.moves} times`);
-    if (alive0) bits.push(`currently holds ${fmtAmount(gridRec.c.live_value, network)}`);
+    if (alive0) bits.push(`currently holds ${amountWithUsd(gridRec.c.live_value, network)}`);
     else bits.push(`retired ${relTime(gridRec.lastMs)}`);
     view.innerHTML =
       `<a class="back" href="#/explore">← all smart coins</a>` +
@@ -2981,7 +3066,7 @@ function renderDetail(entry, covId, flashTx, program) {
       `<p class="detail-tags"><span class="pill ${alive0 ? 'pill-alive' : 'pill-retired'}" title="${esc(alive0 ? GLOSSARY.alive : GLOSSARY.retired)}">${alive0 ? 'alive' : 'retired'}</span>` +
       `<button type="button" class="star${watched0 ? ' starred' : ''}" data-action="watch" data-id="${esc(covId)}" aria-pressed="${watched0}" aria-label="watch this coin">★</button>` +
       lineageBadge(gridRec.c) +
-      `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span></p>` +
+      `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span> ${usdToggleHtml()}</p>` +
       `<p class="id-chip"><span class="mono">${esc(shortHex(covId, 10, 8))}</span>` +
       `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(covId)}" aria-label="copy this coin’s full id">copy id</button>` +
       `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(shareUrl(network, covId))}" aria-label="copy a shareable link to this coin">share</button></p>` +
@@ -3018,7 +3103,7 @@ function renderDetail(entry, covId, flashTx, program) {
   summaryBits.push(`${c.genesis_daa != null ? 'born' : 'first seen'} ${relTime(rec.bornMs)} (${absShort(rec.bornMs)})`);
   summaryBits.push(rec.moves === 0 ? 'never moved' : rec.moves === 1 ? 'moved once' : `moved ${rec.moves} times`);
   if (alive) {
-    summaryBits.push(`currently holds ${fmtAmount(c.live_value, network)}${c.live_utxos > 1 ? ` in ${c.live_utxos} pieces` : ''}`);
+    summaryBits.push(`currently holds ${amountWithUsd(c.live_value, network)}${c.live_utxos > 1 ? ` in ${c.live_utxos} pieces` : ''}`);
   } else {
     summaryBits.push(`retired ${relTime(rec.lastMs)} (${absShort(rec.lastMs)})`);
   }
@@ -3031,19 +3116,51 @@ function renderDetail(entry, covId, flashTx, program) {
     ? `<p class="dim trunc-note">part of this coin’s story is missing — it had more events than we keep per coin.</p>`
     : '';
 
+  const events = c.events;
+
+  /* timeline chips: kind row always (once there's something to filter), and
+     a second row by spend-revealed program label when the coin's spends
+     revealed at least two distinct ones. The "revealed label" of an event is
+     carried by the UTXO(s) that event consumed (same join as eventShape). */
+  const revealedLabels = (ev) => (c.utxos || [])
+    .filter((u) => u.spent_txid === ev.txid && u.revealed_template)
+    .map((u) => u.revealed_template);
+  const labelSet = [...new Set(events.flatMap(revealedLabels))];
+  const kindSel = state.tlKind || 'all';
+  const labelSel = labelSet.includes(state.tlLabel) ? state.tlLabel : 'all';
+  let tlEvents = filterEventsByKind(events, kindSel);
+  if (labelSel !== 'all') tlEvents = tlEvents.filter((ev) => revealedLabels(ev).includes(labelSel));
+  const tlChip = (action, value, sel) =>
+    `<button type="button" class="chip" data-action="${action}" data-value="${esc(value)}"` +
+    ` aria-pressed="${value === sel}">${esc(value)}</button>`;
+  const kindChips = events.length > 1
+    ? `<div class="chips tl-chips" role="group" aria-label="Filter the timeline by event">` +
+      ['all', 'born', 'moved', 'retired'].map((k) => tlChip('tl-kind', k, kindSel)).join('') + `</div>`
+    : '';
+  const labelChips = labelSet.length >= 2
+    ? `<div class="chips tl-chips" role="group" aria-label="Filter the timeline by revealed program">` +
+      ['all', ...labelSet].map((l) => tlChip('tl-label', l, labelSel)).join('') + `</div>`
+    : '';
+  const tlCount = kindSel !== 'all' || labelSel !== 'all'
+    ? `<p class="dim tl-count">${esc(fmtInt(tlEvents.length))} of ${esc(fmtInt(events.length))} events shown</p>`
+    : '';
+  const tlEmpty = !tlEvents.length
+    ? `<li class="tl-item tl-note"><span class="tl-icon" aria-hidden="true">${ICONS.move}</span><div class="tl-body">` +
+      `<p class="tl-text dim">no ${esc(labelSel !== 'all' ? labelSel : kindSel)} events on this coin</p></div></li>`
+    : '';
+
   /* long life stories fold to a window; a highlighted event beyond the
      fold auto-expands so ?tx= deep links always land */
-  const events = c.events;
   if (flashTx && !state.storyAll) {
-    const at = events.findIndex((ev) => ev.txid === flashTx);
+    const at = tlEvents.findIndex((ev) => ev.txid === flashTx);
     if (at >= STORY_WINDOW - 1) state.storyAll = true;
   }
-  const foldStory = events.length > STORY_WINDOW + 4 && !state.storyAll;
-  const shownEvents = foldStory ? events.slice(0, STORY_WINDOW) : events;
-  const storyFoot = events.length > STORY_WINDOW + 4
+  const foldStory = tlEvents.length > STORY_WINDOW + 4 && !state.storyAll;
+  const shownEvents = foldStory ? tlEvents.slice(0, STORY_WINDOW) : tlEvents;
+  const storyFoot = tlEvents.length > STORY_WINDOW + 4
     ? `<button type="button" class="btn btn-expand" data-action="story-all">` +
       (foldStory
-        ? `show all ${fmtInt(events.length)} events ↓`
+        ? `show all ${fmtInt(tlEvents.length)} events ↓`
         : 'collapse the story ↑') +
       `</button>`
     : '';
@@ -3098,15 +3215,15 @@ function renderDetail(entry, covId, flashTx, program) {
     ` aria-pressed="${watched}" aria-label="${watched ? 'stop watching' : 'watch'} this coin">★</button>` +
     (namedTemplate ? `<span class="flag flag-tpl">${esc(namedTemplate)}</span>` : '') +
     lineageBadge(c) +
-    `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span></p>` +
+    `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span> ${usdToggleHtml()}</p>` +
     `<p class="id-chip"><span class="mono">${esc(shortHex(c.covenant_id, 10, 8))}</span>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(c.covenant_id)}" aria-label="copy this coin’s full id">copy id</button>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(shareUrl(network, c.covenant_id))}" aria-label="copy a shareable link to this coin">share</button></p>` +
     `</div></header>` +
     `<p class="detail-summary">${esc(summaryBits.join(' · '))}.</p>` +
     coinContractSectionHtml(c) +
-    `<section aria-label="Life story"><h2>life story</h2>${truncNote}` +
-    `<ol class="timeline">${preface}${shownEvents.map((ev) => timelineItem(rec, ev, data, network, flashTx)).join('')}</ol>${storyFoot}</section>` +
+    `<section aria-label="Life story"><h2>life story</h2>${kindChips}${labelChips}${tlCount}${truncNote}` +
+    `<ol class="timeline">${preface}${tlEmpty}${shownEvents.map((ev) => timelineItem(rec, ev, data, network, flashTx)).join('')}</ol>${storyFoot}</section>` +
     togetherSection +
     holdersSection +
     `<section class="nerd" aria-label="Technical details">` +
@@ -3744,7 +3861,7 @@ function renderAddress(route) {
     const name = gridRec ? gridRec.name : friendlyName(c.covenant_id);
     const alive = c.status === 'active';
     const sb = [`${c.genesis_daa != null ? 'born' : 'first seen'} ${relTimeShort(toMs(c.genesis_daa != null ? c.genesis_daa : c.first_seen_daa))}`];
-    if (alive) sb.push(`holds ${fmtAmount(c.live_value, network)}`);
+    if (alive) sb.push(`holds ${amountWithUsd(c.live_value, network)}`);
     else sb.push(`retired ${relTimeShort(toMs(c.last_activity_daa))}`);
     sb.push(c.controls_now ? 'this key controls it now' : 'this key owned it earlier');
     return `<article class="card"><div class="card-head">${avatarSvg(c.covenant_id, 40)}` +
@@ -3755,7 +3872,7 @@ function renderAddress(route) {
   view.innerHTML = back + `<header class="page-head addr-head"><h1>address</h1>` +
     headChip(null, data.address) +
     (data.pubkey !== q.toLowerCase() ? headChip('pubkey', data.pubkey) : '') +
-    `<p class="page-sub">${bits.map(esc).join(' · ')} <span class="dim">on ${esc(net.label)}</span></p></header>` +
+    `<p class="page-sub">${bits.map(esc).join(' · ')} <span class="dim">on ${esc(net.label)}</span> ${usdToggleHtml()}</p></header>` +
     (rows.length ? `<div class="coin-grid">${cards}</div>`
       : `<div class="empty-card"><h2>this address hasn’t touched any smart coins we’ve seen.</h2>` +
         `<p class="dim">kascov matches p2pk covenant states only — plain payments to this address don’t appear here, and covenants with richer scripts may not name their owner.</p></div>`);
@@ -3980,6 +4097,14 @@ async function render() {
   if (state.watchNet !== state.network) {
     state.watch = loadWatch(state.network);
     state.watchNet = state.network;
+  }
+  /* mainnet views probe the $-rate (feature-detected, silent on a miss);
+     the first arrival repaints so ≈ $ tails appear without a reload */
+  const pricePending = loadPrice();
+  if (pricePending) {
+    pricePending.then((d) => {
+      if (d && state.network === 'mainnet' && !document.hidden) render();
+    });
   }
   syncStream();
   syncDetailStream();
@@ -4429,6 +4554,37 @@ document.addEventListener('click', (e) => {
     });
     const entry = state.cache[state.network];
     if (entry) renderGrid(entry, state.network);
+  } else if (action === 'story-kind') {
+    const k = el.dataset.kind;
+    if (!k || k === state.storyKind) return;
+    state.storyKind = k;
+    document.querySelectorAll('[data-action="story-kind"]').forEach((c) => {
+      c.setAttribute('aria-pressed', String(c.dataset.kind === k));
+    });
+    repaintStories();
+  } else if (action === 'tl-kind' || action === 'tl-label') {
+    if (action === 'tl-kind') state.tlKind = el.dataset.value;
+    else state.tlLabel = el.dataset.value;
+    const route = parseRoute();
+    const entry = state.cache[state.network];
+    if (route.view === 'detail' && entry) {
+      const y = window.scrollY;
+      renderDetail(entry, route.id, route.tx, route.program);
+      window.scrollTo({ top: y, behavior: 'instant' });
+    }
+  } else if (action === 'usd') {
+    usdOn = !usdOn;
+    try { localStorage.setItem('kascov-usd', usdOn ? '1' : '0'); } catch (err) { /* ignore */ }
+    document.querySelectorAll('[data-action="usd"]').forEach((b) => {
+      b.setAttribute('aria-pressed', String(usdOn));
+    });
+    const route = parseRoute();
+    const entry = state.cache[state.network];
+    const y = window.scrollY;
+    if (route.view === 'detail' && entry) renderDetail(entry, route.id, route.tx, route.program);
+    else if (route.view === 'address') renderAddress(route);
+    else if (route.view === 'explore' && entry) renderWatchStrip(entry, state.network);
+    window.scrollTo({ top: y, behavior: 'instant' });
   } else if (action === 'pulse-range') {
     const r = el.dataset.range;
     if (!ACTIVITY_RANGES.includes(r) || r === state.pulseRange) return;

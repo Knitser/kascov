@@ -100,6 +100,7 @@ const state = {
   network: 'testnet-10',
   cache: {},          // network -> { data, index }
   filter: 'all',
+  storyKind: 'all', // stories-feed chip: all | born | moved | retired (session-only)
   query: '',
   shown: PAGE_SIZE,
   nerd: false,
