@@ -72,7 +72,20 @@ gcloud storage buckets add-iam-policy-binding "gs://$BUCKET" --member="serviceAc
 
 echo "==> pointing Firebase Hosting /data/** at the worker (activates firebase-worker.json)"
 cp firebase-worker.json firebase.json
-firebase deploy --only hosting --non-interactive
+# Hosting ships whatever is in web/ ON DISK — refuse a dirty tree so agent
+# work-in-progress or local experiments never leak to production. (This once
+# shipped an in-flight galaxy.js; deploy hosting from a clean checkout, or
+# FORCE_DIRTY_HOSTING=1 to override deliberately.)
+if ! git diff --quiet -- web/ || [ -n "$(git ls-files --others --exclude-standard web/ | grep -v '^web/data/')" ]; then
+  if [ "${FORCE_DIRTY_HOSTING:-}" != "1" ]; then
+    echo "!!  web/ has uncommitted changes — SKIPPING hosting deploy (worker was deployed)." >&2
+    echo "    commit first, or rerun with FORCE_DIRTY_HOSTING=1" >&2
+  else
+    firebase deploy --only hosting --non-interactive
+  fi
+else
+  firebase deploy --only hosting --non-interactive
+fi
 
 URL=$(gcloud run services describe $SERVICE --project $PROJECT --region $REGION --format='value(status.url)')
 echo "==> done. worker: $URL"
