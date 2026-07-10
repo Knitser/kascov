@@ -5,6 +5,12 @@ simulation (CLI), verified contracts, a visual script debugger, based-app lanes,
 KIP-16 ZK panel (see `Novel-Features-Plan.md`). This doc is the backlog *after* that:
 what to deepen and what to build next, grouped by wave. Lift = S/M/L.
 
+> **Status (July 10, 2026):** most of this document shipped — items below carry ✅ DONE
+> stamps with their ship date (dates from `web/changelog.json`). Also shipped beyond this
+> plan: per-coin **share cards** `/share/{net}/{id}` + OG PNG + sitemap (2026-07-10) and
+> the **search endpoint** `search?q=` (2026-07-10). Still open: RISC Zero proof
+> verification, covenant lint, the plain-English explainer, and the parking lot.
+
 ---
 
 ## Wave 1 — NEXT (in progress)
@@ -12,7 +18,7 @@ what to deepen and what to build next, grouped by wave. Lift = S/M/L.
 The picks that (a) make the flagship usable by everyone, (b) tie kascov to Kaspa's real
 activity, and (c) add another nobody-has-it that's cheap because the foundation exists.
 
-### 1. In-browser simulation on live coins  · lift M
+### 1. In-browser simulation on live coins  · lift M · ✅ DONE 2026-07-06
 Move covenant simulation out of the CLI (`kascov-lab --dry-run`) and into the web. On a
 coin/decode page, construct a hypothetical spend (entrypoint, recipient, amount) → get
 PASS/FAIL + the failing rule, in the browser.
@@ -22,7 +28,7 @@ PASS/FAIL + the failing rule, in the browser.
   returns `{pass, verdict, failing_rule}`. (WASM in-browser is the stretch alternative.)
 - **Why:** rank 2 in the research; the natural home for the flagship.
 
-### 2. KRC-20 / inscription decoding in lanes  · lift M
+### 2. KRC-20 / inscription decoding in lanes  · lift M · ✅ DONE 2026-07-06 (lanes) / 2026-07-09 (KRC-20 + per-lane dashboards)
 The biggest lane bucket is "JSON inscriptions" — decode them. Parse payloads into token
 ops (deploy/mint/transfer, tick, amount) and give each namespace a per-app dashboard
 (activity over time, top coins, holders).
@@ -39,12 +45,12 @@ A static "audit" panel on any decoded covenant flagging risks: "anyone can spend
 
 ## Wave 2 — deepen + visualize
 
-### Real-spend debugger  · lift M · research rank 4
+### Real-spend debugger  · lift M · research rank 4 · ✅ DONE 2026-07-06
 Today the debugger is a *symbolic* static trace. Extend it to replay an *actual* on-chain
 spend: given a spend tx, run the real engine with the real witness and capture concrete
 per-opcode stacks. Worker `/debug` driving `execute_opcode` + `stacks_view()`.
 
-### App-graph / "follow the coin"  · lift M · research rank 5
+### App-graph / "follow the coin"  · lift M · research rank 5 · ✅ DONE 2026-07-09 (the galaxy)
 Turn the existing covenant **families** (union-find) into an interactive force-graph:
 nodes = covenants, edges = shared transactions, animated flow. A visual map of
 multi-contract apps.
@@ -53,7 +59,7 @@ multi-contract apps.
 Auto-generate a prose explanation for any decoded covenant (like the arbiter write-up),
 built on the skeleton matcher.
 
-### Time-series / analytics dashboards  · lift S
+### Time-series / analytics dashboards  · lift S · ✅ DONE 2026-07-09
 Births vs burns over time, per-template, per-lane, survival curves ("how long do
 covenants live?"). Mostly aggregation + charts on top of the existing histogram.
 
@@ -61,22 +67,22 @@ covenants live?"). Mostly aggregation + charts on top of the existing histogram.
 
 ## Wave 3 — bigger bets
 
-### ZK: decode + actually verify the proof  · lift M (Groth16) / L (RISC Zero)
+### ZK: decode + actually verify the proof  · lift M (Groth16) / L (RISC Zero) · ◐ PARTIAL (ZK panel + `/zk-verify` 2026-07-06; RISC Zero proof verification still open)
 Beyond detecting `OpZkPrecompile`: parse proof / verification key / public inputs,
 display them, and re-verify the Groth16 proof off-chain to show "proof valid ✓". Plus a
 "ZK apps" filter on explore.
 
-### Verify-and-publish  · lift M–L
+### Verify-and-publish  · lift M–L · ✅ DONE 2026-07-06 (`/publish` + `/verified/{hash}`)
 Etherscan's flow: anyone submits SilverScript source + args → kascov compiles, checks
 byte-identical, publishes as a verified contract. Grows the registry past the 3 templates.
 Needs the `silverc` compiler reachable from the worker + a submission store.
 
-### Covenant alerting & webhooks  · lift L · research rank 7
+### Covenant alerting & webhooks  · lift L · research rank 7 · ✅ DONE 2026-07-10 (subscribe/unsubscribe + real SSRF-guarded delivery)
 Subscribe to a covenant (coin moved/retired, escrow settled, ZK coin appeared) →
 webhook/email/push. Reuses the SSE stream + events; the lift is the subscription store +
 delivery.
 
-### No-code covenant builder  · lift L · research rank 8
+### No-code covenant builder  · lift L · research rank 8 · ✅ DONE 2026-07-09 (builder) / 2026-07-10 (one-click deploy proven in production)
 Beyond re-parameterizing the 3 templates: a guided visual builder (parties, conditions,
 timelocks) that composes SilverScript and deploys.
 
@@ -86,6 +92,7 @@ timelocks) that composes SilverScript and deploys.
 - Address / entity labeling (Arkham-style) — data-thin for Kaspa today.
 - MEV / ordering analysis on the BlockDAG — novel but data-thin + harder.
 - Covenant state "diff" — what changed (program/args) between a coin's states.
+- Galaxy id-prefix core tier — a smarter `tier=core` cut than cluster size alone.
 
 **Process:** build a wave, verify everything end-to-end, then deploy. Keep local until
 the wave is verified (same rhythm as the July-6 wave).

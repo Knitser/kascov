@@ -1,6 +1,6 @@
 # kascov — Kaspa Covenant Explorer
 
-**Live dashboard: [kascov-explorer.web.app](https://kascov-explorer.web.app)**
+**Live dashboard: [kascov.io](https://kascov.io)**
 
 CLI + indexer for **covenants on Kaspa L1**, introduced by the [Toccata hardfork](https://docs.kaspa.org/toccata) (June 30, 2026).
 
@@ -16,6 +16,8 @@ Toccata lets UTXOs carry application state: outputs can be bound to a **covenant
 - **`kascov watch`** — live feed of covenant events as they're accepted
 
 > **Status:** all commands work against live networks. Toccata is live on **mainnet** and **testnet-10** (both supported); Testnet 12 was the pre-fork covenant playground on a separate node branch — not supported. Verified against real covenant traffic on testnet-10 (240+ covenants observed within minutes of scanning). Mainnet covenant traffic is still near zero days after activation — which is exactly why indexing from day one matters.
+
+**What's new (July 2026):** a zoomable **galaxy map** of the whole network (every app at once, each dot a smart coin); richer **coin pages** — holders, decoded payloads, KRC-20/inscription kinds, spend cost, and provable genesis; a **no-code builder** with one-click testnet deploy (server-side custodial key, gated by `KASCOV_DEPLOY_KEY`, testnet-10 only); **analytics dashboards** plus the indexer's own reorg feed; per-coin **share cards** at `/share/{network}/{id}` with server-rendered OG PNGs; `search?q=` across ids, names and templates; **webhooks** with real, SSRF-guarded delivery; and zero-dep **API clients** (JS + Python) in [`clients/`](clients/).
 
 ## Why an index matters
 
@@ -40,13 +42,13 @@ cargo run -p kascov -- --json scan --last 500 | jq .covenant_id
 
 ## The website
 
-[kascov-explorer.web.app](https://kascov-explorer.web.app) is the hosted face of this index:
+[kascov.io](https://kascov.io) is the hosted face of this index:
 
 - **explorer** — every smart coin with a friendly name, life story timeline, live-updating stats ("watching live" means the indexer saw the chain tip seconds ago; times are exact, UTC on hover). First paint comes from a 30 KB live feed in ~1 s while the full snapshot loads.
 - **search that answers the tester's question** — paste a transaction id (or start typing a name for live suggestions) and land on the coin it touched, with that event highlighted; a clear "kascov hasn't seen this" when it isn't covenant traffic
 - **watchlist** (★), record holders, sorting; long life stories and UTXO panels fold with expanders
-- **[/decode](https://kascov-explorer.web.app/decode)** — paste any script hex, get the post-Toccata disassembly (KIP-17 introspection, KIP-20 covenant ops, KIP-16 zk) in the browser, with a downloadable .txt and an example gallery. It **names compiled SilverScript contracts** (Mecenas, Escrow, LastWill) and labels their constructor arguments — as does the indexer for on-chain states and spend-time reveals. Recognized contracts can be **re-instantiated with your own parameters** ("make this yours"): readable source + rebuilt hex + a one-command testnet deploy via `kascov-lab deploy`.
-- **[/dev](https://kascov-explorer.web.app/dev)** — the JSON API documented with curl examples
+- **[/decode](https://kascov.io/decode)** — paste any script hex, get the post-Toccata disassembly (KIP-17 introspection, KIP-20 covenant ops, KIP-16 zk) in the browser, with a downloadable .txt and an example gallery. It **names compiled SilverScript contracts** (Mecenas, Escrow, LastWill) and labels their constructor arguments — as does the indexer for on-chain states and spend-time reveals. Recognized contracts can be **re-instantiated with your own parameters** ("make this yours"): readable source + rebuilt hex + a one-command testnet deploy via `kascov-lab deploy`.
+- **[/dev](https://kascov.io/dev)** — the JSON API documented with curl examples
 
 ## Make your own smart coin
 
@@ -58,7 +60,7 @@ cargo run -p kascov-lab -- contract-demo   # a Mecenas is deployed, then reveals
 cargo run -p kascov-lab -- examples        # every copy-paste recipe
 ```
 
-Open the `kascov-explorer.web.app/…` link it prints and flip on *nerd mode*. To choose the parameters yourself, use the generator on [/decode](https://kascov-explorer.web.app/decode) ("make a Mecenas / Escrow / LastWill"), then `deploy` → `spend`. Full guide: [`docs/Covenant Lab.md`](docs/Covenant%20Lab.md).
+Open the `kascov.io/…` link it prints and flip on *nerd mode*. To choose the parameters yourself, use the generator on [/decode](https://kascov.io/decode) ("make a Mecenas / Escrow / LastWill"), then `deploy` → `spend`. Full guide: [`docs/Covenant Lab.md`](docs/Covenant%20Lab.md).
 
 ## The JSON API
 
@@ -66,17 +68,19 @@ An always-on worker (Cloud Run) follows the chain and serves the index as JSON, 
 
 ```sh
 # small fast feed: stats + chain tip + newest ~150 events (poll this)
-curl -s https://kascov-explorer.web.app/data/testnet-10-live.json | jq .stats
+curl -s https://kascov.io/data/testnet-10-live.json | jq .stats
 
-# full snapshot: every covenant, complete timelines, UTXOs with decoded scripts
-curl -s https://kascov-explorer.web.app/data/testnet-10.json | jq '.covenants[0]'
+# the grid: stats + one summary row per covenant
+curl -s https://kascov.io/data/testnet-10.json | jq '.covenants[0]'
 ```
 
-Field-by-field docs live on the [for developers page](https://kascov-explorer.web.app/#/dev).
+The bare grid request is a **first page capped at 20,000 rows** (ordered by last activity, newest first). When more rows remain, the response carries `next_after_daa` + `next_after_id` cursors — pass them back as `?after_daa=&after_id=&limit=` to keep walking (default page 5,000).
+
+Field-by-field docs live on the [for developers page](https://kascov.io/#/dev).
 
 ## Design notes
 
-- Rust workspace: `kascov-core` (node client, detection, sync, storage), `kascov` (CLI + serve worker), `kascov-decode` (post-Toccata disassembler; `web/disasm.js` is its verified JS port), `kascov-lab` (make real covenants on TN10 — `deploy`/`spend`/`settle-escrow` plus one-command `contract-demo`/`escrow-demo`).
+- Rust workspace: `kascov-core` (node client, detection, sync, storage), `kascov` (CLI + serve worker), `kascov-decode` (post-Toccata disassembler; `web/disasm.js` is its verified JS port), `kascov-lab` (make real covenants on TN10 — `deploy`/`spend`/`settle-escrow` plus one-command `contract-demo`/`escrow-demo`), `kascov-labkit` (the transaction-building library `kascov-lab` and the worker's custodial one-click deploy share), `kascov-sim` (off-chain script-engine harness behind simulate/debug/zk-verify).
 - Kaspa RPC types never leave one module (`node/wrpc.rs`) — the rest of the code uses kascov's own stable model.
 - Kaspa crates on crates.io are frozen pre-Toccata; deps are pinned to a single [rusty-kaspa](https://github.com/kaspanet/rusty-kaspa) git rev in the workspace manifest. The pin must be wire-compatible (borsh) with the node you connect to.
 - Index storage is SQLite — single file per network, disposable and rebuildable. The hosted worker restores/backs up its DBs via GCS so history survives restarts; `sync` records the chain tip so exports can date events exactly, and prefetches accepting blocks concurrently to outrun busy testnets.

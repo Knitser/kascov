@@ -198,7 +198,7 @@ pub fn keygen(path: &Path) -> Result<()> {
     println!("blake2b(pubkey): {}", hex::encode(pk_hash.as_bytes()));
     println!();
     println!("the pubkey and its blake2b fill the generator's key fields on");
-    println!("kascov-explorer.web.app/decode — fund the address at");
+    println!("kascov.io/decode — fund the address at");
     println!("https://faucet-testnet.kaspanet.io before deploying.");
     Ok(())
 }
@@ -407,7 +407,7 @@ pub async fn deploy(client: &KaspaRpcClient, keypair: &Keypair, program: &[u8], 
     println!();
     println!("watch it live (give the indexer ~a minute) — this link proves the");
     println!("commitment in the browser, no spend needed:");
-    println!("  https://kascov-explorer.web.app/testnet-10/c/{id}?program={}", hex::encode(program));
+    println!("  https://kascov.io/testnet-10/c/{id}?program={}", hex::encode(program));
     println!();
     println!("the coin shows as a 'p2sh commitment' (the program is hidden) until");
     println!("you SPEND it — that reveals the program on-chain and kascov names it:");
@@ -563,7 +563,7 @@ pub async fn settle_escrow(
     if let Some(id) = covenant_id_opt {
         println!();
         println!("the escrow revealed itself on-chain. watch the story:");
-        println!("  https://kascov-explorer.web.app/testnet-10/c/{id}");
+        println!("  https://kascov.io/testnet-10/c/{id}");
     }
     Ok(())
 }
@@ -848,7 +848,7 @@ async fn spend_constrained(
     if let Some(id) = covenant_id_opt {
         println!();
         println!("the program is now revealed on-chain. give the indexer ~a minute, then:");
-        println!("  https://kascov-explorer.web.app/testnet-10/c/{id}");
+        println!("  https://kascov.io/testnet-10/c/{id}");
     }
     Ok(())
 }
@@ -1004,7 +1004,7 @@ pub async fn spend(
     if let Some(id) = covenant_id {
         println!();
         println!("the program is now revealed on-chain. give the indexer ~a minute, then:");
-        println!("  https://kascov-explorer.web.app/testnet-10/c/{id}");
+        println!("  https://kascov.io/testnet-10/c/{id}");
         println!("nerd mode shows \"revealed at spend — {template}\" with your args.");
     }
     Ok(())

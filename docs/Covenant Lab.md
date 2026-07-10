@@ -25,7 +25,7 @@ First run only: `cargo run -p kascov-lab -- keygen`, fund the printed address at
 | `escrow-demo` | deploy an escrow + settle it to the buyer (one command) |
 | `demo` | raw covenant lifecycle: genesis → N transitions → burn |
 | `deploy` | birth a compiled contract as a real covenant (hidden p2sh state) |
-| `spend` | satisfy a pure-signature entrypoint → reveal the program on-chain |
+| `spend` | satisfy an entrypoint → reveal the program on-chain (`reclaim` \| `cold` \| `inherit` \| `receive` \| `refresh`) |
 | `settle-escrow` | satisfy Escrow.spend as arbiter, forcing the payout to a party |
 
 ## Why no SilverScript needed
@@ -73,6 +73,14 @@ cargo run -p kascov-lab -- deploy --program-hex <hex> --value 1000000000
 
 The coin is born with a **P2SH commitment** state (`OpBlake2b <blake2b-256(program)> OpEqual`) bound to a fresh covenant id, and appears on the explorer within ~a minute — as a `p2sh commitment` (the program is hidden behind the hash).
 
+### No toolchain at all: one-click web deploy
+
+The builder on [kascov.io/decode](https://kascov.io/decode) can skip the CLI entirely: fill in the parties and amounts, click deploy, and the site POSTs the compiled hex to the worker's `/data/testnet-10/deploy` endpoint. The **server** births the covenant with its own custodial faucet key. Deliberately narrow: the route only exists when the worker is armed with `KASCOV_DEPLOY_KEY` **and** the network is testnet-10 (404 otherwise — never mainnet), value is capped at 1–10 TKAS, and it's rate-limited globally (~144/day) and per IP (20/day). The tx-building code is the same [[Architecture]] `kascov-labkit` library the CLI uses.
+
+### Proven in production (July 10, 2026)
+
+The whole loop ran end-to-end on the live site: `POST /deploy` birthed Mecenas covenant `b4ade48e3ad1…` on TN10 → the indexer picked it up with **provable genesis** → `kascov-lab spend --entrypoint reclaim` reclaimed it → the coin revealed itself as *SilverScript · Mecenas* on [kascov.io](https://kascov.io), permanently.
+
 ## Revealing it — spend the contract on-chain
 
 Spending the coin reveals the program, so kascov shows it as your named contract *for everyone, permanently* (`revealed at spend — SilverScript · Mecenas`, with your args labeled). The lab satisfies the **pure-signature** entrypoints (Mecenas `reclaim`, LastWill `cold`/`inherit`) — they need only a signature from the matching key:
@@ -107,4 +115,18 @@ cargo run -p kascov-lab -- escrow-demo
 
 Proven on TN10: covenant `da2fe117…` deployed, then settled 4.99999 TKAS to the buyer — now shows `revealed at spend — SilverScript · Escrow` with arbiter/buyer/seller labeled.
 
-**Still out of scope (v1):** the other output-constrained entrypoints (Mecenas `receive`, LastWill `refresh`) — same technique as `settle-escrow`, not yet wired up.
+## The other output-constrained entrypoints — wired
+
+Mecenas `receive` and LastWill `refresh` use the same technique as `settle-escrow` and dispatch through labkit's `spend_constrained`:
+
+```sh
+# Mecenas.receive — selector 0, NO signature (anyone may trigger a payout period):
+#   outputs[0] pays the recipient the pledge, outputs[1] re-commits the remainder
+cargo run -p kascov-lab -- spend --program-hex <hex> --entrypoint receive
+
+# LastWill.refresh — selector 2, signed with the HOT key:
+#   outputs[0] re-commits the same P2SH state (resets the inheritance clock)
+cargo run -p kascov-lab -- spend --program-hex <hex> --entrypoint refresh
+```
+
+Every SilverScript template entrypoint the lab knows is now spendable: `reclaim` · `cold` · `inherit` (pure-signature), `receive` · `refresh` (output-constrained), plus `settle-escrow` for Escrow.

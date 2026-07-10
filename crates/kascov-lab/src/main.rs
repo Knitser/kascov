@@ -67,7 +67,7 @@ enum Command {
     },
     /// Birth a compiled contract as a real covenant: its P2SH commitment
     /// becomes the coin's state. Pairs with the generator on
-    /// kascov-explorer.web.app/decode ("make this yours").
+    /// kascov.io/decode ("make this yours").
     Deploy {
         /// Compiled contract hex (the generator's "compiled" block)
         #[arg(long)]
@@ -201,7 +201,7 @@ SETUP (only once):
     cargo run -p kascov-lab -- balance         # check it arrived
 
 MAKE YOUR OWN (choose the parameters yourself):
-    1. https://kascov-explorer.web.app/decode  → "make a Mecenas / Escrow / LastWill"
+    1. https://kascov.io/decode  → "make a Mecenas / Escrow / LastWill"
        edit the fields (use your keygen pubkey / blake2b), copy the compiled hex.
     2. deploy it (born as a hidden p2sh commitment):
        cargo run -p kascov-lab -- deploy --program-hex <hex> --value 1000000000

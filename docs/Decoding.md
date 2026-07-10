@@ -21,6 +21,14 @@ Where it surfaces:
 
 Reveals exist for spends indexed from July 2 (evening) onward; earlier spends predate capture. Today's TN10 storm coins are P2PK-style (their unlocking script is just a signature — captured, shown as `spend signature …`); the reveal path lights up as P2SH covenants circulate.
 
+## ZK system heuristic
+
+Scripts that invoke the KIP-16 verifier (`OpZkPrecompile`) get a best-effort `zk_system` label from their push sizes: any push **≥ 1024 B** (STARK-scale seal) → `risc0`; otherwise a push in the **128–256 B** band (three Groth16 curve points, compressed to uncompressed) → `groth16`; anything else → `null`. Never guessed for scripts without a zk opcode. Surfaces as `zk_system` on state UTXOs and `revealed_zk_system` on spend-time reveals (`kascov_decode::zk_system`).
+
+## Write-time payload stamping
+
+Event payloads are classified **when they're written** (with a one-time backfill for pre-existing rows), not on every read: the store's `payload_tag` column holds `json` / `jsonhex` / `tag:<8 hex>` (a 4-byte based-app tag) / `''`, and `inscription_kind` holds the decoded JSON-inscription label (KRC-20 ops and friends). This is what makes `lanes.json` and `inscriptions.json` two GROUP BYs instead of a decode pass over every payload.
+
 ## Template decoders (named contracts, labeled fields)
 
 `Registry` tries `StateDecoder` implementations in order and falls back to disassembly. Registered:

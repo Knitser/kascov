@@ -515,7 +515,24 @@
           <a href="#ep-templates">Templates</a>
           <a href="#ep-activity">Activity</a>
           <a href="#ep-families">Apps</a>
+          <a href="#ep-galaxy">Galaxy</a>
           <a href="#ep-lanes">Based-app lanes</a>
+          <a href="#ep-lane">One lane</a>
+          <a href="#ep-inscriptions">Inscriptions</a>
+          <a href="#ep-lifespans">Lifespans</a>
+          <a href="#ep-reorgs">Reorgs</a>
+          <div class="api-nav-group">Find</div>
+          <a href="#ep-search">Search</a>
+          <a href="#ep-debug">Spend debugger</a>
+          <div class="api-nav-group">Share</div>
+          <a href="#ep-share">Share cards</a>
+          <div class="api-nav-group">Write</div>
+          <a href="#ep-simulate">Simulate a spend</a>
+          <a href="#ep-compile">Compile</a>
+          <a href="#ep-publish">Publish source</a>
+          <a href="#ep-verified">Verified source</a>
+          <a href="#ep-subscribe">Webhooks</a>
+          <a href="#ep-deploy">One-click deploy</a>
         </nav>
 
         <div class="api-main">
@@ -564,8 +581,13 @@
           </article>
 
           <article class="api-endpoint" id="ep-snapshot">
-            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}.json</code></div>
-            <p class="ep-desc">The grid — stats plus one summary row per covenant. One request tells you about every smart coin on the network (can be multiple MB; cache it).</p>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}.json</code><span class="ep-q">?after_daa=&amp;after_id=&amp;limit=</span></div>
+            <p class="ep-desc">The grid — stats plus one summary row per covenant, ordered by last activity, newest first. A bare request is a first page capped at 20,000 rows; when more remain the response carries <code class="mono">next_after_daa</code> + <code class="mono">next_after_id</code> — pass them back to keep walking.</p>
+            <table class="ep-params"><thead><tr><th>Query</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">after_daa</td><td>int</td><td>exclusive cursor — resume below this <code class="mono">last_activity_daa</code></td></tr>
+              <tr><td class="mono">after_id</td><td>hex</td><td>tie-breaker within the boundary DAA (the last row's <code class="mono">covenant_id</code>)</td></tr>
+              <tr><td class="mono">limit</td><td>int</td><td>page size, default 5000, capped at 20000; invalid values degrade to the bare first page</td></tr>
+            </tbody></table>
             <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
   "stats": { … },
   "covenants": [
@@ -573,12 +595,15 @@
       "status": "active", "born_value": 1000000000, "live_value": 1000000000,
       "event_count": 1, "genesis_daa": 508951007, "last_daa": 508951007,
       "template": "SilverScript · Mecenas" }
-  ]
+  ],
+  "next_after_daa": 509571904,
+  "next_after_id": "f00dbabe…1234"
 }</code></pre></div>
             <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
               <tr><td class="mono">status</td><td>string</td><td><code class="mono">active</code> or <code class="mono">burned</code></td></tr>
               <tr><td class="mono">born_value · live_value</td><td>int</td><td>sompi held at birth / right now</td></tr>
               <tr><td class="mono">template</td><td>string?</td><td>recognized contract, or a state shape like <code class="mono">p2sh commitment</code></td></tr>
+              <tr><td class="mono">next_after_daa · next_after_id</td><td>int? · hex?</td><td>present only when another page exists — feed them to <code class="mono">?after_daa=&amp;after_id=</code></td></tr>
             </tbody></table>
           </article>
 
@@ -615,6 +640,9 @@
               <tr><td class="mono">lineage_complete</td><td>bool</td><td><code class="mono">false</code> means kascov started watching mid-life; earlier history is honestly missing</td></tr>
               <tr><td class="mono">utxos[].revealed_template</td><td>string?</td><td>the contract a P2SH state actually ran, decoded and hash-verified when it was spent</td></tr>
               <tr><td class="mono">…_fields[]</td><td>array</td><td><code class="mono">{ name, value }</code> — labeled constructor arguments</td></tr>
+              <tr><td class="mono">holders[]</td><td>array</td><td>up to 100 p2pk-state owners: <code class="mono">{ pubkey, controls_now, states_seen, first_seen_daa, last_seen_daa }</code></td></tr>
+              <tr><td class="mono">utxos[].zk_system</td><td>string?</td><td>on zk-using states, a size heuristic over the proof push: <code class="mono">risc0</code> (≥1024&nbsp;B) or <code class="mono">groth16</code> (128–256&nbsp;B)</td></tr>
+              <tr><td class="mono">utxos[].revealed_zk_system</td><td>string?</td><td>the same heuristic applied to the program revealed at spend</td></tr>
             </tbody></table>
           </article>
 
@@ -691,6 +719,223 @@
     ] }
   ]
 }</code></pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-galaxy">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/galaxy.json</code><span class="ep-q">?fmt=2&amp;tier=core</span></div>
+            <p class="ep-desc">The whole-network app graph behind the galaxy map — precomputed positions, weighted edges, and status for every smart coin. Built server-side and kept warm, so even a 168k-coin network answers instantly.</p>
+            <table class="ep-params"><thead><tr><th>Query</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">fmt</td><td>enum</td><td><code class="mono">2</code> — columnar arrays instead of one object per node (much smaller payload)</td></tr>
+              <tr><td class="mono">tier</td><td>enum</td><td><code class="mono">core</code> — the big clusters only, for a fast first paint; fetch the full graph after</td></tr>
+            </tbody></table>
+            <p class="ep-desc">Unknown params and unknown values degrade to the legacy full-object shape — old clients keep working unchanged.</p>
+          </article>
+
+          <article class="api-endpoint" id="ep-lanes">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/lanes.json</code></div>
+            <p class="ep-desc">Based-app traffic by namespace — KIP-21 lanes, 4-byte app tags, and the JSON-inscription bucket, sorted by event count. Printable tags get their ASCII label; the rest show as <code class="mono">0x…</code>.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "tip_daa": 509571904,
+  "lanes": [
+    { "label": "kspr", "hex": "6b737072", "ascii": true,
+      "kind": "tag", "events": 40312, "covenants": 6120 },
+    { "label": "JSON inscriptions", "hex": null, "ascii": false,
+      "kind": "inscription", "events": 8123, "covenants": 950 }
+  ]
+}</code></pre></div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">lanes[].kind</td><td>string</td><td><code class="mono">lane</code> (KIP-21 namespace) · <code class="mono">tag</code> (4-byte app tag) · <code class="mono">inscription</code> (JSON payloads)</td></tr>
+              <tr><td class="mono">lanes[].hex</td><td>hex?</td><td>the raw 4-byte namespace; <code class="mono">null</code> for the JSON-inscription bucket</td></tr>
+            </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-lane">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/lane/{ns}</code></div>
+            <p class="ep-desc">One namespace's dashboard — headline counts, the 50 newest events, and an hourly activity series over the lane's whole life. <code class="mono">{ns}</code> is the 4-byte tag as exactly 8 hex characters — anything else is a <code class="mono">400</code>.</p>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -s https://kascov.io/data/testnet-10/lane/6b737072</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "namespace": "6b737072",
+  "events": 40312, "covenants": 6120,
+  "recent": [ { "covenant_id": "…", "txid": "…",
+                "accepting_daa": 509571333, "kind": "transition" } ],
+  "activity": [ { "daa": 509540000, "count": 812 } ],
+  "bucket_daa": 36000
+}</code></pre></div>
+            </div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">bucket_daa</td><td>int</td><td>bucket width of the activity series — 36,000 DAA ≈ 1 hour</td></tr>
+            </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-inscriptions">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/inscriptions.json</code></div>
+            <p class="ep-desc">The JSON-inscription breakdown — events and distinct coins per decoded label (KRC-20 ops and friends).</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "inscriptions": [
+    { "label": "krc-20 mint", "events": 5123, "covenants": 640 }
+  ]
+}</code></pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-lifespans">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/lifespans.json</code></div>
+            <p class="ep-desc">How long do smart coins live? A bucketed lifespan histogram over every retired coin, plus the median. Times derive from DAA at 10 per second, so <code class="mono">median_ms</code> is an estimate.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "buckets": [ { "label": "&lt; 1 min", "count": 41230 } ],
+  "median_daa": 1840, "median_ms": 184000, "total": 83181
+}</code></pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-reorgs">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/reorgs.json</code></div>
+            <p class="ep-desc">The indexer's own reorg ledger — the last 500 virtual-chain reorgs it applied, newest first. Every entry is a rewind the index actually performed, not a heuristic.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "reorgs": [ { "daa": 509571904, "at_ms": 1751799000000, "rolled_back": 2 } ]
+}</code></pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-search">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/search</code><span class="ep-q">?q=&amp;limit=</span></div>
+            <p class="ep-desc">Find a coin — by covenant-id hex prefix (4+ characters), friendly-name prefix, or template substring. Each hit says which way it matched.</p>
+            <table class="ep-params"><thead><tr><th>Query</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">q</td><td>string</td><td>required, 1–64 characters; <code class="mono">400</code> otherwise</td></tr>
+              <tr><td class="mono">limit</td><td>int</td><td>max results, default 10, clamped</td></tr>
+            </tbody></table>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -s 'https://kascov.io/data/testnet-10/search?q=mece'</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "query": "mece",
+  "results": [
+    { "id": "b4ade48e…", "name": "brave-amber-lynx-b4ad",
+      "template": "SilverScript · Mecenas",
+      "status": "active", "matched": "template" }
+  ]
+}</code></pre></div>
+            </div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">results[].matched</td><td>string</td><td><code class="mono">id</code> · <code class="mono">name</code> · <code class="mono">template</code></td></tr>
+            </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-debug">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/debug/{txid}</code></div>
+            <p class="ep-desc">Replay a real on-chain covenant spend through the actual script engine, with the witness captured at index time — a concrete per-opcode trace of what really ran. The transaction context is fabricated, so signature/introspection checks may diverge from the original; the response says so in <code class="mono">note</code>.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "ok": true, "pass": true, "verdict": "script accepted",
+  "covenant_id": "…", "outpoint": { "txid": "…", "index": 0 },
+  "value": 500000000,
+  "trace": [ { "op": "OpBlake2b", "dstack": ["…"], "astack": [] } ],
+  "trace_truncated": false,
+  "note": "replayed with a fabricated tx context"
+}</code></pre></div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">ok</td><td>bool</td><td><code class="mono">false</code> when the txid spent no tracked state, or no witness was captured (<code class="mono">reason</code> says which)</td></tr>
+              <tr><td class="mono">trace_truncated</td><td>bool</td><td>the trace is capped at 2,000 opcodes</td></tr>
+            </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-share">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/share/{network}/{covenant_id}</code></div>
+            <p class="ep-desc">The crawler-visible page for one coin (the SPA is hash-routed, so scrapers never see <code class="mono">#/…</code> urls) — OG/Twitter meta plus a redirect into the app for humans. Its picture is a server-rendered PNG card, and <code class="mono">/sitemap.xml</code> lists every share page so search engines find every coin. These live on the site root, not under <code class="mono">/data</code>.</p>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">The card image</div><pre class="codeblock"><code>GET /og/{network}/{covenant_id}.png
+→ 1200×630 Open Graph card (name, avatar,
+  holdings, story), rendered on demand</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">The index</div><pre class="codeblock"><code>GET /sitemap.xml
+→ every coin's /share/… url</code></pre></div>
+            </div>
+          </article>
+
+          <article class="api-endpoint" id="ep-simulate">
+            <div class="ep-head"><span class="method post">POST</span><code class="ep-path">/data/{network}/simulate</code></div>
+            <p class="ep-desc">Run a hypothetical spend of a compiled contract through the real script engine, off-chain — the same PASS/FAIL a node would decide, with the violated rule in plain English on failure. Pure computation: the network segment is cosmetic, and responses are <code class="mono">no-store</code>.</p>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">Request body</div><pre class="codeblock"><code>{
+  "program_hex": "20d9a9…87",   // ≤ 20,000 hex chars
+  "entrypoint": "spend",        // spend · reclaim · cold · inherit
+  "recipient": "buyer",         // buyer · seller · other · self
+  "value": 500000000,           // the state coin, sompi
+  "amount": 499999000,          // output 0; default value − 1000
+  "trace": true                 // capture per-opcode stacks
+}</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "ok": true, "pass": false,
+  "verdict": "…", "rule": "output 0 must pay the buyer exactly value − 1000",
+  "template": "SilverScript · Escrow",
+  "trace": [ { "op": "OpDup", "dstack": ["…"], "astack": [] } ],
+  "note": "simulated with a stand-in signer"
+}</code></pre></div>
+            </div>
+          </article>
+
+          <article class="api-endpoint" id="ep-compile">
+            <div class="ep-head"><span class="method post">POST</span><code class="ep-path">/data/{network}/compile</code></div>
+            <p class="ep-desc">Compile SilverScript source server-side. Body is <code class="mono">{ source, args }</code> — source up to 40,000 characters, at most 16 constructor args of ≤200 characters each.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{ "ok": true, "hex": "20d9a9…87" }
+// or
+{ "ok": false, "error": "compile error: …" }</code></pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-publish">
+            <div class="ep-head"><span class="method post">POST</span><code class="ep-path">/data/{network}/publish</code></div>
+            <p class="ep-desc">Verify-and-publish, Etherscan-style: submit <code class="mono">{ source, args }</code>; the worker compiles it and stores the source keyed by the compiled program's blake2b-256 hash. Any coin whose revealed program hashes the same now shows your source as community-verified.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{ "ok": true, "hash": "d9a9e982…f475d17",
+  "template": "SilverScript · Mecenas" }</code></pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-verified">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/verified/{hash}</code></div>
+            <p class="ep-desc">The published source for a program hash — what <code class="mono">/publish</code> stored. <code class="mono">{ "ok": false }</code> when nothing is published for that hash.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{ "ok": true, "source": "contract Mecenas(…) { … }",
+  "args": "…", "template": "SilverScript · Mecenas",
+  "verified_at": 1752130000000 }</code></pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-subscribe">
+            <div class="ep-head"><span class="method post">POST</span><code class="ep-path">/data/{network}/subscribe</code></div>
+            <p class="ep-desc">Register a webhook: your URL gets one JSON POST per matching covenant event, delivered as it happens. Filter to one coin with <code class="mono">covenant_id</code> (must be exactly 64 hex characters — anything else is rejected, never a silent wildcard) and/or one event <code class="mono">kind</code>; omit both for everything. Unsubscribe with <code class="mono">POST /data/{network}/unsubscribe</code> and the returned id.</p>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">Request body</div><pre class="codeblock"><code>{
+  "url": "https://example.com/hook",
+  "covenant_id": "b4ade48e…",  // optional, 64 hex
+  "kind": "burn"               // optional: genesis · transition · burn
+}
+// → { "ok": true, "id": 7 }
+// unsubscribe: { "id": 7 } → { "ok": true, "deleted": true }</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Each delivery</div><pre class="codeblock"><code>POST your-url  ·  application/json
+{
+  "network": "testnet-10",
+  "covenant_id": "b4ade48e…",
+  "kind": "burn",
+  "txid": "1461f8…07ed",
+  "accepting_daa": 509571520
+}</code></pre></div>
+            </div>
+            <table class="ep-fields"><thead><tr><th>Semantics</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">delivery</td><td></td><td>up to 3 attempts with backoff, 5s timeout, redirects never followed; a subscription that keeps failing is retired automatically</td></tr>
+              <tr><td class="mono">targets</td><td></td><td>public http(s) hosts only — every resolved address is checked, and loopback / private / link-local targets are rejected (SSRF guard)</td></tr>
+              <tr><td class="mono">guarantees</td><td></td><td>best-effort hints, not a durable feed — confirm through the polled endpoints</td></tr>
+            </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-deploy">
+            <div class="ep-head"><span class="method post">POST</span><code class="ep-path">/data/{network}/deploy</code></div>
+            <p class="ep-desc">One-click deploy: the server births your compiled contract as a real covenant on <strong>testnet-10</strong> using its own faucet key — no local toolchain. Gated off by default: the route exists only when the server is armed (<code class="mono">KASCOV_DEPLOY_KEY</code>) <em>and</em> the network is testnet-10; otherwise it answers <code class="mono">404</code>. Never on mainnet.</p>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">Request body</div><pre class="codeblock"><code>{
+  "program_hex": "20d9a9…87",  // ≤ 20,000 hex chars
+  "value": 1000000000          // 1–10 TKAS, in sompi
+}</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{ "ok": true,
+  "covenant_id": "b4ade48e…",
+  "network": "testnet-10" }</code></pre></div>
+            </div>
+            <table class="ep-fields"><thead><tr><th>Limit</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">global</td><td></td><td>token bucket — 5 burst, refilling 1 per 10 minutes (≈144/day); throttled requests get <code class="mono">429</code></td></tr>
+              <tr><td class="mono">per IP</td><td></td><td>20 deploys per day (best-effort)</td></tr>
+              <tr><td class="mono">in flight</td><td></td><td>one deploy at a time — they share the funding wallet</td></tr>
+            </tbody></table>
           </article>
 
           <p class="api-foot dim">Served by an always-on indexer that follows the chain live. Want the raw index or to run your own? <a href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov</a>.</p>

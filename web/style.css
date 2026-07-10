@@ -2502,6 +2502,7 @@ button.build-card { width: 100%; text-align: left; font: inherit; color: inherit
 .ep-head { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; margin-bottom: 0.7rem; }
 .method { font-family: var(--mono); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; padding: 0.25rem 0.55rem; border-radius: 6px; }
 .method.get { color: var(--born); background: var(--born-soft); border: 1px solid rgba(91,228,155,0.35); }
+.method.post { color: var(--burn); background: var(--burn-soft); border: 1px solid rgba(242,165,102,0.35); }
 .ep-path { font-family: var(--mono); font-size: 1rem; color: var(--text); word-break: break-all; }
 .ep-path + .ep-q, .ep-q { font-family: var(--mono); font-size: 0.9rem; color: var(--faint); }
 .ep-desc { color: var(--muted); line-height: 1.6; margin: 0 0 1rem; max-width: 70ch; }

@@ -1,6 +1,6 @@
 # Architecture
 
-Four crates + a no-build web app, strict boundaries:
+Six crates + a no-build web app, strict boundaries:
 
 ```
 crates/
@@ -11,8 +11,13 @@ crates/
 │   ├── store.rs     the [[Storage Schema]]
 │   └── detect.rs    tx → covenant sightings
 ├── kascov-decode/   [[Decoding]] — disassembler, P2SH reveals, template registry
+├── kascov-sim/      off-chain script-engine harness — powers /simulate, /debug
+│                    (real-witness replay) and /zk-verify
 ├── kascov/          the CLI + the `serve` worker ([[CLI Reference]])
-└── kascov-lab/      [[Covenant Lab]] — makes real covenants to index
+│   └── src/og.rs    share cards: SVG → resvg → 1200×630 PNG, fonts embedded
+├── kascov-labkit/   transaction-building library shared by the lab CLI and the
+│                    worker's custodial one-click /deploy
+└── kascov-lab/      [[Covenant Lab]] — CLI over labkit; makes real covenants to index
 web/                 vanilla-JS explorer (no build step) + disasm.js (verified
                      JS port of kascov-decode's disassembler)
 ```
@@ -32,10 +37,26 @@ web/                 vanilla-JS explorer (no build step) + disasm.js (verified
 ```
 Firebase Hosting  ──  static web/ (SPA, no build step; HTML no-cache, js/css 5 min)
       │
-      └── /data/** rewrite ──► Cloud Run: kascov-worker (`kascov serve`)
+      └── /data/**, /share/**, /og/**, /sitemap.xml rewrite
+                            ──► Cloud Run: kascov-worker (`kascov serve`)
                                  ├─ follows mainnet + TN10 (concurrent prefetch)
-                                 ├─ /data/<net>.json        full snapshot (15/30s cache, br/gzip)
+                                 ├─ /data/<net>.json        grid snapshot — 20k-row first page,
+                                 │                          next_after_daa/next_after_id cursors
                                  ├─ /data/<net>-live.json   stats+tip+150 events (5/10s cache)
+                                 ├─ /data/<net>/…           coin/tx/addr detail, analytics
+                                 │                          (galaxy, lanes, reorgs, lifespans,
+                                 │                          inscriptions), search, debug, SSE,
+                                 │                          simulate/compile/publish/verified,
+                                 │                          subscribe/unsubscribe, deploy (gated)
+                                 ├─ /share/<net>/<id> · /og/<net>/<id>.png · /sitemap.xml
+                                 │                          crawler-visible coin pages + PNG
+                                 │                          OG cards (src/og.rs)
+                                 ├─ per-network webhook-delivery task — mpsc queue off the
+                                 │    follower callback → sequential SSRF-guarded POSTs
+                                 │    (3 attempts, 5s timeout, no redirects, auto-retire)
+                                 ├─ galaxy keep-warm task — rebuilds the frontend's two
+                                 │    payload variants every ~240s so no request pays a
+                                 │    cold multi-second build
                                  └─ SQLite DBs ⟷ gs://kascov-explorer-index (5-min backups,
                                     restore on boot — history survives redeploys)
 ```
