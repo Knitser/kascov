@@ -100,11 +100,17 @@ const state = {
   network: 'testnet-10',
   cache: {},          // network -> { data, index }
   filter: 'all',
+  filterTouched: false, // an explicit chip choice sticks across network switches
   storyKind: 'all', // stories-feed chip: all | born | moved | retired (session-only)
   query: '',
   shown: PAGE_SIZE,
   nerd: false,
   sort: 'activity',
+  detailId: null,     // covenant id the detail view last rendered
+  storyAll: false,    // detail view: long timeline expanded past its fold
+  utxoAll: false,     // detail view: UTXO list expanded past its fold
+  tlKind: 'all',      // detail timeline chip: all | born | moved | retired
+  tlLabel: 'all',     // detail timeline chip: revealed-program label
   live: {},           // network -> { supported, missedAt, data }
   details: {},        // network -> Map(covenant id -> merged detail entry)
   txLookup: {},       // 64-hex query -> 'pending' | 'miss' (server tx resolver)

@@ -5,7 +5,7 @@
    web/core/* modules without a bundler. */
 
 import {
-  idByte, friendlyName, avatarSvg,
+  idByte, friendlyName, semanticTemplate, avatarSvg,
   ICONS, KIND_META, GLOSSARY,
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex,
@@ -14,10 +14,22 @@ import {
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
-  ACTIVITY_TTL_MS, ACTIVITY_MISS_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
+  ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
-  state, watchKey, loadWatch, saveWatch,
+  state, loadWatch, saveWatch,
 } from './core/state.js';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js';
+import {
+  isAlive,
+  buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
+  loadDetail, loadAddress, loadLite,
+  loadTemplates, loadLanes, loadInscriptions, loadLifespans, loadFamilies,
+  loadActivity, loadReorgs, loadDigest,
+  galaxyCache, loadGalaxy,
+  LANE_PAGE_TTL_MS, lanePages, loadLanePage,
+  TOKENS_TTL_MS, tokenPages, loadTokens,
+  loadChangelog,
+} from './core/data.js';
 
 
 
@@ -28,261 +40,6 @@ const $ = (sel) => document.querySelector(sel);
 
 
 
-
-/* Balance held right after each event daa. A spent UTXO is assumed
-   consumed by the first covenant event after its creation (covenant
-   outputs can only be spent by covenant events), so it counts toward
-   balances in [creation event, next event). Reconciles with live_value
-   at the last event for every covenant in current snapshots. */
-function balancesByEventDaa(c) {
-  const evDaas = [...new Set(c.events.map((e) => e.accepting_daa))].sort((a, b) => a - b);
-  const out = new Map();
-  for (const daa of evDaas) {
-    let total = 0;
-    for (const u of (c.utxos || [])) {
-      if (u.created_daa > daa) continue;
-      if (u.live) { total += u.value; continue; }
-      const next = evDaas.find((x) => x > u.created_daa);
-      if (next == null || daa < next) total += u.value;
-    }
-    out.set(daa, total);
-  }
-  return out;
-}
-
-/* Build a derived index so rendering stays cheap. The grid feed carries one
-   summary row per covenant (no timelines, no scripts — those come from the
-   per-coin detail endpoint), so this stays linear even at 40k+ coins. */
-
-/* one index entry from a grid row (name collisions handled by the callers) */
-function indexEntry(c, data, name) {
-  /* transitions = events minus the birth (if seen) and the burn (if retired) */
-  const moves = Math.max(0, c.event_count -
-    (c.genesis_daa != null ? 1 : 0) -
-    (c.status !== 'active' ? 1 : 0));
-  const bornMs = c.genesis_daa != null ? daaToMs(c.genesis_daa, data)
-    : (c.last_activity_daa ? daaToMs(c.last_activity_daa, data) : data.generated_at_ms);
-  const lastMs = c.last_activity_daa ? daaToMs(c.last_activity_daa, data) : bornMs;
-  const birthValue = c.born_value || 0;
-  const blob = (name + ' ' + c.covenant_id).toLowerCase();
-  return { c, name, moves, bornMs, lastMs, birthValue, blob };
-}
-
-function buildIndex(data) {
-  /* friendly names can collide; count them so duplicates get a suffix */
-  const nameCounts = new Map();
-  for (const c of data.covenants) {
-    const n = friendlyName(c.covenant_id);
-    nameCounts.set(n, (nameCounts.get(n) || 0) + 1);
-  }
-  const covs = data.covenants.map((c) => {
-    let name = friendlyName(c.covenant_id);
-    if (nameCounts.get(name) > 1) name += `-${c.covenant_id.slice(0, 4)}`;
-    return indexEntry(c, data, name);
-  });
-  covs.sort((a, b) => (b.c.last_activity_daa || 0) - (a.c.last_activity_daa || 0));
-  const byId = new Map(covs.map((e) => [e.c.covenant_id, e]));
-  /* nameCounts + generation persist so load-more can append incrementally
-     (O(page), not a full O(n log n) rebuild) and renders can memoize.
-     generation is globally unique — a rebuilt index (45s refresh) must never
-     collide with the memo key of the index it replaces. */
-  return { covs, byId, nameCounts, generation: ++indexSeq };
-}
-let indexSeq = 0;
-
-/* Merge newly loaded (older) grid rows into an existing index in O(page).
-   Cursor pages arrive in descending-activity order strictly below what's
-   loaded, so appending preserves the sort; a cheap boundary check catches the
-   rare out-of-order page (server refreshed mid-walk) and falls back to one
-   sort. A name colliding with an already-indexed coin retro-suffixes the
-   existing entry, matching what a full rebuild would have produced. */
-function appendToIndex(index, data, newRows) {
-  const covs = index.covs;
-  for (const c of newRows) {
-    const base = friendlyName(c.covenant_id);
-    const count = (index.nameCounts.get(base) || 0) + 1;
-    index.nameCounts.set(base, count);
-    if (count === 2) {
-      /* retro-suffix the existing holder of this name (rare; linear scan) */
-      const prev = covs.find((e) => e.name === base);
-      if (prev) {
-        prev.name = base + `-${prev.c.covenant_id.slice(0, 4)}`;
-        prev.blob = (prev.name + ' ' + prev.c.covenant_id).toLowerCase();
-      }
-    }
-    const name = count > 1 ? base + `-${c.covenant_id.slice(0, 4)}` : base;
-    const entry = indexEntry(c, data, name);
-    covs.push(entry);
-    index.byId.set(c.covenant_id, entry);
-  }
-  /* boundary guard: if the first appended row is newer than what precedes it,
-     the pages interleaved — restore order with one sort */
-  const at = covs.length - newRows.length;
-  if (at > 0 && newRows.length &&
-      (covs[at].c.last_activity_daa || 0) > (covs[at - 1].c.last_activity_daa || 0)) {
-    covs.sort((a, b) => (b.c.last_activity_daa || 0) - (a.c.last_activity_daa || 0));
-  }
-  index.generation = ++indexSeq; /* same global sequence as buildIndex — no key collisions */
-  return index;
-}
-
-/* Fetch one grid page. The compound cursor `afterDaa`+`afterId` and `limit` are
-   folded into the query only when present so a plain `data/{net}.json` still
-   works against older workers. */
-async function fetchGridPage(network, afterDaa, afterId, limit) {
-  const qs = new URLSearchParams();
-  if (afterDaa != null) qs.set('after_daa', String(afterDaa));
-  if (afterId != null) qs.set('after_id', String(afterId));
-  if (limit != null) qs.set('limit', String(limit));
-  const suffix = qs.toString();
-  const res = await fetch(`data/${network}.json${suffix ? `?${suffix}` : ''}`, { cache: 'no-cache' });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
-
-async function loadNetwork(network) {
-  if (state.cache[network]) return state.cache[network];
-  const data = await fetchGridPage(network, null, null, GRID_PAGE);
-  data.__anchor = makeAnchor(data, network);
-  /* a cursor means the worker paginated and older rows remain; its absence
-     means we already hold the full snapshot (older worker or a small net) */
-  const cursor = data.next_after_daa != null ? data.next_after_daa : null;
-  const entry = {
-    data, index: buildIndex(data), nextAfterDaa: cursor,
-    nextAfterId: data.next_after_id != null ? data.next_after_id : null,
-    loadingMore: false,
-  };
-  state.cache[network] = entry;
-  return entry;
-}
-
-/* Pull the next older grid page and merge it into the cached entry: append the
-   fresh rows, advance the cursor, and rebuild the derived index so search,
-   sort, filter and the watch strip all see the newly loaded coins. Returns the
-   entry unchanged (no-op) when there is nothing more to load or a fetch is
-   already in flight. */
-async function loadMoreGrid(network) {
-  const entry = state.cache[network];
-  if (!entry || entry.nextAfterDaa == null || entry.loadingMore) return entry;
-  entry.loadingMore = true;
-  try {
-    const page = await fetchGridPage(network, entry.nextAfterDaa, entry.nextAfterId, GRID_PAGE);
-    const rows = Array.isArray(page.covenants) ? page.covenants : [];
-    /* dedup against the index (byId covers everything loaded), then merge the
-       genuinely-new rows incrementally — O(page), not a full rebuild */
-    const fresh = rows.filter((c) => !entry.index.byId.has(c.covenant_id));
-    entry.data.covenants.push(...fresh);
-    entry.nextAfterDaa = page.next_after_daa != null ? page.next_after_daa : null;
-    entry.nextAfterId = page.next_after_id != null ? page.next_after_id : null;
-    appendToIndex(entry.index, entry.data, fresh);
-  } finally {
-    entry.loadingMore = false;
-  }
-  return entry;
-}
-
-/* One coin's full story, fetched on demand and merged over its grid row so
-   the detail renderer sees the same shape the all-in-one snapshot used to
-   provide. */
-async function loadDetail(network, covId) {
-  const map = state.details[network] || (state.details[network] = new Map());
-  const hit = map.get(covId);
-  if (hit) return hit;
-  const res = await fetch(`data/${network}/c/${covId}.json`, { cache: 'no-cache' });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const detail = await res.json();
-  const entry = state.cache[network];
-  const gridRec = entry && entry.index.byId.get(covId);
-  const c = Object.assign({}, gridRec ? gridRec.c : {}, detail);
-  const data = entry ? entry.data : detail; /* anchor for daa→ms */
-  const name = gridRec ? gridRec.name : friendlyName(covId);
-  const moves = c.events.filter((e) => e.kind === 'transition').length;
-  const firstEvent = c.events[0] || null;
-  const lastEvent = c.events[c.events.length - 1] || null;
-  const bornMs = c.genesis_daa != null ? daaToMs(c.genesis_daa, data)
-    : (firstEvent ? daaToMs(firstEvent.accepting_daa, data) : data.generated_at_ms);
-  const lastMs = lastEvent ? daaToMs(lastEvent.accepting_daa, data) : bornMs;
-  let birthValue = c.born_value || 0;
-  if (c.genesis_daa != null && Array.isArray(c.utxos)) {
-    let v = 0;
-    for (const u of c.utxos) if (u.created_daa === c.genesis_daa) v += u.value;
-    if (v > 0) birthValue = v;
-  }
-  const rec = { c, name, moves, bornMs, lastMs, birthValue, balances: balancesByEventDaa(c) };
-  map.set(covId, rec);
-  return rec;
-}
-
-/* which smart coins has this address/pubkey touched — fetched on demand */
-async function loadAddress(network, q) {
-  const map = state.addrs[network] || (state.addrs[network] = new Map());
-  const hit = map.get(q);
-  if (hit) return hit;
-  const res = await fetch(`data/${network}/addr/${encodeURIComponent(q)}.json`, { cache: 'no-cache' });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  map.set(q, data);
-  return data;
-}
-
-/* The tiny live feed, for instant first paint while the full snapshot
-   (multi-MB on a busy testnet) is still downloading. */
-async function loadLite(network) {
-  const ls = state.live[network] || (state.live[network] = { supported: null, missedAt: 0, data: null });
-  if (ls.data) return ls.data;
-  try {
-    const res = await fetch(`data/${network}-live.json`, { cache: 'no-cache' });
-    if (!res.ok) {
-      if (res.status === 404) {
-        ls.supported = false;
-        ls.missedAt = Date.now();
-      }
-      return null;
-    }
-    ls.data = await res.json();
-    ls.supported = true;
-    return ls.data;
-  } catch (e) {
-    return null;
-  }
-}
-
-/* Contract-type analytics — what runs on this network, by recognized script
-   template. Cached per network for a minute (mirrors the server ttl); a 404
-   from an older worker is remembered (data: null) and reprobed after the
-   ttl, so the section hides instead of pinning a dead panel. */
-const TEMPLATES_TTL_MS = 60_000;
-
-async function loadTemplates(network) {
-  const t = state.templates[network];
-  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/templates.json`, { cache: 'no-cache' });
-    if (!res.ok) {
-      state.templates[network] = { data: null, at: Date.now() };
-      return null;
-    }
-    const data = await res.json();
-    state.templates[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
-}
-
-async function loadLanes(network) {
-  const t = state.lanes[network];
-  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/lanes.json`, { cache: 'no-cache' });
-    if (!res.ok) { state.lanes[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    state.lanes[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
-}
 
 /* a namespace is 4 bytes — show its ASCII when printable ("KASP"), else hex */
 function nsLabel(hex) {
@@ -330,20 +87,6 @@ function renderLanes(network) {
   }).join('');
 }
 
-async function loadInscriptions(network) {
-  const t = state.inscriptions[network];
-  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/inscriptions.json`, { cache: 'no-cache' });
-    if (!res.ok) { state.inscriptions[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    state.inscriptions[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
-}
-
 function renderInscriptions(network) {
   const section = $('#section-inscriptions');
   const host = $('#inscriptions-row');
@@ -368,20 +111,6 @@ function renderInscriptions(network) {
       `<span class="lane-track"><span class="lane-fill" style="width:${w}%"></span></span>` +
       `<span class="lane-counts dim">${fmtInt(l.events)} tx${l.events === 1 ? '' : 's'} · ${fmtInt(l.covenants)} coin${l.covenants === 1 ? '' : 's'}</span></div>`;
   }).join('');
-}
-
-async function loadLifespans(network) {
-  const t = state.lifespans[network];
-  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/lifespans.json`, { cache: 'no-cache' });
-    if (!res.ok) { state.lifespans[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    state.lifespans[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
 }
 
 function renderLifespans(network) {
@@ -449,26 +178,6 @@ function promoteSection(sec, key) {
     else if (pref === 'open') sec.open = true;
     else if (pref === 'closed') sec.open = false;
   } catch (e) { /* private mode — leave the default (closed) */ }
-}
-const galaxyCache = {};        // network -> { data, at }
-
-async function loadGalaxy(network) {
-  const t = galaxyCache[network];
-  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    /* first paint asks for the compact columnar core tier (?fmt=2&tier=core:
-       big clusters only, parallel arrays). An older worker ignores the params
-       and answers with the full legacy shape — galaxy.js feature-detects
-       either. When the reply IS the core tier, upgradeGalaxy() streams the
-       full set in behind it and hot-swaps without moving the camera. */
-    const res = await fetch(`data/${network}/galaxy.json?fmt=2&tier=core`, { cache: 'no-cache' });
-    if (!res.ok) { galaxyCache[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    galaxyCache[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
 }
 
 /* core-tier first paint → fetch the full node set (?fmt=2) in the background
@@ -570,20 +279,6 @@ function renderGalaxy() {
   if (isCoreTier) upgradeGalaxy(network);
 }
 
-async function loadFamilies(network) {
-  const t = state.families[network];
-  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/families.json`, { cache: 'no-cache' });
-    if (!res.ok) { state.families[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    state.families[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
-}
-
 /* covenant apps: coins that moved together in a transaction. Renders the
    biggest few clusters; hidden when none (single-covenant networks). */
 function renderFamilies(network) {
@@ -638,28 +333,6 @@ function renderFamilies(network) {
       `<span class="family-sub dim">${f.size} coins moved together in a transaction</span></div>` +
       `<div class="family-members">${members}</div></div>`;
   }).join('');
-}
-
-/* the activity histogram behind the pulse chart — per (network, range)
-   cache mirroring the server ttl; a 404 from an older worker is remembered
-   (data: null) and reprobed after ACTIVITY_MISS_TTL_MS */
-async function loadActivity(network, range) {
-  const byRange = state.activity[network] || (state.activity[network] = {});
-  const hit = byRange[range];
-  const ttl = hit && hit.data === null ? ACTIVITY_MISS_TTL_MS : ACTIVITY_TTL_MS;
-  if (hit && Date.now() - hit.at < ttl) return hit.data;
-  try {
-    const res = await fetch(`data/${network}/activity.json?range=${range}`, { cache: 'no-cache' });
-    if (!res.ok) {
-      if (res.status === 404) byRange[range] = { data: null, at: Date.now() };
-      return hit ? hit.data : null;
-    }
-    const data = await res.json();
-    byRange[range] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return hit ? hit.data : null;   /* stale-ok; fallback only on a real 404 */
-  }
 }
 
 /* DAA → ms against the live feed's own tip anchor. */
@@ -720,6 +393,7 @@ function renderLiteLanding(live, network) {
   $('#section-teaser').hidden = empty;
   renderDigestStrip(network, empty);
   renderWhatsNew();
+  updateTourOffer();
   if (empty) {
     $('#landing-empty').innerHTML = emptyCardHtml(network);
     return;
@@ -767,65 +441,11 @@ function renderLiteExplore(live, network) {
   $('#story-list').innerHTML = liteEvents.length
     ? liteEvents.map((ev) => liteStoryRow(ev, live, network)).join('')
     : storyEmptyHtml();
+  syncFilterChips(network);
   $('#result-count').textContent = `${fmtInt(s.covenants)} smart coins`;
   $('#coin-grid').innerHTML =
     `<div class="no-results"><p class="dim">loading all ${esc(fmtInt(s.covenants))} smart coins…</p></div>`;
   $('#grid-foot').innerHTML = '';
-}
-
-/* ------------------------------------------------------ USD hints (mainnet) */
-
-/* KAS→USD tails on real-money amounts. The rate rides a feature-detected
-   /data/price.json: one probe per 5 minutes while a mainnet view is up, and
-   any miss (404/503/network error) silences the feature for the session — an
-   older worker without the route must leave zero trace in the UI. Testnet
-   never fetches and never shows a dollar sign (play money). */
-const PRICE_TTL_MS = 5 * 60_000;
-const price = { data: null, at: 0, dead: false, inflight: null };
-let usdOn = true;
-try { usdOn = localStorage.getItem('kascov-usd') !== '0'; } catch (e) { /* private mode */ }
-
-/* returns a promise ONLY when this call started a fetch — callers hang their
-   one repaint off it without stacking repaints on a shared in-flight probe */
-function loadPrice() {
-  if (price.dead || state.network !== 'mainnet') return null;
-  if (price.data && Date.now() - price.at < PRICE_TTL_MS) return null;
-  if (price.inflight) return null;
-  price.inflight = fetch('data/price.json', { cache: 'no-cache' })
-    .then(async (res) => {
-      if (!res.ok) { price.dead = true; return null; }
-      const d = await res.json();
-      if (!d || typeof d.kas_usd !== 'number' || !(d.kas_usd > 0)) { price.dead = true; return null; }
-      price.data = d;
-      price.at = Date.now();
-      return d;
-    })
-    .catch(() => { price.dead = true; return null; })
-    .finally(() => { price.inflight = null; });
-  return price.inflight;
-}
-
-/* dollar formatting: 2 significant decimals under $1, cents above */
-function fmtUsd(usd) {
-  const str = usd >= 1
-    ? usd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-    : usd.toLocaleString('en-US', { maximumSignificantDigits: 2 });
-  return `$${str}`;
-}
-
-/* fmtAmount plus an "≈ $X" tail — plain text, so the esc()'d call sites on
-   coin pages, address pages and the watch strip keep working unchanged */
-function amountWithUsd(sompi, network) {
-  const base = fmtAmount(sompi, network);
-  if (network !== 'mainnet' || !usdOn || !price.data || !(sompi > 0)) return base;
-  return `${base} ≈ ${fmtUsd((sompi / 1e8) * price.data.kas_usd)}`;
-}
-
-/* the toggle chip — only rendered where dollar tails can actually appear */
-function usdToggleHtml() {
-  if (state.network !== 'mainnet' || !price.data) return '';
-  return `<button type="button" class="chip chip-usd" data-action="usd" aria-pressed="${usdOn}"` +
-    ` title="show approximate US-dollar values next to KAS amounts">≈ USD</button>`;
 }
 
 /* ------------------------------------------------------------- sentences */
@@ -880,7 +500,7 @@ function eventSentence(entry, ev, network, withBalance) {
      that is burned now. A burn followed by more life (the other piece kept
      moving) is "lost a piece", even when it's the only burn so far. */
   const lastEvent = entry.c.events[entry.c.events.length - 1];
-  const isFinal = entry.c.status !== 'active' && lastEvent && ev.seq === lastEvent.seq;
+  const isFinal = !isAlive(entry.c) && lastEvent && ev.seq === lastEvent.seq;
   const gone = eventShape(entry, ev).consumedValue;
   const goneBit = gone > 0 ? ` — ${esc(amountWithUsd(gone, network))} left the covenant` : '';
   if (!isFinal) {
@@ -898,7 +518,7 @@ function cardStory(entry, network) {
   const bits = [];
   bits.push(`${c.genesis_daa != null ? 'born' : 'first seen'} ${relTimeShort(entry.bornMs)}`);
   if (entry.moves > 0) bits.push(`moved ${entry.moves}×`);
-  if (c.status === 'active') bits.push(`holds ${fmtAmount(c.live_value, network)}`);
+  if (isAlive(c)) bits.push(`holds ${fmtAmount(c.live_value, network)}`);
   else bits.push(`retired ${relTimeShort(entry.lastMs)}`);
   return bits.join(' · ');
 }
@@ -1182,7 +802,7 @@ function renderPulseFallback(entry) {
   const events = [];
   for (const e of index.covs) {
     if (e.c.genesis_daa != null) events.push({ kind: 'genesis', ms: e.bornMs });
-    if (e.c.status !== 'active') events.push({ kind: 'burn', ms: e.lastMs });
+    if (!isAlive(e.c)) events.push({ kind: 'burn', ms: e.lastMs });
   }
   const host = $('#pulse-chart');
   host.dataset.mode = 'fallback'; /* so ensurePulseShell rebuilds when the endpoint returns */
@@ -1278,7 +898,7 @@ function buildFeed(entry, network) {
   /* fallback: most recently active coins as one-line stories */
   const events = entry.index.covs.slice(0, STORY_COUNT).map((e) => ({
     covenant_id: e.c.covenant_id,
-    kind: e.c.status !== 'active' ? 'burn' : (e.moves > 0 ? 'transition' : 'genesis'),
+    kind: !isAlive(e.c) ? 'burn' : (e.moves > 0 ? 'transition' : 'genesis'),
     accepting_daa: e.c.last_activity_daa,
   }));
   return { live: null, events };
@@ -1324,16 +944,85 @@ function repaintStories() {
     : storyEmptyHtml();
 }
 
+/* --------------------------------------------- known bulk-traffic keys */
+
+/* Keys we can name honestly. The one entry today is the bot that floods
+   testnet-10 with plain p2pk covenant states — 157k+ of TN10's coins are
+   its, and pretending they're organic apps would be a lie of omission. */
+const GENERATOR_LABEL = 'TN10 traffic generator';
+const KNOWN_KEYS = {
+  'a39404c7f7a004b5eb51966981abeab40df55abf6f631c48399a42066bf182fa': GENERATOR_LABEL,
+};
+
+function knownKeyLabel(pubkey) {
+  return KNOWN_KEYS[String(pubkey || '').toLowerCase()] || null;
+}
+
+/* Is this coin the traffic generator's? Exact when we hold its p2pk holders
+   (detail payloads carry the keys); grid rows don't, so there the TN10 proxy
+   is the bare 'p2pk state' shape — 157,484 of the 157,506 such coins are the
+   generator's at last count, and the coin page verifies by key. */
+function generatorLabel(c, network) {
+  if (Array.isArray(c.holders) && c.holders.length) {
+    for (const h of c.holders) {
+      const l = knownKeyLabel(h.pubkey);
+      if (l) return l;
+    }
+    return null; /* holders known, none match — organic for sure */
+  }
+  return network === 'testnet-10' && c.template === 'p2pk state' ? GENERATOR_LABEL : null;
+}
+
+/* Per-network filter default: testnet-10 opens on 'organic' (the generator's
+   bulk coins hidden, counts still shown) and mainnet on 'all'. An explicit
+   chip choice sticks across switches — except 'organic', which only exists
+   where a known generator does. */
+function networkFilterReset() {
+  if (!state.filterTouched || (state.filter === 'organic' && state.network !== 'testnet-10')) {
+    state.filter = state.network === 'testnet-10' ? 'organic' : 'all';
+  }
+}
+
 /* ------------------------------------------------------------------- grid */
 
 function matchesFilter(entry) {
   if (state.filter === 'watch') {
     if (!state.watch.has(entry.c.covenant_id)) return false;
+  } else if (state.filter === 'organic') {
+    if (generatorLabel(entry.c, state.network)) return false;
   } else if (state.filter !== 'all' && entry.c.status !== state.filter) {
     return false;
   }
   if (state.query && !entry.blob.includes(state.query)) return false;
   return true;
+}
+
+/* The status-filter chip row is static in index.html; the 'organic' chip
+   joins it only on networks with a known generator, and pressed states
+   follow state.filter (whose default is per-network, so the markup's
+   hardcoded aria-pressed can't be trusted). */
+function syncFilterChips(network) {
+  const group = document.querySelector('#section-coins .chips[role="group"]');
+  if (!group) return;
+  let organic = group.querySelector('[data-filter="organic"]');
+  if (network === 'testnet-10' && !organic) {
+    organic = document.createElement('button');
+    organic.type = 'button';
+    organic.className = 'chip';
+    organic.dataset.action = 'filter';
+    organic.dataset.filter = 'organic';
+    organic.textContent = 'organic';
+    organic.title = 'hide the TN10 traffic generator’s coins — bulk plain-p2pk states minted by one known key';
+    const all = group.querySelector('[data-filter="all"]');
+    if (all) all.after(organic);
+    else group.prepend(organic);
+  } else if (network !== 'testnet-10' && organic) {
+    organic.remove();
+    if (state.filter === 'organic') networkFilterReset();
+  }
+  group.querySelectorAll('[data-action="filter"]').forEach((c) => {
+    c.setAttribute('aria-pressed', String(c.dataset.filter === state.filter));
+  });
 }
 
 const SORTS = {
@@ -1344,16 +1033,20 @@ const SORTS = {
   moves: (a, b) => b.moves - a.moves,
 };
 
-/* one grid card — shared by the full render and the append-only path */
+/* one grid card — shared by the full render and the append-only path.
+   The semantic template ("what is this?") is the primary badge, first after
+   the name; the animal name stays the identity. */
 function coinCardHtml(e, network) {
-  const alive = e.c.status === 'active';
+  const alive = isAlive(e.c);
   const watched = state.watch.has(e.c.covenant_id);
-  const namedTpl = e.c.template && !/^p2(pk|sh)/.test(e.c.template) ? e.c.template : null;
+  const namedTpl = semanticTemplate(e.c.template);
+  const genLabel = generatorLabel(e.c, network);
   return `<article class="card">` +
     `<div class="card-head">${avatarSvg(e.c.covenant_id, 40)}` +
     `<div class="card-id"><a class="card-link" href="#/${esc(network)}/c/${esc(e.c.covenant_id)}">${esc(e.name)}</a>` +
+    (namedTpl ? `<span class="flag flag-tpl flag-tpl-primary" title="recognized as ${esc(namedTpl)} — decoded from the chain’s own bytes; details on the coin page">${esc(namedTpl)}</span>` : '') +
     `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>` +
-    (namedTpl ? `<span class="flag flag-tpl" title="recognized contract: a compiled ${esc(namedTpl)} — constructor arguments labeled on the coin page">${esc(namedTpl)}</span>` : '') +
+    (genLabel ? `<span class="flag flag-off flag-gen" title="bulk testnet traffic from the known generator key — not an app">${esc(genLabel)}</span>` : '') +
     lineageBadge(e.c) +
     `</div>` +
     `<button type="button" class="star${watched ? ' starred' : ''}" data-action="watch" data-id="${esc(e.c.covenant_id)}"` +
@@ -1390,9 +1083,12 @@ function renderGrid(entry, network) {
      filtered denominator stays the rows actually searched so "of N" is honest */
   const total = (entry.data.stats && entry.data.stats.covenants != null)
     ? entry.data.stats.covenants : loaded;
-  $('#result-count').textContent = (state.query || state.filter !== 'all')
-    ? `${list.length} of ${loaded} smart coin${loaded === 1 ? '' : 's'}`
-    : `${total} smart coin${total === 1 ? '' : 's'}`;
+  /* the organic view says exactly what it hid — nothing feels swept away */
+  $('#result-count').textContent = (state.filter === 'organic' && !state.query)
+    ? `${list.length} organic · ${loaded - list.length} generator coin${loaded - list.length === 1 ? '' : 's'} hidden · ${total} total`
+    : (state.query || state.filter !== 'all')
+      ? `${list.length} of ${loaded} smart coin${loaded === 1 ? '' : 's'}`
+      : `${total} smart coin${total === 1 ? '' : 's'}`;
 
   const grid = $('#coin-grid');
   const foot = $('#grid-foot');
@@ -1531,14 +1227,14 @@ function remoteGridCardsHtml(entry, network) {
   if (!fresh.length) return '';
   return `<p class="remote-found dim">found on the chain — older than the loaded window:</p>` +
     fresh.map((r) => {
-      const alive = r.status === 'active';
+      const alive = isAlive(r);
       const name = r.name || friendlyName(r.id);
-      const tpl = r.template && !/^p2(pk|sh)/.test(r.template) ? r.template : null;
+      const tpl = semanticTemplate(r.template);
       return `<article class="card">` +
         `<div class="card-head">${avatarSvg(r.id, 40)}` +
         `<div class="card-id"><a class="card-link" href="#/${esc(network)}/c/${esc(r.id)}">${esc(name)}</a>` +
+        (tpl ? `<span class="flag flag-tpl flag-tpl-primary">${esc(tpl)}</span>` : '') +
         `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>` +
-        (tpl ? `<span class="flag flag-tpl">${esc(tpl)}</span>` : '') +
         `</div></div>` +
         `<p class="card-story">lives further back on the chain — tap to read its story.</p>` +
         `</article>`;
@@ -1611,7 +1307,7 @@ function renderSuggest() {
         /* a row the grid DID load renders from its richer local record */
         const local = entry && entry.index.byId.get(r.id);
         suggest.items.push({
-          e: local || { c: { covenant_id: r.id, status: r.status }, name: r.name || friendlyName(r.id) },
+          e: local || { c: { covenant_id: r.id, status: r.status, template: r.template }, name: r.name || friendlyName(r.id) },
           why: 'remote', tx: null, score: 9,
         });
       }
@@ -1620,7 +1316,8 @@ function renderSuggest() {
   suggest.active = -1;
   if (!suggest.items.length) { closeSuggest(); return; }
   host.innerHTML = suggest.items.map((s, i) => {
-    const alive = s.e.c.status === 'active';
+    const alive = isAlive(s.e.c);
+    const tpl = semanticTemplate(s.e.c.template);
     const href = `#/${esc(state.network)}/c/${esc(s.e.c.covenant_id)}` +
       (s.tx ? `?tx=${esc(s.tx)}` : '');
     const kind = s.why === 'name' ? '' :
@@ -1629,6 +1326,7 @@ function renderSuggest() {
     return `<a class="suggest-item" id="sugg-${i}" role="option" href="${href}" data-suggest="${i}">` +
       avatarSvg(s.e.c.covenant_id, 26) +
       `<span class="suggest-name">${markMatch(s.e.name, state.query)}</span>` +
+      (tpl ? `<span class="flag flag-tpl suggest-tpl">${esc(tpl)}</span>` : '') +
       kind +
       `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>` +
       `</a>`;
@@ -1681,7 +1379,7 @@ function renderWatchStrip(entry, network) {
   const usdSlot = $('#watch-usd-slot');
   if (usdSlot) usdSlot.innerHTML = usdToggleHtml(); /* stale cached index.html */
   $('#watch-row').innerHTML = watched.map((e) => {
-    const alive = e.c.status === 'active';
+    const alive = isAlive(e.c);
     const sub = alive
       ? `holds ${amountWithUsd(e.c.live_value, network)} · active ${relTimeShort(e.lastMs)}`
       : `retired ${relTimeShort(e.lastMs)}`;
@@ -1691,8 +1389,8 @@ function renderWatchStrip(entry, network) {
 
 function renderRecords(entry, network) {
   const covs = entry.index.covs;
-  const alive = covs.filter((e) => e.c.status === 'active');
-  const retired = covs.filter((e) => e.c.status !== 'active');
+  const alive = covs.filter((e) => isAlive(e.c));
+  const retired = covs.filter((e) => !isAlive(e.c));
   const born = (list) => list.filter((e) => e.c.genesis_daa != null);
   const recs = [];
   const oldest = born(alive).sort((a, b) => a.bornMs - b.bornMs)[0];
@@ -1769,24 +1467,6 @@ function renderTemplates(network) {
 }
 
 /* ------------------------------------------------------- analytics board */
-
-/* the reorg log — the append-only ledger of virtual-chain reorgs the indexer
-   applied. Optional: an older worker without the endpoint 404s, which we
-   remember (data: null) and reprobe after the ttl, so the panel hides
-   instead of pinning a dead request. */
-async function loadReorgs(network) {
-  const t = state.reorgs[network];
-  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/reorgs.json`, { cache: 'no-cache' });
-    if (!res.ok) { state.reorgs[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    state.reorgs[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
-}
 
 /* births vs burns over the whole history — two cumulative lines drawn from the
    same activity buckets the pulse chart reads; the gap between them is the
@@ -2038,32 +1718,6 @@ function emptyCardHtml(network) {
 
 /* ----------------------------------------------------------- daily digest */
 
-/* "the last 24 hours" — one tiny object per network, cached for a minute
-   (mirrors the server ttl). A failed or 404 fetch marks it missing and
-   returns whatever we already had, so the strip degrades to hidden instead
-   of flashing errors under the hero. */
-const DIGEST_TTL_MS = 60_000;
-
-async function loadDigest(network) {
-  const ds = state.digest[network] ||
-    (state.digest[network] = { data: null, at: 0, animated: false });
-  if (Date.now() - ds.at < DIGEST_TTL_MS) return ds.data;
-  try {
-    const res = await fetch(`data/${network}/digest.json`, { cache: 'no-cache' });
-    if (!res.ok) {
-      /* misses respect the TTL too — an old worker without the endpoint
-         shouldn't be re-asked on every landing render */
-      ds.at = Date.now();
-      return ds.data; /* stale-ok */
-    }
-    ds.data = await res.json();
-    ds.at = Date.now();
-    return ds.data;
-  } catch (e) {
-    return ds.data;
-  }
-}
-
 /* count-up to the real number: ~700ms, ease-out cubic, landing exactly on
    the target; reduced motion gets the settled value immediately */
 function animateStatN(el, target) {
@@ -2179,6 +1833,7 @@ function renderLanding(entry) {
   $('#section-teaser').hidden = empty;
   renderDigestStrip(network, empty);
   renderWhatsNew();
+  updateTourOffer();
 
   if (empty) {
     $('#landing-empty').innerHTML = emptyCardHtml(network);
@@ -2245,6 +1900,7 @@ function renderExplore(entry) {
   renderStories(entry, network);
   const sortSel = $('#sort');
   if (sortSel && sortSel.value !== state.sort) sortSel.value = state.sort;
+  syncFilterChips(network);
   renderGrid(entry, network);
 }
 
@@ -3050,8 +2706,9 @@ function renderDetail(entry, covId, flashTx, program) {
   /* the life story and scripts come from the per-coin detail endpoint —
      paint the header from the grid row instantly, fill in when it lands */
   if (!rec) {
-    const alive0 = gridRec.c.status === 'active';
+    const alive0 = isAlive(gridRec.c);
     const watched0 = state.watch.has(covId);
+    const namedTpl0 = semanticTemplate(gridRec.c.template);
     document.title = `${gridRec.name} — kascov`;
     const bits = [];
     bits.push(`${gridRec.c.genesis_daa != null ? 'born' : 'first seen'} ${relTime(gridRec.bornMs)}`);
@@ -3063,7 +2720,9 @@ function renderDetail(entry, covId, flashTx, program) {
       `<header class="detail-head">` +
       `<span role="img" aria-label="avatar of ${esc(gridRec.name)}">${avatarSvg(covId, 88)}</span>` +
       `<div class="detail-id"><h1>${esc(gridRec.name)}</h1>` +
-      `<p class="detail-tags"><span class="pill ${alive0 ? 'pill-alive' : 'pill-retired'}" title="${esc(alive0 ? GLOSSARY.alive : GLOSSARY.retired)}">${alive0 ? 'alive' : 'retired'}</span>` +
+      `<p class="detail-tags">` +
+      (namedTpl0 ? `<span class="flag flag-tpl flag-tpl-primary">${esc(namedTpl0)}</span>` : '') +
+      `<span class="pill ${alive0 ? 'pill-alive' : 'pill-retired'}" title="${esc(alive0 ? GLOSSARY.alive : GLOSSARY.retired)}">${alive0 ? 'alive' : 'retired'}</span>` +
       `<button type="button" class="star${watched0 ? ' starred' : ''}" data-action="watch" data-id="${esc(covId)}" aria-pressed="${watched0}" aria-label="watch this coin">★</button>` +
       lineageBadge(gridRec.c) +
       `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span> ${usdToggleHtml()}</p>` +
@@ -3091,12 +2750,15 @@ function renderDetail(entry, covId, flashTx, program) {
   }
 
   const c = rec.c;
-  const alive = c.status === 'active';
+  const alive = isAlive(c);
   const watched = state.watch.has(c.covenant_id);
-  /* surface recognized contract templates (but not the ubiquitous p2pk/p2sh shapes) */
+  /* surface recognized contract templates (but not the ubiquitous p2pk/p2sh
+     shapes): spend-time reveals first (proven from the bytes), else the
+     summary's semantic name (newer workers decode e.g. "KCC20 token" there) */
   const namedTemplate = (c.utxos || [])
     .map((u) => u.revealed_template || u.template)
-    .find((t) => t && !/^p2(pk|sh)/.test(t));
+    .find((t) => semanticTemplate(t)) || semanticTemplate(c.template);
+  const genLabel = generatorLabel(c, network);
   document.title = `${rec.name} — kascov`;
 
   const summaryBits = [];
@@ -3189,12 +2851,14 @@ function renderDetail(entry, covId, flashTx, program) {
   if (Array.isArray(c.holders) && c.holders.length) {
     const holderRows = c.holders.map((h) => {
       const pk = String(h.pubkey || '');
+      const keyLabel = knownKeyLabel(pk);
       const inner = `${avatarSvg(pk, 34)}<span class="holder-name">${esc(friendlyName(pk))}</span>` +
         `<span class="holder-key mono">${esc(shortHex(pk, 8, 6))}</span>`;
       const idCell = PUBKEY_RE.test(pk)
         ? `<a class="holder-id" href="#/${esc(network)}/addr/${esc(pk)}" title="${esc(pk)}">${inner}</a>`
         : `<span class="holder-id" title="${esc(pk)}">${inner}</span>`;
       const badges = [];
+      if (keyLabel) badges.push(`<span class="flag flag-off flag-gen" title="a known key — this is bulk testnet traffic, not a person or an app">${esc(keyLabel)}</span>`);
       if (h.controls_now) badges.push(`<span class="pill pill-alive" title="this key controls a live piece of this coin right now">controls now</span>`);
       if (h.states_seen != null) badges.push(`<span class="dim">${esc(fmtInt(h.states_seen))} state${h.states_seen === 1 ? '' : 's'} seen</span>`);
       return `<li class="holder-row">${idCell}<span class="holder-meta">${badges.join(' ')}</span></li>`;
@@ -3202,6 +2866,11 @@ function renderDetail(entry, covId, flashTx, program) {
     holdersSection = `<section class="holders" aria-label="Holders"><h2>holders</h2>` +
       `<p class="dim">keys that have controlled a piece of this coin’s state</p>` +
       `<ul class="holder-list">${holderRows}</ul></section>`;
+  } else if (Array.isArray(c.holders) && (c.utxos || []).length) {
+    /* the export answered and found no p2pk owners — for shapes that hide
+       their controller (p2sh commitments), say so instead of omitting */
+    holdersSection = `<section class="holders" aria-label="Holders"><h2>holders</h2>` +
+      `<p class="dim">holders unknown — this covenant shape hides its controller until each spend.</p></section>`;
   }
 
   view.innerHTML =
@@ -3210,10 +2879,12 @@ function renderDetail(entry, covId, flashTx, program) {
     `<span role="img" aria-label="avatar of ${esc(rec.name)}">${avatarSvg(c.covenant_id, 88)}</span>` +
     `<div class="detail-id">` +
     `<h1>${esc(rec.name)}</h1>` +
-    `<p class="detail-tags"><span class="pill ${alive ? 'pill-alive' : 'pill-retired'}">${alive ? 'alive' : 'retired'}</span>` +
+    `<p class="detail-tags">` +
+    (namedTemplate ? `<span class="flag flag-tpl flag-tpl-primary" title="recognized as ${esc(namedTemplate)} — decoded from the chain’s own bytes">${esc(namedTemplate)}</span>` : '') +
+    `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}">${alive ? 'alive' : 'retired'}</span>` +
     `<button type="button" class="star${watched ? ' starred' : ''}" data-action="watch" data-id="${esc(c.covenant_id)}"` +
     ` aria-pressed="${watched}" aria-label="${watched ? 'stop watching' : 'watch'} this coin">★</button>` +
-    (namedTemplate ? `<span class="flag flag-tpl">${esc(namedTemplate)}</span>` : '') +
+    (genLabel ? `<span class="flag flag-off flag-gen" title="controlled by the known testnet traffic-generator key — bulk p2pk traffic, not an app">${esc(genLabel)}</span>` : '') +
     lineageBadge(c) +
     `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span> ${usdToggleHtml()}</p>` +
     `<p class="id-chip"><span class="mono">${esc(shortHex(c.covenant_id, 10, 8))}</span>` +
@@ -3715,22 +3386,6 @@ function renderBuild() {
 
 /* -------------------------------------------------------------- changelog */
 
-/* web/changelog.json — a static file shipped with the frontend: an array of
-   { date, title, body }, newest first. Cached for the session; a missing
-   file (older deploy) hides everything that depends on it. */
-let changelogCache;
-async function loadChangelog() {
-  if (changelogCache !== undefined) return changelogCache;
-  try {
-    const res = await fetch('changelog.json', { cache: 'no-cache' });
-    const data = res.ok ? await res.json() : null;
-    changelogCache = Array.isArray(data) && data.length ? data : null;
-  } catch (e) {
-    changelogCache = null;
-  }
-  return changelogCache;
-}
-
 /* the "have you seen the newest entry" stamp — date alone can repeat across
    entries shipped the same day, so the title disambiguates */
 const changelogStamp = (e) => `${e.date || ''}|${e.title || ''}`;
@@ -3859,7 +3514,7 @@ function renderAddress(route) {
   const cards = rows.map((c) => {
     const gridRec = entry && entry.index.byId.get(c.covenant_id);
     const name = gridRec ? gridRec.name : friendlyName(c.covenant_id);
-    const alive = c.status === 'active';
+    const alive = isAlive(c);
     const sb = [`${c.genesis_daa != null ? 'born' : 'first seen'} ${relTimeShort(toMs(c.genesis_daa != null ? c.genesis_daa : c.first_seen_daa))}`];
     if (alive) sb.push(`holds ${amountWithUsd(c.live_value, network)}`);
     else sb.push(`retired ${relTimeShort(toMs(c.last_activity_daa))}`);
@@ -3879,29 +3534,6 @@ function renderAddress(route) {
 }
 
 /* ------------------------------------------------------------ lane pages */
-
-/* one KIP-21 lane namespace's dashboard — served by its own worker endpoint
-   (feature-detected: an older worker / static hosting 404s → graceful note) */
-const LANE_PAGE_TTL_MS = 60_000;
-const lanePages = new Map(); // `${network}/${ns}` -> { data|missing, at }
-
-async function loadLanePage(network, ns) {
-  const key = `${network}/${ns}`;
-  const t = lanePages.get(key);
-  if (t && Date.now() - t.at < LANE_PAGE_TTL_MS) return t;
-  const res = await fetch(`data/${network}/lane/${ns}`, { cache: 'no-cache' });
-  if (res.status === 404 || res.status === 400) {
-    /* a worker that serves lanes always answers a well-formed namespace with
-       200 (even for an empty lane) — a 404 means the route doesn't exist */
-    const rec = { missing: true, at: Date.now() };
-    lanePages.set(key, rec);
-    return rec;
-  }
-  if (!res.ok) throw new Error(`lane ${res.status}`);
-  const rec = { data: await res.json(), at: Date.now() };
-  lanePages.set(key, rec);
-  return rec;
-}
 
 /* hour-bucketed event bars over the lane's recent life (same visual language
    as the analytics sparklines) — gaps between buckets render as quiet hours */
@@ -4012,6 +3644,110 @@ function renderLane(route) {
     `</section>`;
 }
 
+/* --------------------------------------------------------- token directory */
+
+/* #/{net}/tokens — every covenant token (KCC20-shaped coin) the worker
+   decoded, as one table. Born modular (M5): renders from core/data's
+   loadTokens cache and core helpers only, no shared view state — lift into
+   web/views/tokens.js unchanged when the views seam lands. */
+
+const TOKEN_NOTE_FALLBACK = 'decoded from chain — not validated: kascov shows what these covenants ' +
+  'wrote in their own bytes; it does not (yet) check KCC20 balance rules';
+
+/* the decoded fields object as compact label/value chips — long hex values
+   shortened for display, the full value in the tooltip */
+function tokenFieldChips(fields) {
+  const entries = Object.entries(fields || {}).slice(0, 6);
+  if (!entries.length) return '<span class="dim">—</span>';
+  return entries.map(([k, v]) => {
+    const val = String(v == null ? '' : v);
+    const shown = /^[0-9a-fA-F]{16,}$/.test(val) ? shortHex(val.toLowerCase(), 8, 6)
+      : val.length > 28 ? `${val.slice(0, 28)}…` : val;
+    return `<span class="tpl-field" title="${esc(k)}: ${esc(val)}">${esc(k)} <strong>${esc(shown)}</strong></span>`;
+  }).join('');
+}
+
+function renderTokens() {
+  const network = state.network;
+  const view = $('#view-tokens');
+  if (!view) return; /* stale cached index.html */
+  const net = NETWORKS[network];
+  document.title = `tokens on ${net.label} — kascov`;
+  const back = `<a class="back" href="#/${esc(network)}/explore">← all smart coins</a>`;
+  const head = (d) => back +
+    `<header class="page-head tokens-head"><h1>tokens</h1>` +
+    `<p class="page-sub">covenant tokens on ${esc(net.label)} — every KCC20-shaped coin the indexer decoded, ` +
+    `read straight from the chain’s bytes ${usdToggleHtml()}</p>` +
+    `<p class="tokens-note">⚠ ${esc((d && d.note) || TOKEN_NOTE_FALLBACK)}</p>` +
+    `</header>`;
+  const cached = tokenPages.get(network);
+  const fresh = cached && Date.now() - cached.at < TOKENS_TTL_MS;
+  if (!fresh) {
+    /* stale-while-revalidate, same shape as lane pages: keep showing an
+       expired record while the refetch runs */
+    loadTokens(network)
+      .then(() => {
+        if (state.network === network && parseRoute().view === 'tokens') renderTokens();
+      })
+      .catch(() => {
+        if (cached) return; /* stale data beats an error card */
+        if (state.network === network && parseRoute().view === 'tokens') {
+          view.innerHTML = head(null) + `<div class="empty-card"><h2>couldn’t load the token directory.</h2>` +
+            `<p class="dim">the lookup didn’t answer — the worker may be busy. it’s not you.</p>` +
+            `<button type="button" class="btn" data-action="retry-tokens">try again</button></div>`;
+        }
+      });
+  }
+  if (!cached) {
+    view.innerHTML = head(null) + `<p class="dim">reading this network’s tokens…</p>`;
+    return;
+  }
+  if (cached.missing) {
+    view.innerHTML = head(null) + `<div class="empty-card"><h2>the token directory needs a newer worker.</h2>` +
+      `<p class="dim">this kascov worker doesn’t serve decoded covenant tokens yet — the rest of the explorer works unchanged.</p></div>`;
+    return;
+  }
+  const d = cached.data || {};
+  const tokens = Array.isArray(d.tokens) ? d.tokens : [];
+  if (!tokens.length) {
+    view.innerHTML = head(d) + `<div class="empty-card"><h2>no covenant tokens found on this network yet.</h2>` +
+      `<p class="dim">they’re coming — the first KCC20-shaped coins will show up here on their own.</p></div>`;
+    return;
+  }
+  /* daa→ms: prefer the payload's own tip anchor, else the grid snapshot's
+     (if loaded); with neither, show the raw DAA rather than a made-up time */
+  const entry = state.cache[network];
+  const toMs = (daa) => {
+    if (daa == null) return null;
+    if (d.tip_daa != null) {
+      return (d.tip_at_ms != null ? d.tip_at_ms : d.generated_at_ms) - (d.tip_daa - daa) * MS_PER_DAA;
+    }
+    return entry ? daaToMs(daa, entry.data) : null;
+  };
+  const rows = tokens.map((t) => {
+    const cid = String(t.covenant_id || '');
+    const name = t.name || friendlyName(cid);
+    const alive = t.status === 'active';
+    const ms = toMs(t.last_activity_daa);
+    const when = ms != null ? `<span title="${esc(utcTitle(ms))}">${esc(relTimeShort(ms))}</span>`
+      : t.last_activity_daa != null ? `<span class="mono dim">DAA ${esc(fmtInt(t.last_activity_daa))}</span>`
+      : '<span class="dim">—</span>';
+    return `<tr>` +
+      `<td><a class="token-coin" href="#/${esc(network)}/c/${esc(cid)}">${avatarSvg(cid, 26)} <span class="token-name">${esc(name)}</span></a></td>` +
+      `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}</td>` +
+      `<td><div class="tokens-fields">${tokenFieldChips(t.fields)}</div></td>` +
+      `<td class="tokens-value">${t.live_value != null ? esc(amountWithUsd(t.live_value, network)) : '<span class="dim">—</span>'}</td>` +
+      `<td><span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span></td>` +
+      `<td class="tokens-when">${when}</td>` +
+      `</tr>`;
+  }).join('');
+  view.innerHTML = head(d) +
+    `<p class="dim tokens-count">${esc(fmtInt(tokens.length))} token coin${tokens.length === 1 ? '' : 's'} — tap any row’s name for its full life story</p>` +
+    `<div class="tokens-tablewrap"><table class="tokens-table">` +
+    `<thead><tr><th>token</th><th>template</th><th>decoded fields</th><th>holds</th><th>status</th><th>last activity</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table></div>`;
+}
+
 /* ---------------------------------------------------------------- routing */
 
 function parseRoute() {
@@ -4042,6 +3778,9 @@ function parseRoute() {
   /* '#/<network>/lane/<8-hex namespace>' — one KIP-21 lane's dashboard */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?lane\/([0-9a-fA-F]{8})$/);
   if (m) return { view: 'lane', network: m[1] || null, id: m[2].toLowerCase() };
+  /* '#/tokens' and '#/<network>/tokens' — the decoded covenant-token directory */
+  m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?tokens\/?$/);
+  if (m) return { view: 'tokens', network: m[1] || null };
   /* '#/explore' and '#/<network>/explore' — '?galaxy=1' opens the galaxy */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
   if (m) return { view: 'explore', network: m[1] || null, galaxy: params.get('galaxy') === '1' };
@@ -4062,6 +3801,8 @@ function routeHash(view, id) {
   if (view === 'address') return `#/${state.network}/addr/${id}`;
   /* a lane namespace exists on any network — keep the page, switch the data */
   if (view === 'lane') return `#/${state.network}/lane/${id}`;
+  /* the token directory exists on any network — keep the page, switch the data */
+  if (view === 'tokens') return `#/${state.network}/tokens`;
   if (view === 'explore') return `#/${state.network}/explore`;
   /* decode/dev/changelog are network-free — switching networks keeps the page (and its query) */
   if (view === 'decode' || view === 'dev' || view === 'build' || view === 'changelog') return location.hash || `#/${view}`;
@@ -4092,6 +3833,7 @@ async function render() {
   if (route.network && NETWORKS[route.network] && route.network !== state.network) {
     state.network = route.network;
     state.shown = PAGE_SIZE;
+    networkFilterReset();
     closeSuggest();
   }
   if (state.watchNet !== state.network) {
@@ -4115,6 +3857,7 @@ async function render() {
     detail: $('#view-detail'),
     address: $('#view-address'),
     lane: $('#view-lane'),
+    tokens: $('#view-tokens'),
     decode: $('#view-decode'),
     build: $('#view-build'),
     dev: $('#view-dev'),
@@ -4133,17 +3876,20 @@ async function render() {
     if (a.dataset.nav === navFor) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
-  $('#header-search').hidden = route.view !== 'explore';
+  /* search is chain-wide (names, ids, txids, addresses — local + the worker
+     endpoint), so it stays reachable on every view; ⌘K focuses it anywhere */
+  $('#header-search').hidden = false;
 
-  /* the decoder, dev docs, changelog, address and lane pages never need a
-     snapshot — don't block them on data (address/lane pages fetch their own) */
-  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'build' || route.view === 'address' || route.view === 'lane' || route.view === 'changelog') && views[route.view]) {
+  /* the decoder, dev docs, changelog, address, lane and token pages never
+     need a snapshot — don't block them on data (they fetch their own) */
+  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'build' || route.view === 'address' || route.view === 'lane' || route.view === 'tokens' || route.view === 'changelog') && views[route.view]) {
     panel.hidden = true;
     for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
     views.detail.innerHTML = '';
     if (route.view === 'decode') renderDecode(route);
     else if (route.view === 'address') renderAddress(route);
     else if (route.view === 'lane') renderLane(route);
+    else if (route.view === 'tokens') renderTokens();
     else if (route.view === 'build') renderBuild();
     else if (route.view === 'changelog') renderChangelog();
     else renderDev();
@@ -4367,9 +4113,13 @@ setInterval(pollLive, LIVE_MS);
    rewrites — if the stream never delivers, nothing is lost. */
 const STREAM_RETRY_BASE_MS = 5_000;
 const STREAM_RETRY_MAX_MS = 60_000;
+/* a connection must live this long (or deliver a message) before the retry
+   backoff resets — a proxy that accepts and instantly drops would otherwise
+   reset it on every open and pin the reconnect loop at the base interval */
+const STREAM_SETTLE_MS = 5_000;
 const STREAM_POKE_MS = 500;
 
-const stream = { es: null, network: null, retryMs: STREAM_RETRY_BASE_MS, retryTimer: 0, pokeTimer: 0 };
+const stream = { es: null, network: null, retryMs: STREAM_RETRY_BASE_MS, retryTimer: 0, pokeTimer: 0, settleTimer: 0 };
 
 function streamWanted() {
   const view = parseRoute().view;
@@ -4381,8 +4131,10 @@ function closeStream() {
   stream.network = null;
   clearTimeout(stream.retryTimer);
   clearTimeout(stream.pokeTimer);
+  clearTimeout(stream.settleTimer);
   stream.retryTimer = 0;
   stream.pokeTimer = 0;
+  stream.settleTimer = 0;
 }
 
 function flashLiveBadge() {
@@ -4412,8 +4164,14 @@ function syncStream() {
   const es = new EventSource(`${STREAM_ORIGIN}data/${network}/stream`);
   stream.es = es;
   stream.network = network;
-  es.onopen = () => { stream.retryMs = STREAM_RETRY_BASE_MS; };
+  es.onopen = () => {
+    clearTimeout(stream.settleTimer);
+    stream.settleTimer = setTimeout(() => {
+      if (stream.es === es) stream.retryMs = STREAM_RETRY_BASE_MS;
+    }, STREAM_SETTLE_MS);
+  };
   es.onmessage = () => {
+    stream.retryMs = STREAM_RETRY_BASE_MS;
     flashLiveBadge();
     clearTimeout(stream.pokeTimer);
     stream.pokeTimer = setTimeout(pollLive, STREAM_POKE_MS);
@@ -4431,15 +4189,17 @@ function syncStream() {
    workers ignore the param and fan out network-wide — every event is
    re-checked client-side by covenant_id before acting, so both are safe. */
 const DETAIL_REFETCH_DEBOUNCE_MS = 600;
-const detailStream = { es: null, key: null, retryMs: STREAM_RETRY_BASE_MS, retryTimer: 0, refetchTimer: 0 };
+const detailStream = { es: null, key: null, retryMs: STREAM_RETRY_BASE_MS, retryTimer: 0, refetchTimer: 0, settleTimer: 0 };
 
 function closeDetailStream() {
   if (detailStream.es) { detailStream.es.close(); detailStream.es = null; }
   detailStream.key = null;
   clearTimeout(detailStream.retryTimer);
   clearTimeout(detailStream.refetchTimer);
+  clearTimeout(detailStream.settleTimer);
   detailStream.retryTimer = 0;
   detailStream.refetchTimer = 0;
+  detailStream.settleTimer = 0;
 }
 
 function syncDetailStream() {
@@ -4456,8 +4216,14 @@ function syncDetailStream() {
   const es = new EventSource(`${STREAM_ORIGIN}data/${network}/stream?covenant=${covId}`);
   detailStream.es = es;
   detailStream.key = key;
-  es.onopen = () => { detailStream.retryMs = STREAM_RETRY_BASE_MS; };
+  es.onopen = () => {
+    clearTimeout(detailStream.settleTimer);
+    detailStream.settleTimer = setTimeout(() => {
+      if (detailStream.es === es) detailStream.retryMs = STREAM_RETRY_BASE_MS;
+    }, STREAM_SETTLE_MS);
+  };
   es.onmessage = (ev) => {
+    detailStream.retryMs = STREAM_RETRY_BASE_MS;
     let msg = null;
     try { msg = JSON.parse(ev.data); } catch (err) { return; }
     if (!msg || msg.covenant_id !== covId) return;
@@ -4526,16 +4292,27 @@ async function copyToClipboard(text) {
   }
 }
 
-document.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-action]');
-  if (!el) return;
-  const action = el.dataset.action;
+/* the two timeline chip rows on a coin page share one repaint path */
+function setTimelineChip(key, value) {
+  state[key] = value;
+  const route = parseRoute();
+  const entry = state.cache[state.network];
+  if (route.view === 'detail' && entry) {
+    const y = window.scrollY;
+    renderDetail(entry, route.id, route.tx, route.program);
+    window.scrollTo({ top: y, behavior: 'instant' });
+  }
+}
 
-  if (action === 'network') {
+/* The action registry: every delegated click routes data-action → handler.
+   A new view brings its own entries instead of another branch in a chain. */
+const ACTIONS = {
+  'network'(el) {
     const net = el.dataset.network;
     if (!NETWORKS[net] || net === state.network) return;
     state.network = net;
     state.shown = PAGE_SIZE;
+    networkFilterReset();
     /* encode the network in the hash so the choice survives reloads and
        shared links land on the right network. A specific coin can't exist on
        the other network, so switching from a detail page lands on that
@@ -4545,8 +4322,11 @@ document.addEventListener('click', (e) => {
     const target = routeHash(view, route.id);
     if (location.hash === target) render();
     else location.hash = target;
-  } else if (action === 'filter') {
+  },
+
+  'filter'(el) {
     state.filter = el.dataset.filter;
+    state.filterTouched = true;
     state.shown = PAGE_SIZE;
     /* scope to the filter chips — the pulse range pills are .chip too */
     document.querySelectorAll('[data-action="filter"]').forEach((c) => {
@@ -4554,7 +4334,9 @@ document.addEventListener('click', (e) => {
     });
     const entry = state.cache[state.network];
     if (entry) renderGrid(entry, state.network);
-  } else if (action === 'story-kind') {
+  },
+
+  'story-kind'(el) {
     const k = el.dataset.kind;
     if (!k || k === state.storyKind) return;
     state.storyKind = k;
@@ -4562,30 +4344,32 @@ document.addEventListener('click', (e) => {
       c.setAttribute('aria-pressed', String(c.dataset.kind === k));
     });
     repaintStories();
-  } else if (action === 'tl-kind' || action === 'tl-label') {
-    if (action === 'tl-kind') state.tlKind = el.dataset.value;
-    else state.tlLabel = el.dataset.value;
-    const route = parseRoute();
-    const entry = state.cache[state.network];
-    if (route.view === 'detail' && entry) {
-      const y = window.scrollY;
-      renderDetail(entry, route.id, route.tx, route.program);
-      window.scrollTo({ top: y, behavior: 'instant' });
-    }
-  } else if (action === 'usd') {
-    usdOn = !usdOn;
-    try { localStorage.setItem('kascov-usd', usdOn ? '1' : '0'); } catch (err) { /* ignore */ }
+  },
+
+  'tl-kind'(el) {
+    setTimelineChip('tlKind', el.dataset.value);
+  },
+
+  'tl-label'(el) {
+    setTimelineChip('tlLabel', el.dataset.value);
+  },
+
+  'usd'(el) {
+    const on = toggleUsd();
     document.querySelectorAll('[data-action="usd"]').forEach((b) => {
-      b.setAttribute('aria-pressed', String(usdOn));
+      b.setAttribute('aria-pressed', String(on));
     });
     const route = parseRoute();
     const entry = state.cache[state.network];
     const y = window.scrollY;
     if (route.view === 'detail' && entry) renderDetail(entry, route.id, route.tx, route.program);
     else if (route.view === 'address') renderAddress(route);
+    else if (route.view === 'tokens') renderTokens();
     else if (route.view === 'explore' && entry) renderWatchStrip(entry, state.network);
     window.scrollTo({ top: y, behavior: 'instant' });
-  } else if (action === 'pulse-range') {
+  },
+
+  'pulse-range'(el) {
     const r = el.dataset.range;
     if (!ACTIVITY_RANGES.includes(r) || r === state.pulseRange) return;
     state.pulseRange = r;
@@ -4595,11 +4379,15 @@ document.addEventListener('click', (e) => {
     });
     hidePulseTip();
     updatePulse(state.network);
-  } else if (action === 'more') {
+  },
+
+  'more'(el) {
     state.shown += PAGE_SIZE;
     const entry = state.cache[state.network];
     if (entry) renderGrid(entry, state.network);
-  } else if (action === 'more-net') {
+  },
+
+  'more-net'(el) {
     const network = state.network;
     const entry = state.cache[network];
     if (!entry || entry.nextAfterDaa == null || entry.loadingMore) return;
@@ -4619,7 +4407,9 @@ document.addEventListener('click', (e) => {
           renderGrid(entry, network);
         }
       });
-  } else if (action === 'nerd') {
+  },
+
+  'nerd'(el) {
     state.nerd = !state.nerd;
     try { localStorage.setItem('kascov-nerd', state.nerd ? '1' : '0'); } catch (err) { /* ignore */ }
     const route = parseRoute();
@@ -4629,7 +4419,9 @@ document.addEventListener('click', (e) => {
       renderDetail(entry, route.id, route.tx, route.program);
       window.scrollTo({ top: y, behavior: 'instant' });
     }
-  } else if (action === 'watch') {
+  },
+
+  'watch'(el) {
     const id = el.dataset.id;
     if (!id) return;
     if (state.watch.has(id)) state.watch.delete(id);
@@ -4647,18 +4439,26 @@ document.addEventListener('click', (e) => {
       renderDetail(entry, route.id);
       window.scrollTo({ top: y, behavior: 'instant' });
     }
-  } else if (action === 'decode') {
+  },
+
+  'decode'(el) {
     runDecode(true);
-  } else if (action === 'decode-load') {
+  },
+
+  'decode-load'(el) {
     const hex = DECODE_EXAMPLES[el.dataset.example];
     if (hex) {
       $('#decode-input').value = hex;
       runDecode(true);
     }
-  } else if (action === 'decode-all') {
+  },
+
+  'decode-all'(el) {
     decodeShowAll = !decodeShowAll;
     runDecode(false);
-  } else if (action === 'gen-example') {
+  },
+
+  'gen-example'(el) {
     const input = $('#decode-input');
     const which = el.dataset.example || 'mecenas';
     if (input && DECODE_EXAMPLES[which]) {
@@ -4672,23 +4472,31 @@ document.addEventListener('click', (e) => {
         if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 120);
     }
-  } else if (action === 'gen-toggle') {
+  },
+
+  'gen-toggle'(el) {
     genState = genState && genState.open ? null : { open: true };
     runDecode(false);
     if (genState) {
       const panel = $('#gen-panel');
       if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
-  } else if (action === 'guided-template') {
+  },
+
+  'guided-template'(el) {
     guidedInit(el.dataset.template);
     renderGuidedBuilder();
-  } else if (action === 'guided-open') {
+  },
+
+  'guided-open'(el) {
     /* gallery card → jump into the builder with this template selected */
     guidedInit(el.dataset.template);
     renderGuidedBuilder();
     const sec = document.getElementById('build-guided');
     if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  } else if (action === 'guided-download') {
+  },
+
+  'guided-download'(el) {
     if (!lastGuidedBuild || !window.kascovGen || !window.kascovGen.buildDeployScript) return;
     const b = lastGuidedBuild;
     const script = window.kascovGen.buildDeployScript(b.hex, b.sompi,
@@ -4699,7 +4507,9 @@ document.addEventListener('click', (e) => {
     a.download = `deploy-${b.template.replace('SilverScript · ', '').toLowerCase()}.sh`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-  } else if (action === 'guided-publish') {
+  },
+
+  'guided-publish'(el) {
     /* register the canonical source against this program's hash — recompiled
        server-side with your args, so any coin hashing to it shows the source */
     const out = document.getElementById('guided-publish-result');
@@ -4723,7 +4533,9 @@ document.addEventListener('click', (e) => {
           : ` <span class="compile-err">${esc((d && d.error) || 'publish failed')}</span>`;
       })
       .catch(() => { out.innerHTML = ' <span class="compile-err">publish unavailable — is the kascov node reachable?</span>'; });
-  } else if (action === 'guided-connect-wallet') {
+  },
+
+  'guided-connect-wallet'(el) {
     /* KasWare connect — read-only: we only surface the address + a faucet link.
        No signing here; the custodial worker deploys. Guarded + graceful. */
     const strip = document.getElementById('guided-wallet');
@@ -4739,7 +4551,9 @@ document.addEventListener('click', (e) => {
       .catch((err) => {
         if (strip) strip.innerHTML = `<p class="guided-wallet-note dim">wallet not connected${err && err.message ? ' — ' + esc(String(err.message)) : ''}. you can still deploy below.</p>`;
       });
-  } else if (action === 'guided-deploy') {
+  },
+
+  'guided-deploy'(el) {
     /* one-click custodial deploy. Endpoint is gated OFF by default (404 unless
        the operator set KASCOV_DEPLOY_KEY), so any 404 / network error falls
        back to the existing download-deploy.sh + CLI path. */
@@ -4784,7 +4598,9 @@ document.addEventListener('click', (e) => {
         }
       })
       .catch(() => fallback('network error'));
-  } else if (action === 'copy-block') {
+  },
+
+  'copy-block'(el) {
     const pre = el.closest('.gen-block');
     const text = pre && pre.querySelector('pre') ? pre.querySelector('pre').textContent : '';
     copyToClipboard(text).then((ok) => {
@@ -4793,13 +4609,19 @@ document.addEventListener('click', (e) => {
       el.classList.add('copied');
       setTimeout(() => { el.textContent = orig; el.classList.remove('copied'); }, 1400);
     });
-  } else if (action === 'decode-download') {
+  },
+
+  'decode-download'(el) {
     downloadDisassembly();
-  } else if (action === 'decode-input-toggle') {
+  },
+
+  'decode-input-toggle'(el) {
     const input = $('#decode-input');
     const collapsed = input.classList.toggle('collapsed');
     el.textContent = collapsed ? 'expand input ▼' : 'collapse input ▲';
-  } else if (action === 'story-all') {
+  },
+
+  'story-all'(el) {
     state.storyAll = !state.storyAll;
     const entry = state.cache[state.network];
     const route = parseRoute();
@@ -4808,7 +4630,9 @@ document.addEventListener('click', (e) => {
       renderDetail(entry, route.id);
       window.scrollTo({ top: y, behavior: 'instant' });
     }
-  } else if (action === 'utxo-all') {
+  },
+
+  'utxo-all'(el) {
     state.utxoAll = !state.utxoAll;
     const entry = state.cache[state.network];
     const route = parseRoute();
@@ -4817,7 +4641,9 @@ document.addEventListener('click', (e) => {
       renderDetail(entry, route.id);
       window.scrollTo({ top: y, behavior: 'instant' });
     }
-  } else if (action === 'decode-share') {
+  },
+
+  'decode-share'(el) {
     runDecode(true);
     copyToClipboard(location.href).then((ok) => {
       const original = el.dataset.label || el.textContent;
@@ -4825,7 +4651,9 @@ document.addEventListener('click', (e) => {
       el.textContent = ok ? 'link copied!' : 'copy failed';
       setTimeout(() => { el.textContent = el.dataset.label; }, 1400);
     });
-  } else if (action === 'copy') {
+  },
+
+  'copy'(el) {
     copyToClipboard(el.dataset.copy || '').then((ok) => {
       const original = el.dataset.label || el.textContent;
       el.dataset.label = original;
@@ -4836,10 +4664,14 @@ document.addEventListener('click', (e) => {
         el.classList.remove('copied');
       }, 1400);
     });
-  } else if (action === 'retry') {
+  },
+
+  'retry'(el) {
     delete state.cache[state.network];
     render();
-  } else if (action === 'reveal-check') {
+  },
+
+  'reveal-check'(el) {
     const box = el.closest('.reveal-preview');
     const val = box && box.querySelector('.reveal-input') ? box.querySelector('.reveal-input').value.trim().replace(/^0x/, '') : '';
     if (val) {
@@ -4848,7 +4680,9 @@ document.addEventListener('click', (e) => {
         location.hash = `#/${state.network}/c/${route.id}?program=${val}`;
       }
     }
-  } else if (action === 'compile-run') {
+  },
+
+  'compile-run'(el) {
     const src = $('#compiler-src');
     const argsEl = $('#compiler-args');
     const out = $('#compiler-result');
@@ -4859,16 +4693,22 @@ document.addEventListener('click', (e) => {
       .then((r) => r.json())
       .then(renderCompileResult)
       .catch(() => { out.innerHTML = '<div class="compile-err">the compiler isn’t available right now</div>'; });
-  } else if (action === 'compile-example') {
+  },
+
+  'compile-example'(el) {
     const src = $('#compiler-src');
     const args = $('#compiler-args');
     if (src) src.value = SILVERSCRIPT_EXAMPLE.source;
     if (args) args.value = SILVERSCRIPT_EXAMPLE.args;
     const out = $('#compiler-result');
     if (out) out.innerHTML = '';
-  } else if (action === 'compile-template') {
+  },
+
+  'compile-template'(el) {
     loadTemplate(el.dataset.template);
-  } else if (action === 'compile-publish') {
+  },
+
+  'compile-publish'(el) {
     const src = $('#compiler-src');
     const argsEl = $('#compiler-args');
     const out = $('#publish-result');
@@ -4883,7 +4723,9 @@ document.addEventListener('click', (e) => {
           : `<div class="compile-err">${esc(d.error || 'publish failed')}</div>`;
       })
       .catch(() => { out.innerHTML = '<div class="compile-err">publish unavailable</div>'; });
-  } else if (action === 'zk-verify') {
+  },
+
+  'zk-verify'(el) {
     const result = el.parentElement.querySelector('.zk-verify-result');
     const prog = el.dataset.prog;
     if (!prog || !result) return;
@@ -4896,21 +4738,27 @@ document.addEventListener('click', (e) => {
           : ` <span class="zk-invalid">✗ ${esc(d.reason || 'invalid')}</span>`;
       })
       .catch(() => { result.innerHTML = ' <span class="dim">verifier unavailable</span>'; });
-  } else if (action === 'galaxy-status') {
+  },
+
+  'galaxy-status'(el) {
     const box = el.closest('.galaxy-chips');
     if (box) box.querySelectorAll('.chip').forEach((c) => {
       c.classList.toggle('chip-on', c === el);
       c.setAttribute('aria-pressed', String(c === el));
     });
     if (galaxyCtrl) galaxyCtrl.setFilter({ status: el.dataset.val });
-  } else if (action === 'galaxy-color') {
+  },
+
+  'galaxy-color'(el) {
     const box = el.closest('.galaxy-chips');
     if (box) box.querySelectorAll('.chip').forEach((c) => {
       c.classList.toggle('chip-on', c === el);
       c.setAttribute('aria-pressed', String(c === el));
     });
     if (galaxyCtrl) galaxyCtrl.setColorMode(el.dataset.val);
-  } else if (action === 'sim-run') {
+  },
+
+  'sim-run'(el) {
     const panel = el.closest('.sim-panel');
     const scenario = (SIM_SCENARIOS[panel && panel.dataset.tpl] || [])[parseInt(el.dataset.i, 10)];
     const out = panel && panel.querySelector('.sim-result');
@@ -4924,9 +4772,13 @@ document.addEventListener('click', (e) => {
       .then((r) => r.json())
       .then((d) => { lastSimTrace = d.trace || null; out.innerHTML = simVerdictHtml(d); })
       .catch(() => { out.innerHTML = '<div class="sim-verdict sim-na">simulation unavailable</div>'; });
-  } else if (action === 'sim-trace') {
+  },
+
+  'sim-trace'(el) {
     openSimTrace(lastSimTrace);
-  } else if (action === 'replay-spend') {
+  },
+
+  'replay-spend'(el) {
     /* replay a REAL on-chain spend through the engine (worker /debug/{txid});
        feature-detected — any failure degrades to a one-line note */
     const row = el.closest('.replay-row');
@@ -4949,28 +4801,55 @@ document.addEventListener('click', (e) => {
       .catch(() => {
         out.innerHTML = '<span class="dim">replay unavailable — this needs a newer kascov worker</span>';
       });
-  } else if (action === 'dbg-open') {
+  },
+
+  'dbg-open'(el) {
     openDebugger(el.dataset.prog || '');
-  } else if (action === 'dbg-prev') {
+  },
+
+  'dbg-prev'(el) {
     dbgStep(-1);
-  } else if (action === 'dbg-next') {
+  },
+
+  'dbg-next'(el) {
     dbgStep(1);
-  } else if (action === 'dbg-seek') {
+  },
+
+  'dbg-seek'(el) {
     dbgStep(0, parseInt(el.dataset.i, 10));
-  } else if (action === 'dbg-close') {
+  },
+
+  'dbg-close'(el) {
     dbg = null;
     /* clear whichever host the debugger was drawn into (a replay panel on the
        coin page, or the decode page's #dbg-panel) */
     const host = dbgHost && dbgHost.isConnected ? dbgHost : document.getElementById('dbg-panel');
     dbgHost = null;
     if (host) host.innerHTML = '';
-  } else if (action === 'retry-detail') {
+  },
+
+  'retry-detail'(el) {
     render(); /* the detail map has no entry for a failed fetch — this refetches */
-  } else if (action === 'retry-addr') {
+  },
+
+  'retry-addr'(el) {
     render(); /* failed lookups are never cached — this refetches */
-  } else if (action === 'retry-lane') {
+  },
+
+  'retry-lane'(el) {
     render(); /* failed lane loads are never cached — this refetches */
-  }
+  },
+
+  'retry-tokens'(el) {
+    render(); /* failed token loads are never cached — this refetches */
+  },
+};
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const action = el.dataset.action;
+  if (Object.prototype.hasOwnProperty.call(ACTIONS, action)) ACTIONS[action](el, e);
 });
 
 /* the debugger scrubber (range input) — separate from click delegation */
@@ -5206,14 +5085,26 @@ document.querySelectorAll('.guide-icon').forEach((el) => {
 /* ------------------------------------------------ first-visit story tour */
 
 /* Eight steps over the LIVE page: watch → understand → see it whole → touch.
-   Vanilla, dismissible everywhere, never nags twice (localStorage flag),
-   replay via ?tour=1 or the landing's "take the tour" link. */
+   Vanilla, dismissible everywhere, strictly opt-in: first visits land on the
+   front page with a visible invitation (the hero button below), and the tour
+   itself only starts from ?tour=1 links. */
 const tour = { step: -1, el: null };
 
 const TOUR_STEPS = [
   {
     target: () => document.querySelector('.live-badge'),
-    text: 'kascov is watching the Kaspa chain <strong>right now</strong> — green means it saw the tip seconds ago.',
+    /* the opening line matches what the badge actually says right now —
+       promising "green means live" while it shows "catching up" reads broken */
+    text: () => {
+      const b = document.querySelector('.live-badge');
+      if (b && b.classList.contains('live-on')) {
+        return 'kascov is watching the Kaspa chain <strong>right now</strong> — green means it saw the tip seconds ago.';
+      }
+      if (b && (b.classList.contains('live-lag') || b.classList.contains('live-stale'))) {
+        return 'kascov watches the Kaspa chain live — right now it’s <strong>catching up</strong>, replaying every block in order until it reaches the tip.';
+      }
+      return 'kascov keeps a fresh <strong>snapshot</strong> of the Kaspa chain — it re-checks for new life every few seconds.';
+    },
   },
   {
     target: () => document.querySelector('#story-list .story'),
@@ -5243,7 +5134,7 @@ const TOUR_STEPS = [
     target: () => document.querySelector('#story-list .story'),
     text: 'let’s follow this one…',
     enter: (el) => { if (el) location.hash = el.getAttribute('href'); },
-    autoAdvanceMs: 1100,
+    advanceOnRender: true, /* move on when the coin page has actually painted */
   },
   {
     target: () => document.querySelector('#view-detail .timeline'),
@@ -5266,14 +5157,44 @@ function endTour(finished) {
   tour.el = null;
   tour.step = -1;
   try { localStorage.setItem('kascov-tour', 'done'); } catch (e) { /* private mode */ }
+  updateTourOffer(); /* the hero invitation retires with the flag */
   if (finished) location.hash = '#/build';
+}
+
+/* the landing hero's opt-in invitation — visible until the tour has been
+   taken (or skipped) once; the tour stamps the same flag either way */
+function tourSeen() {
+  try { return localStorage.getItem('kascov-tour') === 'done'; }
+  catch (e) { return true; } /* private mode: never nag */
+}
+
+function updateTourOffer() {
+  const hero = document.querySelector('#view-landing .hero');
+  if (!hero) return;
+  const existing = document.getElementById('hero-tour');
+  if (tourSeen()) { if (existing) existing.remove(); return; }
+  if (existing) {
+    /* keep the link on the network the reader is actually looking at */
+    const a = existing.querySelector('a');
+    if (a) a.setAttribute('href', `#/${state.network}/explore?tour=1`);
+    return;
+  }
+  const p = document.createElement('p');
+  p.id = 'hero-tour';
+  p.className = 'hero-tour';
+  p.innerHTML =
+    `<a class="btn btn-accent hero-tour-btn" href="#/${esc(state.network)}/explore?tour=1">▶ take the 30-second tour</a>` +
+    `<span class="dim">new here? eight quick steps — skippable any time</span>`;
+  hero.appendChild(p);
 }
 
 function showTourStep(i) {
   const step = TOUR_STEPS[i];
   if (!step) { endTour(false); return; }
   const target = step.target();
-  if (!target) {
+  /* getClientRects catches elements that exist but sit inside a hidden view
+     (every section of every view stays in the DOM) — those aren't targets */
+  if (!target || !target.getClientRects().length) {
     /* element not on screen (data still loading, view changed) — try the
        next step rather than stranding the visitor */
     if (i + 1 < TOUR_STEPS.length) showTourStep(i + 1);
@@ -5290,26 +5211,70 @@ function showTourStep(i) {
   const r = target.getBoundingClientRect();
   const below = r.bottom + 200 < window.innerHeight;
   const cardTop = (below ? r.bottom + 14 : Math.max(12, r.top - 160)) + window.scrollY;
+  /* copy can depend on live page state (step 1 reads the badge) */
+  const text = typeof step.text === 'function' ? step.text() : step.text;
   tour.el.innerHTML =
     `<div class="tour-spot" style="top:${r.top + window.scrollY - 6}px;left:${Math.max(0, r.left - 6)}px;width:${Math.min(r.width + 12, window.innerWidth)}px;height:${r.height + 12}px"></div>` +
     `<div class="tour-card" style="top:${cardTop}px;left:${Math.max(12, Math.min(r.left, window.innerWidth - 348))}px">` +
-    `<p class="tour-text">${step.text}</p>` +
+    `<p class="tour-text">${text}</p>` +
     `<div class="tour-nav">` +
     `<span class="dim tour-count">${i + 1}/${TOUR_STEPS.length}</span>` +
+    (i > 0 ? `<button type="button" class="btn tour-skip tour-back" data-tour="back">← back</button>` : '') +
     `<button type="button" class="btn tour-skip" data-tour="skip">skip</button>` +
     `<button type="button" class="btn btn-accent" data-tour="${step.last ? 'finish' : 'next'}">${step.last ? (step.cta || 'finish →') : 'next →'}</button>` +
     `</div></div>`;
   if (step.enter) {
     step.enter(target);
-    if (step.autoAdvanceMs) setTimeout(() => { if (tour.step === i) showTourStep(i + 1); }, step.autoAdvanceMs);
+    if (step.advanceOnRender) {
+      /* advance once the NEXT step's target has actually painted (the coin
+         page fills in when its detail fetch lands) — not on a blind timer.
+         A short floor keeps this card readable; a ceiling keeps the tour
+         moving even if the render never completes. */
+      const started = Date.now();
+      const next = TOUR_STEPS[i + 1];
+      const poll = () => {
+        if (tour.step !== i) return; /* dismissed, skipped, or moved on */
+        const waited = Date.now() - started;
+        if ((next && next.target() && waited >= 600) || waited > 8000) {
+          showTourStep(i + 1);
+          return;
+        }
+        setTimeout(poll, 150);
+      };
+      setTimeout(poll, 150);
+    }
   }
 }
 
+/* step back — transition steps (enter) replay a navigation, so reverse skips
+   over them; a step that lives on the explore page walks the view back there
+   first and waits for it to paint */
+function tourBack() {
+  let i = tour.step - 1;
+  while (i >= 0 && TOUR_STEPS[i].enter) i--;
+  if (i < 0) return;
+  const step = TOUR_STEPS[i];
+  const onScreen = () => {
+    const t = step.target();
+    return t && t.getClientRects().length > 0;
+  };
+  if (onScreen()) { showTourStep(i); return; }
+  location.hash = `#/${state.network}/explore`;
+  let tries = 0;
+  const poll = () => {
+    if (tour.step < 0) return; /* dismissed while walking back */
+    if (onScreen()) { showTourStep(i); return; }
+    if (++tries < 40) setTimeout(poll, 250);
+  };
+  setTimeout(poll, 250);
+}
+
 function maybeStartTour() {
-  let seen = 'done';
-  try { seen = localStorage.getItem('kascov-tour') || ''; } catch (e) { /* private mode: never nag */ }
+  /* strictly opt-in: only a ?tour=1 link (the hero invitation, the guide's
+     tour line, shared links) starts it. A first visit lands on the front
+     page and keeps its scroll — no hijacking into the explorer. */
   const forced = /[?&]tour=1/.test(location.hash) || /[?&]tour=1/.test(location.search);
-  if (seen === 'done' && !forced) return;
+  if (!forced) return;
   const view = parseRoute().view;
   if (view !== 'explore' && view !== 'landing') return;
   if (view === 'landing') location.hash = `#/${state.network}/explore`;
@@ -5330,6 +5295,7 @@ document.addEventListener('click', (e) => {
   const act = b.dataset.tour;
   if (act === 'skip') endTour(false);
   else if (act === 'finish') endTour(true);
+  else if (act === 'back') tourBack();
   else showTourStep(tour.step + 1);
 });
 document.addEventListener('keydown', (e) => {
@@ -5371,6 +5337,7 @@ document.addEventListener('click', (e) => {
   }).catch(() => {});
 });
 
+networkFilterReset(); /* testnet-10 boots with the traffic generator hidden */
 render();
 pollLive();
 setTimeout(maybeStartTour, 900);

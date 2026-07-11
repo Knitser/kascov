@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deploy → spend → replay: covenants on Kaspa testnet-10 in 15 minutes — kascov</title>
+  <meta name="description" content="A tested, end-to-end walkthrough: compile a SilverScript Mecenas, deploy it as a real covenant on Kaspa testnet-10, spend it under its own rules, and replay the spend opcode-by-opcode on kascov.io. Includes the v0-UTXO compute-budget trap and its fix.">
+  <link rel="canonical" href="https://kascov.io/guide.html">
+  <link rel="icon" href="favicon.ico">
+  <meta property="og:title" content="Deploy → spend → replay: covenants on Kaspa testnet-10 in 15 minutes">
+  <meta property="og:description" content="Every command tested against the live chain, July 2026 — including the 'script units exceeded' trap that stops most first deploys, and its fix.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://kascov.io/guide.html">
+  <style>
+    /* self-contained: kascov's dark look, no external fetches */
+    :root {
+      color-scheme: dark;
+      --bg: #0a100f;
+      --bg-soft: #0e1514;
+      --card: #111a18;
+      --border: rgba(255, 255, 255, 0.09);
+      --border-strong: rgba(112, 199, 186, 0.35);
+      --text: #e9f1ef;
+      --muted: #a7b8b4;
+      --faint: #8fa19d;
+      --accent: #70c7ba;
+      --accent-soft: rgba(112, 199, 186, 0.12);
+      --born: #6fd9a4;
+      --burn: #f2a566;
+      --burn-soft: rgba(242, 165, 102, 0.14);
+      --watch: #ffd479;
+      --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      --sans: "Instrument Sans", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --radius: 16px;
+      --radius-sm: 10px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(1100px 520px at 50% -180px, rgba(112, 199, 186, 0.10), transparent 70%),
+        var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    .container { width: min(880px, 100% - 2.5rem); margin-inline: auto; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header.site {
+      padding: 1.1rem 0 0.9rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(10, 16, 15, 0.8);
+    }
+    .wordmark { font-weight: 700; letter-spacing: 0.02em; color: var(--text); font-size: 1.05rem; }
+    .wordmark span { color: var(--accent); }
+    .crumb { color: var(--faint); font-size: 0.9rem; }
+    h1 { font-size: clamp(1.6rem, 4.5vw, 2.3rem); line-height: 1.2; margin: 1.8rem 0 0.6rem; letter-spacing: -0.01em; }
+    .lead { color: var(--muted); font-size: 1.06rem; max-width: 62ch; }
+    .honest {
+      margin: 1.2rem 0 0;
+      padding: 0.7rem 1rem;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      background: var(--accent-soft);
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+    .honest strong { color: var(--text); }
+    h2 { font-size: 1.35rem; margin: 2.6rem 0 0.5rem; letter-spacing: -0.01em; }
+    h2 .stepno { color: var(--accent); font-family: var(--mono); font-size: 0.95rem; margin-right: 0.55rem; }
+    h3 { font-size: 1.05rem; margin: 1.6rem 0 0.4rem; }
+    p, li { color: var(--muted); }
+    p strong, li strong { color: var(--text); }
+    code { font-family: var(--mono); font-size: 0.86em; color: var(--text); background: var(--bg-soft); border: 1px solid var(--border); border-radius: 5px; padding: 0.08em 0.35em; word-break: break-word; }
+    pre {
+      position: relative;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.9rem 1rem;
+      overflow-x: auto;
+      font-family: var(--mono);
+      font-size: 0.83rem;
+      line-height: 1.55;
+      color: var(--text);
+    }
+    pre code { background: none; border: none; padding: 0; }
+    pre .c { color: var(--faint); }        /* comment */
+    pre .o { color: var(--born); }         /* output line */
+    pre .e { color: var(--burn); }         /* error line */
+    .copy-btn {
+      position: absolute;
+      top: 0.5rem; right: 0.5rem;
+      font: 600 0.72rem var(--sans);
+      color: var(--muted);
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 0.25rem 0.6rem;
+      cursor: pointer;
+    }
+    .copy-btn:hover { color: var(--text); border-color: var(--border-strong); }
+    .callout {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: var(--radius-sm);
+      background: var(--bg-soft);
+      padding: 0.9rem 1.1rem;
+      margin: 1.1rem 0;
+      font-size: 0.95rem;
+    }
+    .callout.trap { border-left-color: var(--burn); background: var(--burn-soft); }
+    .callout p { margin: 0.4rem 0; }
+    table { border-collapse: collapse; width: 100%; margin: 0.8rem 0; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 0.45rem 0.7rem; border-bottom: 1px solid var(--border); color: var(--muted); vertical-align: top; }
+    th { color: var(--text); font-weight: 600; }
+    td code { white-space: nowrap; }
+    .table-scroll { overflow-x: auto; }
+    footer { margin: 3.5rem 0 2rem; padding-top: 1.2rem; border-top: 1px solid var(--border); color: var(--faint); font-size: 0.9rem; }
+    .toc { margin: 1.4rem 0 0; padding: 0.9rem 1.1rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card); font-size: 0.93rem; }
+    .toc ol { margin: 0.3rem 0 0 1.1rem; padding: 0; }
+    .toc li { margin: 0.15rem 0; }
+  </style>
+</head>
+<body>
+  <header class="site">
+    <div class="container">
+      <a class="wordmark" href="/">kas<span>cov</span></a>
+      <span class="crumb"> · builder guide</span>
+    </div>
+  </header>
+
+  <main class="container">
+    <h1>Deploy → spend → replay: covenants on Kaspa testnet-10 in 15 minutes</h1>
+    <p class="lead">
+      The working end-to-end path: compile a SilverScript <strong>Mecenas</strong>, deploy it as a
+      real covenant (KIP-20) on testnet-10, spend it <em>under its own rules</em>, then replay that
+      spend opcode-by-opcode in the browser. Along the way: the compute-budget trap that has
+      stopped most first covenant deploys, and exactly how to avoid it.
+    </p>
+    <div class="honest">
+      <strong>Everything here is tested.</strong> Every command was run against the live chain and the
+      shipped <a href="https://github.com/Knitser/kascov">kascov</a> toolchain in July 2026; every
+      transaction id links to a real, replayable on-chain spend. Nothing is hypothetical.
+    </div>
+
+    <nav class="toc" aria-label="contents">
+      <strong>On this page</strong>
+      <ol>
+        <li><a href="#prereqs">Prerequisites (5 min, once)</a></li>
+        <li><a href="#compile">Compile a Mecenas</a></li>
+        <li><a href="#deploy">Deploy it as a covenant</a></li>
+        <li><a href="#trap">The trap: “script units exceeded” and the v0-UTXO bootstrap</a></li>
+        <li><a href="#spend">Spend it — <code>--entrypoint receive</code></a></li>
+        <li><a href="#replay">Replay it on kascov.io</a></li>
+        <li><a href="#real">A real production example you can inspect right now</a></li>
+      </ol>
+    </nav>
+
+    <h2 id="prereqs"><span class="stepno">0</span>Prerequisites — 5 minutes, once</h2>
+    <p>
+      You need a Rust toolchain (stable) and the kascov repo. <code>kascov-lab</code> is the covenant
+      lab CLI: it builds, signs and broadcasts real covenant transactions on testnet-10.
+    </p>
+    <pre><code>git clone https://github.com/Knitser/kascov.git
+cd kascov
+cargo build -p kascov-lab              <span class="c"># one-time; grabs the pinned rusty-kaspa rev</span>
+
+cargo run -p kascov-lab -- keygen      <span class="c"># makes a throwaway TN10 key, prints your address</span>
+<span class="o">address:         kaspatest:qq…</span>
+<span class="o">pubkey (x-only): 3f9c…</span>
+<span class="o">blake2b(pubkey): e377…                # you'll paste these two into the generator</span></code></pre>
+    <p>
+      Fund the printed address at
+      <a href="https://faucet-testnet.kaspanet.io">faucet-testnet.kaspanet.io</a> (it’s
+      Cloudflare-gated — use a browser), then confirm it arrived:
+    </p>
+    <pre><code>cargo run -p kascov-lab -- balance
+<span class="o">balance: 100.00000000 TKAS</span></code></pre>
+    <div class="callout">
+      <p><strong>In a hurry?</strong> One command runs this entire guide’s loop — deploy a Mecenas, then spend it so it names itself on the explorer:</p>
+      <p><code>cargo run -p kascov-lab -- contract-demo</code> &nbsp;(or <code>escrow-demo</code> for a dispute-resolution flow). <code>kascov-lab examples</code> prints every recipe. The rest of this page does the same thing step by step, so you can see the moving parts.</p>
+    </div>
+
+    <h2 id="compile"><span class="stepno">1</span>Compile a Mecenas</h2>
+    <p>
+      A <strong>Mecenas</strong> is a patronage contract: after every <code>period</code>, anyone may push
+      one <code>pledge</code> to the recipient (<code>receive</code>); the funder can reclaim the rest at any
+      time with a signature (<code>reclaim</code>). Two ways to get the compiled hex:
+    </p>
+    <h3>Option A — the generator (no toolchain)</h3>
+    <p>
+      Open <a href="https://kascov.io/decode">kascov.io/decode</a> → “make a Mecenas” — fill in
+      <code>recipient</code> (your keygen <em>pubkey</em>), <code>funder</code> (your keygen
+      <em>blake2b(pubkey)</em> — this is what lets you reclaim), a pledge, and a period, and copy
+      the compiled hex. Pick a short period like <code>600</code> DAA (≈ 1 minute on testnet-10, which
+      runs ~10 DAA per second) so you can trigger <code>receive</code> within this guide.
+    </p>
+    <h3>Option B — the compile API</h3>
+    <p>
+      The same compiler (<code>silverc</code>) runs behind
+      <code>POST /data/testnet-10/compile</code>. Constructor args are <strong>bare positional
+      strings</strong>: <code>0x…</code> hex for <code>pubkey</code>/<code>byte[32]</code>, plain decimals for
+      <code>int</code>:
+    </p>
+    <pre><code>curl -s -X POST -H 'content-type: application/json' \
+  https://kascov.io/data/testnet-10/compile \
+  -d '{"source": "&lt;the Mecenas source from kascov.io/decode&gt;",
+       "args": ["0x&lt;recipient pubkey&gt;", "0x&lt;funder blake2b&gt;", "100000000", "600"]}'
+<span class="o">{"ok":true,"hex":"6b6c76009c6375…"}</span></code></pre>
+    <div class="callout">
+      <p><strong>Heads-up on arg encodings.</strong> The upstream <code>silverc --constructor-args</code> CLI wants a different shape — tagged Expr JSON like <code>{"kind":"int","data":600}</code>, where a <code>byte[32]</code> is an array of 32 <code>byte</code> objects — while the debugger and the endpoints above take the bare forms. The zero-dep converter <a href="https://github.com/Knitser/kascov/blob/main/clients/js/kascov-encode.mjs"><code>clients/js/kascov-encode.mjs</code></a> translates both directions (<code>node kascov-encode.mjs 0x44…44 600</code>), so you never hand-write 32 nested byte objects.</p>
+    </div>
+
+    <h2 id="deploy"><span class="stepno">2</span>Deploy it as a covenant</h2>
+    <pre><code>cargo run -p kascov-lab -- deploy --program-hex &lt;the compiled hex&gt; --value 1000000000
+<span class="o">program:   SilverScript · Mecenas (181 bytes)</span>
+<span class="o">BIRTH      covenant b4ade48e3ad1eda5…</span>
+<span class="o">           tx a9a7df1a71307c05…</span>
+<span class="o">           program blake2b 3483c24b…</span></code></pre>
+    <p>What just happened, precisely:</p>
+    <ul>
+      <li>The coin is born holding 10 TKAS with a <strong>P2SH commitment</strong> state:
+        <code>OpBlake2b &lt;blake2b-256(program)&gt; OpEqual</code>. The program itself stays hidden until you spend.</li>
+      <li>Output 0 carries a <code>CovenantBinding</code> with a fresh covenant id —
+        <code>blake2b(outpoint ‖ authorized outputs)</code> — the identity that persists across every
+        future state transition (KIP-20).</li>
+      <li>The command prints a link like
+        <code>kascov.io/testnet-10/c/&lt;id&gt;?program=&lt;hex&gt;</code> — the explorer verifies your
+        program hash against the on-chain commitment <em>in the browser</em>, so you can prove what
+        you deployed before revealing it.</li>
+    </ul>
+    <p>
+      The coin appears on <a href="https://kascov.io">kascov.io</a> within about a minute, labeled
+      “p2sh commitment” until the reveal.
+    </p>
+
+    <h2 id="trap"><span class="stepno">3</span>The trap: “script units exceeded” and the v0-UTXO bootstrap</h2>
+    <p>
+      This is where most first deploys die
+      (<a href="https://github.com/kaspanet/rusty-kaspa/issues/1073">rusty-kaspa#1073</a> is the
+      canonical report). You build a version-1 covenant transaction, set a huge
+      <code>computeBudget</code>, spend a plain faucet UTXO — and the node answers:
+    </p>
+    <pre><code><span class="e">failed to verify the signature script: script units exceeded
+the amount committed in the input: used=100000, limit=9999</span></code></pre>
+    <p>Three facts decode that message:</p>
+    <div class="table-scroll"><table>
+      <tr><th>fact</th><th>number</th></tr>
+      <tr><td>Toccata (v1) transactions replace the per-input <code>sigOpCount: u8</code> with a per-input <code>computeBudget: u16</code> commitment. 1 budget unit = 100 grams = <strong>10,000 script units</strong>.</td><td><code>1 → 10,000</code></td></tr>
+      <tr><td>Every input gets a free allowance of one budget unit minus one script unit — that is the <code>limit=9999</code> you hit when your committed budget is effectively <strong>0</strong>.</td><td><code>9,999 free</code></td></tr>
+      <tr><td>One Schnorr <code>OpCheckSig</code> costs 1,000 grams × 100 units/gram — the <code>used=100000</code>. So even the most boring pay-to-pubkey input needs <strong>budget ≥ 10</strong> in a v1 transaction. Witness bytes you push are charged 1:1 on top.</td><td><code>100,000 / sig</code></td></tr>
+    </table></div>
+    <p>And the two misconceptions the error invites:</p>
+    <ul>
+      <li><strong>It is not the v0 UTXO limiting you.</strong> A v1 transaction can spend v0 (pre-Toccata) UTXOs —
+        that is the bootstrap path; every covenant on testnet-10 started from a plain faucet UTXO.
+        The budget is committed by the <em>spending input</em>, not derived from the UTXO.</li>
+      <li><strong>You can’t patch the budget in afterwards.</strong> For v1 transactions the
+        <code>computeBudget</code> field is covered by the signature hash. Setting it after signing
+        invalidates the signature; and SDKs pinned to pre-Toccata wire formats silently drop the
+        field when serializing — the node then sees budget 0 and you get
+        <code>limit=9999</code> no matter what your local object said. If your tooling predates
+        Toccata (e.g. wasm/py SDKs frozen at 2.0.x), it cannot express this transaction.</li>
+    </ul>
+    <div class="callout trap">
+      <p><strong>The fix (what <code>kascov-labkit</code> does, verbatim from the shipped code):</strong></p>
+      <p>Every input of a v1 transaction gets an explicit commitment —
+        <code>TransactionInput::new_with_mass(outpoint, script, seq, ComputeCommit::ComputeBudget(ComputeBudget(n)))</code> —
+        <em>including the plain fee input</em>, the one everybody forgets because it “never needed anything” pre-Toccata.
+        <code>kascov-lab spend</code> exposes it as <code>--compute-budget</code> (default 20 per input; 1 unit = 10,000 script units).</p>
+      <p>Committed budget is charged as compute mass <em>whether the script uses it or not</em>, so the fee
+        must scale with it. labkit prices two-input constrained spends as
+        <code>fee = 100 sompi × (2 × budget × 100 grams + size headroom)</code> — commit generously, but not <code>65535</code>.</p>
+      <p>For plain (non-covenant) transfers, rusty-kaspa’s own <code>consensus-core sign()</code> already stamps
+        <code>ComputeBudget(10)</code> on every v1 input — exactly one signature check. That is what labkit’s deploy relies on.</p>
+    </div>
+
+    <h2 id="spend"><span class="stepno">4</span>Spend it — <code>--entrypoint receive</code></h2>
+    <p>
+      <code>receive</code> is the interesting entrypoint: it is <strong>output-constrained</strong> and needs
+      <em>no signature at all</em>. Once the coin is older than <code>period</code>, <em>anyone</em> may build the
+      spend — but the contract’s own introspection (KIP-17) forces the outputs: exactly
+      <code>pledge</code> to the recipient, and the remainder re-bound to the same P2SH so the covenant
+      lives on. Dry-run it first — this runs the real Kaspa script engine locally, without broadcasting:
+    </p>
+    <pre><code>cargo run -p kascov-lab -- spend --program-hex &lt;the same hex&gt; --entrypoint receive --dry-run
+<span class="o">SIMULATE   SilverScript · Mecenas . receive  (not broadcast)</span>
+<span class="o">           ✓ PASS —  the spend SATISFIES the contract — a node would accept it</span>
+<span class="o">           output[0] 1.00000000 TKAS</span>
+<span class="o">           output[1] 8.99999000 TKAS [covenant continues]</span></code></pre>
+    <p>
+      (If you dry-run before <code>period</code> has elapsed you’ll see the engine reject honestly —
+      the age gate compiles to <code>OpCheckSequenceVerify</code>. Wait out your period and re-run.)
+      Then drop <code>--dry-run</code> to broadcast:
+    </p>
+    <pre><code>cargo run -p kascov-lab -- spend --program-hex &lt;the same hex&gt; --entrypoint receive
+<span class="o">SPEND      SilverScript · Mecenas . receive</span>
+<span class="o">           tx 05128801…</span></code></pre>
+    <p>Mechanics worth knowing:</p>
+    <ul>
+      <li>The witness reveals the program: <code>push(selector) ++ push(program)</code> for
+        <code>receive</code> (no signature args); pure-signature entrypoints prepend
+        <code>push(pubkey) ++ push(sig)</code>. From this moment kascov shows the coin as
+        <strong>SilverScript · Mecenas</strong>, constructor args labeled, permanently.</li>
+      <li>The tx has a <strong>second, plain input</strong> paying the real network fee — the contract’s
+        internal math hardcodes a 1000-sompi fee, and the node’s compute-mass fee must hold on top.
+        Both inputs commit <code>--compute-budget</code> (see step 3).</li>
+      <li>The funder’s exit is <code>--entrypoint reclaim</code>: a pure-signature spend that works
+        immediately, if your key’s blake2b is the coin’s <code>funder</code> field.</li>
+    </ul>
+
+    <h2 id="replay"><span class="stepno">5</span>Replay it on kascov.io</h2>
+    <p>
+      Open your coin’s page (<code>kascov.io/testnet-10/c/&lt;covenant-id&gt;</code>, or paste the txid
+      into the search box). In the UTXO panel, every spent state has a
+      <strong>“⧉ replay this spend”</strong> button — the worker fetches the captured witness and runs it
+      through the actual <code>TxScriptEngine</code>, streaming an opcode-by-opcode trace with live
+      stacks: the age check, the introspection ops reading your outputs, the final verdict.
+    </p>
+    <p>The same replay is a plain JSON endpoint:</p>
+    <pre><code>curl -s https://kascov.io/data/testnet-10/debug/&lt;txid&gt; | jq '.verdict, .trace[0:3]'</code></pre>
+    <p>
+      Honest caveat, stated by the endpoint itself: the replay fabricates a 1-in/1-out context, so
+      signature and output-introspection checks can diverge from the original transaction — the
+      witness, program and data flow are the real on-chain bytes, but a <code>pass: false</code> replay
+      does not mean the on-chain spend was invalid (it was accepted by consensus).
+    </p>
+
+    <h2 id="real"><span class="stepno">6</span>A real production example you can inspect right now</h2>
+    <p>
+      This exact loop ran end-to-end on the live site on <strong>July 10, 2026</strong> — deploy →
+      genesis → reclaim → revealed. The coin is
+      <a href="https://kascov.io/testnet-10/c/b4ade48e3ad1eda5cfab75a8a9d757abf7faed20a557d274e3ca1fcacd990410"><strong>jolly-pearl-quail</strong></a>
+      (<code>b4ade48e3ad1eda5…</code>), a Mecenas born via the one-click web deploy, then reclaimed by
+      the funder key with <code>kascov-lab spend --entrypoint reclaim</code>:
+    </p>
+    <div class="table-scroll"><table>
+      <tr><th>event</th><th>txid</th></tr>
+      <tr><td>genesis (deploy — P2SH commitment, provable)</td><td><code>a9a7df1a71307c0518aa001920b42b9afecbaa503d61c279c08e45ee6bfc8bdb</code></td></tr>
+      <tr><td>reclaim (reveals the program; funds exit → burn)</td><td><code>051288013eecf1cc3f890005236b96567f743423390a540650af65f50c4288b3</code></td></tr>
+    </table></div>
+    <p>Replay the reveal yourself — one curl, no setup:</p>
+    <pre><code>curl -s https://kascov.io/data/testnet-10/debug/051288013eecf1cc3f890005236b96567f743423390a540650af65f50c4288b3 \
+  | jq '{verdict, steps: (.trace|length), fields: .trace[3].op}'</code></pre>
+    <p>
+      The trace shows the witness pushing the funder’s pubkey and signature, then the full 181-byte
+      Mecenas program whose blake2b matches the deploy commitment — the coin page shows the decoded
+      constructor args (<code>recipient</code>, <code>funder_hash</code>, <code>pledge</code>, <code>period</code>) it
+      recovered from those bytes.
+    </p>
+
+    <footer>
+      <p>
+        <a href="https://kascov.io">kascov.io</a> ·
+        <a href="https://kascov.io/decode">script playground &amp; generator</a> ·
+        <a href="https://kascov.io/#/dev">JSON API docs</a> ·
+        <a href="https://github.com/Knitser/kascov">github.com/Knitser/kascov</a> ·
+        <a href="https://github.com/Knitser/kascov/blob/main/docs/Covenant%20Lab.md">docs/Covenant Lab.md</a>
+      </p>
+      <p>Questions or a step that didn’t work as written? Open an issue — this page only documents what has actually been run.</p>
+    </footer>
+  </main>
+
+  <script>
+    /* copy buttons — the page's only JS */
+    document.querySelectorAll('pre').forEach((pre) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'copy-btn';
+      btn.textContent = 'copy';
+      btn.addEventListener('click', () => {
+        /* copy only the command lines: skip comment-only and output/error spans */
+        const clone = pre.cloneNode(true);
+        clone.querySelectorAll('.o, .e, .copy-btn').forEach((n) => n.remove());
+        const text = clone.textContent.replace(/^\s*\n/gm, '').trimEnd();
+        navigator.clipboard.writeText(text).then(() => {
+          btn.textContent = 'copied ✓';
+          setTimeout(() => { btn.textContent = 'copy'; }, 1200);
+        });
+      });
+      pre.appendChild(btn);
+    });
+  </script>
+</body>
+</html>

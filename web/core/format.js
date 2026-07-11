@@ -36,6 +36,14 @@ function friendlyName(id) {
   return `${adj}-${col}-${ani}`;
 }
 
+/* a template name is "semantic" when it names an actual contract or protocol
+   object ("SilverScript · Escrow", "KCC20 token", "genesis0 · list") rather
+   than a bare state shape — the ubiquitous p2pk/p2sh shapes stay secondary.
+   Returns the name, or null. */
+function semanticTemplate(t) {
+  return t && !/^p2(pk|sh)/.test(t) ? t : null;
+}
+
 /* --------------------------------------------------------------- avatar */
 
 function avatarSvg(id, size) {
@@ -215,7 +223,7 @@ function absShort(ms) {
 }
 
 export {
-  idByte, friendlyName, avatarSvg,
+  idByte, friendlyName, semanticTemplate, avatarSvg,
   ICONS, KIND_META, GLOSSARY,
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex,

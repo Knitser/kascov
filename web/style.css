@@ -304,6 +304,18 @@ h2::after {
   margin: 0;
 }
 
+/* the hero's opt-in tour invitation (injected until the tour flag is set) */
+.hero-tour {
+  margin: 1.35rem 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  animation: rise-in 0.7s 0.44s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.hero-tour .dim { font-size: 0.88rem; }
+
 /* --------------------------------------------------------------- guide */
 
 .guide { margin: 1.8rem 0 2.6rem; }
@@ -1397,6 +1409,23 @@ a.btn:hover { text-decoration: none; }
 .spend-note { margin: 0.5rem 0 0; font-size: 0.8rem; }
 
 .flag-tpl { background: var(--accent-soft); color: var(--accent); text-transform: none; letter-spacing: 0.02em; }
+/* the semantic template promoted to the primary "what is this?" badge —
+   first after the name on cards, coin headers and suggestions */
+.flag-tpl-primary {
+  font-size: 0.74rem;
+  padding: 0.14rem 0.55rem;
+  box-shadow: inset 0 0 0 1px rgba(112, 199, 186, 0.3);
+}
+/* honesty badge for known bulk-traffic keys ("TN10 traffic generator") */
+.flag-gen { text-transform: none; letter-spacing: 0.02em; }
+/* template badge inside a type-ahead row — never let it squash the name */
+.suggest-tpl {
+  flex: none;
+  max-width: 9.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .tpl-line {
   display: flex;
   flex-wrap: wrap;
@@ -2783,3 +2812,45 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
 .tl-count { margin: 0 0 0.6rem; font-size: 0.83rem; font-variant-numeric: tabular-nums; }
 .story-none { padding: 0.6rem 0.2rem; font-size: 0.94rem; }
 .chip-usd { font-size: 0.72rem; padding: 0.18rem 0.6rem; vertical-align: middle; }
+
+/* ---- token directory (#/{net}/tokens) ---- */
+.tokens-note {
+  margin: 0.9rem 0 0;
+  padding: 0.55rem 0.9rem;
+  border: 1px solid rgba(242, 165, 102, 0.35);
+  border-radius: var(--radius-sm);
+  background: var(--burn-soft);
+  color: var(--burn);
+  font-size: 0.88rem;
+  max-width: 76ch;
+}
+.tokens-count { margin: 1.2rem 0 0.4rem; font-size: 0.86rem; }
+.tokens-tablewrap { overflow-x: auto; }
+.tokens-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 0.88rem; }
+.tokens-table th {
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.tokens-table td {
+  padding: 0.55rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.token-coin { display: inline-flex; align-items: center; gap: 0.45rem; white-space: nowrap; }
+.token-coin .avatar { flex: none; }
+.token-name { font-weight: 600; }
+.tokens-fields { display: flex; flex-wrap: wrap; gap: 0.25rem 0.9rem; font-size: 0.8rem; }
+.tokens-value, .tokens-when { white-space: nowrap; }
+
+/* the galaxy hint: touch copy replaces the mouse copy on small screens */
+.galaxy-hint-mobile { display: none; }
+@media (max-width: 640px) {
+  .galaxy-hint-desktop { display: none; }
+  .galaxy-hint-mobile { display: block; margin-top: 0.3rem; }
+}

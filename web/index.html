@@ -27,6 +27,26 @@
   <meta name="twitter:title" content="kascov — watch Kaspa's smart coins live their lives">
   <meta name="twitter:description" content="The first covenant explorer for Kaspa L1. Every smart coin, born, moving, retiring — recorded live, remembered forever.">
   <meta name="twitter:image" content="https://kascov.io/og.png?v=2">
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "WebSite",
+          "name": "kascov",
+          "url": "https://kascov.io/",
+          "description": "The covenant explorer for Kaspa L1 — every smart coin on the network born, moving, retiring, recorded live and kept after nodes prune."
+        },
+        {
+          "@type": "Organization",
+          "name": "kascov",
+          "url": "https://kascov.io/",
+          "description": "Open-source indexer and explorer for Kaspa L1 covenants (smart coins).",
+          "sameAs": ["https://github.com/Knitser/kascov"]
+        }
+      ]
+    }
+  </script>
   <meta name="theme-color" content="#0a100f">
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32">
@@ -54,8 +74,10 @@
       <div class="header-right">
         <nav class="site-nav" aria-label="Pages">
           <a class="nav-link" href="#/explore" data-nav="explore">explore</a>
+          <a class="nav-link" href="#/tokens" data-nav="tokens">tokens</a>
           <a class="nav-link" href="#/decode" data-nav="playground">playground</a>
           <a class="nav-link" href="#/dev" data-nav="dev">API</a>
+          <a class="nav-link" href="/guide.html">guide</a>
         </nav>
         <nav class="network-tabs" aria-label="Network">
           <button type="button" class="network-tab" data-action="network" data-network="testnet-10" aria-pressed="true">testnet-10</button>
@@ -72,8 +94,9 @@
     <section id="view-landing" class="view-fade" hidden>
       <section class="hero" aria-label="Overview">
         <canvas id="dag-canvas" class="dag-canvas" aria-hidden="true"></canvas>
+        <p class="page-eyebrow">the covenant explorer for Kaspa L1</p>
         <h1 class="hero-title">Kaspa coins just learned to <em>carry rules</em>.</h1>
-        <p class="hero-sub">kascov watches every smart coin on the Kaspa <span data-net-word>testnet</span> — born, moving, retiring — and saves the history the network deletes after 3&nbsp;days.</p>
+        <p class="hero-sub">like a token explorer, but for coins that carry their own rules: kascov watches every smart coin on the Kaspa <span data-net-word>testnet</span> — born, moving, retiring — and saves the history the network deletes after 3&nbsp;days.</p>
         <div class="hero-stats" id="hero-stats"></div>
         <p class="freshness" id="freshness"></p>
       </section>
@@ -207,7 +230,7 @@
 
       <details class="lanes collapse-sec" id="section-galaxy" aria-label="Galaxy" hidden>
         <summary><h2>the galaxy · the whole network</h2><span class="collapse-count dim" id="galaxy-count"></span></summary>
-        <p class="dim families-sub">every app at once — each dot is a smart coin, each link a shared transaction. scroll to zoom, drag to pan, click a dot to open the coin.</p>
+        <p class="dim families-sub">every app at once — each dot is a smart coin, each link a shared transaction. <span class="galaxy-hint-desktop">scroll to zoom, drag to pan, click a dot to open the coin.</span><span class="galaxy-hint-mobile">pinch to zoom · tap a dot</span></p>
         <div class="galaxy-toolbar">
           <input type="search" id="galaxy-search" class="galaxy-search" placeholder="find a coin…" autocomplete="off" spellcheck="false" aria-label="Find a coin in the graph">
           <span class="galaxy-chips" role="group" aria-label="Filter">
@@ -299,6 +322,9 @@
     <section id="view-address" class="view-fade" aria-label="Address lookup" hidden></section>
 
     <section id="view-lane" class="view-fade" aria-label="Lane dashboard" hidden></section>
+
+    <!-- ============ TOKENS ============ -->
+    <section id="view-tokens" class="view-fade" aria-label="Token directory" hidden></section>
 
     <!-- ============ DECODER ============ -->
     <section id="view-decode" class="view-fade" aria-label="Playground — read" hidden>
@@ -508,13 +534,16 @@
           <div class="api-nav-group">Start</div>
           <a href="#api-intro">Overview</a>
           <a href="#api-networks">Networks</a>
+          <a href="#api-clients">Client libraries</a>
           <div class="api-nav-group">Feeds</div>
           <a href="#ep-live">Live feed</a>
           <a href="#ep-snapshot">Full snapshot</a>
+          <a href="#ep-events">Event feed</a>
           <a href="#ep-stream">Event stream</a>
           <a href="#ep-price">Price</a>
           <div class="api-nav-group">Coins</div>
           <a href="#ep-coin">One coin</a>
+          <a href="#ep-coins">Coins by id</a>
           <a href="#ep-tx">Transaction</a>
           <a href="#ep-addr">Address</a>
           <div class="api-nav-group">Analytics</div>
@@ -526,6 +555,7 @@
           <a href="#ep-lanes">Based-app lanes</a>
           <a href="#ep-lane">One lane</a>
           <a href="#ep-inscriptions">Inscriptions</a>
+          <a href="#ep-tokens">Tokens</a>
           <a href="#ep-lifespans">Lifespans</a>
           <a href="#ep-reorgs">Reorgs</a>
           <div class="api-nav-group">Find</div>
@@ -551,7 +581,7 @@
                 <tr><th>Base URL</th><td><code class="mono">https://kascov.io</code></td></tr>
                 <tr><th>Format</th><td>JSON · <code class="mono">application/json</code></td></tr>
                 <tr><th>Auth</th><td>None — public</td></tr>
-                <tr><th>CORS</th><td><code class="mono">Access-Control-Allow-Origin: *</code></td></tr>
+                <tr><th>CORS</th><td>CORS enabled incl. preflight — call any route, GET or POST, straight from a browser page</td></tr>
                 <tr><th>Caching</th><td>CDN <code class="mono">s-maxage</code> + <code class="mono">stale-while-revalidate</code>; responses carry <code class="mono">tip_daa</code> + <code class="mono">tip_at_ms</code> so you always know how fresh they are</td></tr>
               </tbody>
             </table>
@@ -562,20 +592,29 @@
             <p>Every path takes a network segment. Swap <code class="mono">testnet-10</code> for <code class="mono">mainnet</code> anywhere. Mainnet's first smart coins arrived July 2, 2026; their full history starts there.</p>
           </div>
 
+          <div class="api-block" id="api-clients">
+            <h3>Client libraries</h3>
+            <p>Two tiny zero-dependency clients ship in the repo — <a href="https://github.com/Knitser/kascov/tree/main/clients" target="_blank" rel="noopener noreferrer"><code class="mono">clients/js/kascov.mjs</code></a> (Node 18+ and browsers) and <code class="mono">clients/py/kascov.py</code>. Each is a single file wrapping the endpoints below. One sharp edge: for the <a href="#ep-stream">event stream</a>, construct the client with the worker origin as its base — <code class="mono">new Kascov('testnet-10', 'https://kascov-worker-12056584181.europe-west4.run.app')</code> — because the default <code class="mono">kascov.io</code> base sits behind a CDN that buffers SSE. Everything else works fine through the default.</p>
+          </div>
+
           <article class="api-endpoint" id="ep-live">
             <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}-live.json</code></div>
             <p class="ep-desc">The small, fast feed — network stats, the chain tip, and the ~150 newest life events. This is the one to poll (a few KB, refreshes every few seconds).</p>
             <div class="ep-cols">
               <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -s https://kascov.io/data/testnet-10-live.json</code></pre></div>
               <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
-  "stats": { "covenants": 89747, "active": 6566, "events": 403794 },
-  "tip_daa": 509571904,
-  "tip_at_ms": 1751799000000,
-  "processed_daa": 509571904,
+  "network": "testnet-10",
+  "stats": { "covenants": 192852, "active": 14190, "burned": 178662,
+             "events": 876383, "live_value": 307204412838957,
+             "last_activity_daa": 513875477 },
+  "tip_daa": 513875491,
+  "tip_at_ms": 1783746272524,
+  "processed_daa": 513875490,
+  "generated_at_ms": 1783746272524,
   "recent_events": [
-    { "covenant_id": "b11acf6c…459c6",
-      "kind": "genesis", "txid": "a86041…e684",
-      "accepting_daa": 508951007 }
+    { "covenant_id": "2ab7dcd2…35115",
+      "kind": "transition", "txid": "f9bbca…f2ba",
+      "accepting_daa": 513875477, "seq": 5, "tx_index": 50 }
   ]
 }</code></pre></div>
             </div>
@@ -584,6 +623,8 @@
               <tr><td class="mono">stats.active</td><td>int</td><td>coins with a live UTXO right now</td></tr>
               <tr><td class="mono">tip_daa · processed_daa</td><td>int</td><td>chain tip vs. last block applied — the gap is the honest sync lag</td></tr>
               <tr><td class="mono">recent_events[].kind</td><td>string</td><td><code class="mono">genesis</code> · <code class="mono">transition</code> · <code class="mono">burn</code></td></tr>
+              <tr><td class="mono">recent_events[].seq</td><td>int</td><td>the event's 0-based position in its own coin's timeline</td></tr>
+              <tr><td class="mono">recent_events[].tx_index</td><td>int?</td><td>0-based index in the accepting block's accepted-tx list (consensus acceptance order); omitted on rows indexed before capture</td></tr>
             </tbody></table>
           </article>
 
@@ -598,30 +639,68 @@
             <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
   "stats": { … },
   "covenants": [
-    { "covenant_id": "b11acf6c…459c6", "name": "nimble-teal-newt-b11a",
-      "status": "active", "born_value": 1000000000, "live_value": 1000000000,
-      "event_count": 1, "genesis_daa": 508951007, "last_daa": 508951007,
-      "template": "SilverScript · Mecenas" }
+    { "covenant_id": "e55322e7…60697", "name": "sleepy-olive-crane",
+      "status": "active", "born_value": 460831908462, "live_value": 230415954231,
+      "event_count": 2, "live_utxos": 1, "lineage_complete": true,
+      "genesis_daa": 513863444, "last_activity_daa": 513870198,
+      "template": "p2pk state" }
   ],
-  "next_after_daa": 509571904,
-  "next_after_id": "f00dbabe…1234"
+  "next_after_daa": 513870178,
+  "next_after_id": "a348a978…f3a29"
 }</code></pre></div>
             <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">name</td><td>string</td><td>the coin's friendly name — derived deterministically from the id, the same name everywhere kascov shows it</td></tr>
               <tr><td class="mono">status</td><td>string</td><td><code class="mono">active</code> or <code class="mono">burned</code></td></tr>
               <tr><td class="mono">born_value · live_value</td><td>int</td><td>sompi held at birth / right now</td></tr>
+              <tr><td class="mono">last_activity_daa</td><td>int</td><td>the DAA of the coin's newest life event — the sort key of this feed</td></tr>
               <tr><td class="mono">template</td><td>string?</td><td>recognized contract, or a state shape like <code class="mono">p2sh commitment</code></td></tr>
               <tr><td class="mono">next_after_daa · next_after_id</td><td>int? · hex?</td><td>present only when another page exists — feed them to <code class="mono">?after_daa=&amp;after_id=</code></td></tr>
             </tbody></table>
           </article>
 
+          <article class="api-endpoint" id="ep-events">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/events</code><span class="ep-q">?after_daa=&amp;after_seq=&amp;limit=</span></div>
+            <p class="ep-desc">The chain-wide event feed — every life event on the network, oldest first, in the canonical deterministic order: <code class="mono">accepting_daa</code>, then <code class="mono">tx_index</code>, then <code class="mono">txid</code>. Every event-shaped surface (this feed, the live feed, the stream, webhooks) serves the same object, so you write one parser. Walk history from any point by passing the response's cursor pair back.</p>
+            <table class="ep-params"><thead><tr><th>Query</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">after_daa</td><td>int</td><td>resume at this DAA — <code class="mono">0</code> starts from the beginning of history</td></tr>
+              <tr><td class="mono">after_seq</td><td>int</td><td>how many events of that boundary DAA were already taken — pass the returned pair straight back; a stable cursor because order inside a DAA is total and history only appends at higher DAAs</td></tr>
+              <tr><td class="mono">limit</td><td>int</td><td>page size, clamped server-side</td></tr>
+            </tbody></table>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "events": [
+    { "covenant_id": "2ab7dcd2…35115", "seq": 5, "kind": "transition",
+      "txid": "f9bbca…f2ba", "accepting_daa": 513875477,
+      "accepting_block": "58ef8d…c44f0", "tx_index": 50,
+      "payload_len": 137 }
+  ],
+  "next_after_daa": 513875477,
+  "next_after_seq": 12
+}</code></pre></div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">events[].seq</td><td>int</td><td>0-based position in the event's own coin's timeline</td></tr>
+              <tr><td class="mono">events[].tx_index</td><td>int?</td><td>consensus acceptance order within the accepting block; omitted (not null) on rows indexed before capture</td></tr>
+              <tr><td class="mono">events[].payload_len</td><td>int?</td><td>byte length of the transaction's v1 payload; omitted when it carried none</td></tr>
+              <tr><td class="mono">next_after_daa · next_after_seq</td><td>int</td><td>the resume cursor — feed to <code class="mono">?after_daa=&amp;after_seq=</code> to keep walking</td></tr>
+            </tbody></table>
+          </article>
+
           <article class="api-endpoint" id="ep-stream">
-            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/stream</code></div>
-            <p class="ep-desc">Server-sent events — one JSON message the moment the indexer sees each life event, plus a <code class="mono">: ka</code> keep-alive every 25s. Treat messages as hints and confirm through the polled feeds (some CDNs buffer streams).</p>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/stream</code><span class="ep-q">?covenant=</span></div>
+            <p class="ep-desc">Server-sent events — one JSON message the moment the indexer sees each life event. <strong>Connect to the worker origin directly</strong>: the <code class="mono">kascov.io</code> CDN (Firebase) buffers streams, so an SSE connection opened there never delivers. The stream opens with a <code class="mono">: connected</code> hello and sends a <code class="mono">: ka</code> keep-alive comment every 25s. Treat messages as hints and confirm through the polled feeds.</p>
+            <table class="ep-params"><thead><tr><th>Query</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">covenant</td><td>hex</td><td>optional — exactly 64 hex characters narrows the stream to one coin's events; anything else is a <code class="mono">400</code>, never a silent wildcard</td></tr>
+            </tbody></table>
             <div class="ep-cols">
-              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -N https://kascov.io/data/testnet-10/stream</code></pre></div>
-              <div class="ep-example"><div class="ep-ex-head">Each message</div><pre class="codeblock"><code>data: {"covenant_id":"b11acf6c…","kind":"genesis",
-       "txid":"a86041…","accepting_daa":508951007}</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Request — note the worker origin</div><pre class="codeblock"><code>curl -N 'https://kascov-worker-12056584181.europe-west4.run.app/data/testnet-10/stream'</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">The stream</div><pre class="codeblock"><code>: connected
+
+data: {"covenant_id":"2ab7dcd2…","kind":"transition",
+       "txid":"f9bbca…","accepting_daa":513875477,
+       "tx_index":50}</code></pre></div>
             </div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">kind</td><td>string</td><td><code class="mono">genesis</code> · <code class="mono">transition</code> · <code class="mono">burn</code> — plus <code class="mono">reorg</code> notices <code class="mono">{"kind":"reorg","rolled_back":N}</code> (filtered streams never see them)</td></tr>
+            </tbody></table>
           </article>
 
           <article class="api-endpoint" id="ep-price">
@@ -646,15 +725,21 @@
             <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/c/{covenant_id}.json</code></div>
             <p class="ep-desc">One coin's whole life — the complete event timeline and every UTXO with decoded scripts, recognized templates, and spend-time reveals. <code class="mono">404</code> if the id is unknown.</p>
             <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
-  "covenant_id": "da2fe117…5d6d7", "name": "lively-slate-urchin-da2f",
-  "status": "burned", "event_count": 2, "lineage_complete": true,
-  "genesis_txid": "823d33…80c5", "genesis_daa": 509571333,
+  "covenant_id": "a348a978…f3a29", "name": "brave-jade-osprey",
+  "status": "burned", "event_count": 3, "lineage_complete": true,
+  "genesis_txid": "82aabd…25dcb", "genesis_daa": 513863030,
+  "last_activity_daa": 513870178,
   "events": [
-    { "seq": 0, "kind": "genesis", "txid": "823d33…80c5", "accepting_daa": 509571333 },
-    { "seq": 1, "kind": "burn",    "txid": "1461f8…07ed", "accepting_daa": 509571520 }
+    { "seq": 0, "kind": "genesis", "txid": "82aabd…25dcb",
+      "accepting_daa": 513863030, "accepting_block": "bc5aaf…8daac",
+      "tx_index": 56 },
+    { "seq": 2, "kind": "burn", "txid": "8e7040…3e2bb",
+      "accepting_daa": 513870178, "accepting_block": "3d1c00…45e7e2",
+      "tx_index": 18 }
   ],
+  "events_truncated": false,
   "utxos": [
-    { "outpoint": "823d33…80c5:0", "value": 500000000, "live": false,
+    { "outpoint": "82aabd…25dcb:0", "value": 230415954231, "live": false,
       "template": "p2sh commitment",
       "state_fields": [ { "name": "program_hash", "value": "d9a9e982…f475d17" } ],
       "revealed_template": "SilverScript · Escrow",
@@ -662,13 +747,33 @@
   ]
 }</code></pre></div>
             <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">name</td><td>string</td><td>the coin's friendly name — deterministic from the id</td></tr>
               <tr><td class="mono">lineage_complete</td><td>bool</td><td><code class="mono">false</code> means kascov started watching mid-life; earlier history is honestly missing</td></tr>
+              <tr><td class="mono">events_truncated</td><td>bool</td><td><code class="mono">true</code> when the timeline was capped — <code class="mono">event_count</code> still counts everything</td></tr>
+              <tr><td class="mono">events[].payload · payload_len</td><td>hex? · int?</td><td>the tx's v1 payload — inlined as hex when ≤ 512 bytes, collapsed to its byte length above that</td></tr>
+              <tr><td class="mono">events[].with_covenants</td><td>array?</td><td>up to 4 other coins the same transaction moved (multi-contract flows)</td></tr>
               <tr><td class="mono">utxos[].revealed_template</td><td>string?</td><td>the contract a P2SH state actually ran, decoded and hash-verified when it was spent</td></tr>
               <tr><td class="mono">…_fields[]</td><td>array</td><td><code class="mono">{ name, value }</code> — labeled constructor arguments</td></tr>
               <tr><td class="mono">holders[]</td><td>array</td><td>up to 100 p2pk-state owners: <code class="mono">{ pubkey, controls_now, states_seen, first_seen_daa, last_seen_daa }</code></td></tr>
               <tr><td class="mono">utxos[].zk_system</td><td>string?</td><td>on zk-using states, a size heuristic over the proof push: <code class="mono">risc0</code> (≥1024&nbsp;B) or <code class="mono">groth16</code> (128–256&nbsp;B)</td></tr>
               <tr><td class="mono">utxos[].revealed_zk_system</td><td>string?</td><td>the same heuristic applied to the program revealed at spend</td></tr>
             </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-coins">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/coins</code><span class="ep-q">?ids=</span></div>
+            <p class="ep-desc">Batch summaries — several coins in one request, each row in the exact shape the <a href="#ep-snapshot">snapshot grid</a> serves. <code class="mono">ids</code> is comma-separated 64-hex covenant ids; ids the index doesn't know are simply absent from the answer, never an error.</p>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -s 'https://kascov.io/data/testnet-10/coins?ids=e55322e7…,a348a978…'</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "coins": [
+    { "covenant_id": "e55322e7…60697", "name": "sleepy-olive-crane",
+      "status": "active", "last_activity_daa": 513870198, … },
+    { "covenant_id": "a348a978…f3a29", "name": "brave-jade-osprey",
+      "status": "burned", "last_activity_daa": 513870178, … }
+  ]
+}</code></pre></div>
+            </div>
           </article>
 
           <article class="api-endpoint" id="ep-tx">
@@ -803,6 +908,26 @@
 }</code></pre></div>
           </article>
 
+          <article class="api-endpoint" id="ep-tokens">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/tokens.json</code></div>
+            <p class="ep-desc">The covenant-token directory behind the <a href="#/tokens">tokens</a> page — every KCC20-shaped coin the indexer decoded, its ticker and fields read straight from the chain's bytes. <strong>Decoded, not validated</strong>: kascov shows what these covenants wrote in their own bytes; it does not (yet) check KCC20 balance rules. The response repeats that warning in <code class="mono">note</code> — surface it to your users too.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "note": "decoded from chain — not validated: …",
+  "tip_daa": 513875491, "tip_at_ms": 1783746272524,
+  "tokens": [
+    { "covenant_id": "9cc4fb51…68f50", "name": "humble-crimson-magpie",
+      "template": "KCC20 token",
+      "fields": { "tick": "NACHO", "op": "deploy" },
+      "live_value": 100000000, "status": "active",
+      "last_activity_daa": 513875477 }
+  ]
+}</code></pre></div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">tokens[].fields</td><td>object</td><td>the decoded key/values exactly as the covenant wrote them — no registry, no labels kascov invented</td></tr>
+              <tr><td class="mono">tokens[].live_value</td><td>int?</td><td>sompi the coin holds right now</td></tr>
+            </tbody></table>
+          </article>
+
           <article class="api-endpoint" id="ep-lifespans">
             <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/lifespans.json</code></div>
             <p class="ep-desc">How long do smart coins live? A bucketed lifespan histogram over every retired coin, plus the median. Times derive from DAA at 10 per second, so <code class="mono">median_ms</code> is an estimate.</p>
@@ -919,25 +1044,29 @@
 
           <article class="api-endpoint" id="ep-subscribe">
             <div class="ep-head"><span class="method post">POST</span><code class="ep-path">/data/{network}/subscribe</code></div>
-            <p class="ep-desc">Register a webhook: your URL gets one JSON POST per matching covenant event, delivered as it happens. Filter to one coin with <code class="mono">covenant_id</code> (must be exactly 64 hex characters — anything else is rejected, never a silent wildcard) and/or one event <code class="mono">kind</code>; omit both for everything. Unsubscribe with <code class="mono">POST /data/{network}/unsubscribe</code> and the returned id.</p>
+            <p class="ep-desc">Register a webhook: your URL gets one JSON POST per matching covenant event, delivered as it happens. Filter to one coin with <code class="mono">covenant_id</code> (must be exactly 64 hex characters — anything else is rejected, never a silent wildcard) and/or one event <code class="mono">kind</code>; omit both for everything. The response hands you a generated <code class="mono">secret</code> — shown once, never readable back: every delivery is signed with it, and only someone holding it can unsubscribe the hook. Unsubscribe with <code class="mono">POST /data/{network}/unsubscribe</code>, the returned id, and that secret.</p>
             <div class="ep-cols">
               <div class="ep-example"><div class="ep-ex-head">Request body</div><pre class="codeblock"><code>{
   "url": "https://example.com/hook",
   "covenant_id": "b4ade48e…",  // optional, 64 hex
   "kind": "burn"               // optional: genesis · transition · burn
 }
-// → { "ok": true, "id": 7 }
-// unsubscribe: { "id": 7 } → { "ok": true, "deleted": true }</code></pre></div>
+// → { "ok": true, "id": 7, "secret": "9f2ab4…" }  // save it — shown once
+// unsubscribe: { "id": 7, "secret": "9f2ab4…" }
+//            → { "ok": true, "deleted": true }</code></pre></div>
               <div class="ep-example"><div class="ep-ex-head">Each delivery</div><pre class="codeblock"><code>POST your-url  ·  application/json
+X-Kascov-Signature: 3f9c41…  (keyed with your subscription's secret)
 {
   "network": "testnet-10",
   "covenant_id": "b4ade48e…",
   "kind": "burn",
   "txid": "1461f8…07ed",
-  "accepting_daa": 509571520
+  "accepting_daa": 509571520,
+  "tx_index": 18
 }</code></pre></div>
             </div>
             <table class="ep-fields"><thead><tr><th>Semantics</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">authenticity</td><td></td><td>every delivery carries <code class="mono">X-Kascov-Signature</code>: the hex keyed blake2b-256 of the exact request body, keyed with the secret <code class="mono">/subscribe</code> returned — recompute it over the raw bytes you received and compare before trusting the event</td></tr>
               <tr><td class="mono">delivery</td><td></td><td>up to 3 attempts with backoff, 5s timeout, redirects never followed; a subscription that keeps failing is retired automatically</td></tr>
               <tr><td class="mono">targets</td><td></td><td>public http(s) hosts only — every resolved address is checked, and loopback / private / link-local targets are rejected (SSRF guard)</td></tr>
               <tr><td class="mono">guarantees</td><td></td><td>best-effort hints, not a durable feed — confirm through the polled endpoints</td></tr>
@@ -982,7 +1111,7 @@
   <footer class="site-footer">
     <div class="container footer-inner">
       <p class="footer-motto">Kaspa nodes forget after ~3 days. <strong>kascov remembers.</strong></p>
-      <p class="footer-nav"><a class="footer-link" href="#/explore">explorer</a> · <a class="footer-link" href="#/decode">playground</a> · <a class="footer-link" href="#/dev">JSON API &amp; docs</a> · <a class="footer-link" href="#/changelog">what&rsquo;s new</a></p>
+      <p class="footer-nav"><a class="footer-link" href="#/explore">explorer</a> · <a class="footer-link" href="#/decode">playground</a> · <a class="footer-link" href="#/dev">JSON API &amp; docs</a> · <a class="footer-link" href="/guide.html">the 15-minute guide</a> · <a class="footer-link" href="#/changelog">what&rsquo;s new</a></p>
       <p><a class="footer-link" href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov</a></p>
       <p class="footer-dim">data streams live from the kascov indexer — it never stops watching</p>
       <p class="footer-dim">not affiliated with the Kaspa Foundation</p>
