@@ -311,6 +311,7 @@ fn build_grid_snapshot(
         .map(|c| {
             serde_json::json!({
                 "covenant_id": c.covenant_id,
+                "name": og::friendly_name(&c.covenant_id.to_string()),
                 "status": if c.live_utxos > 0 { "active" } else { "burned" },
                 "genesis_daa": c.genesis_daa,
                 "lineage_complete": c.lineage_complete,
@@ -415,8 +416,12 @@ fn build_covenant_detail(
 ) -> Result<serde_json::Value> {
     let mut detail = covenant_json(store, registry, summary, max_events)?;
     let tip = store.tip()?;
-    let obj = detail.as_object_mut().expect("covenant json is an object");
+    let obj = detail.as_object_mut().context("covenant json is not an object")?;
     obj.insert("network".into(), serde_json::json!(network.to_string()));
+    obj.insert(
+        "name".into(),
+        serde_json::json!(og::friendly_name(&summary.covenant_id.to_string())),
+    );
     obj.insert("generated_at_ms".into(), serde_json::json!(now_ms()));
     obj.insert("tip_daa".into(), serde_json::json!(tip.map(|t| t.0)));
     obj.insert("tip_at_ms".into(), serde_json::json!(tip.map(|t| t.1)));
@@ -438,6 +443,26 @@ fn covenant_json(
 ) -> Result<serde_json::Value> {
     let events = store.events(&summary.covenant_id)?;
     let truncated_events = events.len() as u64 > max_events;
+    let mut event_rows = Vec::with_capacity(events.len().min(max_events as usize));
+    for e in events.iter().take(max_events as usize) {
+        let mut v = serde_json::to_value(e).context("event serializes")?;
+        // based-app payloads can be large; the snapshot inlines small ones only
+        if let Some(p) = &e.payload {
+            if p.len() > 512 {
+                v.as_object_mut().context("event json is not an object")?.remove("payload");
+                v["payload_len"] = serde_json::json!(p.len());
+            }
+        }
+        // multi-covenant transactions: name the other coins this tx moved
+        if let Ok(others) = store.covenants_by_txid(&e.txid) {
+            let with: Vec<_> =
+                others.into_iter().filter(|c| c != &summary.covenant_id).take(4).collect();
+            if !with.is_empty() {
+                v["with_covenants"] = serde_json::json!(with);
+            }
+        }
+        event_rows.push(v);
+    }
     let utxos: Vec<_> = store
         .utxos(&summary.covenant_id, false)?
         .into_iter()
@@ -502,24 +527,7 @@ fn covenant_json(
         "last_activity_daa": summary.last_activity_daa,
         "live_utxos": summary.live_utxos,
         "live_value": summary.live_value,
-        "events": events.iter().take(max_events as usize).map(|e| {
-            let mut v = serde_json::to_value(e).expect("event serializes");
-            // based-app payloads can be large; the snapshot inlines small ones only
-            if let Some(p) = &e.payload {
-                if p.len() > 512 {
-                    v.as_object_mut().expect("event object").remove("payload");
-                    v["payload_len"] = serde_json::json!(p.len());
-                }
-            }
-            // multi-covenant transactions: name the other coins this tx moved
-            if let Ok(others) = store.covenants_by_txid(&e.txid) {
-                let with: Vec<_> = others.into_iter().filter(|c| c != &summary.covenant_id).take(4).collect();
-                if !with.is_empty() {
-                    v["with_covenants"] = serde_json::json!(with);
-                }
-            }
-            v
-        }).collect::<Vec<_>>(),
+        "events": event_rows,
         "events_truncated": truncated_events,
         "utxos": utxos,
     }))
@@ -1010,6 +1018,13 @@ impl Drop for SubscriberSlot {
     }
 }
 
+/// Per-network follower liveness, shared with /healthz. Epoch ms of the last
+/// successful sync pass; initialized to boot time so a fresh instance gets the
+/// same 10-minute grace as a healthy one.
+struct SyncHealth {
+    last_sync_ok_ms: std::sync::atomic::AtomicI64,
+}
+
 struct ServeState {
     base_dir: std::path::PathBuf,
     networks: Vec<Network>,
@@ -1018,6 +1033,11 @@ struct ServeState {
     rpc: Option<String>,
     /// Rate limiter shared by the custodial /deploy endpoint.
     deploy_limiter: tokio::sync::Mutex<DeployLimiter>,
+    /// Rate limiter shared by the compiler-adjacent endpoints
+    /// (/compile, /publish, /zk-verify).
+    tool_limiter: tokio::sync::Mutex<ToolLimiter>,
+    /// Follower liveness per network (same Vec-not-HashMap shape as `live`).
+    sync_health: Vec<(Network, std::sync::Arc<SyncHealth>)>,
     /// Serializes custodial deploys: they all spend from one funding wallet, so
     /// concurrent builds would pick the same UTXO and double-spend. One in flight.
     deploy_inflight: tokio::sync::Mutex<()>,
@@ -1035,6 +1055,21 @@ struct ServeState {
     /// cheap staleness probe (ids are append-only). A std Mutex because it's
     /// taken inside spawn_blocking; held only for map lookups, never builds.
     search_index: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, u64, std::sync::Arc<SearchIndex>)>>,
+}
+
+/// Parse a `{network}` path segment and require it to be a network this
+/// worker follows. `Err` carries the ready-made 404 response, so handlers
+/// `return` it as-is.
+fn resolve_network(
+    state: &ServeState,
+    raw: &str,
+) -> std::result::Result<Network, axum::response::Response> {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    match raw.parse::<Network>() {
+        Ok(network) if state.networks.contains(&network) => Ok(network),
+        _ => Err((StatusCode::NOT_FOUND, "unknown network").into_response()),
+    }
 }
 
 async fn serve(
@@ -1058,15 +1093,27 @@ async fn serve(
     std::fs::create_dir_all(&base_dir)?;
 
     let mut live = Vec::with_capacity(networks.len());
+    let mut sync_health = Vec::with_capacity(networks.len());
     for &network in &networks {
         let channel = LiveChannel::new();
+        let health = std::sync::Arc::new(SyncHealth {
+            last_sync_ok_ms: std::sync::atomic::AtomicI64::new(now_ms() as i64),
+        });
         let db = base_dir.join(format!("{network}.db"));
         // Webhook delivery rides the same event callback as SSE: the follower
         // try_sends into this queue and a per-network task does the POSTs.
         let (hook_tx, hook_rx) = tokio::sync::mpsc::channel::<HookEvent>(HOOK_QUEUE);
         tokio::spawn(webhook_delivery_forever(network, db.clone(), hook_rx));
-        tokio::spawn(follow_forever(network, cli.rpc.clone(), db, channel.tx.clone(), hook_tx));
+        tokio::spawn(follow_forever(
+            network,
+            cli.rpc.clone(),
+            db,
+            channel.tx.clone(),
+            hook_tx,
+            health.clone(),
+        ));
         live.push((network, channel));
+        sync_health.push((network, health));
     }
 
     let state = std::sync::Arc::new(ServeState {
@@ -1075,6 +1122,8 @@ async fn serve(
         max_events,
         rpc: cli.rpc.clone(),
         deploy_limiter: tokio::sync::Mutex::new(DeployLimiter::new()),
+        tool_limiter: tokio::sync::Mutex::new(ToolLimiter::new()),
+        sync_health,
         deploy_inflight: tokio::sync::Mutex::new(()),
         live,
         cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
@@ -1091,10 +1140,15 @@ async fn serve(
     {
         let state = state.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(240));
+            // First tick held back 90s: a fresh instance must answer cheap
+            // requests before it pays 2×networks galaxy builds (boot storm).
+            let mut tick = tokio::time::interval_at(
+                tokio::time::Instant::now() + std::time::Duration::from_secs(90),
+                std::time::Duration::from_secs(240),
+            );
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                tick.tick().await; // first tick fires immediately = boot prewarm
+                tick.tick().await;
                 for &network in &state.networks {
                     let db = state.base_dir.join(format!("{network}.db"));
                     if !db.exists() {
@@ -1149,7 +1203,7 @@ async fn serve(
         });
     }
     let app = axum::Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+        .route("/healthz", get(healthz_handler))
         .route("/data/{network}/simulate", post(simulate_handler))
         .route("/data/{network}/zk-verify", post(zk_verify_handler))
         .route("/data/{network}/compile", post(compile_handler))
@@ -1173,6 +1227,9 @@ async fn serve(
         .route("/data/{network}/lifespans.json", get(lifespans_handler))
         .route("/data/{network}/digest.json", get(digest_handler))
         .route("/data/{network}/templates.json", get(templates_handler))
+        .route("/data/{network}/tokens.json", get(tokens_handler))
+        .route("/data/{network}/events", get(events_handler))
+        .route("/data/{network}/coins", get(coins_handler))
         .route("/data/{network}/activity.json", get(activity_handler))
         .route("/data/{network}/addr/{address}", get(addr_handler))
         .route("/data/{network}/search", get(search_handler))
@@ -1186,12 +1243,97 @@ async fn serve(
         // compresses the small dynamic responses; the big cached bodies are
         // pre-gzipped (Content-Encoding already set, so this layer skips them)
         .layer(tower_http::compression::CompressionLayer::new())
+        // browsers preflight the JSON POSTs (compile/publish/subscribe/…) with
+        // OPTIONS, which a post-only route would 405. This layer answers the
+        // preflight and stamps the same open policy the GETs already send by
+        // hand (its header replaces, not duplicates, any manual ACAO).
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([axum::http::header::CONTENT_TYPE])
+                .max_age(std::time::Duration::from_secs(3600)),
+        )
         .with_state(state);
 
     eprintln!("kascov worker listening on {listen}");
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// How stale the newest successful sync pass may be before /healthz reports
+/// "stalled" and answers 503 (the uptime check's restart signal).
+const HEALTHZ_STALL_MS: i64 = 10 * 60 * 1000;
+
+/// GET /healthz — follower liveness + index progress per network. 503 as soon
+/// as ANY followed network hasn't completed a sync pass in HEALTHZ_STALL_MS.
+async fn healthz_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let now = now_ms() as i64;
+    let mut stalled = false;
+    let mut networks = serde_json::Map::new();
+    for &network in &state.networks {
+        let last_ok = state
+            .sync_health
+            .iter()
+            .find(|(n, _)| *n == network)
+            .map(|(_, h)| h.last_sync_ok_ms.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        stalled |= now.saturating_sub(last_ok) > HEALTHZ_STALL_MS;
+        let db = state.base_dir.join(format!("{network}.db"));
+        // Nulls until the follower has created the DB; an open/read failure
+        // degrades to the same nulls rather than failing the whole probe.
+        let indexed = if db.exists() {
+            tokio::task::spawn_blocking(move || -> Result<(Option<u64>, Option<u64>, bool)> {
+                let store = kascov_core::store::Store::open(&db, network)?;
+                Ok((
+                    store.processed_daa()?,
+                    store.tip()?.map(|t| t.0),
+                    store.tx_index_backfill_done()?,
+                ))
+            })
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+        } else {
+            None
+        };
+        let (processed, tip, backfill_done) = indexed.unwrap_or((None, None, false));
+        networks.insert(
+            network.to_string(),
+            serde_json::json!({
+                "processed_daa": processed,
+                "tip_daa": tip,
+                "lag_daa": tip.zip(processed).map(|(t, p)| t.saturating_sub(p)),
+                "last_sync_ok_ms": last_ok,
+                "tx_index_backfill_done": backfill_done,
+            }),
+        );
+    }
+    let code = if stalled { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::OK };
+    (
+        code,
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        ],
+        serde_json::json!({
+            "status": if stalled { "stalled" } else { "ok" },
+            "networks": networks,
+        })
+        .to_string(),
+    )
+        .into_response()
 }
 
 /// After repeated sync failures, check for the testnet-reset signature: the
@@ -1211,6 +1353,11 @@ async fn recover_wedged_cursor(node: &NodeHandle, store: &mut Store, network: Ne
     store.reset_cursor(dag.sink).is_ok()
 }
 
+/// A pending tx_index backfill re-fetches every retained block over RPC —
+/// heavy enough to starve a booting instance. Hold it back this long after
+/// boot; a completed backfill (the steady state) skips the wait entirely.
+const TX_BACKFILL_BOOT_DELAY: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Follow a network's virtual chain forever, reconnecting on any failure.
 async fn follow_forever(
     network: Network,
@@ -1218,8 +1365,11 @@ async fn follow_forever(
     db: std::path::PathBuf,
     live_tx: tokio::sync::broadcast::Sender<std::sync::Arc<str>>,
     hook_tx: tokio::sync::mpsc::Sender<HookEvent>,
+    health: std::sync::Arc<SyncHealth>,
 ) {
     use kascov_core::sync::SyncUpdate;
+    // This task is spawned once per network at boot, so "task start" = boot.
+    let boot = tokio::time::Instant::now();
     // Lives across reconnects: every sync failure breaks to a fresh session,
     // so a per-session counter would reset before ever reaching the
     // testnet-reset recovery threshold below.
@@ -1244,6 +1394,15 @@ async fn follow_forever(
         // One-shot per database: stamp tx_index onto pre-capture event rows
         // still inside node retention. Best-effort — a failed walk resumes
         // next session and never blocks following the chain.
+        // Boot-storm guard: when the one-shot still has work, hold it (and
+        // this network's first follow) until the instance has been serving
+        // for a while — requests come first, heavy background work second.
+        if !store.tx_index_backfill_done().unwrap_or(true) {
+            let since_boot = boot.elapsed();
+            if since_boot < TX_BACKFILL_BOOT_DELAY {
+                tokio::time::sleep(TX_BACKFILL_BOOT_DELAY - since_boot).await;
+            }
+        }
         match kascov_core::sync::backfill_tx_index(&node, &mut store).await {
             Ok(0) => {}
             Ok(n) => tracing::info!("{network}: tx_index backfill stamped {n} event rows"),
@@ -1299,6 +1458,9 @@ async fn follow_forever(
             match result {
                 Ok(_) => {
                     consecutive_errors = 0;
+                    health
+                        .last_sync_ok_ms
+                        .store(now_ms() as i64, std::sync::atomic::Ordering::Relaxed);
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
                 Err(err) => {
@@ -1393,9 +1555,31 @@ fn webhook_target_allowed(url: &str) -> std::result::Result<(), &'static str> {
     Ok(())
 }
 
+/// The delivery signature: keyed BLAKE2b-256 over the exact POST body, keyed
+/// with the subscription secret's ASCII bytes (the hex string as handed out
+/// by /subscribe — no decoding step for the verifier to get wrong). BLAKE2's
+/// keyed mode is a MAC by construction, so the blake2b already in-tree
+/// covers this without an HMAC dependency.
+fn webhook_signature(secret: &str, body: &str) -> String {
+    hex::encode(
+        blake2b_simd::Params::new()
+            .hash_length(32)
+            .key(secret.as_bytes())
+            .hash(body.as_bytes())
+            .as_bytes(),
+    )
+}
+
 /// POST one event to one subscriber: SSRF pre-flight, then up to 3 attempts
 /// with exponential backoff (1s, 2s between attempts). True iff a 2xx landed.
-async fn deliver_webhook(client: &reqwest::Client, url: &str, payload: &serde_json::Value) -> bool {
+/// `body` is the pre-serialized JSON — the signature must cover the exact
+/// bytes on the wire. Legacy subscriptions (no secret) are sent unsigned.
+async fn deliver_webhook(
+    client: &reqwest::Client,
+    url: &str,
+    body: &str,
+    secret: Option<&str>,
+) -> bool {
     // The guard does blocking DNS — keep it off the runtime workers. A
     // rejected target counts as a failure, so a private URL that slipped into
     // the store retires itself after WEBHOOK_MAX_FAILURES events.
@@ -1407,11 +1591,19 @@ async fn deliver_webhook(client: &reqwest::Client, url: &str, payload: &serde_js
         tracing::warn!("webhook {url}: rejected ({reason})");
         return false;
     }
+    let signature = secret.map(|s| webhook_signature(s, body));
     for attempt in 0u32..3 {
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(500u64 << attempt)).await;
         }
-        match client.post(url).json(payload).send().await {
+        let mut req = client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        if let Some(sig) = &signature {
+            req = req.header("X-Kascov-Signature", sig.as_str());
+        }
+        match req.send().await {
             Ok(resp) if resp.status().is_success() => return true,
             Ok(resp) => tracing::debug!("webhook {url}: attempt {} got {}", attempt + 1, resp.status()),
             Err(err) => tracing::debug!("webhook {url}: attempt {} failed: {err}", attempt + 1),
@@ -1463,7 +1655,7 @@ async fn webhook_delivery_forever(
             let db = db.clone();
             let cid = ev.covenant_id;
             let kind = ev.kind;
-            tokio::task::spawn_blocking(move || -> Result<Vec<(i64, String)>> {
+            tokio::task::spawn_blocking(move || -> Result<Vec<(i64, String, Option<String>)>> {
                 let store = Store::open(&db, network)?;
                 Ok(store.subscriptions_matching(cid.0.as_slice(), kind)?)
             })
@@ -1473,16 +1665,18 @@ async fn webhook_delivery_forever(
         if subs.is_empty() {
             continue;
         }
-        let payload = serde_json::json!({
+        // Serialized once: every subscriber gets (and signs over) these bytes.
+        let body = serde_json::json!({
             "network": network.to_string(),
             "covenant_id": ev.covenant_id,
             "kind": ev.kind,
             "txid": ev.txid,
             "accepting_daa": ev.accepting_daa,
             "tx_index": ev.tx_index,
-        });
-        for (id, url) in subs {
-            if deliver_webhook(&client, &url, &payload).await {
+        })
+        .to_string();
+        for (id, url, secret) in subs {
+            if deliver_webhook(&client, &url, &body, secret.as_deref()).await {
                 failures.remove(&id);
                 continue;
             }
@@ -1533,7 +1727,7 @@ async fn serve_cached(
             locks.entry(key.clone()).or_default().clone()
         };
         let _building = key_lock.lock().await;
-        body = { fresh_body(&*state.cache.lock().await) };
+        body = fresh_body(&*state.cache.lock().await);
         if body.is_none() {
             match tokio::task::spawn_blocking(build).await {
                 Ok(Ok(Some(json))) => {
@@ -1733,10 +1927,10 @@ async fn data_handler(
         Some(base) => (base, true),
         None => (name, false),
     };
-    let Ok(network) = net_name.parse::<Network>() else { return not_found() };
-    if !state.networks.contains(&network) {
-        return not_found();
-    }
+    let network = match resolve_network(&state, net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
 
     let db = state.base_dir.join(format!("{network}.db"));
     let (ttl, cache_control) = if live {
@@ -1747,10 +1941,11 @@ async fn data_handler(
         (20, "public, max-age=15, s-maxage=60, stale-while-revalidate=300")
     };
     // Grid paging: `?after_daa=` (exclusive cursor) and `?limit=` (page size,
-    // capped) walk the grid newest-first. Invalid numbers are ignored so a bad
-    // param degrades to the bare first page rather than erroring. Params are only
-    // meaningful for the grid, and are folded into the cache key so each page
-    // caches independently.
+    // capped) walk the grid newest-first. An unparseable limit is a 400 (a
+    // silently ignored limit re-serves the full first page — tens of MB the
+    // caller asked NOT to get); a bad after_daa still degrades to page one.
+    // Params are only meaningful for the grid, and are folded into the cache
+    // key so each page caches independently.
     let (after, limit) = if live {
         (None, None)
     } else {
@@ -1767,7 +1962,16 @@ async fn data_handler(
                 .unwrap_or([0xFF; 32]);
             (daa, id)
         });
-        let limit = q.get("limit").and_then(|s| s.parse::<u64>().ok()).map(|l| l.clamp(1, MAX_PAGE));
+        let limit = match q.get("limit") {
+            None => None,
+            Some(s) => match s.parse::<u64>() {
+                Ok(l) => Some(l.clamp(1, MAX_PAGE)),
+                Err(_) => {
+                    return (StatusCode::BAD_REQUEST, "limit must be a non-negative integer")
+                        .into_response()
+                }
+            },
+        };
         (after, limit)
     };
     let key = match (after, limit) {
@@ -1787,6 +1991,259 @@ async fn data_handler(
             build_grid_snapshot(&store, network, after, limit)?
         };
         Ok(Some(serde_json::to_string(&snapshot)?))
+    })
+    .await
+}
+
+/// Feed page ceiling and the size of a bare (param-less) request.
+const EVENTS_MAX_PAGE: u64 = 1000;
+const EVENTS_DEFAULT_PAGE: u64 = 200;
+
+/// GET /data/{network}/events?after_daa=&after_seq=&limit= — the chain-wide
+/// event feed, canonical event objects in their canonical deterministic order
+/// (accepting_daa, tx_index NULLS LAST, txid), oldest first. Cursor mirrors
+/// the grid's conventions: when more rows remain the response carries
+/// `next_after_daa`/`next_after_seq` — feed them back verbatim to keep
+/// walking. `after_seq` counts events already consumed inside the `after_daa`
+/// group (see Store::events_after for why that offset is stable).
+async fn events_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    // Same contract as the grid: a bad cursor degrades to the stream start,
+    // an unparseable limit is a 400 (a silently ignored limit would serve a
+    // page size the caller asked not to get).
+    let after_daa = q.get("after_daa").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let after_seq = q.get("after_seq").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let limit = match q.get("limit") {
+        None => EVENTS_DEFAULT_PAGE,
+        Some(s) => match s.parse::<u64>() {
+            Ok(l) => l.clamp(1, EVENTS_MAX_PAGE),
+            Err(_) => {
+                return (StatusCode::BAD_REQUEST, "limit must be a non-negative integer")
+                    .into_response()
+            }
+        },
+    };
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/events?after_daa={after_daa}&after_seq={after_seq}&limit={limit}");
+    let cc = "public, max-age=10, s-maxage=15, stale-while-revalidate=60";
+    serve_cached(&state, key, 15, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        // Over-fetch by one to learn whether another page exists.
+        let mut events = store.events_after(after_daa, after_seq, limit + 1)?;
+        let more = events.len() as u64 > limit;
+        if more {
+            events.truncate(limit as usize);
+        }
+        let next = events.last().filter(|_| more).map(|last| {
+            let in_group =
+                events.iter().filter(|e| e.accepting_daa == last.accepting_daa).count() as u64;
+            (
+                last.accepting_daa,
+                if last.accepting_daa == after_daa { after_seq + in_group } else { in_group },
+            )
+        });
+        let tip = store.tip()?;
+        let mut out = serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "tip_daa": tip.map(|t| t.0),
+            "tip_at_ms": tip.map(|t| t.1),
+            "events": events,
+        });
+        if let Some((daa, seq)) = next {
+            out["next_after_daa"] = serde_json::json!(daa);
+            out["next_after_seq"] = serde_json::json!(seq);
+        }
+        Ok(Some(serde_json::to_string(&out)?))
+    })
+    .await
+}
+
+/// Ceiling on one batch-summary request.
+const COINS_MAX_IDS: usize = 50;
+
+/// Parse the `ids` batch param: comma-separated 64-hex ids, at most
+/// COINS_MAX_IDS of them. Any malformed id fails the whole request — a
+/// silently dropped id would read as "coin unknown" to the caller.
+fn parse_coin_ids(raw: &str) -> std::result::Result<Vec<[u8; 32]>, &'static str> {
+    let mut ids = Vec::new();
+    for part in raw.split(',') {
+        let mut b = [0u8; 32];
+        if hex::decode_to_slice(part.trim(), &mut b).is_err() {
+            return Err("ids must be comma-separated 64-hex covenant ids");
+        }
+        ids.push(b);
+    }
+    if ids.len() > COINS_MAX_IDS {
+        return Err("at most 50 ids per request");
+    }
+    Ok(ids)
+}
+
+/// GET /data/{network}/coins?ids=&fields=summary — batch compact summaries.
+/// Unknown ids are simply omitted; malformed input is a 400. Deliberately NOT
+/// behind serve_cached: `ids` is an unbounded keyspace (the /search
+/// reasoning), and each id is one indexed lookup.
+async fn coins_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    match params.get("fields").map(String::as_str) {
+        None | Some("summary") => {}
+        Some(_) => return (StatusCode::BAD_REQUEST, "fields must be 'summary'").into_response(),
+    }
+    let Some(raw) = params.get("ids") else {
+        return (StatusCode::BAD_REQUEST, "ids is required").into_response();
+    };
+    let ids = match parse_coin_ids(raw) {
+        Ok(ids) => ids,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    let db = state.base_dir.join(format!("{network}.db"));
+    let built = tokio::task::spawn_blocking(move || -> Result<String> {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let mut coins = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(s) = store.summary(&kascov_core::CovenantId(id))? {
+                let id_hex = s.covenant_id.to_string();
+                coins.push(serde_json::json!({
+                    "id": id_hex,
+                    "name": og::friendly_name(&id_hex),
+                    "template": s.template,
+                    "status": if s.live_utxos > 0 { "active" } else { "burned" },
+                    "live_value": s.live_value,
+                    "last_activity_daa": s.last_activity_daa,
+                }));
+            }
+        }
+        Ok(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "coins": coins,
+        }))?)
+    })
+    .await;
+    match built {
+        Ok(Ok(json)) => (
+            [
+                (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+                (header::CACHE_CONTROL, "public, max-age=15, s-maxage=30"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            json,
+        )
+            .into_response(),
+        Ok(Err(err)) => {
+            tracing::error!("{network}: coins batch failed: {err}");
+            (StatusCode::SERVICE_UNAVAILABLE, "snapshot unavailable").into_response()
+        }
+        Err(err) => {
+            tracing::error!("{network}: coins batch task panicked: {err}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
+}
+
+/// Templates that put a coin in the tokens directory: the KCC20 skeletons the
+/// decode registry learned from on-chain reveals.
+const KCC20_TEMPLATES: [&str; 2] = ["KCC20 token", "KCC20 minter"];
+
+/// The newest Registry decode of a token covenant's state, as a
+/// label → hex-value map. Live KCC20 state hides behind a P2SH commitment,
+/// so the newest decodable state is usually a spend-time reveal (i.e. the
+/// state as of the last spend); a live state script that decodes wins when
+/// one exists. None when nothing decodes to a KCC20 template.
+fn token_fields(
+    store: &Store,
+    registry: &kascov_decode::Registry,
+    id: &CovenantId,
+) -> Result<Option<serde_json::Value>> {
+    let utxos = store.utxos(id, false)?; // created_daa ascending
+    for utxo in utxos.iter().rev() {
+        let mut d = registry.decode(utxo.spk_version, &utxo.spk_script);
+        if !d.template.is_some_and(|t| t.starts_with("KCC20")) {
+            let Some(redeem) = utxo
+                .spent_sig
+                .as_deref()
+                .and_then(|sig| kascov_decode::p2sh_reveal(&utxo.spk_script, sig))
+            else {
+                continue;
+            };
+            d = registry.decode(utxo.spk_version, &redeem);
+            if !d.template.is_some_and(|t| t.starts_with("KCC20")) {
+                continue;
+            }
+        }
+        if d.fields.is_empty() {
+            continue;
+        }
+        let mut m = serde_json::Map::new();
+        for f in d.fields {
+            m.insert(f.name.to_string(), serde_json::json!(hex::encode(&f.value)));
+        }
+        return Ok(Some(serde_json::Value::Object(m)));
+    }
+    Ok(None)
+}
+
+/// GET /data/{network}/tokens.json — every covenant the decode registry
+/// recognizes as a KCC20 token/minter build, with its latest Registry-labeled
+/// state when derivable. Decoded from chain state only — nothing here is
+/// validated against KCC20's token rules.
+async fn tokens_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/tokens");
+    let cc = "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
+    serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let registry = kascov_decode::Registry::default();
+        let mut tokens = Vec::new();
+        for s in store.covenants_with_templates(&KCC20_TEMPLATES)? {
+            let id_hex = s.covenant_id.to_string();
+            let mut row = serde_json::json!({
+                "covenant_id": id_hex,
+                "name": og::friendly_name(&id_hex),
+                "template": s.template,
+                "status": if s.live_utxos > 0 { "active" } else { "burned" },
+                "live_value": s.live_value,
+                "last_activity_daa": s.last_activity_daa,
+            });
+            if let Some(fields) = token_fields(&store, &registry, &s.covenant_id)? {
+                row["fields"] = fields;
+            }
+            tokens.push(row);
+        }
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "tokens": tokens,
+            "note": "decoded from chain state — not validated against token rules",
+        }))?))
     })
     .await
 }
@@ -2217,9 +2674,22 @@ fn json_resp(v: serde_json::Value) -> axum::response::Response {
     (StatusCode::OK, [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], v.to_string()).into_response()
 }
 
+/// json_resp with an explicit non-200 status (client errors that must be
+/// visible as such, not `ok:false` inside a 200).
+fn json_error(status: axum::http::StatusCode, v: serde_json::Value) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    (status, [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], v.to_string()).into_response()
+}
+
 fn blake2b32(bytes: &[u8]) -> [u8; 32] {
     *blake2b_simd::Params::new().hash_length(32).hash(bytes).as_bytes().first_chunk::<32>().unwrap()
 }
+
+/// Wall-clock ceiling on one silverc run; at the deadline the child is killed.
+const SILVERC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Cap on captured stdout/stderr — a runaway compiler can't balloon memory.
+const SILVERC_OUTPUT_CAP: usize = 256 * 1024;
 
 /// Compile SilverScript source + args to script hex via the `silverc` binary
 /// (SILVERC_BIN). Ok(hex) or Err(message).
@@ -2229,7 +2699,7 @@ async fn run_silverc(source: String, args: Vec<String>) -> Result<String, String
         return Err("the SilverScript compiler isn't available on this server".into());
     }
     let out = tokio::task::spawn_blocking(move || {
-        use std::io::Write;
+        use std::io::{Read, Write};
         use std::process::{Command, Stdio};
         let mut child = Command::new(&bin)
             .arg("-")
@@ -2238,13 +2708,47 @@ async fn run_silverc(source: String, args: Vec<String>) -> Result<String, String
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        // Source is bounded (≤40KB) and fits a pipe buffer, so this can't wedge.
         child.stdin.take().unwrap().write_all(source.as_bytes())?;
-        let o = child.wait_with_output()?;
-        std::io::Result::Ok((
-            o.status.success(),
-            String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            String::from_utf8_lossy(&o.stderr).trim().to_string(),
-        ))
+        // Drain each pipe on its own thread, keeping only the first
+        // SILVERC_OUTPUT_CAP bytes — draining must continue past the cap or a
+        // chatty child blocks on a full pipe and never exits.
+        fn capped_drain(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
+            std::thread::spawn(move || {
+                let mut kept = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match r.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let room = SILVERC_OUTPUT_CAP.saturating_sub(kept.len());
+                            kept.extend_from_slice(&chunk[..n.min(room)]);
+                        }
+                    }
+                }
+                String::from_utf8_lossy(&kept).trim().to_string()
+            })
+        }
+        let stdout = capped_drain(child.stdout.take().unwrap());
+        let stderr = capped_drain(child.stderr.take().unwrap());
+        let deadline = std::time::Instant::now() + SILVERC_TIMEOUT;
+        loop {
+            match child.try_wait()? {
+                Some(status) => {
+                    return std::io::Result::Ok((
+                        status.success(),
+                        stdout.join().unwrap_or_default(),
+                        stderr.join().unwrap_or_default(),
+                    ));
+                }
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait(); // reap; also unblocks the drain threads
+                    return Ok((false, String::new(), "compiler timed out".to_string()));
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(25)),
+            }
+        }
     })
     .await;
     match out {
@@ -2262,11 +2766,16 @@ struct ZkReq {
 }
 
 async fn zk_verify_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path(_net): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     axum::Json(req): axum::Json<ZkReq>,
 ) -> axum::response::Response {
     if req.program_hex.len() > 8_000 {
         return json_resp(serde_json::json!({ "ok": false, "error": "program too large" }));
+    }
+    if let Err(reason) = state.tool_limiter.lock().await.try_take(&client_ip(&headers)) {
+        return too_many(reason);
     }
     let Ok(bytes) = hex::decode(req.program_hex.trim().trim_start_matches("0x")) else {
         return json_resp(serde_json::json!({ "ok": false, "error": "not valid hex" }));
@@ -2278,11 +2787,16 @@ async fn zk_verify_handler(
 }
 
 async fn compile_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path(_net): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     axum::Json(req): axum::Json<CompileReq>,
 ) -> axum::response::Response {
     if req.source.len() > 40_000 || req.args.len() > 16 || req.args.iter().any(|a| a.len() > 200) {
         return json_resp(serde_json::json!({ "ok": false, "error": "input too large" }));
+    }
+    if let Err(reason) = state.tool_limiter.lock().await.try_take(&client_ip(&headers)) {
+        return too_many(reason);
     }
     match run_silverc(req.source, req.args).await {
         Ok(hex) => json_resp(serde_json::json!({ "ok": true, "hex": hex })),
@@ -2367,6 +2881,72 @@ impl DeployLimiter {
     }
 }
 
+/// Token bucket + per-IP hourly counter shared by the compiler-adjacent
+/// endpoints (/compile, /publish, /zk-verify). Same trust model as
+/// DeployLimiter: the global bucket is the only sound bound (X-Forwarded-For
+/// is spoofable), the per-IP cap is best-effort. Generous — these endpoints
+/// burn CPU, not faucet funds.
+struct ToolLimiter {
+    tokens: f64,
+    last_refill: std::time::Instant,
+    per_ip: std::collections::HashMap<String, (u64, u32)>, // ip -> (hour, count)
+}
+
+/// Global ceiling: 500 runs/hour, burstable to the full hour's budget.
+const TOOL_BUCKET_CAP: f64 = 500.0;
+const TOOL_REFILL_PER_SEC: f64 = 500.0 / 3600.0;
+/// Each client IP gets this many runs per clock hour (UTC) — best-effort.
+const TOOL_PER_IP_PER_HOUR: u32 = 30;
+
+impl ToolLimiter {
+    fn new() -> Self {
+        Self { tokens: TOOL_BUCKET_CAP, last_refill: std::time::Instant::now(), per_ip: Default::default() }
+    }
+
+    /// Charge one run to `ip`. Ok on success; Err(reason) when throttled.
+    fn try_take(&mut self, ip: &str) -> std::result::Result<(), &'static str> {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.last_refill).as_secs_f64();
+        self.last_refill = now;
+        self.tokens = (self.tokens + dt * TOOL_REFILL_PER_SEC).min(TOOL_BUCKET_CAP);
+        // Global bucket FIRST, so a throttled flood never allocates per-IP rows.
+        if self.tokens < 1.0 {
+            return Err("compiler rate limit — try again in a few minutes");
+        }
+        let hour = now_ms() / 3_600_000;
+        // Same hard bound as DeployLimiter: evict stale hours, then if a
+        // same-hour spoofed-XFF flood still overflows, drop the map entirely.
+        if self.per_ip.len() > DEPLOY_IP_MAP_MAX {
+            self.per_ip.retain(|_, (h, _)| *h == hour);
+            if self.per_ip.len() > DEPLOY_IP_MAP_MAX {
+                self.per_ip.clear();
+            }
+        }
+        let entry = self.per_ip.entry(ip.to_string()).or_insert((hour, 0));
+        if entry.0 != hour {
+            *entry = (hour, 0);
+        }
+        if entry.1 >= TOOL_PER_IP_PER_HOUR {
+            return Err("hourly compiler limit reached for your address — try again later");
+        }
+        self.tokens -= 1.0;
+        entry.1 += 1;
+        Ok(())
+    }
+}
+
+/// The 429 the tool limiter hands back — JSON like the endpoints it guards.
+fn too_many(reason: &'static str) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")],
+        serde_json::json!({ "ok": false, "error": reason }).to_string(),
+    )
+        .into_response()
+}
+
 /// Best-effort client IP: the first hop in X-Forwarded-For (set by the CDN /
 /// Cloud Run front end), else X-Real-IP, else a shared bucket key.
 fn client_ip(headers: &axum::http::HeaderMap) -> String {
@@ -2398,16 +2978,14 @@ async fn deploy_handler(
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
-    let not_found = || (StatusCode::NOT_FOUND, "not found").into_response();
-    let net = net_name.strip_suffix("/deploy").unwrap_or(&net_name);
-    let Ok(network) = net.parse::<Network>() else { return not_found() };
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
     // Gated OFF by default: the route only exists when armed for testnet-10.
     let deploy_key = std::env::var("KASCOV_DEPLOY_KEY").unwrap_or_default();
-    if deploy_key.trim().is_empty()
-        || network != Network::Testnet(10)
-        || !state.networks.contains(&network)
-    {
-        return not_found();
+    if deploy_key.trim().is_empty() || network != Network::Testnet(10) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     }
 
     // Validate the request body.
@@ -2497,12 +3075,18 @@ async fn deploy_handler(
 async fn publish_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     axum::Json(req): axum::Json<CompileReq>,
 ) -> axum::response::Response {
-    let net = net_name.strip_suffix("/publish").unwrap_or(&net_name);
-    let Ok(network) = net.parse::<Network>() else { return json_resp(serde_json::json!({ "ok": false, "error": "unknown network" })) };
-    if !state.networks.contains(&network) || req.source.len() > 40_000 {
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    if req.source.len() > 40_000 {
         return json_resp(serde_json::json!({ "ok": false, "error": "bad request" }));
+    }
+    if let Err(reason) = state.tool_limiter.lock().await.try_take(&client_ip(&headers)) {
+        return too_many(reason);
     }
     let hex = match run_silverc(req.source.clone(), req.args.clone()).await {
         Ok(h) => h,
@@ -2532,10 +3116,10 @@ async fn verified_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path((net, hash)): axum::extract::Path<(String, String)>,
 ) -> axum::response::Response {
-    let Ok(network) = net.parse::<Network>() else { return json_resp(serde_json::json!({ "ok": false })) };
-    if !state.networks.contains(&network) {
-        return json_resp(serde_json::json!({ "ok": false }));
-    }
+    let network = match resolve_network(&state, &net) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
     let db = state.base_dir.join(format!("{network}.db"));
     let hash = hash.trim_end_matches(".json").to_lowercase();
     let got = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<(String, String, Option<String>, u64)>> {
@@ -2564,10 +3148,22 @@ async fn subscribe_handler(
     axum::extract::Path(net_name): axum::extract::Path<String>,
     axum::Json(req): axum::Json<SubscribeReq>,
 ) -> axum::response::Response {
-    let net = net_name.strip_suffix("/subscribe").unwrap_or(&net_name);
-    let Ok(network) = net.parse::<Network>() else { return json_resp(serde_json::json!({ "ok": false, "error": "unknown network" })) };
-    if !state.networks.contains(&network) || req.url.len() > 500 || !req.url.starts_with("http") {
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    if req.url.len() > 500 || !req.url.starts_with("http") {
         return json_resp(serde_json::json!({ "ok": false, "error": "a valid http(s) url is required" }));
+    }
+    // A kind filter must be a real event kind — anything else would register
+    // a subscription that can never fire.
+    if let Some(kind) = req.kind.as_deref() {
+        if !matches!(kind, "genesis" | "transition" | "burn") {
+            return json_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                serde_json::json!({ "ok": false, "error": "kind must be genesis, transition or burn (or omitted for all kinds)" }),
+            );
+        }
     }
     // A covenant filter must be exactly 64 hex chars. Anything else is a
     // client error — silently mapping bad hex to None would register an
@@ -2586,24 +3182,35 @@ async fn subscribe_handler(
             Some(bytes.to_vec())
         }
     };
+    // 128-bit CSPRNG secret, hex. Signs every delivery (X-Kascov-Signature)
+    // and gates unsubscribe; shown once, never readable back.
+    let secret = {
+        use secp256k1::rand::RngCore;
+        let mut buf = [0u8; 16];
+        secp256k1::rand::rngs::OsRng.fill_bytes(&mut buf);
+        hex::encode(buf)
+    };
     let db = state.base_dir.join(format!("{network}.db"));
-    let (kind, url) = (req.kind, req.url);
+    let (kind, url, stored_secret) = (req.kind, req.url, secret.clone());
     let added = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
         let store = kascov_core::store::Store::open(&db, network)?;
-        Ok(store.add_subscription(cid.as_deref(), kind.as_deref(), &url, now_ms())?)
+        Ok(store.add_subscription(cid.as_deref(), kind.as_deref(), &url, Some(&stored_secret), now_ms())?)
     })
     .await;
     match added {
-        Ok(Ok(id)) => json_resp(serde_json::json!({ "ok": true, "id": id })),
+        Ok(Ok(id)) => json_resp(serde_json::json!({ "ok": true, "id": id, "secret": secret })),
         _ => json_resp(serde_json::json!({ "ok": false, "error": "couldn't subscribe" })),
     }
 }
 
-/// POST /data/{network}/unsubscribe — remove a webhook subscription by the id
-/// /subscribe returned.
+/// POST /data/{network}/unsubscribe — remove a webhook subscription by the
+/// {id, secret} /subscribe returned. Legacy rows (created before secrets)
+/// still delete by id alone.
 #[derive(serde::Deserialize)]
 struct UnsubscribeReq {
     id: i64,
+    #[serde(default)]
+    secret: Option<String>,
 }
 
 async fn unsubscribe_handler(
@@ -2611,21 +3218,24 @@ async fn unsubscribe_handler(
     axum::extract::Path(net_name): axum::extract::Path<String>,
     axum::Json(req): axum::Json<UnsubscribeReq>,
 ) -> axum::response::Response {
-    let net = net_name.strip_suffix("/unsubscribe").unwrap_or(&net_name);
-    let Ok(network) = net.parse::<Network>() else {
-        return json_resp(serde_json::json!({ "ok": false, "error": "unknown network" }));
+    use kascov_core::store::UnsubscribeOutcome;
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    if !state.networks.contains(&network) {
-        return json_resp(serde_json::json!({ "ok": false, "error": "unknown network" }));
-    }
     let db = state.base_dir.join(format!("{network}.db"));
-    let deleted = tokio::task::spawn_blocking(move || -> Result<bool> {
+    let deleted = tokio::task::spawn_blocking(move || -> Result<UnsubscribeOutcome> {
         let store = kascov_core::store::Store::open(&db, network)?;
-        Ok(store.delete_subscription(req.id)?)
+        Ok(store.delete_subscription_secured(req.id, req.secret.as_deref())?)
     })
     .await;
     match deleted {
-        Ok(Ok(deleted)) => json_resp(serde_json::json!({ "ok": true, "deleted": deleted })),
+        Ok(Ok(UnsubscribeOutcome::Deleted)) => json_resp(serde_json::json!({ "ok": true, "deleted": true })),
+        Ok(Ok(UnsubscribeOutcome::NotFound)) => json_resp(serde_json::json!({ "ok": true, "deleted": false })),
+        Ok(Ok(UnsubscribeOutcome::WrongSecret)) => json_error(
+            axum::http::StatusCode::FORBIDDEN,
+            serde_json::json!({ "ok": false, "error": "secret does not match" }),
+        ),
         _ => json_resp(serde_json::json!({ "ok": false, "error": "couldn't unsubscribe" })),
     }
 }
@@ -2639,12 +3249,10 @@ async fn lane_handler(
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    let Ok(network) = net_name.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
     // Namespaces are the 4-byte app tag as 8 lowercase hex chars — anything
     // else is a client error (and never reaches the cache/DB).
     let ns = ns.strip_suffix(".json").unwrap_or(&ns).to_ascii_lowercase();
@@ -2703,12 +3311,10 @@ async fn debug_handler(
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    let Ok(network) = net_name.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
     let tx_hex = txid.strip_suffix(".json").unwrap_or(&txid);
     let Ok(txid) = tx_hex.parse::<TxId>() else {
         return (StatusCode::BAD_REQUEST, "bad txid").into_response();
@@ -2790,15 +3396,10 @@ async fn lifespans_handler(
     axum::extract::Path(net_name): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-    let net = net_name.strip_suffix("/lifespans.json").unwrap_or(&net_name);
-    let Ok(network) = net.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
     let db = state.base_dir.join(format!("{network}.db"));
     let cc = "public, max-age=120, s-maxage=300, stale-while-revalidate=900";
     serve_cached(&state, format!("{network}/lifespans"), 180, cc, accepts_gzip(&headers), move || {
@@ -2825,15 +3426,10 @@ async fn inscriptions_handler(
     axum::extract::Path(net_name): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-    let net = net_name.strip_suffix("/inscriptions.json").unwrap_or(&net_name);
-    let Ok(network) = net.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
     let db = state.base_dir.join(format!("{network}.db"));
     let cc = "public, max-age=60, s-maxage=180, stale-while-revalidate=600";
     serve_cached(&state, format!("{network}/inscriptions"), 90, cc, accepts_gzip(&headers), move || {
@@ -2857,15 +3453,10 @@ async fn lanes_handler(
     axum::extract::Path(net_name): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-    let net = net_name.strip_suffix("/lanes.json").unwrap_or(&net_name);
-    let Ok(network) = net.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
     let db = state.base_dir.join(format!("{network}.db"));
     let cc = "public, max-age=30, s-maxage=120, stale-while-revalidate=600";
     serve_cached(&state, format!("{network}/lanes"), 60, cc, accepts_gzip(&headers), move || {
@@ -2937,15 +3528,10 @@ async fn families_handler(
     axum::extract::Path(net_name): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-    let net = net_name.strip_suffix("/families.json").unwrap_or(&net_name);
-    let Ok(network) = net.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
     let db = state.base_dir.join(format!("{network}.db"));
     let cc = "public, max-age=30, s-maxage=120, stale-while-revalidate=600";
     serve_cached(&state, format!("{network}/families"), 60, cc, accepts_gzip(&headers), move || {
@@ -2962,15 +3548,10 @@ async fn reorgs_handler(
     axum::extract::Path(net_name): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-    let net = net_name.strip_suffix("/reorgs.json").unwrap_or(&net_name);
-    let Ok(network) = net.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
     let db = state.base_dir.join(format!("{network}.db"));
     let cc = "public, max-age=30, s-maxage=120, stale-while-revalidate=600";
     serve_cached(&state, format!("{network}/reorgs"), 60, cc, accepts_gzip(&headers), move || {
@@ -2995,15 +3576,10 @@ async fn galaxy_handler(
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-    let net = net_name.strip_suffix("/galaxy.json").unwrap_or(&net_name);
-    let Ok(network) = net.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
     // Opt-in payload variants (see GalaxyFmt). Unknown params and unknown
     // values degrade to the legacy shape, so old and new clients both work.
     let fmt = GalaxyFmt {
@@ -3038,16 +3614,14 @@ async fn detail_handler(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let Ok(network) = net_name.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
     let id_hex = id.strip_suffix(".json").unwrap_or(&id);
     let Ok(covenant_id) = id_hex.parse::<kascov_core::CovenantId>() else {
         return (StatusCode::BAD_REQUEST, "bad covenant id").into_response();
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
 
     let db = state.base_dir.join(format!("{network}.db"));
     let max_events = state.max_events;
@@ -3129,8 +3703,9 @@ async fn og_card_handler(
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
-    let Ok(network) = net_name.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
     let Some(id_hex) = id.strip_suffix(".png") else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
@@ -3138,9 +3713,6 @@ async fn og_card_handler(
     let Ok(covenant_id) = id_hex.parse::<kascov_core::CovenantId>() else {
         return (StatusCode::BAD_REQUEST, "bad covenant id").into_response();
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
 
     let db = state.base_dir.join(format!("{network}.db"));
     let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
@@ -3196,15 +3768,13 @@ async fn share_handler(
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
-    let Ok(network) = net_name.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
     let Ok(covenant_id) = id.parse::<kascov_core::CovenantId>() else {
         return (StatusCode::BAD_REQUEST, "bad covenant id").into_response();
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
 
     let db = state.base_dir.join(format!("{network}.db"));
     let result = tokio::task::spawn_blocking(move || -> Result<Option<String>> {
@@ -3325,16 +3895,14 @@ async fn tx_handler(
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
-    let Ok(network) = net_name.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
     let tx_hex = txid.strip_suffix(".json").unwrap_or(&txid);
     let Ok(txid) = tx_hex.parse::<TxId>() else {
         return (StatusCode::BAD_REQUEST, "bad txid").into_response();
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
 
     // A point lookup on an indexed column — cheap enough to skip the cache.
     let db = state.base_dir.join(format!("{network}.db"));
@@ -3382,15 +3950,10 @@ async fn digest_handler(
     axum::extract::Path(net_name): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-
-    let Ok(network) = net_name.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
 
     let db = state.base_dir.join(format!("{network}.db"));
     let key = format!("{network}/digest");
@@ -3410,15 +3973,10 @@ async fn templates_handler(
     axum::extract::Path(net_name): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-
-    let Ok(network) = net_name.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
 
     let db = state.base_dir.join(format!("{network}.db"));
     let key = format!("{network}/templates");
@@ -3441,8 +3999,9 @@ async fn activity_handler(
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
-    let Ok(network) = net_name.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
     // whitelist → &'static str, so the closure needs no owned copy
     let range: &'static str = match q.get("range").map(String::as_str) {
@@ -3460,9 +4019,6 @@ async fn activity_handler(
                 .into_response()
         }
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
 
     let db = state.base_dir.join(format!("{network}.db"));
     let key = format!("{network}/activity/{range}");
@@ -3516,8 +4072,9 @@ async fn addr_handler(
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
-    let Ok(network) = net_name.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
     let raw = address.strip_suffix(".json").unwrap_or(&address);
     let Some((canonical, pubkey)) = parse_addr_or_pubkey(raw, network) else {
@@ -3528,9 +4085,6 @@ async fn addr_handler(
         )
             .into_response();
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
 
     let db = state.base_dir.join(format!("{network}.db"));
     // pubkey hex normalizes the cache key: address form and hex form share one entry
@@ -3584,7 +4138,24 @@ async fn addr_handler(
 /// ids (search shows "a few of this template", not all of them).
 struct SearchIndex {
     names: Vec<(String, [u8; 32])>,
+    /// The non-leading tokens of every generated name ("slate"/"tapir" of
+    /// quiet-slate-tapir), same sorted shape — so a query on any word of a
+    /// name matches, not just its first. Leading tokens are covered by the
+    /// full-name walk over `names`.
+    name_tokens: Vec<(String, [u8; 32])>,
     templates: Vec<(String, Vec<[u8; 32]>)>,
+}
+
+/// Build the token index `SearchIndex::name_tokens` out of the (name, id)
+/// pairs — split on the generated names' '-' separator, skip the leading
+/// token, sort for the binary-search walk.
+fn name_token_index(names: &[(String, [u8; 32])]) -> Vec<(String, [u8; 32])> {
+    let mut tokens: Vec<(String, [u8; 32])> = names
+        .iter()
+        .flat_map(|(name, id)| name.split('-').skip(1).map(move |t| (t.to_string(), *id)))
+        .collect();
+    tokens.sort_unstable();
+    tokens
 }
 
 /// Ids a single template contributes to the index — search returns at most
@@ -3604,6 +4175,7 @@ fn build_search_index(store: &kascov_core::store::Store) -> Result<SearchIndex> 
         .map(|id| (og::friendly_name(&hex::encode(id)), id))
         .collect();
     names.sort_unstable();
+    let name_tokens = name_token_index(&names);
     let mut by_template: std::collections::HashMap<String, Vec<[u8; 32]>> =
         std::collections::HashMap::new();
     for (id, template) in store.covenant_templates()? {
@@ -3617,7 +4189,7 @@ fn build_search_index(store: &kascov_core::store::Store) -> Result<SearchIndex> 
         ids.sort_unstable();
     }
     templates.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    Ok(SearchIndex { names, templates })
+    Ok(SearchIndex { names, name_tokens, templates })
 }
 
 /// The current index for `network`, rebuilding at most when the covenant set
@@ -3704,12 +4276,10 @@ async fn search_handler(
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
-    let Ok(network) = net_name.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
-    if !state.networks.contains(&network) {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
-    }
     let q = params
         .get("q")
         .map(|s| s.trim().to_lowercase())
@@ -3755,6 +4325,16 @@ async fn search_handler(
         if rows.len() < limit {
             let idx = search_index_for(&state2, network, &store)?;
             for id in name_prefix_matches(&idx.names, &q, limit - rows.len()) {
+                if !seen.contains(&id) {
+                    if let Some(s) = store.summary(&kascov_core::CovenantId(id))? {
+                        seen.insert(id);
+                        push(&s, "name", &mut rows);
+                    }
+                }
+            }
+            // Token prefix: "tapir" finds quiet-slate-tapir. Still a name
+            // hit as far as the caller cares, so `matched` stays "name".
+            for id in name_prefix_matches(&idx.name_tokens, &q, limit - rows.len()) {
                 if !seen.contains(&id) {
                     if let Some(s) = store.summary(&kascov_core::CovenantId(id))? {
                         seen.insert(id);
@@ -3846,8 +4426,9 @@ async fn stream_handler(
     use axum::response::IntoResponse;
     use std::sync::atomic::Ordering;
 
-    let Ok(network) = net_name.parse::<Network>() else {
-        return (StatusCode::NOT_FOUND, "unknown network").into_response();
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
     };
     // Optional ?covenant=<64 hex>: narrow the fan-out to one coin's events.
     let Ok(needle) = covenant_filter(params.get("covenant").map(String::as_str)) else {
@@ -3891,6 +4472,13 @@ async fn stream_handler(
             }
         }
     });
+    // Lead with a comment so headers and first bytes flush at accept time —
+    // clients see the connection is live and buffering proxies commit to the
+    // stream instead of holding a byteless response open.
+    let stream = futures::stream::once(async {
+        Ok::<_, std::convert::Infallible>(Event::default().comment("connected"))
+    })
+    .chain(stream);
 
     let mut resp = Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(25)).text("ka"))
@@ -4185,6 +4773,72 @@ mod galaxy_tests {
             assert_eq!(both["ny"][i], n["y"]);
         }
         assert_eq!(both["edges"], core["edges"]);
+    }
+}
+
+#[cfg(test)]
+mod api_growth_tests {
+    use super::*;
+
+    /// The X-Kascov-Signature construction, pinned against an independent
+    /// implementation (python hashlib.blake2b, key = the secret's ASCII
+    /// bytes, digest_size=32).
+    #[test]
+    fn webhook_signature_vector() {
+        assert_eq!(
+            webhook_signature("00112233445566778899aabbccddeeff", "{\"kind\":\"genesis\"}"),
+            "d255c6775ad244870d5ddfd7b79bbc232a7764df408e07c59441d3703dfbff59"
+        );
+        assert_eq!(
+            webhook_signature("aa", ""),
+            "75e3638c6c3f6a10429cadf5630f0cb0c0b9575b6cfd7893b4a14c795ea0c544"
+        );
+        // Different secrets must not collide on the same body.
+        assert_ne!(
+            webhook_signature("aa", "{\"kind\":\"genesis\"}"),
+            webhook_signature("bb", "{\"kind\":\"genesis\"}")
+        );
+    }
+
+    #[test]
+    fn coin_ids_parse_and_clamp() {
+        let a = "11".repeat(32);
+        let b = "22".repeat(32);
+        assert_eq!(parse_coin_ids(&a).unwrap(), vec![[0x11u8; 32]]);
+        assert_eq!(parse_coin_ids(&format!("{a},{b}")).unwrap(), vec![[0x11u8; 32], [0x22u8; 32]]);
+        // whitespace around ids is tolerated
+        assert_eq!(parse_coin_ids(&format!(" {a} , {b}")).unwrap().len(), 2);
+        // malformed: empty, short, non-hex, trailing comma
+        assert!(parse_coin_ids("").is_err());
+        assert!(parse_coin_ids("11").is_err());
+        assert!(parse_coin_ids(&"zz".repeat(32)).is_err());
+        assert!(parse_coin_ids(&format!("{a},")).is_err());
+        // the batch ceiling: 50 ok, 51 rejected
+        let max = vec![a.as_str(); COINS_MAX_IDS].join(",");
+        assert_eq!(parse_coin_ids(&max).unwrap().len(), COINS_MAX_IDS);
+        let over = vec![a.as_str(); COINS_MAX_IDS + 1].join(",");
+        assert!(parse_coin_ids(&over).is_err());
+    }
+
+    /// Token-prefix search: any non-leading word of a generated name matches,
+    /// leading words stay with the full-name walk.
+    #[test]
+    fn name_tokens_match_inner_words() {
+        let names = vec![
+            ("eager-copper-yak".to_string(), [1u8; 32]),
+            ("quiet-slate-tapir".to_string(), [2u8; 32]),
+            ("stubborn-violet-moth".to_string(), [3u8; 32]),
+        ];
+        let tokens = name_token_index(&names);
+        assert_eq!(name_prefix_matches(&tokens, "tapir", 10), vec![[2u8; 32]]);
+        assert_eq!(name_prefix_matches(&tokens, "sla", 10), vec![[2u8; 32]]);
+        assert_eq!(name_prefix_matches(&tokens, "violet", 10), vec![[3u8; 32]]);
+        assert_eq!(name_prefix_matches(&tokens, "copper", 10), vec![[1u8; 32]]);
+        // leading tokens are the full-name walk's job, not the token index's
+        assert!(name_prefix_matches(&tokens, "quiet", 10).is_empty());
+        assert!(name_prefix_matches(&tokens, "zzz", 10).is_empty());
+        // the walk honors its limit
+        assert_eq!(name_prefix_matches(&tokens, "", 2).len(), 2);
     }
 }
 

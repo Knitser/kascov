@@ -2,6 +2,7 @@
 //! always-correct fallback is an opcode disassembly of the state script.
 
 pub mod disasm;
+pub mod observed;
 
 use disasm::{disassemble, Instruction, OpGroup};
 
@@ -75,9 +76,12 @@ fn base_decode(name: &'static str, script: &[u8]) -> Decoded {
 ///     STARK scale.
 ///   * **RISC Zero** seals are STARK receipts: kilobytes of proof data plus a
 ///     32-byte image id. A push of >= 1 KiB feeding the precompile is the tell.
+///   * A push between those bands (300–1023 bytes) is bigger than any Groth16
+///     encoding but below STARK scale — some succinct system we can't
+///     attribute further, labeled "succinct proof (inferred)".
 ///
 /// Bare 32/64-byte pushes on their own are too generic to attribute, so those
-/// yield `None`.
+/// yield `None` (as does the 257–299 byte gap just above the Groth16 band).
 pub fn zk_system(script: &[u8]) -> Option<&'static str> {
     let (instructions, _) = disassemble(script);
     zk_system_from(&instructions)
@@ -98,6 +102,11 @@ fn zk_system_from(instructions: &[Instruction]) -> Option<&'static str> {
     // reads as Groth16.
     if sizes.iter().any(|&n| (128..=256).contains(&n)) {
         return Some("groth16");
+    }
+    // Above every Groth16 encoding but below STARK scale: some succinct
+    // system's proof, unattributable beyond that.
+    if sizes.iter().any(|&n| (300..1024).contains(&n)) {
+        return Some("succinct proof (inferred)");
     }
     None
 }
@@ -272,6 +281,72 @@ impl Skeleton {
         })
     }
 
+    /// Derive a skeleton from two or more distinct on-chain instances of the
+    /// same compiled contract (no sentinels available — the arguments are
+    /// whatever the deployers used). Instructions must align one-to-one
+    /// across every instance: equal non-push opcodes stay fixed, pushes that
+    /// agree everywhere become constants, and pushes that differ anywhere
+    /// become slots. Slots are labeled in first-occurrence order; two slot
+    /// positions whose values agree in *every* instance are the same inlined
+    /// argument and share one label (and `match_script` will keep enforcing
+    /// that they agree). `labels` must name exactly the distinct slots.
+    pub fn derive_observed(
+        name: &'static str,
+        instances: &[&[u8]],
+        labels: &[&'static str],
+    ) -> Option<Skeleton> {
+        if instances.len() < 2 {
+            return None;
+        }
+        let mut streams = Vec::with_capacity(instances.len());
+        for bytes in instances {
+            let (insts, truncated) = disassemble(bytes);
+            if truncated || streams.first().is_some_and(|f: &Vec<Instruction>| f.len() != insts.len()) {
+                return None;
+            }
+            streams.push(insts);
+        }
+        let first = &streams[0];
+        let mut items = Vec::with_capacity(first.len());
+        // Distinct slots seen so far, as their value-vector across instances.
+        let mut slots: Vec<Vec<Vec<u8>>> = Vec::new();
+        for (i, inst) in first.iter().enumerate() {
+            if !is_push(inst) {
+                if streams.iter().any(|s| is_push(&s[i]) || s[i].opcode != inst.opcode) {
+                    return None;
+                }
+                items.push(SkelItem::Op(inst.opcode));
+                continue;
+            }
+            let vector = streams
+                .iter()
+                .map(|s| push_value(&s[i]))
+                .collect::<Option<Vec<_>>>()?;
+            if vector.iter().all(|v| *v == vector[0]) {
+                let end = first.get(i + 1).map_or(instances[0].len(), |n| n.offset);
+                items.push(SkelItem::ConstPush {
+                    value: vector[0].clone(),
+                    raw: instances[0][inst.offset..end].to_vec(),
+                });
+            } else {
+                let slot = match slots.iter().position(|s| *s == vector) {
+                    Some(idx) => idx,
+                    None => {
+                        slots.push(vector);
+                        slots.len() - 1
+                    }
+                };
+                items.push(SkelItem::Slot(labels.get(slot).copied()?));
+            }
+        }
+        // Every label must correspond to an actual slot — a mismatch means
+        // the fixtures (or the labels) are wrong.
+        if slots.len() != labels.len() {
+            return None;
+        }
+        Some(Skeleton { name, items, param_order: labels.to_vec() })
+    }
+
     /// Constructor parameter labels, in order.
     pub fn params(&self) -> &[&'static str] {
         &self.param_order
@@ -305,49 +380,283 @@ impl Skeleton {
         }
         let mut values: Vec<(&'static str, Vec<u8>)> = Vec::new();
         for (item, inst) in self.items.iter().zip(instructions) {
-            match item {
-                SkelItem::Op(op) => {
-                    if is_push(inst) || inst.opcode != *op {
-                        return None;
-                    }
-                }
-                SkelItem::ConstPush { value, .. } => {
-                    if push_value(inst).as_ref() != Some(value) {
-                        return None;
-                    }
-                }
-                SkelItem::Slot(label) => {
-                    let v = push_value(inst)?;
-                    match values.iter().find(|(l, _)| l == label) {
-                        Some((_, prev)) if *prev != v => return None,
-                        Some(_) => {}
-                        None => values.push((label, v)),
-                    }
+            if !match_skel_item(item, inst, &mut values) {
+                return None;
+            }
+        }
+        Some(fields_in_order(&self.param_order, &values))
+    }
+}
+
+/// Match one skeleton item against one instruction. Slot values accumulate in
+/// `values`; a label seen twice within the same scope must carry the same
+/// value (SilverScript inlines an argument at every use site).
+fn match_skel_item(
+    item: &SkelItem,
+    inst: &Instruction,
+    values: &mut Vec<(&'static str, Vec<u8>)>,
+) -> bool {
+    match item {
+        SkelItem::Op(op) => !is_push(inst) && inst.opcode == *op,
+        SkelItem::ConstPush { value, .. } => push_value(inst).as_ref() == Some(value),
+        SkelItem::Slot(label) => {
+            let Some(v) = push_value(inst) else { return false };
+            match values.iter().find(|(l, _)| l == label) {
+                Some((_, prev)) => *prev == v,
+                None => {
+                    values.push((label, v));
+                    true
                 }
             }
         }
-        Some(
-            self.param_order
-                .iter()
-                .filter_map(|label| {
-                    values
-                        .iter()
-                        .find(|(l, _)| l == label)
-                        .map(|(_, v)| Field { name: label, value: v.clone() })
-                })
-                .collect(),
-        )
+    }
+}
+
+fn fields_in_order(order: &[&'static str], values: &[(&'static str, Vec<u8>)]) -> Vec<Field> {
+    order
+        .iter()
+        .filter_map(|label| {
+            values.iter().find(|(l, _)| l == label).map(|(_, v)| Field { name: label, value: v.clone() })
+        })
+        .collect()
+}
+
+/// Push-size-aware shape equality: two instructions align when both are
+/// pushes of the same width or both are the same non-push opcode. This is
+/// the alignment used to find the repeated block of a variable-arity family.
+fn same_shape(a: &Instruction, b: &Instruction) -> bool {
+    match (push_value(a), push_value(b)) {
+        (Some(x), Some(y)) => x.len() == y.len(),
+        (None, None) => a.opcode == b.opcode,
+        _ => false,
+    }
+}
+
+/// A compiled-contract family whose builds differ only by how many times one
+/// instruction block repeats (e.g. genesis0's slot-mint emits one
+/// amount+script check per collection output). Matched as
+/// `prefix · group×N · suffix` with `N >= min_repeats`; the group's pushes
+/// are per-repeat slots, so every arity of the family decodes to one name.
+pub struct RepeatSkeleton {
+    pub name: &'static str,
+    prefix: Vec<SkelItem>,
+    group: Vec<SkelItem>,
+    suffix: Vec<SkelItem>,
+    min_repeats: usize,
+    param_order: Vec<&'static str>,
+    group_params: Vec<&'static str>,
+}
+
+impl RepeatSkeleton {
+    /// Derive from real instances of two different arities: `long` holds two
+    /// or more instances of the bigger build, `short` at least one of the
+    /// smaller. The repeated group is the shape difference between the two
+    /// arities (rotated to its leftmost position, so trailing copies inside
+    /// the longer build's aligned prefix fold into repeats). Fixed-part
+    /// pushes become constants only when *every* instance of *both* arities
+    /// agrees — arity-dependent constants (output counts, indexes) become
+    /// slots automatically. `labels` names the distinct fixed-part slots in
+    /// first-occurrence order; `group_labels` names the group's pushes in
+    /// order (repeat a label to require equality within one repeat).
+    pub fn derive(
+        name: &'static str,
+        long: &[&[u8]],
+        short: &[&[u8]],
+        labels: &[&'static str],
+        group_labels: &[&'static str],
+    ) -> Option<RepeatSkeleton> {
+        if long.len() < 2 || short.is_empty() {
+            return None;
+        }
+        let parse = |set: &[&[u8]]| -> Option<Vec<Vec<Instruction>>> {
+            let mut streams = Vec::with_capacity(set.len());
+            for bytes in set {
+                let (insts, truncated) = disassemble(bytes);
+                if truncated || streams.first().is_some_and(|f: &Vec<Instruction>| f.len() != insts.len()) {
+                    return None;
+                }
+                streams.push(insts);
+            }
+            Some(streams)
+        };
+        let la = parse(long)?;
+        let lb = parse(short)?;
+        let (a0, b0) = (&la[0], &lb[0]);
+        let g = a0.len().checked_sub(b0.len()).filter(|g| *g > 0)?;
+        // Shape-align the two arities from both ends, then rotate the group
+        // window as far left as it goes so it sits at the first repeat.
+        let mut p = 0;
+        while p < b0.len() && same_shape(&a0[p], &b0[p]) {
+            p += 1;
+        }
+        let mut s = 0;
+        while s < b0.len() - p && same_shape(&a0[a0.len() - 1 - s], &b0[b0.len() - 1 - s]) {
+            s += 1;
+        }
+        if a0.len() - p - s < g {
+            return None;
+        }
+        p = a0.len() - s - g; // group directly before the suffix…
+        while p > 0 && same_shape(&a0[p - 1], &a0[p + g - 1]) {
+            p -= 1; // …rotated to its leftmost equivalent position
+        }
+        let extra = b0.len().checked_sub(p + s)?;
+        if extra % g != 0 {
+            return None;
+        }
+        let min_repeats = extra / g;
+
+        // Fixed parts: const/slot decided across every instance of both
+        // arities (suffix positions aligned from the end).
+        let mut slots: Vec<Vec<Vec<u8>>> = Vec::new();
+        let mut build = |positions: &mut dyn Iterator<Item = (usize, usize)>| -> Option<Vec<SkelItem>> {
+            let mut items = Vec::new();
+            for (ia, ib) in positions {
+                let inst = &a0[ia];
+                if !is_push(inst) {
+                    let ok = la.iter().all(|x| !is_push(&x[ia]) && x[ia].opcode == inst.opcode)
+                        && lb.iter().all(|x| !is_push(&x[ib]) && x[ib].opcode == inst.opcode);
+                    if !ok {
+                        return None;
+                    }
+                    items.push(SkelItem::Op(inst.opcode));
+                    continue;
+                }
+                let vector = la
+                    .iter()
+                    .map(|x| push_value(&x[ia]))
+                    .chain(lb.iter().map(|x| push_value(&x[ib])))
+                    .collect::<Option<Vec<_>>>()?;
+                if vector.iter().all(|v| *v == vector[0]) {
+                    let end = a0.get(ia + 1).map_or(long[0].len(), |n| n.offset);
+                    items.push(SkelItem::ConstPush {
+                        value: vector[0].clone(),
+                        raw: long[0][inst.offset..end].to_vec(),
+                    });
+                } else {
+                    let slot = match slots.iter().position(|x| *x == vector) {
+                        Some(idx) => idx,
+                        None => {
+                            slots.push(vector);
+                            slots.len() - 1
+                        }
+                    };
+                    items.push(SkelItem::Slot(labels.get(slot).copied()?));
+                }
+            }
+            Some(items)
+        };
+        let prefix = build(&mut (0..p).map(|i| (i, i)))?;
+        let suffix = build(&mut (0..s).map(|j| (a0.len() - s + j, b0.len() - s + j)))?;
+        if slots.len() != labels.len() {
+            return None;
+        }
+
+        // The group: every push is a per-repeat slot.
+        let mut group = Vec::with_capacity(g);
+        let mut pushes = 0;
+        for inst in &a0[p..p + g] {
+            if is_push(inst) {
+                group.push(SkelItem::Slot(*group_labels.get(pushes)?));
+                pushes += 1;
+            } else {
+                group.push(SkelItem::Op(inst.opcode));
+            }
+        }
+        if pushes != group_labels.len() {
+            return None;
+        }
+        let mut group_params: Vec<&'static str> = Vec::new();
+        for label in group_labels {
+            if !group_params.contains(label) {
+                group_params.push(label);
+            }
+        }
+
+        let skel = RepeatSkeleton {
+            name,
+            prefix,
+            group,
+            suffix,
+            min_repeats,
+            param_order: labels.to_vec(),
+            group_params,
+        };
+        // Nothing is registered on faith: the derived matcher must accept
+        // every instance it was derived from.
+        for bytes in long.iter().chain(short) {
+            let (insts, _) = disassemble(bytes);
+            skel.match_script(&insts)?;
+        }
+        Some(skel)
+    }
+
+    /// Fixed-part parameter labels, in order.
+    pub fn params(&self) -> &[&'static str] {
+        &self.param_order
+    }
+
+    /// Per-repeat parameter labels, in order.
+    pub fn group_params(&self) -> &[&'static str] {
+        &self.group_params
+    }
+
+    /// Match `prefix · group×N · suffix`; fixed-part fields come first (in
+    /// `params()` order), then each repeat's fields in repeat order.
+    fn match_script(&self, instructions: &[Instruction]) -> Option<Vec<Field>> {
+        let fixed = self.prefix.len() + self.suffix.len();
+        let extra = instructions.len().checked_sub(fixed)?;
+        if self.group.is_empty() || extra % self.group.len() != 0 {
+            return None;
+        }
+        let repeats = extra / self.group.len();
+        if repeats < self.min_repeats {
+            return None;
+        }
+        let mut values: Vec<(&'static str, Vec<u8>)> = Vec::new();
+        for (item, inst) in self.prefix.iter().zip(instructions) {
+            if !match_skel_item(item, inst, &mut values) {
+                return None;
+            }
+        }
+        let mut at = self.prefix.len();
+        let mut repeat_fields: Vec<Field> = Vec::new();
+        for _ in 0..repeats {
+            // Fresh scope per repeat: a repeated label must agree within one
+            // repeat (an output index used twice) but may differ across them.
+            let mut rv: Vec<(&'static str, Vec<u8>)> = Vec::new();
+            for item in &self.group {
+                if !match_skel_item(item, &instructions[at], &mut rv) {
+                    return None;
+                }
+                at += 1;
+            }
+            repeat_fields.extend(fields_in_order(&self.group_params, &rv));
+        }
+        for (item, inst) in self.suffix.iter().zip(&instructions[at..]) {
+            if !match_skel_item(item, inst, &mut values) {
+                return None;
+            }
+        }
+        let mut fields = fields_in_order(&self.param_order, &values);
+        fields.append(&mut repeat_fields);
+        Some(fields)
     }
 }
 
 /// Matches compiled contracts against known skeletons.
 pub struct TemplateDecoder {
     skeletons: Vec<Skeleton>,
+    repeats: Vec<RepeatSkeleton>,
 }
 
 impl TemplateDecoder {
     pub fn new(skeletons: Vec<Skeleton>) -> Self {
-        Self { skeletons }
+        Self { skeletons, repeats: vec![] }
+    }
+
+    pub fn with_repeats(skeletons: Vec<Skeleton>, repeats: Vec<RepeatSkeleton>) -> Self {
+        Self { skeletons, repeats }
     }
 }
 
@@ -360,15 +669,18 @@ impl StateDecoder for TemplateDecoder {
         if truncated {
             return None;
         }
-        for skel in &self.skeletons {
-            if let Some(fields) = skel.match_script(&instructions) {
-                let mut d = base_decode("template", script);
-                d.template = Some(skel.name);
-                d.fields = fields;
-                return Some(d);
-            }
-        }
-        None
+        let hit = self
+            .skeletons
+            .iter()
+            .find_map(|s| s.match_script(&instructions).map(|f| (s.name, f)))
+            .or_else(|| {
+                self.repeats.iter().find_map(|s| s.match_script(&instructions).map(|f| (s.name, f)))
+            });
+        let (name, fields) = hit?;
+        let mut d = base_decode("template", script);
+        d.template = Some(name);
+        d.fields = fields;
+        Some(d)
     }
 }
 
@@ -483,9 +795,11 @@ pub struct Registry {
 
 impl Default for Registry {
     fn default() -> Self {
+        let mut skeletons = silverscript_skeletons();
+        skeletons.extend(observed::observed_skeletons());
         Self {
             decoders: vec![
-                Box::new(TemplateDecoder::new(silverscript_skeletons())),
+                Box::new(TemplateDecoder::with_repeats(skeletons, observed::observed_repeat_skeletons())),
                 Box::new(P2pkStateDecoder),
                 Box::new(P2shCommitmentDecoder),
             ],
@@ -672,6 +986,164 @@ mod tests {
         let mut ambiguous = encode_push(&vec![0x07; 32]);
         ambiguous.push(0xa6);
         assert_eq!(zk_system(&ambiguous), None);
+    }
+
+    #[test]
+    fn observed_skeletons_all_derive() {
+        let names: Vec<_> = observed::observed_skeletons().iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            [
+                "PURE",
+                "genesis0 · list",
+                "genesis0 · buy",
+                "genesis0 · list",
+                "genesis0 · buy",
+                "genesis0 · collection",
+                "KCC20 token",
+                "KCC20 token",
+                "KCC20 token",
+                "KCC20 minter",
+            ],
+            "every on-chain fixture pair must derive a skeleton"
+        );
+        let repeats: Vec<_> = observed::observed_repeat_skeletons().iter().map(|s| s.name).collect();
+        assert_eq!(repeats, ["genesis0 · slot-mint"]);
+    }
+
+    #[test]
+    fn observed_families_match_their_fixture_programs() {
+        let reg = Registry::default();
+        let get = |d: &Decoded, n: &str| {
+            d.fields.iter().find(|f| f.name == n).map(|f| f.value.clone())
+        };
+
+        // PURE: the one inlined argument is the CheckSigFromStack key.
+        let pure = include_bytes!("../fixtures/pure_a.bin");
+        let d = reg.decode(0, pure);
+        assert_eq!(d.template, Some("PURE"));
+        assert_eq!(
+            get(&d, "signer_pubkey").map(hex::encode).as_deref(),
+            Some("4df3c68074217004ad86fca1e63b91b73e625d9140063f21992231fdfdfa8936")
+        );
+
+        // KCC20 token: state fields land on the contract's labels. Fixture
+        // kcc20_b_a is a mint-capable instance owned by a covenant id.
+        let d = reg.decode(0, include_bytes!("../fixtures/kcc20_b_a.bin"));
+        assert_eq!(d.template, Some("KCC20 token"));
+        assert_eq!(get(&d, "owner_identifier").map(|v| v.len()), Some(32));
+        assert_eq!(get(&d, "identifier_type"), Some(vec![0x02]));
+        assert_eq!(get(&d, "amount"), Some(vec![0; 8]));
+        assert_eq!(get(&d, "is_minter"), Some(vec![0x01]));
+        // …and kcc20_a_a is a plain pubkey-owned, non-minting instance.
+        let d = reg.decode(0, include_bytes!("../fixtures/kcc20_a_a.bin"));
+        assert_eq!(d.template, Some("KCC20 token"));
+        assert_eq!(get(&d, "identifier_type"), Some(vec![0x00]));
+        assert_eq!(get(&d, "amount").map(hex::encode).as_deref(), Some("a00f000000000000"));
+        assert_eq!(get(&d, "is_minter"), Some(vec![0x00]));
+
+        // KCC20 minter: the input-side and output-side covenant-id pins fold
+        // into one slot per governed token, so exactly two id fields.
+        let d = reg.decode(0, include_bytes!("../fixtures/kcc20_minter_a.bin"));
+        assert_eq!(d.template, Some("KCC20 minter"));
+        assert_eq!(d.fields.len(), 2);
+        assert!(d.fields.iter().all(|f| f.value.len() == 32));
+
+        // Marketplace stages + collection registry.
+        for (fixture, want) in [
+            (include_bytes!("../fixtures/g0_list_v1_a.bin").as_slice(), "genesis0 · list"),
+            (include_bytes!("../fixtures/g0_buy_v1_a.bin").as_slice(), "genesis0 · buy"),
+            (include_bytes!("../fixtures/g0_list_v2_b.bin").as_slice(), "genesis0 · list"),
+            (include_bytes!("../fixtures/g0_buy_v2_b.bin").as_slice(), "genesis0 · buy"),
+            (include_bytes!("../fixtures/g0_col_a.bin").as_slice(), "genesis0 · collection"),
+        ] {
+            assert_eq!(reg.decode(0, fixture).template, Some(want), "fixture for {want}");
+        }
+        // The list program embeds the follow-up buy state's template bytes.
+        let d = reg.decode(0, include_bytes!("../fixtures/g0_list_v1_a.bin"));
+        let tmpl = get(&d, "next_state_template").expect("next_state_template");
+        assert_eq!(tmpl.len(), 396);
+    }
+
+    #[test]
+    fn slot_mint_repeat_matcher_covers_all_arities() {
+        let reg = Registry::default();
+        let get_all = |d: &Decoded, n: &str| {
+            d.fields.iter().filter(|f| f.name == n).map(|f| f.value.clone()).collect::<Vec<_>>()
+        };
+
+        // DI4M2 build: two per-collection output checks.
+        let di4m = include_bytes!("../fixtures/slot_mint_di4m_a.bin");
+        let d = reg.decode(0, di4m);
+        assert_eq!(d.template, Some("genesis0 · slot-mint"));
+        assert_eq!(get_all(&d, "lane_tag"), vec![b"DI4M2".to_vec()]);
+        assert_eq!(get_all(&d, "min_outputs"), vec![vec![0x04]]);
+        let hashes = get_all(&d, "output_spk_hash");
+        assert_eq!(hashes.len(), 2, "two repeats in the DI4M2 arity");
+        assert_eq!(
+            hex::encode(&hashes[0]),
+            "c90a93233366793d3a3576e9677a7e1f31ff85c80ba999fc5ca5dbaeac73a544",
+            "first repeat pins the shared marketplace output"
+        );
+
+        // GZ4M1 build: one check.
+        let d = reg.decode(0, include_bytes!("../fixtures/slot_mint_gz4m_a.bin"));
+        assert_eq!(d.template, Some("genesis0 · slot-mint"));
+        assert_eq!(get_all(&d, "lane_tag"), vec![b"GZ4M1".to_vec()]);
+        assert_eq!(get_all(&d, "min_outputs"), vec![vec![0x03]]);
+        assert_eq!(get_all(&d, "output_spk_hash").len(), 1);
+
+        // An unseen third arity still matches: splice in another copy of the
+        // repeated block (instructions 102..111 of the DI4M2 build).
+        let (insts, _) = disassemble(di4m);
+        let start = insts[102].offset;
+        let end = insts[111].offset;
+        let mut three = di4m[..end].to_vec();
+        three.extend_from_slice(&di4m[start..end]);
+        three.extend_from_slice(&di4m[end..]);
+        let d = reg.decode(0, &three);
+        assert_eq!(d.template, Some("genesis0 · slot-mint"), "extra repeat must still match");
+        assert_eq!(get_all(&d, "output_spk_hash").len(), 3);
+
+        // A partial copy breaks group divisibility → no template.
+        let mut ragged = di4m[..end].to_vec();
+        ragged.extend_from_slice(&di4m[start..start + 1]); // lone output-index push
+        ragged.extend_from_slice(&di4m[end..]);
+        assert_eq!(reg.decode(0, &ragged).template, None);
+    }
+
+    #[test]
+    fn derive_observed_edge_cases() {
+        let a = include_bytes!("../fixtures/pure_a.bin").as_slice();
+        let b = include_bytes!("../fixtures/pure_b.bin").as_slice();
+        // one instance is not a derivation
+        assert!(Skeleton::derive_observed("x", &[a], &["k"]).is_none());
+        // label count must equal the distinct slots (one here)
+        assert!(Skeleton::derive_observed("x", &[a, b], &[]).is_none());
+        assert!(Skeleton::derive_observed("x", &[a, b], &["k", "extra"]).is_none());
+        assert!(Skeleton::derive_observed("x", &[a, b], &["k"]).is_some());
+        // shape mismatch across instances → None
+        let other = include_bytes!("../fixtures/g0_col_a.bin").as_slice();
+        assert!(Skeleton::derive_observed("x", &[a, other], &["k"]).is_none());
+        // repeat derivation needs both arities
+        assert!(RepeatSkeleton::derive("x", &[a, b], &[], &["k"], &[]).is_none());
+    }
+
+    #[test]
+    fn zk_band_boundaries() {
+        let probe = |n: usize| {
+            let mut s = encode_push(&vec![0x5a; n]);
+            s.push(0xa6); // OpZkPrecompile
+            zk_system(&s)
+        };
+        assert_eq!(probe(127), None);
+        assert_eq!(probe(128), Some("groth16"));
+        assert_eq!(probe(256), Some("groth16"));
+        assert_eq!(probe(257), None, "gap above the Groth16 band stays unattributed");
+        assert_eq!(probe(299), None);
+        assert_eq!(probe(300), Some("succinct proof (inferred)"));
+        assert_eq!(probe(1023), Some("succinct proof (inferred)"));
+        assert_eq!(probe(1024), Some("risc0"));
     }
 
     #[test]

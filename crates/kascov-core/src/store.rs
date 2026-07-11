@@ -230,6 +230,36 @@ pub struct GlobalEventRow {
     pub tx_index: Option<u64>,
 }
 
+/// The canonical event object every cross-covenant API surface serves — one
+/// shape, so consumers write one parser. `tx_index`/`payload_len` are omitted
+/// (not null) when unknown/absent.
+#[derive(Clone, Debug, Serialize)]
+pub struct FeedEventRow {
+    pub covenant_id: CovenantId,
+    pub seq: u64,
+    pub kind: String,
+    pub txid: TxId,
+    pub accepting_daa: u64,
+    pub accepting_block: BlockHash,
+    /// 0-based index in the accepting block's accepted-tx list (consensus
+    /// acceptance order). None on rows written before capture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_index: Option<u64>,
+    /// Byte length of the tx's v1 payload; None when it carried none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_len: Option<u64>,
+}
+
+/// What a caller-facing unsubscribe attempt did (see
+/// [`Store::delete_subscription_secured`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsubscribeOutcome {
+    Deleted,
+    NotFound,
+    /// The row carries a secret and the caller's didn't match.
+    WrongSecret,
+}
+
 /// One fixed-width DAA bucket of covenant activity: kind counts inside
 /// [daa, daa + bucket width). Buckets with no events are never stored.
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -489,11 +519,19 @@ fn payload_tag(payload: &[u8]) -> String {
     }
 }
 
+/// How much of a payload the inscription decoder looks at. Was 512 bytes;
+/// real TN10 inscriptions (batched genesis0 mints, KCC20V3Wrapped orders)
+/// routinely push JSON past that, truncating the parse to `''`. Every window
+/// user (write-time stamp, backfill, legacy scan) must share this constant,
+/// and widening it needs a `CLASSIFIER_VERSION` bump so stale `''` stamps on
+/// longer payloads get re-derived.
+const INSCRIPTION_WINDOW: usize = 2048;
+
 /// Decode a payload's inscription label for the precomputed stamp — the same
-/// first-512-bytes window + parse the legacy `inscription_breakdown` scan
-/// used per row. `''` when the payload isn't a parseable inscription.
+/// leading-window parse the legacy `inscription_breakdown` scan used per
+/// row. `''` when the payload isn't a parseable inscription.
 fn inscription_kind_of(payload: &[u8]) -> String {
-    let head = &payload[..payload.len().min(512)];
+    let head = &payload[..payload.len().min(INSCRIPTION_WINDOW)];
     extract_inscription_json(head).map(|v| inscription_kind(&v)).unwrap_or_default()
 }
 
@@ -504,6 +542,14 @@ fn registry() -> &'static kascov_decode::Registry {
     static REGISTRY: std::sync::OnceLock<kascov_decode::Registry> = std::sync::OnceLock::new();
     REGISTRY.get_or_init(kascov_decode::Registry::default)
 }
+
+/// Version of the write-time classification (decode registry + inscription
+/// window). Bump whenever either learns something new, so stamps an older
+/// binary left as *generic* get cleared back to NULL on open and the
+/// backfills re-derive them; rows the old classifier gave a real name keep
+/// it. Version 2: observed-family skeletons (genesis0 / PURE / KCC20) and
+/// the 512 B → 2 KiB inscription window.
+const CLASSIFIER_VERSION: &str = "2";
 
 impl Store {
     pub fn open(path: &Path, network: Network) -> Result<Self> {
@@ -533,6 +579,7 @@ impl Store {
             "ALTER TABLE covenant_events ADD COLUMN tx_index INTEGER",
             "ALTER TABLE covenant_events ADD COLUMN accepting_time_ms INTEGER",
             "ALTER TABLE covenant_events ADD COLUMN accepting_blue_score INTEGER",
+            "ALTER TABLE webhook_subscriptions ADD COLUMN secret TEXT",
         ];
         for sql in &migrations {
             if let Err(e) = conn.execute(sql, []) {
@@ -618,10 +665,59 @@ impl Store {
             }
             Some(_) => {}
         }
-        // After the ownership check — a wrong-network database is never mutated.
+        // After the ownership check — a wrong-network database is never
+        // mutated. Stale generic stamps are cleared before the backfills so
+        // one open re-derives them with the current classifier.
+        store.reclassify_if_stale()?;
         store.backfill_templates()?;
         store.backfill_payload_tags()?;
         Ok(store)
+    }
+
+    /// On a classifier-version bump, clear the stamps the old classifier
+    /// left as *generic* back to NULL — the "not yet decoded" state the
+    /// on-open backfills re-derive from — then record the current version.
+    /// Real recognized names are never touched. Idempotent (clearing rows
+    /// the current classifier also stamps generic just re-derives the same
+    /// value) and cheap: the clears are three linear passes gated to run
+    /// once per version, and rows that stay NULL-free afterwards cost the
+    /// usual O(1) todo-index probes.
+    fn reclassify_if_stale(&mut self) -> Result<()> {
+        if self.meta("classifier_version")?.as_deref() == Some(CLASSIFIER_VERSION) {
+            return Ok(());
+        }
+        let tx = self.conn.transaction().map_err(db_err)?;
+        // State scripts nothing matched ('' = decoded, no template).
+        tx.execute("UPDATE covenant_utxos SET template = NULL WHERE template = ''", [])
+            .map_err(db_err)?;
+        // Spends whose committed P2SH program the old registry couldn't name
+        // (or could only call a nested commitment). Only canonical P2SH spks
+        // can ever reveal, so the '' rows of plain p2pk spends stay put
+        // instead of forcing a re-decode of the whole spent set.
+        tx.execute(
+            "UPDATE covenant_utxos SET revealed_template = NULL
+             WHERE spent_sig IS NOT NULL
+               AND revealed_template IN ('', 'p2sh commitment')
+               AND length(spk_script) = 35 AND substr(spk_script, 1, 1) = x'aa'",
+            [],
+        )
+        .map_err(db_err)?;
+        // Payloads whose inscription parse came up empty under the old
+        // 512-byte window and that actually extend past it; payload_tag is
+        // cleared with it because the pair is always stamped together.
+        tx.execute(
+            "UPDATE covenant_events SET payload_tag = NULL, inscription_kind = NULL
+             WHERE payload IS NOT NULL AND length(payload) > 512 AND inscription_kind = ''",
+            [],
+        )
+        .map_err(db_err)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('classifier_version', ?1)",
+            [CLASSIFIER_VERSION],
+        )
+        .map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
+        Ok(())
     }
 
     fn meta(&self, key: &str) -> Result<Option<String>> {
@@ -771,8 +867,8 @@ impl Store {
     /// columns: one-shot after a migration, an O(1) probe against the empty
     /// ev_payload_tag_todo partial index on every open after that. Both
     /// columns are stamped together (see the todo index comment). Only the
-    /// first 512 payload bytes are fetched — the tag needs 4 and the
-    /// inscription decode always used the same 512-byte window.
+    /// leading `INSCRIPTION_WINDOW` payload bytes are fetched — the tag
+    /// needs 4 and the inscription decode never reads past that window.
     fn backfill_payload_tags(&mut self) -> Result<()> {
         const BATCH: i64 = 5000;
         let mut stamped = 0u64;
@@ -780,10 +876,10 @@ impl Store {
             let rows: Vec<(i64, Vec<u8>)> = {
                 let mut stmt = self
                     .conn
-                    .prepare(
-                        "SELECT rowid, substr(payload, 1, 512) FROM covenant_events
+                    .prepare(&format!(
+                        "SELECT rowid, substr(payload, 1, {INSCRIPTION_WINDOW}) FROM covenant_events
                          WHERE payload IS NOT NULL AND payload_tag IS NULL LIMIT ?1",
-                    )
+                    ))
                     .map_err(db_err)?;
                 let collected = stmt
                     .query_map([BATCH], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -1108,6 +1204,38 @@ impl Store {
             .map_err(db_err)?;
         self.conn
             .execute("DELETE FROM meta WHERE key = 'tx_index_backfilled_to'", [])
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Regress every stamp to the previous classifier's generic verdicts and
+    /// drop the version key — what a database written by the last release
+    /// looks like (tests only).
+    #[cfg(test)]
+    pub(crate) fn simulate_old_classifier_for_test(&self) -> Result<()> {
+        self.plant_generic_stamps_for_test()?;
+        self.conn
+            .execute("DELETE FROM meta WHERE key = 'classifier_version'", [])
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Overwrite recognized stamps with generic verdicts but keep the
+    /// version key — for asserting the reclassification is version-gated
+    /// (tests only).
+    #[cfg(test)]
+    pub(crate) fn plant_generic_stamps_for_test(&self) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE covenant_utxos SET revealed_template = '' WHERE revealed_template IS NOT NULL",
+                [],
+            )
+            .map_err(db_err)?;
+        self.conn
+            .execute(
+                "UPDATE covenant_events SET inscription_kind = '' WHERE inscription_kind IS NOT NULL",
+                [],
+            )
             .map_err(db_err)?;
         Ok(())
     }
@@ -1653,12 +1781,12 @@ impl Store {
     fn inscription_breakdown_scan(&self) -> Result<Vec<(String, u64, u64)>> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT substr(payload, 1, 512), lower(hex(covenant_id))
+            .prepare(&format!(
+                "SELECT substr(payload, 1, {INSCRIPTION_WINDOW}), lower(hex(covenant_id))
                  FROM covenant_events
                  WHERE payload IS NOT NULL
                    AND (substr(payload, 1, 2) = x'7b22' OR substr(payload, 1, 4) = x'37623232')",
-            )
+            ))
             .map_err(db_err)?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)))
@@ -1705,21 +1833,45 @@ impl Store {
             .map_err(db_err)
     }
 
-    /// Add a webhook subscription (covenant_id / kind NULL = wildcard). Returns its id.
-    pub fn add_subscription(&self, covenant_id: Option<&[u8]>, kind: Option<&str>, url: &str, now_ms: u64) -> Result<i64> {
+    /// Add a webhook subscription (covenant_id / kind NULL = wildcard).
+    /// `secret` signs deliveries and gates unsubscribe (NULL = legacy row,
+    /// unsigned and deletable by id alone). Returns its id.
+    pub fn add_subscription(&self, covenant_id: Option<&[u8]>, kind: Option<&str>, url: &str, secret: Option<&str>, now_ms: u64) -> Result<i64> {
         self.conn
             .execute(
-                "INSERT INTO webhook_subscriptions (covenant_id, kind, url, created_at) VALUES (?1,?2,?3,?4)",
-                params![covenant_id, kind, url, now_ms as i64],
+                "INSERT INTO webhook_subscriptions (covenant_id, kind, url, secret, created_at) VALUES (?1,?2,?3,?4,?5)",
+                params![covenant_id, kind, url, secret, now_ms as i64],
             )
             .map_err(db_err)?;
         Ok(self.conn.last_insert_rowid())
     }
 
     /// Remove a subscription by id. Returns whether one was deleted.
+    /// Bypasses any secret — for the delivery loop retiring dead endpoints;
+    /// caller-facing unsubscribe goes through [`delete_subscription_secured`].
     pub fn delete_subscription(&self, id: i64) -> Result<bool> {
         let n = self.conn.execute("DELETE FROM webhook_subscriptions WHERE id = ?1", params![id]).map_err(db_err)?;
         Ok(n > 0)
+    }
+
+    /// Caller-facing unsubscribe: a row with a secret is only deleted when
+    /// the caller presents it; legacy NULL-secret rows delete by id alone.
+    pub fn delete_subscription_secured(&self, id: i64, secret: Option<&str>) -> Result<UnsubscribeOutcome> {
+        let stored: Option<Option<String>> = self
+            .conn
+            .query_row("SELECT secret FROM webhook_subscriptions WHERE id = ?1", params![id], |r| r.get(0))
+            .optional()
+            .map_err(db_err)?;
+        match stored {
+            None => Ok(UnsubscribeOutcome::NotFound),
+            Some(Some(stored)) if secret != Some(stored.as_str()) => Ok(UnsubscribeOutcome::WrongSecret),
+            Some(_) => {
+                self.conn
+                    .execute("DELETE FROM webhook_subscriptions WHERE id = ?1", params![id])
+                    .map_err(db_err)?;
+                Ok(UnsubscribeOutcome::Deleted)
+            }
+        }
     }
 
     /// Webhook URLs matching an event (covenant_id + kind; NULL columns are wildcards).
@@ -1737,15 +1889,18 @@ impl Store {
         self.conn.query_row("SELECT COUNT(*) FROM webhook_subscriptions", [], |r| r.get::<_, i64>(0)).map(|n| n as u64).map_err(db_err)
     }
 
-    /// Like [`subscriptions_for`] but returns `(id, url)` — the delivery loop
-    /// needs the id to retire a subscription after repeated failures.
-    pub fn subscriptions_matching(&self, covenant_id: &[u8], kind: &str) -> Result<Vec<(i64, String)>> {
+    /// Like [`subscriptions_for`] but returns `(id, url, secret)` — the
+    /// delivery loop needs the id to retire a subscription after repeated
+    /// failures and the secret to sign the POST body.
+    pub fn subscriptions_matching(&self, covenant_id: &[u8], kind: &str) -> Result<Vec<(i64, String, Option<String>)>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, url FROM webhook_subscriptions WHERE (covenant_id IS NULL OR covenant_id = ?1) AND (kind IS NULL OR kind = ?2)")
+            .prepare("SELECT id, url, secret FROM webhook_subscriptions WHERE (covenant_id IS NULL OR covenant_id = ?1) AND (kind IS NULL OR kind = ?2)")
             .map_err(db_err)?;
         let rows = stmt
-            .query_map(params![covenant_id, kind], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .query_map(params![covenant_id, kind], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
+            })
             .map_err(db_err)?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(db_err)
     }
@@ -2154,6 +2309,95 @@ impl Store {
         Ok(rows)
     }
 
+    /// One page of the chain-wide event feed in the canonical deterministic
+    /// order: (accepting_daa, tx_index NULLS LAST, txid), oldest first —
+    /// with (covenant_id, seq) as final tiebreakers, because one tx can move
+    /// several covenants (several events share a txid). The cursor is
+    /// (after_daa, after_seq): resume at DAA group `after_daa`, skipping its
+    /// first `after_seq` events. A within-group offset is a stable cursor
+    /// because the order inside a group is total and history only ever
+    /// appends at higher DAAs (groups are tiny — ≤ a few dozen events share
+    /// one DAA).
+    ///
+    /// Two queries, both on ev_by_daa: the boundary group (equality probe +
+    /// a sort of that one group), then the open range, where SQLite walks the
+    /// index in DAA order and only temp-sorts within each group before the
+    /// LIMIT cuts off — no compound index needed (measured: <10ms a page from
+    /// DAA 0 on a 767k-event index).
+    pub fn events_after(&self, after_daa: u64, after_seq: u64, limit: u64) -> Result<Vec<FeedEventRow>> {
+        const COLS: &str =
+            "covenant_id, seq, kind, txid, accepting_daa, accepting_block, tx_index, length(payload)";
+        fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FeedEventRow> {
+            Ok(FeedEventRow {
+                covenant_id: CovenantId(row.get(0)?),
+                seq: row.get(1)?,
+                kind: row.get(2)?,
+                txid: TxId(row.get(3)?),
+                accepting_daa: row.get(4)?,
+                accepting_block: BlockHash(row.get(5)?),
+                tx_index: row.get(6)?,
+                payload_len: row.get(7)?,
+            })
+        }
+        let limit = limit.min(i64::MAX as u64) as i64;
+        let offset = after_seq.min(i64::MAX as u64) as i64;
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {COLS} FROM covenant_events WHERE accepting_daa = ?1
+                 ORDER BY (tx_index IS NULL), tx_index, txid, covenant_id, seq LIMIT ?2 OFFSET ?3",
+            ))
+            .map_err(db_err)?;
+        let mut rows = stmt
+            .query_map(params![after_daa, limit, offset], map_row)
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        let remaining = limit - rows.len() as i64;
+        if remaining > 0 {
+            let mut stmt = self
+                .conn
+                .prepare(&format!(
+                    "SELECT {COLS} FROM covenant_events WHERE accepting_daa > ?1
+                     ORDER BY accepting_daa, (tx_index IS NULL), tx_index, txid, covenant_id, seq LIMIT ?2",
+                ))
+                .map_err(db_err)?;
+            let tail = stmt
+                .query_map(params![after_daa, remaining], map_row)
+                .map_err(db_err)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(db_err)?;
+            rows.extend(tail);
+        }
+        Ok(rows)
+    }
+
+    /// Covenants whose state (or spend-revealed) template is one of
+    /// `templates`, newest activity first — the tokens-directory row source.
+    /// A full covenant_utxos scan (no template index), so callers cache.
+    pub fn covenants_with_templates(&self, templates: &[&str]) -> Result<Vec<CovenantSummary>> {
+        if templates.is_empty() {
+            return Ok(vec![]);
+        }
+        let marks = vec!["?"; templates.len()].join(",");
+        let sql = format!(
+            "{SUMMARY_SELECT} WHERE c.covenant_id IN (
+                SELECT DISTINCT covenant_id FROM covenant_utxos
+                WHERE template IN ({marks}) OR revealed_template IN ({marks}))
+             ORDER BY c.last_activity_daa DESC, c.covenant_id DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params_from_iter(templates.iter().chain(templates.iter())),
+                map_summary_row,
+            )
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
     pub fn utxos(&self, id: &CovenantId, live_only: bool) -> Result<Vec<UtxoRow>> {
         let mut stmt = self
             .conn
@@ -2333,6 +2577,112 @@ mod tests {
         // payload_tag fast path — and it must agree with the legacy scan.
         assert!(!store.payload_tags_pending().unwrap());
         assert_eq!(tags, store.based_app_namespaces_scan().unwrap());
+    }
+
+    /// A real TN10 reveal (a PURE covenant program) round-trips the whole
+    /// classifier lifecycle: write-time naming, a version bump re-deriving a
+    /// stamp the old classifier left generic, and the version gate keeping
+    /// later opens from touching stamps again.
+    #[test]
+    fn classifier_bump_reclassifies_generic_stamps() {
+        let path = test_store_path("classifier-bump");
+        let program = include_bytes!("../../kascov-decode/fixtures/pure_a.bin");
+        let hash = blake2b_simd::Params::new().hash_length(32).hash(program);
+        let mut spk = vec![0xaa, 0x20];
+        spk.extend_from_slice(hash.as_bytes());
+        spk.push(0x87);
+        // spend witness: junk arg, then the revealed program
+        let mut sig = kascov_decode::encode_push(&[0x01, 0x02]);
+        sig.extend_from_slice(&kascov_decode::encode_push(program));
+        let outpoint = Outpoint { txid: TxId([7; 32]), index: 0 };
+        let named = vec![("PURE".to_string(), 1u64)];
+
+        {
+            let mut store = Store::open(&path, Network::Testnet(10)).unwrap();
+            let block = BlockEvents {
+                accepting_block: BlockHash([1; 32]),
+                accepting_daa: 10,
+                accepting_time_ms: 10_000,
+                accepting_blue_score: 10,
+                events: vec![],
+                created_utxos: vec![NewUtxo {
+                    outpoint,
+                    covenant_id: CovenantId([9; 32]),
+                    value: 1,
+                    spk_version: 0,
+                    spk_script: spk,
+                }],
+                spent_utxos: vec![(outpoint, TxId([8; 32]), sig, 0)],
+            };
+            store.apply(&block, BlockHash([1; 32])).unwrap();
+            // Write-time recognition names the real program immediately.
+            assert_eq!(store.revealed_template_counts().unwrap(), named);
+            store.simulate_old_classifier_for_test().unwrap();
+            assert!(store.revealed_template_counts().unwrap().is_empty());
+        }
+        // Version mismatch on open: the generic stamp is cleared and the
+        // backfill re-derives the name from the stored reveal bytes.
+        {
+            let store = Store::open(&path, Network::Testnet(10)).unwrap();
+            assert_eq!(store.revealed_template_counts().unwrap(), named);
+        }
+        // Same-version reopen is gated: a planted generic verdict survives
+        // (nothing cleared, nothing re-stamped), so the pass is idempotent
+        // and costs nothing once the version matches.
+        {
+            let store = Store::open(&path, Network::Testnet(10)).unwrap();
+            store.plant_generic_stamps_for_test().unwrap();
+        }
+        {
+            let store = Store::open(&path, Network::Testnet(10)).unwrap();
+            assert!(store.revealed_template_counts().unwrap().is_empty());
+        }
+    }
+
+    /// Inscriptions whose JSON runs past the old 512-byte window parse under
+    /// the widened one, and a version bump re-stamps rows the old window had
+    /// given up on.
+    #[test]
+    fn classifier_bump_rescans_long_inscriptions() {
+        let path = test_store_path("insc-window");
+        let payload = format!(
+            "{{\"p\":\"krc-20\",\"op\":\"mint\",\"tick\":\"LONG\",\"pad\":\"{}\"}}",
+            "a".repeat(600)
+        )
+        .into_bytes();
+        assert!(payload.len() > 512 && payload.len() <= INSCRIPTION_WINDOW);
+        let want = vec![("krc-20 · mint · LONG".to_string(), 1u64, 1u64)];
+
+        {
+            let mut store = Store::open(&path, Network::Testnet(10)).unwrap();
+            let block = BlockEvents {
+                accepting_block: BlockHash([1; 32]),
+                accepting_daa: 10,
+                accepting_time_ms: 10_000,
+                accepting_blue_score: 10,
+                events: vec![NewEvent {
+                    covenant_id: CovenantId([1; 32]),
+                    kind: EventKind::Genesis,
+                    txid: TxId([1; 32]),
+                    tx_index: 0,
+                    payload: Some(payload),
+                    lane_namespace: None,
+                }],
+                created_utxos: vec![],
+                spent_utxos: vec![],
+            };
+            store.apply(&block, BlockHash([1; 32])).unwrap();
+            assert_eq!(store.inscription_breakdown().unwrap(), want);
+            // A database stamped by the 512-byte-window binary: the long
+            // payload's parse came up empty.
+            store.simulate_old_classifier_for_test().unwrap();
+            assert!(store.inscription_breakdown().unwrap().is_empty());
+        }
+        {
+            let store = Store::open(&path, Network::Testnet(10)).unwrap();
+            assert_eq!(store.inscription_breakdown().unwrap(), want);
+            assert!(!store.payload_tags_pending().unwrap());
+        }
     }
 
     /// The full stamp lifecycle: write-time stamping, the legacy-scan
@@ -3055,5 +3405,153 @@ mod tests {
         rows.sort_by_key(|r| (r.accepting_daa, r.tx_index));
         let order: Vec<TxId> = rows.iter().map(|r| r.txid).collect();
         assert_eq!(order, vec![TxId([0x20; 32]), TxId([0x10; 32]), TxId([0x30; 32])]);
+    }
+
+    /// The canonical event shape: exactly these keys, with tx_index and
+    /// payload_len omitted (never null) when absent.
+    #[test]
+    fn feed_event_row_canonical_shape() {
+        let row = FeedEventRow {
+            covenant_id: CovenantId([1; 32]),
+            seq: 3,
+            kind: "transition".into(),
+            txid: TxId([2; 32]),
+            accepting_daa: 100,
+            accepting_block: BlockHash([3; 32]),
+            tx_index: Some(4),
+            payload_len: Some(20),
+        };
+        let v = serde_json::to_value(&row).unwrap();
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let mut expect = vec![
+            "covenant_id", "seq", "kind", "txid", "accepting_daa", "accepting_block",
+            "tx_index", "payload_len",
+        ];
+        let mut got = keys.clone();
+        got.sort_unstable();
+        expect.sort_unstable();
+        assert_eq!(got, expect);
+        assert_eq!(v["tx_index"], serde_json::json!(4));
+        assert_eq!(v["payload_len"], serde_json::json!(20));
+
+        let bare = FeedEventRow { tx_index: None, payload_len: None, ..row };
+        let v = serde_json::to_value(&bare).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("tx_index"), "absent, not null");
+        assert!(!obj.contains_key("payload_len"), "absent, not null");
+        assert_eq!(obj.len(), 6);
+    }
+
+    /// events_after pages a synthetic interleaving — ties on DAA across
+    /// blocks, tx_index ties resolved by txid, a multi-covenant tx (two
+    /// events sharing txid AND tx_index) resolved by covenant_id, legacy
+    /// NULL tx_index rows last in their group — identically to one big
+    /// query, from any page size.
+    #[test]
+    fn events_feed_cursor_walks_interleavings() {
+        let mut store = test_store("events-feed");
+        let ev = |cov: u8, tx: u8, tx_index: u32| NewEvent {
+            covenant_id: CovenantId([cov; 32]),
+            kind: EventKind::Genesis,
+            txid: TxId([tx; 32]),
+            tx_index,
+            payload: (tx == 0x20).then(|| vec![0u8; tx as usize]),
+            lane_namespace: None,
+        };
+        // Two blocks share DAA 100 (tx_index collides across them → txid
+        // breaks the tie); insertion order is deliberately not feed order.
+        let mut b1 = BlockEvents::empty(BlockHash([1; 32]));
+        b1.accepting_daa = 100;
+        b1.events = vec![ev(0xA, 0x50, 0), ev(0xB, 0x10, 1), ev(0xA, 0x60, 2)];
+        let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
+        b2.accepting_daa = 100;
+        b2.events = vec![ev(0xC, 0x20, 0), ev(0xD, 0x70, 1)];
+        let mut b3 = BlockEvents::empty(BlockHash([3; 32]));
+        b3.accepting_daa = 105;
+        // tx 0x40 moves two covenants at once: same txid, same tx_index.
+        b3.events = vec![ev(0xE, 0x30, 0), ev(0xA, 0x40, 1), ev(0x9, 0x40, 1), ev(0xF, 0x80, 2)];
+        let mut b4 = BlockEvents::empty(BlockHash([4; 32]));
+        b4.accepting_daa = 110;
+        b4.events = vec![ev(0xB, 0x90, 0)];
+        for b in [&b3, &b1, &b4, &b2] {
+            store.apply(b, b.accepting_block).unwrap();
+        }
+        // Two legacy rows (pre-capture): NULL tx_index sorts last in-group.
+        store
+            .conn
+            .execute(
+                "UPDATE covenant_events SET tx_index = NULL WHERE txid IN (?1, ?2)",
+                params![[0x10u8; 32].as_slice(), [0x30u8; 32].as_slice()],
+            )
+            .unwrap();
+
+        let all = store.events_after(0, 0, 1000).unwrap();
+        assert_eq!(all.len(), 10);
+        // The canonical order as (txid, covenant) bytes, by hand:
+        // DAA 100 → indices 0 (0x20 < 0x50 by txid), 1, 2, then NULL (0x10);
+        // DAA 105 → the 0x40 pair (covenant 0x9 before 0xA), 0x80, NULL 0x30;
+        // DAA 110 → 0x90.
+        let expect: Vec<(u8, u8)> = vec![
+            (0x20, 0xC), (0x50, 0xA), (0x70, 0xD), (0x60, 0xA), (0x10, 0xB),
+            (0x40, 0x9), (0x40, 0xA), (0x80, 0xF), (0x30, 0xE),
+            (0x90, 0xB),
+        ];
+        let key = |e: &FeedEventRow| (e.txid.0[0], e.covenant_id.0[0]);
+        let got: Vec<(u8, u8)> = all.iter().map(key).collect();
+        assert_eq!(got, expect);
+        // payload_len rides along only where a payload exists.
+        assert_eq!(all[0].payload_len, Some(0x20));
+        assert_eq!(all[1].payload_len, None);
+
+        // Walk at every page size, computing the (after_daa, after_seq)
+        // cursor the way the /events handler does — each walk must re-yield
+        // the full list exactly.
+        for page in 1..=10u64 {
+            let mut walked: Vec<(u8, u8)> = Vec::new();
+            let (mut daa, mut seq) = (0u64, 0u64);
+            loop {
+                let rows = store.events_after(daa, seq, page).unwrap();
+                if rows.is_empty() {
+                    break;
+                }
+                let last_daa = rows.last().unwrap().accepting_daa;
+                let in_group = rows.iter().filter(|e| e.accepting_daa == last_daa).count() as u64;
+                seq = if last_daa == daa { seq + in_group } else { in_group };
+                daa = last_daa;
+                walked.extend(rows.iter().map(key));
+                if rows.len() < page as usize {
+                    break;
+                }
+            }
+            assert_eq!(walked, expect, "page size {page}");
+        }
+        // A cursor mid-group resumes exactly after what it consumed: group
+        // 100 is [0x20, 0x50, 0x70, 0x60, 0x10], so seq 2 resumes at 0x70.
+        assert_eq!(store.events_after(100, 2, 3).unwrap().iter().map(key).collect::<Vec<_>>(), vec![(0x70, 0xD), (0x60, 0xA), (0x10, 0xB)]);
+        // A cursor past the tip yields nothing.
+        assert!(store.events_after(110, 1, 5).unwrap().is_empty());
+    }
+
+    /// Subscription secrets: stored, returned to the delivery loop, and
+    /// enforced on unsubscribe — while legacy NULL-secret rows keep deleting
+    /// by id alone.
+    #[test]
+    fn subscription_secret_roundtrip() {
+        let store = test_store("sub-secret");
+        let id = store.add_subscription(None, Some("genesis"), "https://example.com/hook", Some("aa11"), 1).unwrap();
+        let legacy = store.add_subscription(None, None, "https://example.com/legacy", None, 2).unwrap();
+
+        let subs = store.subscriptions_matching([0u8; 32].as_slice(), "genesis").unwrap();
+        assert!(subs.contains(&(id, "https://example.com/hook".into(), Some("aa11".into()))));
+        assert!(subs.contains(&(legacy, "https://example.com/legacy".into(), None)));
+
+        assert_eq!(store.delete_subscription_secured(id, None).unwrap(), UnsubscribeOutcome::WrongSecret);
+        assert_eq!(store.delete_subscription_secured(id, Some("bb22")).unwrap(), UnsubscribeOutcome::WrongSecret);
+        assert_eq!(store.subscription_count().unwrap(), 2, "wrong secret must not delete");
+        assert_eq!(store.delete_subscription_secured(id, Some("aa11")).unwrap(), UnsubscribeOutcome::Deleted);
+        assert_eq!(store.delete_subscription_secured(id, Some("aa11")).unwrap(), UnsubscribeOutcome::NotFound);
+        // Legacy row: no secret stored, id alone (with or without a guess).
+        assert_eq!(store.delete_subscription_secured(legacy, Some("anything")).unwrap(), UnsubscribeOutcome::Deleted);
+        assert_eq!(store.subscription_count().unwrap(), 0);
     }
 }
