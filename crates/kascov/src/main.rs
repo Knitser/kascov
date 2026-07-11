@@ -1203,7 +1203,10 @@ async fn serve(
         });
     }
     let app = axum::Router::new()
+        // Google Front End swallows /healthz on *.run.app before it reaches
+        // the container — /health is the path that actually works in prod.
         .route("/healthz", get(healthz_handler))
+        .route("/health", get(healthz_handler))
         .route("/data/{network}/simulate", post(simulate_handler))
         .route("/data/{network}/zk-verify", post(zk_verify_handler))
         .route("/data/{network}/compile", post(compile_handler))

@@ -72,13 +72,13 @@ gcloud monitoring uptime create kascov-live \
   || echo "    (uptime check exists or CLI unsupported)"
 
 # "No backups happening" is not expressible as a log-based alert (log alerts
-# fire on presence, not absence) — the /healthz uptime check is the liveness
+# fire on presence, not absence) — the /health uptime check is the liveness
 # proxy until a metric-absence policy is worth the ceremony.
-echo "==> ensuring uptime check on /healthz"
+echo "==> ensuring uptime check on /health (GFE swallows /healthz on run.app)"
 gcloud monitoring uptime create kascov-healthz \
   --resource-type=uptime-url \
   --resource-labels="host=$HOST,project_id=$PROJECT" \
-  --path=/healthz \
+  --path=/health \
   --project $PROJECT 2>/dev/null \
   || echo "    (uptime check exists or CLI unsupported)"
 
