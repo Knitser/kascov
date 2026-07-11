@@ -53,12 +53,15 @@ gcloud run deploy $SERVICE \
   --no-cpu-throttling \
   --memory 4Gi \
   --cpu 2 \
+  --cpu-boost \
   --update-env-vars "^@^BACKUP_BUCKET=$BUCKET@NETWORKS=testnet-10,mainnet" \
   --port 8080
 
-# Uptime check on the small always-cheap health path; alerting needs a
-# notification channel, which is account-specific — print the pointer instead
-# of guessing.
+# Monitoring: two uptime checks + two log-based alert policies keyed on the
+# KASCOV_RESTORE_*/KASCOV_BACKUP_* tokens that worker-entrypoint.sh logs.
+# Everything is created WITHOUT a notification channel (channels are
+# account-specific) — attaching one in the console is the manual step that
+# arms the alerts; the pointer is printed below.
 echo "==> ensuring uptime check on /data/mainnet-live.json"
 HOST=$(gcloud run services describe $SERVICE --project $PROJECT --region $REGION --format='value(status.url)' | sed 's|https://||')
 gcloud monitoring uptime create kascov-live \
@@ -66,7 +69,71 @@ gcloud monitoring uptime create kascov-live \
   --resource-labels="host=$HOST,project_id=$PROJECT" \
   --path=/data/mainnet-live.json \
   --project $PROJECT 2>/dev/null \
-  || echo "    (uptime check exists or CLI unsupported — attach an alert policy + email channel in the console)"
+  || echo "    (uptime check exists or CLI unsupported)"
+
+# "No backups happening" is not expressible as a log-based alert (log alerts
+# fire on presence, not absence) — the /healthz uptime check is the liveness
+# proxy until a metric-absence policy is worth the ceremony.
+echo "==> ensuring uptime check on /healthz"
+gcloud monitoring uptime create kascov-healthz \
+  --resource-type=uptime-url \
+  --resource-labels="host=$HOST,project_id=$PROJECT" \
+  --path=/healthz \
+  --project $PROJECT 2>/dev/null \
+  || echo "    (uptime check exists or CLI unsupported)"
+
+# ensure_log_alert NAME REGEX — log-based alert policy, idempotent by
+# displayName (`policies create` happily makes duplicates, so look first).
+ensure_log_alert() {
+  local name="$1" log_regex="$2"
+  if gcloud alpha monitoring policies list --project "$PROJECT" \
+      --filter="displayName='$name'" --format='value(name)' 2>/dev/null | grep -q .; then
+    echo "    alert policy '$name' already exists"
+    return 0
+  fi
+  local tmp
+  tmp=$(mktemp)
+  # conditionMatchedLog requires alertStrategy.notificationRateLimit.
+  cat > "$tmp" <<EOF
+{
+  "displayName": "$name",
+  "combiner": "OR",
+  "enabled": true,
+  "conditions": [
+    {
+      "displayName": "$name log match",
+      "conditionMatchedLog": {
+        "filter": "resource.type=\\"cloud_run_revision\\" AND resource.labels.service_name=\\"$SERVICE\\" AND textPayload=~\\"$log_regex\\""
+      }
+    }
+  ],
+  "alertStrategy": {
+    "notificationRateLimit": { "period": "3600s" },
+    "autoClose": "604800s"
+  }
+}
+EOF
+  gcloud alpha monitoring policies create --policy-from-file="$tmp" --project "$PROJECT" > /dev/null \
+    && echo "    created alert policy '$name'" \
+    || echo "    (could not create '$name' — create it in the console with log filter: textPayload=~\"$log_regex\")"
+  rm -f "$tmp"
+}
+
+echo "==> ensuring log-based alert policies (restore/backup trouble)"
+ensure_log_alert kascov-restore-trouble "KASCOV_RESTORE_FRESH|KASCOV_RESTORE_FAIL"
+ensure_log_alert kascov-backup-fail "KASCOV_BACKUP_FAIL"
+
+echo ""
+echo "    MANUAL STEP (user-gated): the alert policies and uptime checks have NO"
+echo "    notification channel — nothing emails/pages you until one is attached."
+echo "    In the console (Monitoring > Alerting > pick policy > edit), attach your"
+echo "    channel to:"
+echo "      - kascov-restore-trouble   (restore fell back to fresh, or failed)"
+echo "      - kascov-backup-fail       (a periodic/final backup failed)"
+echo "      - kascov-live / kascov-healthz uptime checks"
+echo "    NOTE: the /healthz uptime check will FAIL until the next worker deploy"
+echo "    ships the real /healthz endpoint — expected, safe to ignore until then."
+echo ""
 
 echo "==> granting the service account access to the backup bucket"
 SA=$(gcloud run services describe $SERVICE --project $PROJECT --region $REGION --format='value(spec.template.spec.serviceAccountName)')
