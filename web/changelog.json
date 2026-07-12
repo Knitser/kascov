@@ -53,5 +53,45 @@
     "date": "2026-07-09",
     "title": "the galaxy",
     "body": "the whole network on one zoomable map — every app at once, each dot a smart coin, each link a shared transaction. scroll to zoom, click a dot to open its life story."
+  },
+  {
+    "date": "2026-07-08",
+    "title": "kascov.io",
+    "body": "the explorer gets its own front door — old links forward, share cards re-rendered, canonical everywhere."
+  },
+  {
+    "date": "2026-07-07",
+    "title": "first outside hands",
+    "body": "community pull requests land — bug fixes from strangers and the covenant workbench unified into one playground. open source doing its thing."
+  },
+  {
+    "date": "2026-07-06",
+    "title": "the workbench wave",
+    "body": "what-if spend simulation, cryptographically verified contract source, a visual script debugger, a ZK proof-verification panel, and payload lanes — the tools a covenant developer actually needs, in the browser."
+  },
+  {
+    "date": "2026-07-06",
+    "title": "contracts RUN now",
+    "body": "deploy a real covenant, spend it, watch the program reveal itself on-chain permanently — plus escrow settlement, multi-contract app families, and a mission-control redesign with the BlockDAG as the hero."
+  },
+  {
+    "date": "2026-07-05",
+    "title": "stories get honest",
+    "body": "multi-piece coins tell their true story, truncated histories get archival repair, \"retired\" is reserved for the story-ending burn — and a contract generator so you can make one yours."
+  },
+  {
+    "date": "2026-07-04",
+    "title": "the scale rework",
+    "body": "the monolithic snapshot era ends: paginated grid, address pages, a live SSE event stream, template analytics and a daily digest. kascov stops being a demo."
+  },
+  {
+    "date": "2026-07-02",
+    "title": "coins learn to speak",
+    "body": "friendly names, life stories, spend-time decoding that captures the program a covenant actually ran, and SilverScript recognition by skeleton — byte-identical, not guesswork."
+  },
+  {
+    "date": "2026-07-02",
+    "title": "day one",
+    "body": "an acceptance-driven covenant indexer, a post-Toccata script disassembler, a lifecycle lab CLI, a live Cloud Run worker and a dashboard — kascov goes from empty repo to watching testnet-10 breathe, in one day."
   }
 ]
