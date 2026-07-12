@@ -343,9 +343,13 @@ fn build_grid_snapshot(
 
 /// Contract-type analytics: which script templates run on this network,
 /// aggregated over every state UTXO ever indexed (recognition is stamped at
-/// write time — this is two GROUP BYs, no decoding). Reveal counts ride
-/// along because compiled contracts (Mecenas, Escrow, LastWill) live behind
-/// p2sh commitments and only show themselves at spend time.
+/// write time — this is two GROUP BYs, no decoding). Rows aggregate by the
+/// RESOLVED covenant-level name — the same precedence the grid rows use —
+/// so a P2SH coin whose program revealed at spend counts under the revealed
+/// name and "p2sh commitment" keeps only genuinely-unrevealed coins. Reveal
+/// counts still ride along because compiled contracts (Mecenas, Escrow,
+/// LastWill) live behind p2sh commitments and only show themselves at spend
+/// time.
 fn build_templates_snapshot(store: &Store, network: kascov_core::Network) -> Result<serde_json::Value> {
     #[derive(Default)]
     struct Row {
@@ -1231,6 +1235,7 @@ async fn serve(
         .route("/data/{network}/digest.json", get(digest_handler))
         .route("/data/{network}/templates.json", get(templates_handler))
         .route("/data/{network}/tokens.json", get(tokens_handler))
+        .route("/data/{network}/token/{id}", get(token_handler))
         .route("/data/{network}/events", get(events_handler))
         .route("/data/{network}/coins", get(coins_handler))
         .route("/data/{network}/activity.json", get(activity_handler))
@@ -1386,6 +1391,20 @@ async fn follow_forever(
                 continue;
             }
         };
+        // One-shot per database + derivation version: build the KCC20 token
+        // accounting tables from history (then apply() keeps them current
+        // incrementally). Sited here, NOT in Store::open, so the serve path
+        // never pays it (WAL readers keep serving while it runs) — and
+        // BEFORE the node connect, because it needs no node and must not
+        // wait out an outage. The meta gate makes reruns O(1); a failure
+        // retries next session.
+        match store.derive_tokens_if_stale() {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("{network}: token derivation pass complete — {n} tokens derived"),
+            Err(err) => tracing::warn!(
+                "{network}: token derivation failed ({err}) — will retry next session"
+            ),
+        }
         let node = match NodeHandle::connect(network, rpc.as_deref()).await {
             Ok(node) => node,
             Err(err) => {
@@ -2164,52 +2183,49 @@ async fn coins_handler(
     }
 }
 
-/// Templates that put a coin in the tokens directory: the KCC20 skeletons the
-/// decode registry learned from on-chain reveals.
-const KCC20_TEMPLATES: [&str; 2] = ["KCC20 token", "KCC20 minter"];
-
-/// The newest Registry decode of a token covenant's state, as a
-/// label → hex-value map. Live KCC20 state hides behind a P2SH commitment,
-/// so the newest decodable state is usually a spend-time reveal (i.e. the
-/// state as of the last spend); a live state script that decodes wins when
-/// one exists. None when nothing decodes to a KCC20 template.
-fn token_fields(
-    store: &Store,
-    registry: &kascov_decode::Registry,
-    id: &CovenantId,
-) -> Result<Option<serde_json::Value>> {
-    let utxos = store.utxos(id, false)?; // created_daa ascending
-    for utxo in utxos.iter().rev() {
-        let mut d = registry.decode(utxo.spk_version, &utxo.spk_script);
-        if !d.template.is_some_and(|t| t.starts_with("KCC20")) {
-            let Some(redeem) = utxo
-                .spent_sig
-                .as_deref()
-                .and_then(|sig| kascov_decode::p2sh_reveal(&utxo.spk_script, sig))
-            else {
-                continue;
-            };
-            d = registry.decode(utxo.spk_version, &redeem);
-            if !d.template.is_some_and(|t| t.starts_with("KCC20")) {
-                continue;
-            }
-        }
-        if d.fields.is_empty() {
-            continue;
-        }
-        let mut m = serde_json::Map::new();
-        for f in d.fields {
-            m.insert(f.name.to_string(), serde_json::json!(hex::encode(&f.value)));
-        }
-        return Ok(Some(serde_json::Value::Object(m)));
+/// The tokens directory row of one derived token, shared by tokens.json and
+/// the token detail endpoint. `status` carries the validator's verdict
+/// (verified | invalid | unvalidated) — the frontend feature-detects it and
+/// falls back to liveness rendering for rows without one (minters, old
+/// workers). `alive` keeps liveness available without overloading `status`.
+fn token_row_json(t: &kascov_core::tokens::TokenDirRow) -> serde_json::Value {
+    let id_hex = t.token_id.to_string();
+    let mut row = serde_json::json!({
+        "covenant_id": id_hex,
+        "name": og::friendly_name(&id_hex),
+        "template": t.template,
+        "status": t.validation,
+        "alive": t.live_utxos > 0,
+        "live_value": t.live_value,
+        "last_activity_daa": t.last_activity_daa,
+        "holders": t.holders,
+        "unresolved_cells": t.unresolved_cells,
+    });
+    if let Some(reason) = &t.invalid_reason {
+        row["invalid_reason"] = serde_json::json!(reason);
     }
-    Ok(None)
+    if let Some(v) = t.supply {
+        row["supply"] = serde_json::json!(v);
+    }
+    if let Some(v) = t.minted {
+        row["minted"] = serde_json::json!(v);
+    }
+    if let Some(v) = t.burned {
+        row["burned"] = serde_json::json!(v);
+    }
+    if let Some(fields) =
+        t.fields_json.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+    {
+        row["fields"] = fields;
+    }
+    row
 }
 
-/// GET /data/{network}/tokens.json — every covenant the decode registry
-/// recognizes as a KCC20 token/minter build, with its latest Registry-labeled
-/// state when derivable. Decoded from chain state only — nothing here is
-/// validated against KCC20's token rules.
+/// GET /data/{network}/tokens.json — the derived KCC20 token directory:
+/// every token with its validation verdict, proven supply/holders where
+/// provable, plus the minter/vault covenants (legacy row shape, no verdict)
+/// with the token ids they pin. Reads only the precomputed token tables —
+/// no per-request registry decodes, no utxo-table scan.
 async fn tokens_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path(net_name): axum::extract::Path<String>,
@@ -2224,29 +2240,194 @@ async fn tokens_handler(
     let cc = "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
     serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
-        let registry = kascov_decode::Registry::default();
-        let mut tokens = Vec::new();
-        for s in store.covenants_with_templates(&KCC20_TEMPLATES)? {
-            let id_hex = s.covenant_id.to_string();
+        let mut tokens: Vec<(u64, String, serde_json::Value)> = Vec::new();
+        for t in store.token_directory()? {
+            tokens.push((t.last_activity_daa, t.token_id.to_string(), token_row_json(&t)));
+        }
+        // Vault/"minter" covenants keep their legacy row shape (liveness in
+        // `status`, no verdict) so old and new frontends render them as
+        // plain covenants; `governs` links them to the tokens they pin.
+        for m in store.token_minter_directory()? {
+            let id_hex = m.covenant_id.to_string();
+            let governs: Vec<String> = m.governs.iter().map(|g| g.to_string()).collect();
             let mut row = serde_json::json!({
                 "covenant_id": id_hex,
                 "name": og::friendly_name(&id_hex),
-                "template": s.template,
-                "status": if s.live_utxos > 0 { "active" } else { "burned" },
-                "live_value": s.live_value,
-                "last_activity_daa": s.last_activity_daa,
+                "template": "KCC20 minter",
+                "status": if m.live_utxos > 0 { "active" } else { "burned" },
+                "live_value": m.live_value,
+                "last_activity_daa": m.last_activity_daa,
+                "governs": governs,
             });
-            if let Some(fields) = token_fields(&store, &registry, &s.covenant_id)? {
-                row["fields"] = fields;
+            if governs.len() == 2 {
+                // The historical fields shape (both pinned ids), kept so the
+                // shipped directory view's field chips stay populated.
+                row["fields"] = serde_json::json!({
+                    "kcc20_covenant_a": governs[0],
+                    "kcc20_covenant_b": governs[1],
+                });
             }
-            tokens.push(row);
+            tokens.push((m.last_activity_daa, id_hex, row));
         }
+        tokens.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        let derivation_version = store.token_derivation_version()?;
+        let pending =
+            derivation_version.as_deref() != Some(kascov_core::tokens::TOKEN_DERIVATION_VERSION);
+        let tip = store.tip()?;
         Ok(Some(serde_json::to_string(&serde_json::json!({
             "network": network.to_string(),
             "generated_at_ms": now_ms(),
-            "tokens": tokens,
-            "note": "decoded from chain state — not validated against token rules",
+            "tip_daa": tip.map(|t| t.0),
+            "tip_at_ms": tip.map(|t| t.1),
+            "tokens": tokens.into_iter().map(|(_, _, row)| row).collect::<Vec<_>>(),
+            "note": "validated from chain — “verified” means every event in the token’s history \
+                     matched the KCC20 rules with every state hash-proven and supply is conserved; \
+                     anything kascov could not prove stays unvalidated with the reason",
+            "derivation": {
+                "version": derivation_version,
+                "current": kascov_core::tokens::TOKEN_DERIVATION_VERSION,
+                "pending": pending,
+            },
         }))?))
+    })
+    .await
+}
+
+/// Balances page bounds for the token detail endpoint.
+const TOKEN_BALANCES_DEFAULT: u64 = 100;
+const TOKEN_BALANCES_MAX: u64 = 500;
+/// Event-delta page bounds for the token detail endpoint.
+const TOKEN_EVENTS_DEFAULT: u64 = 200;
+const TOKEN_EVENTS_MAX: u64 = 1000;
+
+/// GET /data/{network}/token/{id}?limit=&after_seq=&events_limit= — one
+/// derived token: its directory row, top holders (limit ≤ 500), the
+/// classified event-delta history (oldest first, exclusive `after_seq`
+/// cursor, `next_after_seq` when more remain), and the validation summary.
+/// 404 for ids the derivation doesn't know as tokens.
+async fn token_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    // Strict id parse BEFORE the cache key: garbage must never populate the
+    // cache map (the keyspace stays bounded by real tokens — unknown ids
+    // 404 uncached via the builder's Ok(None)).
+    let id_hex = id.strip_suffix(".json").unwrap_or(&id);
+    let Ok(token_id) = id_hex.parse::<kascov_core::CovenantId>() else {
+        return (StatusCode::BAD_REQUEST, "bad token id").into_response();
+    };
+    let parse_limit = |name: &str, default: u64, max: u64| match q.get(name) {
+        None => Ok(default),
+        Some(s) => s.parse::<u64>().map(|l| l.clamp(1, max)).map_err(|_| name.to_string()),
+    };
+    let (limit, events_limit) = match (
+        parse_limit("limit", TOKEN_BALANCES_DEFAULT, TOKEN_BALANCES_MAX),
+        parse_limit("events_limit", TOKEN_EVENTS_DEFAULT, TOKEN_EVENTS_MAX),
+    ) {
+        (Ok(l), Ok(e)) => (l, e),
+        _ => {
+            return (StatusCode::BAD_REQUEST, "limit must be a non-negative integer")
+                .into_response()
+        }
+    };
+    let after_seq = q.get("after_seq").and_then(|s| s.parse::<u64>().ok());
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!(
+        "{network}/token/{token_id}?limit={limit}&after_seq={}&events_limit={events_limit}",
+        after_seq.map_or(String::new(), |s| s.to_string()),
+    );
+    let cc = "public, max-age=15, s-maxage=30, stale-while-revalidate=120";
+    serve_cached(&state, key, 30, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let Some(t) = store.token_row(&token_id)? else {
+            return Ok(None); // uncached 404
+        };
+        let balances: Vec<serde_json::Value> = store
+            .token_balances(&token_id, limit)?
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "owner": kascov_core::tokens::owner_display(&b.owner),
+                    "balance": b.balance,
+                    "cells": b.cells,
+                })
+            })
+            .collect();
+        // Over-fetch one delta row to learn whether another page exists, then
+        // cut on a whole-event (seq) boundary so no event's deltas straddle
+        // pages. A single event never carries more deltas than a page holds.
+        let mut rows = store.token_events_page(&token_id, after_seq, events_limit + 1)?;
+        let more = rows.len() as u64 > events_limit;
+        let next_after_seq = if more {
+            rows.truncate(events_limit as usize);
+            let boundary = rows.last().map(|r| r.seq);
+            if let Some(boundary) = boundary {
+                let complete: Vec<_> = rows.iter().filter(|r| r.seq < boundary).cloned().collect();
+                if !complete.is_empty() {
+                    rows = complete;
+                }
+            }
+            rows.last().map(|r| r.seq)
+        } else {
+            None
+        };
+        let events: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|e| {
+                let mut row = serde_json::json!({
+                    "seq": e.seq,
+                    "delta_idx": e.delta_idx,
+                    "token_kind": e.kind,
+                    "event_kind": e.event_kind,
+                    "accepting_daa": e.accepting_daa,
+                    "txid": e.txid,
+                });
+                if let Some(a) = e.amount {
+                    row["amount"] = serde_json::json!(a);
+                }
+                if let Some(o) = &e.owner_from {
+                    row["owner_from"] = serde_json::json!(kascov_core::tokens::owner_display(o));
+                }
+                if let Some(o) = &e.owner_to {
+                    row["owner_to"] = serde_json::json!(kascov_core::tokens::owner_display(o));
+                }
+                if let Some(i) = e.tx_index {
+                    row["tx_index"] = serde_json::json!(i);
+                }
+                row
+            })
+            .collect();
+        let checked = store.token_event_count(&token_id)?;
+        let tip = store.tip()?;
+        let mut out = serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "tip_daa": tip.map(|t| t.0),
+            "tip_at_ms": tip.map(|t| t.1),
+            "token": token_row_json(&t),
+            "balances": balances,
+            "events": events,
+            "validation": {
+                "status": t.validation,
+                "reason": t.invalid_reason,
+                "checked": checked,
+                "unresolved_cells": t.unresolved_cells,
+                "derivation_version": store.token_derivation_version()?,
+                "derived_at_daa": t.derived_at_daa,
+            },
+        });
+        if let Some(seq) = next_after_seq {
+            out["next_after_seq"] = serde_json::json!(seq);
+        }
+        Ok(Some(serde_json::to_string(&out)?))
     })
     .await
 }

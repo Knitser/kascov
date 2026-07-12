@@ -103,6 +103,59 @@ CREATE TABLE IF NOT EXISTS reorg_log (
     at_ms INTEGER NOT NULL,
     rolled_back INTEGER NOT NULL
 );
+-- KCC20 token registry, derived deterministically from covenant_events +
+-- covenant_utxos by TOKEN_DERIVATION_VERSION (see tokens.rs). status is the
+-- validator verdict: 'verified' only when every event in the token's history
+-- matched a known rule with every state hash-proven; anything unknown or
+-- ambiguous is 'unvalidated' with a reason. Never a false 'verified'.
+CREATE TABLE IF NOT EXISTS tokens (
+    token_id BLOB PRIMARY KEY,            -- = the KCC20 token covenant's covenant_id
+    status TEXT NOT NULL DEFAULT 'unvalidated',  -- verified | invalid | unvalidated
+    invalid_reason TEXT,                  -- first failing/ambiguous check; NULL when verified
+    supply INTEGER,                       -- genesis + mints - burns; NULL = not provable
+    minted INTEGER,                       -- cumulative proven mints; NULL = not provable
+    burned INTEGER,                       -- cumulative proven burns; NULL = not provable
+    holders INTEGER NOT NULL DEFAULT 0,   -- distinct owners across live hash-proven cells
+    unresolved_cells INTEGER NOT NULL DEFAULT 0, -- live cells whose state is unproven
+    last_activity_daa INTEGER NOT NULL DEFAULT 0,
+    fields_json TEXT,                     -- latest proven state fields (label -> hex)
+    derived_at_daa INTEGER                -- provenance: processed_daa when last derived
+);
+CREATE INDEX IF NOT EXISTS tok_by_activity ON tokens(last_activity_daa DESC, token_id DESC);
+-- minter/vault covenant -> governed token, from the reveal's pinned ids
+CREATE TABLE IF NOT EXISTS token_minters (
+    minter_covenant_id BLOB NOT NULL,
+    token_id BLOB NOT NULL,
+    PRIMARY KEY (minter_covenant_id, token_id)
+);
+CREATE INDEX IF NOT EXISTS tok_minter_by_token ON token_minters(token_id);
+-- per covenant-event token deltas: (covenant_id, seq) is the FK into
+-- covenant_events; delta_idx fans out multi-output events. kind is the token
+-- classification (genesis|mint|transfer|split|merge|burn|unknown); amount is
+-- NULL exactly when the event could not be proven.
+CREATE TABLE IF NOT EXISTS token_events (
+    token_id BLOB NOT NULL,
+    covenant_id BLOB NOT NULL,
+    seq INTEGER NOT NULL,
+    delta_idx INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    amount INTEGER,
+    owner_from TEXT,                      -- hex(identifier_type || owner_identifier)
+    owner_to TEXT,
+    accepting_daa INTEGER NOT NULL,       -- copied from the event row
+    tx_index INTEGER,                     -- copied; NULL on pre-capture rows
+    PRIMARY KEY (token_id, covenant_id, seq, delta_idx)
+);
+CREATE INDEX IF NOT EXISTS tev_by_event ON token_events(covenant_id, seq);
+CREATE INDEX IF NOT EXISTS tev_by_token_time ON token_events(token_id, accepting_daa, tx_index);
+CREATE TABLE IF NOT EXISTS token_balances (
+    token_id BLOB NOT NULL,
+    owner TEXT NOT NULL,                  -- hex(identifier_type || owner_identifier)
+    balance INTEGER NOT NULL,
+    cells INTEGER NOT NULL DEFAULT 0,     -- live proven cells backing this balance
+    PRIMARY KEY (token_id, owner)
+);
+CREATE INDEX IF NOT EXISTS bal_top ON token_balances(token_id, balance DESC);
 ";
 
 pub struct Store {
@@ -436,7 +489,7 @@ pub struct NewUtxo {
     pub spk_script: Vec<u8>,
 }
 
-fn db_err(e: rusqlite::Error) -> Error {
+pub(crate) fn db_err(e: rusqlite::Error) -> Error {
     Error::Rpc(format!("store: {e}"))
 }
 
@@ -538,7 +591,7 @@ fn inscription_kind_of(payload: &[u8]) -> String {
 /// Process-wide decode registry for write-time template recognition —
 /// construction derives the SilverScript skeletons once, and Registry is
 /// Send + Sync (its decoders are `Box<dyn StateDecoder: Send + Sync>`).
-fn registry() -> &'static kascov_decode::Registry {
+pub(crate) fn registry() -> &'static kascov_decode::Registry {
     static REGISTRY: std::sync::OnceLock<kascov_decode::Registry> = std::sync::OnceLock::new();
     REGISTRY.get_or_init(kascov_decode::Registry::default)
 }
@@ -650,6 +703,17 @@ impl Store {
         // them — without this, every /debug/<txid> is a full utxo-table scan.
         conn.execute(
             "CREATE INDEX IF NOT EXISTS utxo_by_spent_txid ON covenant_utxos(spent_txid) WHERE spent_txid IS NOT NULL",
+            [],
+        )
+        .map_err(db_err)?;
+        // KCC20 candidate enumeration for the token derivation pass: the
+        // predicate must stay verbatim-identical to the WHERE in
+        // derive_tokens_if_stale so the partial index covers it. References
+        // ALTER-added columns, so it lives here, never in SCHEMA.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS utxo_kcc20 ON covenant_utxos(covenant_id)
+             WHERE template IN ('KCC20 token','KCC20 minter')
+                OR revealed_template IN ('KCC20 token','KCC20 minter')",
             [],
         )
         .map_err(db_err)?;
@@ -954,6 +1018,17 @@ impl Store {
     /// and advance the cursor.
     pub fn apply(&mut self, block: &BlockEvents, new_cursor: BlockHash) -> Result<()> {
         let tx = self.conn.transaction().map_err(db_err)?;
+        // Fresh KCC20 recognition observed in THIS block, per covenant:
+        // (token evidence, minter evidence). Hoisted from the write-time
+        // template stamps below so the token hook at the end of the
+        // transaction can gate on it with zero extra decodes.
+        let mut kcc20_seen: std::collections::HashMap<[u8; 32], (bool, bool)> =
+            std::collections::HashMap::new();
+        let mut note_kcc20 = |covenant_id: &CovenantId, template: &str| match template {
+            "KCC20 token" => kcc20_seen.entry(covenant_id.0).or_default().0 = true,
+            "KCC20 minter" => kcc20_seen.entry(covenant_id.0).or_default().1 = true,
+            _ => {}
+        };
         // Created rows must land BEFORE spends are marked: one accepting chain
         // block can sweep a whole intra-block chain (tx B spending tx A's
         // covenant output), and marking spends first would no-op against the
@@ -964,6 +1039,7 @@ impl Store {
             // so template analytics stay pure GROUP BYs at read time.
             let template =
                 registry().decode(utxo.spk_version, &utxo.spk_script).template.unwrap_or("");
+            note_kcc20(&utxo.covenant_id, template);
             tx.execute(
                 "INSERT OR REPLACE INTO covenant_utxos
                  (txid, output_index, covenant_id, value, spk_version, spk_script,
@@ -991,18 +1067,19 @@ impl Store {
             // and self-heals via the backfill at the next open.
             let revealed: Option<String> = tx
                 .query_row(
-                    "SELECT spk_version, spk_script FROM covenant_utxos
+                    "SELECT spk_version, spk_script, covenant_id FROM covenant_utxos
                      WHERE txid = ?1 AND output_index = ?2",
                     params![outpoint.txid.0.as_slice(), outpoint.index],
-                    |r| Ok((r.get::<_, u16>(0)?, r.get::<_, Vec<u8>>(1)?)),
+                    |r| Ok((r.get::<_, u16>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, [u8; 32]>(2)?)),
                 )
                 .optional()
                 .map_err(db_err)?
-                .map(|(version, spk)| {
-                    kascov_decode::p2sh_reveal(&spk, sig)
+                .map(|(version, spk, covenant_id)| {
+                    let template = kascov_decode::p2sh_reveal(&spk, sig)
                         .and_then(|redeem| registry().decode(version, &redeem).template)
-                        .unwrap_or("")
-                        .to_string()
+                        .unwrap_or("");
+                    note_kcc20(&CovenantId(covenant_id), template);
+                    template.to_string()
                 });
             tx.execute(
                 "UPDATE covenant_utxos SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3, spent_budget = ?4, revealed_template = ?5
@@ -1085,12 +1162,79 @@ impl Store {
             )
             .map_err(db_err)?;
         }
+        // Token accounting hook — same transaction, so readers can never see
+        // token tables inconsistent with covenant data (and after the
+        // processed_daa stamp, so derived_at_daa provenance names THIS
+        // block). Touched covenants are the events' covenants (classify()
+        // guarantees every created/spent covenant UTXO produces an event)
+        // plus fresh KCC20 recognition from the stamps above; the gate per
+        // covenant is two point lookups, so non-KCC20 blocks (the
+        // overwhelming majority) pay almost nothing.
+        {
+            let mut touched: std::collections::BTreeSet<[u8; 32]> =
+                block.events.iter().map(|e| e.covenant_id.0).collect();
+            touched.extend(kcc20_seen.keys().copied());
+            let mut tokens_todo: std::collections::BTreeSet<[u8; 32]> = Default::default();
+            let mut minters_todo: std::collections::BTreeSet<[u8; 32]> = Default::default();
+            for id in &touched {
+                let (token_ev, minter_ev) = kcc20_seen.get(id).copied().unwrap_or_default();
+                if token_ev || crate::tokens::is_token(&tx, id)? {
+                    tokens_todo.insert(*id);
+                }
+                if minter_ev || crate::tokens::is_minter(&tx, id)? {
+                    minters_todo.insert(*id);
+                }
+            }
+            crate::tokens::rederive_affected(&tx, &minters_todo, &tokens_todo)?;
+        }
         tx.commit().map_err(db_err)
     }
 
     /// Undo everything attributed to the given (reorged-out) chain blocks.
     pub fn rollback(&mut self, removed: &[BlockHash]) -> Result<()> {
         let tx = self.conn.transaction().map_err(db_err)?;
+        // Token rewind, phase 1: capture the affected covenant set BEFORE the
+        // deletes below destroy the rows that carry the mapping. The
+        // spent_block term catches the un-reveal case (rolling back a spend
+        // deletes the reveal that proved a cell's state).
+        let mut affected: std::collections::BTreeSet<[u8; 32]> = Default::default();
+        for hash in removed {
+            let hash = hash.0.as_slice();
+            for sql in [
+                "SELECT DISTINCT covenant_id FROM covenant_events WHERE accepting_block = ?1",
+                "SELECT DISTINCT covenant_id FROM covenant_utxos WHERE created_block = ?1",
+                "SELECT DISTINCT covenant_id FROM covenant_utxos WHERE spent_block = ?1",
+            ] {
+                let mut stmt = tx.prepare(sql).map_err(db_err)?;
+                let ids = stmt
+                    .query_map([hash], |r| r.get::<_, [u8; 32]>(0))
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?;
+                affected.extend(ids);
+            }
+        }
+        let mut tokens_todo: std::collections::BTreeSet<[u8; 32]> = Default::default();
+        let mut minters_todo: std::collections::BTreeSet<[u8; 32]> = Default::default();
+        for id in &affected {
+            if crate::tokens::is_token(&tx, id)? {
+                tokens_todo.insert(*id);
+            }
+            if crate::tokens::is_minter(&tx, id)? {
+                minters_todo.insert(*id);
+            }
+            // Belt and braces: any token whose derived events cite this
+            // covenant is re-derived too (tev_by_event).
+            let mut stmt = tx
+                .prepare("SELECT DISTINCT token_id FROM token_events WHERE covenant_id = ?1")
+                .map_err(db_err)?;
+            let ids = stmt
+                .query_map([id.as_slice()], |r| r.get::<_, [u8; 32]>(0))
+                .map_err(db_err)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(db_err)?;
+            tokens_todo.extend(ids);
+        }
         for hash in removed {
             let hash = hash.0.as_slice();
             // revealed_template goes back to NULL (not ''): with spent_sig
@@ -1113,6 +1257,12 @@ impl Store {
         }
         // Covenants whose genesis was rolled back disappear entirely.
         tx.execute("DELETE FROM covenants WHERE event_count <= 0", []).map_err(db_err)?;
+        // Token rewind, phase 2: re-derive every affected token from the
+        // POST-rollback source tables — exactly what a from-scratch index at
+        // the rolled-back height would contain. Cells whose proving reveal
+        // was rolled back regress to unproven, verdicts regress with them,
+        // and a token whose entire evidence disappeared loses its rows.
+        crate::tokens::rederive_affected(&tx, &minters_todo, &tokens_todo)?;
         // Record the reorg for the public feed. The best-available DAA is the
         // indexer's own progress mark (the tip we had reached) — the removed
         // blocks are being deleted, so their DAAs aren't reliably queryable
@@ -1194,6 +1344,13 @@ impl Store {
 
     pub fn set_tx_index_backfill_done(&self) -> Result<()> {
         self.set_meta("tx_index_backfilled_to", "done")
+    }
+
+    /// Raw connection access for crate-internal tests (planting sentinels,
+    /// simulating pre-capture rows) — never a production surface.
+    #[cfg(test)]
+    pub(crate) fn raw_conn(&self) -> &Connection {
+        &self.conn
     }
 
     /// Simulate rows written by a pre-capture binary (tests only).
@@ -1545,20 +1702,39 @@ impl Store {
             .map_err(db_err)
     }
 
-    /// "What runs on this network": per-template aggregates in one GROUP BY.
+    /// "What runs on this network": per-template aggregates in one pass.
     /// Recognition is stamped at write time, so this never decodes a script.
-    /// NULL rows (written by an older binary, healed at the next open) fold
-    /// into the unrecognized bucket — honest degradation under version skew.
+    /// Each state UTXO counts under its covenant's RESOLVED name — the same
+    /// COALESCE precedence as `covenant_templates()`/`SUMMARY_SELECT` (a
+    /// non-p2* revealed or state template wins, then a non-p2* state
+    /// template, else any) — so a P2SH commitment whose program revealed at
+    /// spend folds into the coin's effective name, and "p2sh commitment"
+    /// keeps only genuinely-unrevealed coins (commitment-time classification
+    /// alone left every semantic template at 0 coins forever). Covenants
+    /// where no cell ever matched a template (including NULL rows written by
+    /// an older binary, healed at the next open) fold into the unrecognized
+    /// bucket — honest degradation under version skew.
     pub fn template_stats(&self) -> Result<Vec<TemplateStat>> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT COALESCE(template, '') AS tpl,
-                        COALESCE(SUM(CASE WHEN spent_block IS NULL THEN 1 ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN spent_block IS NULL THEN value ELSE 0 END), 0),
+                "WITH resolved AS (
+                    SELECT covenant_id,
+                           COALESCE(
+                             MAX(CASE WHEN revealed_template IS NOT NULL AND revealed_template <> '' AND revealed_template NOT LIKE 'p2%' THEN revealed_template
+                                      WHEN template NOT LIKE 'p2%' THEN template END),
+                             MAX(COALESCE(NULLIF(revealed_template, ''), template))) AS tpl
+                    FROM covenant_utxos
+                    WHERE (template IS NOT NULL AND template <> '') OR (revealed_template IS NOT NULL AND revealed_template <> '')
+                    GROUP BY covenant_id)
+                 SELECT COALESCE(r.tpl, '') AS tpl,
+                        COALESCE(SUM(CASE WHEN u.spent_block IS NULL THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN u.spent_block IS NULL THEN u.value ELSE 0 END), 0),
                         COUNT(*),
-                        COUNT(DISTINCT covenant_id)
-                 FROM covenant_utxos GROUP BY tpl ORDER BY COUNT(*) DESC, tpl",
+                        COUNT(DISTINCT u.covenant_id)
+                 FROM covenant_utxos u
+                 LEFT JOIN resolved r ON r.covenant_id = u.covenant_id
+                 GROUP BY tpl ORDER BY COUNT(*) DESC, tpl",
             )
             .map_err(db_err)?;
         let rows = stmt
@@ -2373,7 +2549,8 @@ impl Store {
     }
 
     /// Covenants whose state (or spend-revealed) template is one of
-    /// `templates`, newest activity first — the tokens-directory row source.
+    /// `templates`, newest activity first. Formerly the tokens-directory row
+    /// source; that now reads the derived `tokens` tables (see tokens.rs).
     /// A full covenant_utxos scan (no template index), so callers cache.
     pub fn covenants_with_templates(&self, templates: &[&str]) -> Result<Vec<CovenantSummary>> {
         if templates.is_empty() {
@@ -2396,6 +2573,121 @@ impl Store {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
         Ok(rows)
+    }
+
+    /// One-shot, versioned full derivation of the token tables from history.
+    /// Gated O(1) by a meta version probe; a version bump (rule or skeleton
+    /// change) wipes and re-derives everything. Deliberately NOT run in
+    /// `open()` — the serve path opens a store per request; the follower
+    /// session triggers this so derivation never blocks serving. Batched
+    /// transactions keep writer holds short; the meta stamp lands LAST, in
+    /// its own transaction, so a crash mid-pass redoes the (deterministic)
+    /// work instead of trusting partial state. Returns how many tokens were
+    /// derived (0 = already current).
+    pub fn derive_tokens_if_stale(&mut self) -> Result<u64> {
+        use crate::tokens::{TOKEN_DERIVATION_META, TOKEN_DERIVATION_VERSION};
+        if self.meta(TOKEN_DERIVATION_META)?.as_deref() == Some(TOKEN_DERIVATION_VERSION) {
+            return Ok(0);
+        }
+        let tx = self.conn.transaction().map_err(db_err)?;
+        for sql in [
+            "DELETE FROM token_events",
+            "DELETE FROM token_balances",
+            "DELETE FROM token_minters",
+            "DELETE FROM tokens",
+        ] {
+            tx.execute(sql, []).map_err(db_err)?;
+        }
+        tx.commit().map_err(db_err)?;
+        // Candidate enumeration — the WHERE must stay verbatim-identical to
+        // the utxo_kcc20 partial-index predicate so this is an index walk,
+        // not a utxo-table scan.
+        let candidates: Vec<([u8; 32], bool, bool)> = {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT covenant_id,
+                            MAX(CASE WHEN template = 'KCC20 token' OR revealed_template = 'KCC20 token' THEN 1 ELSE 0 END),
+                            MAX(CASE WHEN template = 'KCC20 minter' OR revealed_template = 'KCC20 minter' THEN 1 ELSE 0 END)
+                     FROM covenant_utxos
+                     WHERE template IN ('KCC20 token','KCC20 minter')
+                        OR revealed_template IN ('KCC20 token','KCC20 minter')
+                     GROUP BY covenant_id",
+                )
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, i64>(2)? != 0)))
+                .map_err(db_err)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(db_err)?;
+            rows
+        };
+        let mut token_set: std::collections::BTreeSet<[u8; 32]> = Default::default();
+        // Minters first: their pinned ids join the token set (a pinned id
+        // with no KCC20 evidence of its own still gets an honest
+        // 'unvalidated' row).
+        {
+            let tx = self.conn.transaction().map_err(db_err)?;
+            for (id, _, minter_ev) in &candidates {
+                if *minter_ev {
+                    token_set.extend(crate::tokens::derive_minter(&tx, id)?);
+                }
+            }
+            tx.commit().map_err(db_err)?;
+        }
+        token_set.extend(candidates.iter().filter(|(_, token_ev, _)| *token_ev).map(|(id, _, _)| *id));
+        let ids: Vec<[u8; 32]> = token_set.into_iter().collect();
+        for chunk in ids.chunks(32) {
+            let tx = self.conn.transaction().map_err(db_err)?;
+            for id in chunk {
+                crate::tokens::derive_token(&tx, id)?;
+            }
+            tx.commit().map_err(db_err)?;
+        }
+        self.set_meta(TOKEN_DERIVATION_META, TOKEN_DERIVATION_VERSION)?;
+        Ok(ids.len() as u64)
+    }
+
+    /// The last completed token-derivation version, if any — serves as the
+    /// "derivation pending" signal for the API.
+    pub fn token_derivation_version(&self) -> Result<Option<String>> {
+        self.meta(crate::tokens::TOKEN_DERIVATION_META)
+    }
+
+    /// Every derived token, newest activity first — the tokens.json source.
+    pub fn token_directory(&self) -> Result<Vec<crate::tokens::TokenDirRow>> {
+        crate::tokens::token_directory(&self.conn)
+    }
+
+    /// One derived token's directory row.
+    pub fn token_row(&self, id: &CovenantId) -> Result<Option<crate::tokens::TokenDirRow>> {
+        crate::tokens::token_row(&self.conn, &id.0)
+    }
+
+    /// Top holders of one token by live hash-proven balance.
+    pub fn token_balances(&self, id: &CovenantId, limit: u64) -> Result<Vec<crate::tokens::TokenBalanceRow>> {
+        crate::tokens::token_balances(&self.conn, &id.0, limit)
+    }
+
+    /// One page of a token's classified event deltas (exclusive `after_seq`
+    /// cursor, oldest first).
+    pub fn token_events_page(
+        &self,
+        id: &CovenantId,
+        after_seq: Option<u64>,
+        limit: u64,
+    ) -> Result<Vec<crate::tokens::TokenEventRow>> {
+        crate::tokens::token_events_page(&self.conn, &id.0, after_seq, limit)
+    }
+
+    /// Every registered minter/vault covenant with the token ids it pins.
+    pub fn token_minter_directory(&self) -> Result<Vec<crate::tokens::TokenMinterRow>> {
+        crate::tokens::token_minter_directory(&self.conn)
+    }
+
+    /// How many classified events the validator walked for one token.
+    pub fn token_event_count(&self, id: &CovenantId) -> Result<u64> {
+        crate::tokens::token_event_count(&self.conn, &id.0)
     }
 
     pub fn utxos(&self, id: &CovenantId, live_only: bool) -> Result<Vec<UtxoRow>> {
@@ -3074,6 +3366,73 @@ mod tests {
             store.revealed_template_counts().unwrap(),
             vec![("p2pk state".to_string(), 1)]
         );
+    }
+
+    /// The templates panel aggregates by the covenant's RESOLVED name (the
+    /// grid-row precedence): a p2sh coin whose program revealed a semantic
+    /// template at spend counts under the revealed name — every cell of the
+    /// coin, live ones included — while a genuinely-unrevealed p2sh coin
+    /// stays in the "p2sh commitment" bucket.
+    #[test]
+    fn template_stats_aggregate_by_resolved_covenant_name() {
+        let mut store = test_store("templates-resolved");
+        let p2sh = |seed: u8| {
+            let mut s = vec![0xaa, 0x20];
+            s.extend([seed; 32]);
+            s.push(0x87);
+            s
+        };
+        let utxo = |tx: u8, cov: u8, script: Vec<u8>| NewUtxo {
+            outpoint: Outpoint { txid: TxId([tx; 32]), index: 0 },
+            covenant_id: CovenantId([cov; 32]),
+            value: 1_000,
+            spk_version: 1,
+            spk_script: script,
+        };
+        // 0xE5: two p2sh cells (0x01 spent below, 0x02 stays live);
+        // 0xF6: one live p2sh cell, never revealed.
+        let mut b1 = BlockEvents::empty(BlockHash([1; 32]));
+        b1.accepting_daa = 100;
+        b1.created_utxos = vec![
+            utxo(0x01, 0xE5, p2sh(0x11)),
+            utxo(0x02, 0xE5, p2sh(0x22)),
+            utxo(0x03, 0xF6, p2sh(0x33)),
+        ];
+        store.apply(&b1, BlockHash([1; 32])).unwrap();
+        let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
+        b2.accepting_daa = 200;
+        b2.spent_utxos =
+            vec![(Outpoint { txid: TxId([0x01; 32]), index: 0 }, TxId([0x04; 32]), vec![], 0)];
+        store.apply(&b2, BlockHash([2; 32])).unwrap();
+
+        // every cell classifies as a commitment until a reveal names the coin
+        let by_name = |stats: &[TemplateStat], name: Option<&str>| {
+            stats.iter().find(|s| s.template.as_deref() == name).cloned().unwrap()
+        };
+        let stats = store.template_stats().unwrap();
+        let p2sh_row = by_name(&stats, Some("p2sh commitment"));
+        assert_eq!((p2sh_row.live_states, p2sh_row.ever_seen, p2sh_row.covenants), (2, 3, 2));
+
+        // stamp 0xE5's spent cell with a semantic reveal (the pick rule is
+        // under test here, not reveal decoding — which recognize_and_bucket
+        // already covers)
+        store
+            .conn
+            .execute(
+                "UPDATE covenant_utxos SET revealed_template = 'genesis0 · list' WHERE txid = ?1",
+                [[0x01u8; 32].as_slice()],
+            )
+            .unwrap();
+
+        let stats = store.template_stats().unwrap();
+        // the revealed name owns ALL of 0xE5's cells — the live unrevealed
+        // one included (that's the coin's effective name now)
+        let named = by_name(&stats, Some("genesis0 · list"));
+        assert_eq!((named.live_states, named.ever_seen, named.covenants), (1, 2, 1));
+        assert_eq!(named.live_value, 1_000);
+        // "p2sh commitment" shrinks to the genuinely-unrevealed coin
+        let p2sh_row = by_name(&stats, Some("p2sh commitment"));
+        assert_eq!((p2sh_row.live_states, p2sh_row.ever_seen, p2sh_row.covenants), (1, 1, 1));
     }
 
     #[test]
