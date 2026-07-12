@@ -179,6 +179,20 @@ function shortHex(hex, head, tail) {
   if (!hex || hex.length <= head + tail + 1) return hex || '';
   return `${hex.slice(0, head)}…${hex.slice(-tail)}`;
 }
+/* decode a little-endian hex byte string into a human integer ("71,753") —
+   the client-side twin of the worker's KCC20 state-amount decode (8 LE
+   bytes, same bytes that feed the derived supply). BigInt keeps 8-byte
+   values exact. Returns null when the input isn't plain even-length hex,
+   so callers can fall back to showing the raw value instead of lying. */
+function leAmount(hex) {
+  if (typeof hex !== 'string' || hex.length === 0 || hex.length % 2 !== 0 ||
+      !/^[0-9a-fA-F]+$/.test(hex)) return null;
+  let v = 0n;
+  for (let i = hex.length - 2; i >= 0; i -= 2) {
+    v = (v << 8n) | BigInt(parseInt(hex.slice(i, i + 2), 16));
+  }
+  return v.toLocaleString('en-US');
+}
 /* provenance chip: does the index hold this coin's every state back to
    genesis? optional field — render nothing when the export didn't ship it. */
 function lineageBadge(c) {
@@ -226,6 +240,6 @@ export {
   idByte, friendlyName, semanticTemplate, avatarSvg,
   ICONS, KIND_META, GLOSSARY,
   esc, ordinal, fmtInt,
-  relTime, relTimeShort, fmtClock, fmtSpan, shortHex,
+  relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
 };

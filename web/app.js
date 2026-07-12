@@ -8,7 +8,7 @@ import {
   idByte, friendlyName, semanticTemplate, avatarSvg,
   ICONS, KIND_META, GLOSSARY,
   esc, ordinal, fmtInt,
-  relTime, relTimeShort, fmtClock, fmtSpan, shortHex,
+  relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
 } from './core/format.js';
 import {
@@ -28,6 +28,7 @@ import {
   galaxyCache, loadGalaxy,
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,
   TOKENS_TTL_MS, tokenPages, loadTokens,
+  tokenDetails, loadTokenDetail,
   loadChangelog,
 } from './core/data.js';
 
@@ -1421,9 +1422,10 @@ function templateColor(name) {
   return 'var(--burn)';
 }
 
-/* "what's running here" — bar length ∝ live states (present tense); a
-   template that only ever showed up in spend-time reveals keeps a zero bar
-   and the "ran N× at spend" count carries the truth */
+/* "what's running here" — bar length ∝ coins, the same number the row's
+   text leads with; a template that only ever showed up in spend-time
+   reveals keeps a zero bar and renders runs-only ("ran N× at spend"
+   carries the truth) */
 function renderTemplates(network) {
   const section = $('#section-templates');
   const host = $('#template-bars');
@@ -1445,20 +1447,23 @@ function renderTemplates(network) {
     host.innerHTML = '<p class="dim">no contract state seen here yet.</p>';
     return;
   }
-  const max = Math.max(1, ...rows.map((r) => r.live_states));
+  const max = Math.max(1, ...rows.map((r) => Number(r.covenants) || 0));
   host.innerHTML = rows.map((r) => {
-    const w = r.live_states > 0 ? Math.max((r.live_states / max) * 100, 2).toFixed(1) : 0;
+    const coins = Number(r.covenants) || 0;
+    const w = coins > 0 ? Math.max((coins / max) * 100, 2).toFixed(1) : 0;
     const color = r.unrec ? 'var(--faint)' : templateColor(r.label);
-    const bits = [
+    /* a row that only ever existed as spend-time reveals has no state to
+       count — show just the honest runs figure, not a row of zeros */
+    const bits = (coins === 0 && !(Number(r.ever_seen) > 0) && r.revealed_runs > 0) ? [] : [
+      `${fmtInt(coins)} coin${coins === 1 ? '' : 's'}`,
       `${fmtInt(r.live_states)} live`,
       `${fmtInt(r.ever_seen)} ever`,
-      `${fmtInt(r.covenants)} coin${r.covenants === 1 ? '' : 's'}`,
     ];
     if (r.revealed_runs > 0) bits.push(`ran ${fmtInt(r.revealed_runs)}× at spend`);
     const nameTip = GLOSSARY[r.label] ||
       (r.unrec ? 'state scripts kascov doesn\u2019t recognize as a known shape yet — matching never guesses'
         : `a compiled ${r.label} contract, recognized by its instruction skeleton with constructor arguments labeled`);
-    const countsTip = `live: unspent right now \u00b7 ever: all state pieces indexed with this shape \u00b7 coins: distinct smart coins` +
+    const countsTip = `coins: distinct smart coins whose effective shape this is \u00b7 live: their state pieces unspent right now \u00b7 ever: all their state pieces indexed` +
       (r.revealed_runs > 0 ? ' \u00b7 ran at spend: hidden programs revealed and hash-verified when spent' : '');
     return `<div class="tpl-row"><span class="tpl-name" title="${esc(nameTip)}">${esc(r.label)}</span>` +
       `<span class="tpl-track" aria-hidden="true"><span class="tpl-fill" style="width:${w}%;background:${color}"></span></span>` +
@@ -2725,6 +2730,7 @@ function renderDetail(entry, covId, flashTx, program) {
       `<span class="pill ${alive0 ? 'pill-alive' : 'pill-retired'}" title="${esc(alive0 ? GLOSSARY.alive : GLOSSARY.retired)}">${alive0 ? 'alive' : 'retired'}</span>` +
       `<button type="button" class="star${watched0 ? ' starred' : ''}" data-action="watch" data-id="${esc(covId)}" aria-pressed="${watched0}" aria-label="watch this coin">★</button>` +
       lineageBadge(gridRec.c) +
+      tokenBacklinkHtml(network, covId) +
       `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span> ${usdToggleHtml()}</p>` +
       `<p class="id-chip"><span class="mono">${esc(shortHex(covId, 10, 8))}</span>` +
       `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(covId)}" aria-label="copy this coin’s full id">copy id</button>` +
@@ -2886,6 +2892,7 @@ function renderDetail(entry, covId, flashTx, program) {
     ` aria-pressed="${watched}" aria-label="${watched ? 'stop watching' : 'watch'} this coin">★</button>` +
     (genLabel ? `<span class="flag flag-off flag-gen" title="controlled by the known testnet traffic-generator key — bulk p2pk traffic, not an app">${esc(genLabel)}</span>` : '') +
     lineageBadge(c) +
+    tokenBacklinkHtml(network, c.covenant_id) +
     `<span class="dim">smart coin on ${esc(NETWORKS[network].label)}</span> ${usdToggleHtml()}</p>` +
     `<p class="id-chip"><span class="mono">${esc(shortHex(c.covenant_id, 10, 8))}</span>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(c.covenant_id)}" aria-label="copy this coin’s full id">copy id</button>` +
@@ -3653,14 +3660,64 @@ function renderLane(route) {
 
 const TOKEN_NOTE_FALLBACK = 'decoded from chain — not validated: kascov shows what these covenants ' +
   'wrote in their own bytes; it does not (yet) check KCC20 balance rules';
+const TOKEN_NOTE_VALIDATED = 'validated from chain — “verified” means every event in the token’s ' +
+  'history matched the KCC20 rules and supply is conserved; anything kascov could not prove stays unvalidated';
+
+/* The conservative per-token validation verdict, feature-detected: rows from
+   a newer worker carry status verified|invalid|unvalidated (plus supply,
+   minted, burned, holders); older rows keep status active|burned and none of
+   it, and render exactly as before. A token is never CALLED verified unless
+   the worker proved every event in its history — that's the whole point. */
+const TOKEN_VSTATUS = {
+  verified: {
+    cls: 'pill-verified', label: 'verified ✓',
+    tip: 'every event in this token’s history matched the KCC20 rules and supply is conserved — verified from chain',
+  },
+  invalid: {
+    cls: 'pill-invalid', label: 'invalid',
+    tip: 'this token broke a KCC20 rule somewhere in its history',
+  },
+  unvalidated: {
+    cls: 'pill-unvalidated', label: 'unvalidated',
+    tip: 'kascov could not match every event in this token’s history to a known KCC20 rule — not counted as verified',
+  },
+};
+
+function tokenVstatus(t) {
+  return t && TOKEN_VSTATUS[t.status] ? t.status : null;
+}
+
+function tokenStatusBadge(t) {
+  const vs = tokenVstatus(t);
+  if (!vs) return '';
+  const m = TOKEN_VSTATUS[vs];
+  const tip = (vs !== 'verified' && (t.invalid_reason || t.reason)) || m.tip;
+  return `<span class="pill ${m.cls}" title="${esc(tip)}">${esc(m.label)}</span>`;
+}
+
+/* token amounts are raw on-chain units (KCC20 carries no decimals kascov
+   would trust); anything non-numeric shows as itself rather than lying */
+function fmtTokenAmount(a) {
+  if (typeof a === 'number' && Number.isFinite(a)) return fmtInt(a);
+  return a == null ? '—' : String(a);
+}
 
 /* the decoded fields object as compact label/value chips — long hex values
-   shortened for display, the full value in the tooltip */
+   shortened for display, the full value in the tooltip. The state amount is
+   8 little-endian bytes: decode it to the human number (same decode the
+   worker applies for supply), raw hex kept in the tooltip for nerds.
+   owner_identifier stays truncated hex — it IS an identifier. */
 function tokenFieldChips(fields) {
   const entries = Object.entries(fields || {}).slice(0, 6);
   if (!entries.length) return '<span class="dim">—</span>';
   return entries.map(([k, v]) => {
     const val = String(v == null ? '' : v);
+    if (k === 'amount') {
+      const n = leAmount(val);
+      if (n != null) {
+        return `<span class="tpl-field" title="amount (raw LE bytes): ${esc(val)}">amount <strong>${esc(n)}</strong></span>`;
+      }
+    }
     const shown = /^[0-9a-fA-F]{16,}$/.test(val) ? shortHex(val.toLowerCase(), 8, 6)
       : val.length > 28 ? `${val.slice(0, 28)}…` : val;
     return `<span class="tpl-field" title="${esc(k)}: ${esc(val)}">${esc(k)} <strong>${esc(shown)}</strong></span>`;
@@ -3674,11 +3731,16 @@ function renderTokens() {
   const net = NETWORKS[network];
   document.title = `tokens on ${net.label} — kascov`;
   const back = `<a class="back" href="#/${esc(network)}/explore">← all smart coins</a>`;
-  const head = (d) => back +
+  /* rows carrying a validation verdict mean a newer worker — the directory
+     gains badges, supply/holders columns and token-page links; without them
+     everything renders exactly as before */
+  const head = (d, validated) => back +
     `<header class="page-head tokens-head"><h1>tokens</h1>` +
     `<p class="page-sub">covenant tokens on ${esc(net.label)} — every KCC20-shaped coin the indexer decoded, ` +
     `read straight from the chain’s bytes ${usdToggleHtml()}</p>` +
-    `<p class="tokens-note">⚠ ${esc((d && d.note) || TOKEN_NOTE_FALLBACK)}</p>` +
+    (validated
+      ? `<p class="tokens-note tokens-note-info">${esc((d && d.note) || TOKEN_NOTE_VALIDATED)}</p>`
+      : `<p class="tokens-note">⚠ ${esc((d && d.note) || TOKEN_NOTE_FALLBACK)}</p>`) +
     `</header>`;
   const cached = tokenPages.get(network);
   const fresh = cached && Date.now() - cached.at < TOKENS_TTL_MS;
@@ -3709,8 +3771,9 @@ function renderTokens() {
   }
   const d = cached.data || {};
   const tokens = Array.isArray(d.tokens) ? d.tokens : [];
+  const validated = tokens.some((t) => tokenVstatus(t));
   if (!tokens.length) {
-    view.innerHTML = head(d) + `<div class="empty-card"><h2>no covenant tokens found on this network yet.</h2>` +
+    view.innerHTML = head(d, validated) + `<div class="empty-card"><h2>no covenant tokens found on this network yet.</h2>` +
       `<p class="dim">they’re coming — the first KCC20-shaped coins will show up here on their own.</p></div>`;
     return;
   }
@@ -3724,7 +3787,15 @@ function renderTokens() {
     }
     return entry ? daaToMs(daa, entry.data) : null;
   };
-  const rows = tokens.map((t) => {
+  /* verified first (the ones kascov can vouch for), then by last activity;
+     an unvalidated directory keeps the worker's order untouched */
+  const list = tokens.slice();
+  if (validated) {
+    list.sort((a, b) =>
+      ((tokenVstatus(b) === 'verified' ? 1 : 0) - (tokenVstatus(a) === 'verified' ? 1 : 0)) ||
+      ((b.last_activity_daa || 0) - (a.last_activity_daa || 0)));
+  }
+  const rows = list.map((t) => {
     const cid = String(t.covenant_id || '');
     const name = t.name || friendlyName(cid);
     const alive = t.status === 'active';
@@ -3732,20 +3803,253 @@ function renderTokens() {
     const when = ms != null ? `<span title="${esc(utcTitle(ms))}">${esc(relTimeShort(ms))}</span>`
       : t.last_activity_daa != null ? `<span class="mono dim">DAA ${esc(fmtInt(t.last_activity_daa))}</span>`
       : '<span class="dim">—</span>';
+    /* rows carrying their own verdict link to the token page (badges,
+       balances, timeline); verdict-less rows — minter/vault covenants and
+       every old-worker row — keep going straight to the coin page, because
+       the token endpoint only knows derived tokens (minter ids 404 there) */
+    const href = tokenVstatus(t) ? `#/${esc(network)}/token/${esc(cid)}` : `#/${esc(network)}/c/${esc(cid)}`;
     return `<tr>` +
-      `<td><a class="token-coin" href="#/${esc(network)}/c/${esc(cid)}">${avatarSvg(cid, 26)} <span class="token-name">${esc(name)}</span></a></td>` +
+      `<td><a class="token-coin" href="${href}">${avatarSvg(cid, 26)} <span class="token-name">${esc(name)}</span></a></td>` +
       `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}</td>` +
       `<td><div class="tokens-fields">${tokenFieldChips(t.fields)}</div></td>` +
+      (validated
+        ? `<td class="tokens-supply">${t.supply != null ? esc(fmtTokenAmount(t.supply)) : '<span class="dim">—</span>'}</td>` +
+          `<td class="tokens-holders">${t.holders != null ? esc(fmtInt(t.holders)) : '<span class="dim">—</span>'}</td>`
+        : '') +
       `<td class="tokens-value">${t.live_value != null ? esc(amountWithUsd(t.live_value, network)) : '<span class="dim">—</span>'}</td>` +
-      `<td><span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span></td>` +
+      `<td>${tokenStatusBadge(t) ||
+        `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>`}</td>` +
       `<td class="tokens-when">${when}</td>` +
       `</tr>`;
   }).join('');
-  view.innerHTML = head(d) +
-    `<p class="dim tokens-count">${esc(fmtInt(tokens.length))} token coin${tokens.length === 1 ? '' : 's'} — tap any row’s name for its full life story</p>` +
+  view.innerHTML = head(d, validated) +
+    `<p class="dim tokens-count">${esc(fmtInt(tokens.length))} token coin${tokens.length === 1 ? '' : 's'} — ` +
+    `${validated ? 'tap any row’s name for its token page' : 'tap any row’s name for its full life story'}</p>` +
     `<div class="tokens-tablewrap"><table class="tokens-table">` +
-    `<thead><tr><th>token</th><th>template</th><th>decoded fields</th><th>holds</th><th>status</th><th>last activity</th></tr></thead>` +
+    `<thead><tr><th>token</th><th>template</th><th>decoded fields</th>` +
+    (validated ? `<th>supply</th><th>holders</th>` : '') +
+    `<th>holds</th><th>status</th><th>last activity</th></tr></thead>` +
     `<tbody>${rows}</tbody></table></div>`;
+}
+
+/* -------------------------------------------------------------- token page */
+
+/* #/{net}/token/{id} — one decoded token: stat tiles, the validation verdict
+   (conservative: "verified" is a proof, everything else says why not), top
+   balances, and the classified mint/transfer/burn timeline. Born modular
+   (M5): renders from core/data's loadTokenDetail cache and core helpers
+   only, no shared view state — lifts into web/views/token.js unchanged. */
+
+const TOKEN_EV_META = {
+  mint:     { icon: 'born', cls: 'kind-born', chip: 'tok-mint' },
+  transfer: { icon: 'move', cls: 'kind-move', chip: 'tok-transfer' },
+  burn:     { icon: 'burn', cls: 'kind-burn', chip: 'tok-burn' },
+};
+const TOKEN_EVENTS_SHOWN = 200; /* defensive DOM cap — the endpoint may not cap */
+
+/* an owner pubkey as a compact link to its address page (plain text when it
+   isn't a pubkey shape we can route) */
+function tokenOwnerLink(network, pk) {
+  const s = String(pk || '');
+  if (!s) return '';
+  const inner = `${esc(shortHex(s.toLowerCase(), 8, 6))}`;
+  return PUBKEY_RE.test(s)
+    ? `<a class="mono" href="#/${esc(network)}/addr/${esc(s.toLowerCase())}" title="${esc(s)}">${inner}</a>`
+    : `<span class="mono" title="${esc(s)}">${inner}</span>`;
+}
+
+function tokenEventItem(ev, network, toMs) {
+  const kind = String(ev.token_kind || '');
+  const meta = TOKEN_EV_META[kind] || TOKEN_EV_META.transfer;
+  const ms = toMs(ev.accepting_daa);
+  /* state-accurate wording: on mint/transfer rows `amount` is the created
+     cell's FULL state amount — "now holds", never "minted/moved" (summing
+     those would overstate; net-delta math is the worker's job, not ours).
+     A burn's amount IS the consumed cell's holdings, so that row keeps it. */
+  const amount = ev.amount != null ? `<strong>${esc(fmtTokenAmount(ev.amount))}</strong>` : '';
+  const from = ev.owner_from ? tokenOwnerLink(network, ev.owner_from) : '';
+  const to = ev.owner_to ? tokenOwnerLink(network, ev.owner_to) : '';
+  let text;
+  if (kind === 'mint') text = `${amount ? `cell now holds ${amount}` : 'cell created'}${to ? ` — owned by ${to}` : ''}`;
+  else if (kind === 'burn') text = `${amount ? `burned a cell holding ${amount}` : 'burned'}${from ? ` — from ${from}` : ''}`;
+  else text = `${amount ? `now holds ${amount}` : 'moved'}${from ? ` — from ${from}` : ''}${to ? `${from ? '' : ' —'} to ${to}` : ''}`;
+  const when = ms != null
+    ? `<span title="${esc(utcTitle(ms))}">${esc(relTime(ms))}</span> · <span class="abs-t" title="${esc(utcTitle(ms))}">${esc(absShort(ms))}</span>`
+    : `<span class="mono dim">DAA ${esc(fmtInt(ev.accepting_daa || 0))}</span>`;
+  return `<li class="tl-item ${meta.cls}">` +
+    `<span class="tl-icon" aria-hidden="true">${ICONS[meta.icon]}</span>` +
+    `<div class="tl-body">` +
+    `<p class="tl-text"><span class="tok-ev-chip ${meta.chip}">${esc(kind || 'event')}</span> ${text}</p>` +
+    `<p class="tl-meta">${when}` +
+    (ev.txid ? ` · <a href="${esc(txUrl(network, ev.txid))}" target="_blank" rel="noopener noreferrer">view transaction ↗</a>` : '') +
+    `</p></div></li>`;
+}
+
+/* the validation box — the page's honesty anchor: a teal proof statement for
+   verified, the actual reason (never a shrug) for everything else */
+function tokenValidationHtml(t, validation) {
+  const v = validation || {};
+  const vs = tokenVstatus(t);
+  if (!vs) return '';
+  const reason = v.reason || t.invalid_reason || t.reason || '';
+  const checked = typeof v.checked === 'number'
+    ? ` <span class="dim">(${esc(fmtInt(v.checked))} event${v.checked === 1 ? '' : 's'} checked)</span>` : '';
+  if (vs === 'verified') {
+    return `<section class="token-validation tv-verified" aria-label="Validation">` +
+      `<span class="tv-badge">✓ verified from chain</span>` +
+      `<p class="tv-body">every event in this token’s history matched the KCC20 rules and supply is conserved — verified from chain.${checked}</p>` +
+      `</section>`;
+  }
+  const badge = vs === 'invalid' ? '✗ invalid' : 'unvalidated';
+  const fallback = TOKEN_VSTATUS[vs].tip;
+  return `<section class="token-validation tv-${vs}" aria-label="Validation">` +
+    `<span class="tv-badge">${esc(badge)}</span>` +
+    `<p class="tv-body">${esc(reason || fallback)}${checked}</p>` +
+    `</section>`;
+}
+
+function renderTokenPage(route) {
+  const network = state.network;
+  const view = $('#view-token');
+  if (!view) return; /* stale cached index.html */
+  const id = route.id;
+  const net = NETWORKS[network];
+  const cached = tokenDetails.get(`${network}/${id}`);
+  const back = `<a class="back" href="#/${esc(network)}/tokens">← all tokens</a>`;
+  const fresh = cached && Date.now() - cached.at < TOKENS_TTL_MS;
+  if (!fresh) {
+    /* stale-while-revalidate, same shape as lane pages */
+    loadTokenDetail(network, id)
+      .then(() => {
+        const r = parseRoute();
+        if (state.network === network && r.view === 'token' && r.id === id) renderTokenPage(r);
+      })
+      .catch(() => {
+        if (cached) return; /* stale data beats an error card */
+        const r = parseRoute();
+        if (state.network === network && r.view === 'token' && r.id === id) {
+          view.innerHTML = back + `<div class="empty-card"><h2>couldn’t load this token.</h2>` +
+            `<p class="dim">the lookup didn’t answer — the worker may be busy. it’s not you.</p>` +
+            `<button type="button" class="btn" data-action="retry-token">try again</button></div>`;
+        }
+      });
+  }
+  if (!cached) {
+    document.title = `token ${friendlyName(id)} — kascov`;
+    view.innerHTML = back + `<p class="dim">reading this token’s story…</p>`;
+    return;
+  }
+  if (cached.missing) {
+    document.title = 'token not found — kascov';
+    view.innerHTML = back + `<div class="empty-card"><h2>token pages need a newer worker.</h2>` +
+      `<p class="dim">this kascov worker doesn’t serve per-token pages yet — or this id isn’t a token it knows. ` +
+      `the underlying <a href="#/${esc(network)}/c/${esc(id)}">smart coin page</a> still works.</p></div>`;
+    return;
+  }
+  const d = cached.data || {};
+  const t = d.token || {};
+  const name = t.name || friendlyName(id);
+  document.title = `token ${name} — kascov`;
+
+  /* daa→ms: the payload's own tip anchor first, the grid snapshot's second,
+     the raw DAA (never a made-up time) last — same policy as the directory */
+  const entry = state.cache[network];
+  const toMs = (daa) => {
+    if (daa == null) return null;
+    if (d.tip_daa != null) {
+      return (d.tip_at_ms != null ? d.tip_at_ms : d.generated_at_ms) - (d.tip_daa - daa) * MS_PER_DAA;
+    }
+    return entry ? daaToMs(daa, entry.data) : null;
+  };
+
+  const header =
+    `<header class="detail-head">` +
+    `<span role="img" aria-label="avatar of ${esc(name)}">${avatarSvg(id, 88)}</span>` +
+    `<div class="detail-id"><h1>${esc(name)}</h1>` +
+    `<p class="detail-tags">` +
+    tokenStatusBadge(t) +
+    (t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '') +
+    `<span class="dim">covenant token on ${esc(net.label)}</span></p>` +
+    `<p class="id-chip"><span class="mono">${esc(shortHex(id, 10, 8))}</span>` +
+    `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(id)}" aria-label="copy this token’s covenant id">copy id</button>` +
+    `<a class="token-coin-link" href="#/${esc(network)}/c/${esc(id)}">underlying smart coin →</a></p>` +
+    `</div></header>`;
+
+  const fieldsLine = t.fields && Object.keys(t.fields).length
+    ? `<div class="tokens-fields token-page-fields">${tokenFieldChips(t.fields)}</div>` : '';
+
+  const tiles = [
+    ['supply', t.supply], ['minted', t.minted], ['burned', t.burned], ['holders', t.holders],
+  ].filter(([, v]) => v != null);
+  const stats = tiles.length
+    ? `<div class="lane-stats token-stats">` + tiles.map(([label, v]) =>
+        `<div class="stat"><span class="stat-n">${esc(fmtTokenAmount(v))}</span><span class="stat-label">${esc(label)}</span></div>`
+      ).join('') + `</div>`
+    : '';
+
+  /* top holders: balance share against the live supply when the worker gave
+     one, else against the sum of what it listed — never a made-up total */
+  const balances = Array.isArray(d.balances) ? d.balances : [];
+  let holdersSection = '';
+  if (balances.length) {
+    const listed = balances.reduce((s, b) => s + (typeof b.balance === 'number' ? b.balance : 0), 0);
+    const base = typeof t.supply === 'number' && t.supply > 0 ? t.supply : listed;
+    const holderRows = balances.map((b) => {
+      const share = base > 0 && typeof b.balance === 'number' ? (b.balance / base) * 100 : null;
+      const pct = share != null ? (share >= 9.95 ? share.toFixed(0) : share.toFixed(1)) : null;
+      return `<tr>` +
+        `<td>${tokenOwnerLink(network, b.owner)}</td>` +
+        `<td class="tokens-supply">${esc(fmtTokenAmount(b.balance))}</td>` +
+        `<td class="token-share">${pct != null
+          ? `<span class="lane-track token-share-track"><span class="lane-fill" style="width:${Math.max(Math.min(share, 100), 1).toFixed(1)}%"></span></span> ${esc(pct)}%`
+          : '<span class="dim">—</span>'}</td>` +
+        `</tr>`;
+    }).join('');
+    const moreNote = typeof t.holders === 'number' && t.holders > balances.length
+      ? ` — the ${esc(fmtInt(balances.length))} largest of ${esc(fmtInt(t.holders))} holders` : '';
+    holdersSection = `<section class="token-balances" aria-label="Top holders"><h2>top holders</h2>` +
+      `<p class="dim">who holds this token right now${moreNote}</p>` +
+      `<div class="tokens-tablewrap"><table class="tokens-table token-balances-table">` +
+      `<thead><tr><th>owner</th><th>balance</th><th>share</th></tr></thead>` +
+      `<tbody>${holderRows}</tbody></table></div></section>`;
+  }
+
+  /* the classified timeline — every event the validator walked, as
+     mint/transfer/burn chips with amounts */
+  const events = Array.isArray(d.events) ? d.events : [];
+  let timelineSection = '';
+  if (events.length) {
+    const shown = events.slice(0, TOKEN_EVENTS_SHOWN);
+    const capNote = events.length > shown.length
+      ? `<p class="dim">showing ${esc(fmtInt(shown.length))} of ${esc(fmtInt(events.length))} events.</p>` : '';
+    timelineSection = `<section aria-label="Token history"><h2>token history</h2>` +
+      `<ol class="timeline">${shown.map((ev) => tokenEventItem(ev, network, toMs)).join('')}</ol>${capNote}</section>`;
+  }
+
+  view.innerHTML = back + header + fieldsLine +
+    stats +
+    tokenValidationHtml(t, d.validation) +
+    holdersSection +
+    timelineSection;
+}
+
+/* a coin page's "part of token …" backlink — built only from data ALREADY in
+   the token caches (the directory, or a token page opened this session), so
+   it never costs a coin page an extra request. Old-shape directories (no
+   validation verdicts → no token pages on that worker) never link. */
+function tokenBacklinkHtml(network, covId) {
+  let name = null;
+  const dir = tokenPages.get(network);
+  if (dir && dir.data && Array.isArray(dir.data.tokens)) {
+    const row = dir.data.tokens.find((x) => x.covenant_id === covId);
+    if (row && tokenVstatus(row)) name = row.name || friendlyName(covId);
+  }
+  if (!name) {
+    const det = tokenDetails.get(`${network}/${covId}`);
+    if (det && det.data && det.data.token) name = det.data.token.name || friendlyName(covId);
+  }
+  if (!name) return '';
+  return `<a class="token-backlink" href="#/${esc(network)}/token/${esc(covId)}">part of token ${esc(name)} →</a>`;
 }
 
 /* ---------------------------------------------------------------- routing */
@@ -3781,6 +4085,9 @@ function parseRoute() {
   /* '#/tokens' and '#/<network>/tokens' — the decoded covenant-token directory */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?tokens\/?$/);
   if (m) return { view: 'tokens', network: m[1] || null };
+  /* '#/<network>/token/<covenant id>' — one decoded token's page */
+  m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?token\/([0-9a-fA-F]{6,64})\/?$/);
+  if (m) return { view: 'token', network: m[1] || null, id: m[2].toLowerCase() };
   /* '#/explore' and '#/<network>/explore' — '?galaxy=1' opens the galaxy */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
   if (m) return { view: 'explore', network: m[1] || null, galaxy: params.get('galaxy') === '1' };
@@ -3803,6 +4110,7 @@ function routeHash(view, id) {
   if (view === 'lane') return `#/${state.network}/lane/${id}`;
   /* the token directory exists on any network — keep the page, switch the data */
   if (view === 'tokens') return `#/${state.network}/tokens`;
+  if (view === 'token') return `#/${state.network}/token/${id}`;
   if (view === 'explore') return `#/${state.network}/explore`;
   /* decode/dev/changelog are network-free — switching networks keeps the page (and its query) */
   if (view === 'decode' || view === 'dev' || view === 'build' || view === 'changelog') return location.hash || `#/${view}`;
@@ -3858,6 +4166,7 @@ async function render() {
     address: $('#view-address'),
     lane: $('#view-lane'),
     tokens: $('#view-tokens'),
+    token: $('#view-token'),
     decode: $('#view-decode'),
     build: $('#view-build'),
     dev: $('#view-dev'),
@@ -3870,8 +4179,10 @@ async function render() {
   document.querySelectorAll('.network-tab').forEach((b) => {
     b.setAttribute('aria-pressed', String(b.dataset.network === state.network));
   });
-  /* decode + build are the two modes of the unified "playground" nav entry */
-  const navFor = route.view === 'decode' || route.view === 'build' ? 'playground' : route.view;
+  /* decode + build are the two modes of the unified "playground" nav entry;
+     a token page lives under the "tokens" nav entry */
+  const navFor = route.view === 'decode' || route.view === 'build' ? 'playground'
+    : route.view === 'token' ? 'tokens' : route.view;
   document.querySelectorAll('.nav-link').forEach((a) => {
     if (a.dataset.nav === navFor) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
@@ -3882,7 +4193,7 @@ async function render() {
 
   /* the decoder, dev docs, changelog, address, lane and token pages never
      need a snapshot — don't block them on data (they fetch their own) */
-  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'build' || route.view === 'address' || route.view === 'lane' || route.view === 'tokens' || route.view === 'changelog') && views[route.view]) {
+  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'build' || route.view === 'address' || route.view === 'lane' || route.view === 'tokens' || route.view === 'token' || route.view === 'changelog') && views[route.view]) {
     panel.hidden = true;
     for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
     views.detail.innerHTML = '';
@@ -3890,6 +4201,7 @@ async function render() {
     else if (route.view === 'address') renderAddress(route);
     else if (route.view === 'lane') renderLane(route);
     else if (route.view === 'tokens') renderTokens();
+    else if (route.view === 'token') renderTokenPage(route);
     else if (route.view === 'build') renderBuild();
     else if (route.view === 'changelog') renderChangelog();
     else renderDev();
@@ -4318,7 +4630,10 @@ const ACTIONS = {
        the other network, so switching from a detail page lands on that
        network's explorer overview rather than a guaranteed "not found". */
     const route = parseRoute();
-    const view = route.view === 'detail' ? 'explore' : route.view;
+    /* a specific coin (or token) can't exist on the other network — land on
+       that network's overview instead of a guaranteed "not found" */
+    const view = route.view === 'detail' ? 'explore'
+      : route.view === 'token' ? 'tokens' : route.view;
     const target = routeHash(view, route.id);
     if (location.hash === target) render();
     else location.hash = target;
@@ -4842,6 +5157,10 @@ const ACTIONS = {
 
   'retry-tokens'(el) {
     render(); /* failed token loads are never cached — this refetches */
+  },
+
+  'retry-token'(el) {
+    render(); /* failed token-page loads are never cached — this refetches */
   },
 };
 

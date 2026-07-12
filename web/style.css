@@ -643,6 +643,8 @@ h2::after {
   text-transform: uppercase;
   border-radius: 999px;
   padding: 0.13rem 0.55rem;
+  white-space: nowrap; /* wrapped text turns the 999px radius into an egg */
+  line-height: 1.5;
 }
 .pill-alive { background: var(--born-soft); color: var(--born); }
 .pill-retired { background: var(--burn-soft); color: var(--burn); }
@@ -973,6 +975,7 @@ a.btn:hover { text-decoration: none; }
   text-transform: uppercase;
   border-radius: 6px;
   padding: 0.1rem 0.45rem;
+  white-space: nowrap; /* a badge is one line — never a wrapped two-line box */
 }
 .flag-yes { background: var(--born-soft); color: var(--born); }
 .flag-no { background: var(--burn-soft); color: var(--burn); }
@@ -2847,6 +2850,78 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
 .token-name { font-weight: 600; }
 .tokens-fields { display: flex; flex-wrap: wrap; gap: 0.25rem 0.9rem; font-size: 0.8rem; }
 .tokens-value, .tokens-when { white-space: nowrap; }
+.tokens-supply, .tokens-holders { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* a validated directory's note is information, not a warning */
+.tokens-note-info {
+  border-color: rgba(112, 199, 186, 0.35);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* the conservative validation verdicts (directory badges + token page) */
+.pill-verified { background: var(--accent-soft); color: var(--accent); }
+.pill-invalid { background: var(--burn-soft); color: var(--burn); }
+.pill-unvalidated { background: rgba(255, 255, 255, 0.08); color: var(--faint); }
+
+/* ---- token page (#/{net}/token/{id}) ---- */
+.token-coin-link { font-size: 0.8rem; white-space: nowrap; }
+.token-backlink { font-size: 0.8rem; white-space: nowrap; }
+.token-page-fields { margin: -0.6rem 0 1.4rem; }
+.token-stats { grid-template-columns: repeat(4, minmax(0, 200px)); }
+@media (max-width: 640px) { .token-stats { grid-template-columns: repeat(2, 1fr); } }
+.token-stats .stat-n { font-size: clamp(1.1rem, 2.6vw, 1.6rem); }
+
+.token-validation {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+  padding: 0.9rem 1rem;
+  margin: 0 0 1.8rem;
+  max-width: 76ch;
+}
+.tv-badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 6px;
+  padding: 0.22rem 0.5rem;
+  border: 1px solid var(--border);
+  color: var(--faint);
+  background: rgba(255, 255, 255, 0.08);
+}
+.tv-verified {
+  border-color: rgba(111, 217, 164, 0.35);
+  background: linear-gradient(180deg, rgba(111, 217, 164, 0.05), transparent 60%), var(--card);
+}
+.tv-verified .tv-badge { color: var(--born); background: var(--born-soft); border-color: rgba(111, 217, 164, 0.4); }
+.tv-invalid { border-color: rgba(242, 165, 102, 0.4); }
+.tv-invalid .tv-badge { color: var(--burn); background: var(--burn-soft); border-color: rgba(242, 165, 102, 0.4); }
+.tv-body { margin: 0.5rem 0 0; font-size: 0.92rem; color: var(--muted); }
+.tv-verified .tv-body { color: var(--text); }
+
+.token-balances { margin: 0 0 2rem; }
+.token-balances-table { min-width: 480px; max-width: 720px; }
+.token-share { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.token-share-track { display: inline-block; width: 72px; vertical-align: middle; margin-right: 0.4rem; }
+
+/* mint/transfer/burn chips on the token timeline */
+.tok-ev-chip {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  padding: 0.13rem 0.55rem;
+  margin-right: 0.3rem;
+}
+.tok-mint { background: var(--born-soft); color: var(--born); }
+.tok-transfer { background: var(--move-soft); color: var(--move); }
+.tok-burn { background: var(--burn-soft); color: var(--burn); }
 
 /* the galaxy hint: touch copy replaces the mouse copy on small screens */
 .galaxy-hint-mobile { display: none; }

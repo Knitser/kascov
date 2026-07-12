@@ -445,6 +445,29 @@ async function loadTokens(network) {
   return rec;
 }
 
+/* one decoded token's page — its directory row, top balances, classified
+   mint/transfer/burn events and the validation verdict, served by its own
+   worker endpoint. Feature-detected like the directory: a 404 (older worker
+   without the route, or an id it doesn't know as a token) is remembered as
+   missing and reprobed after the ttl. */
+const tokenDetails = new Map(); // `${network}/${id}` -> { data|missing, at }
+
+async function loadTokenDetail(network, id) {
+  const key = `${network}/${id}`;
+  const t = tokenDetails.get(key);
+  if (t && Date.now() - t.at < TOKENS_TTL_MS) return t;
+  const res = await fetch(`data/${network}/token/${id}`, { cache: 'no-cache' });
+  if (res.status === 404) {
+    const rec = { missing: true, at: Date.now() };
+    tokenDetails.set(key, rec);
+    return rec;
+  }
+  if (!res.ok) throw new Error(`token ${res.status}`);
+  const rec = { data: await res.json(), at: Date.now() };
+  tokenDetails.set(key, rec);
+  return rec;
+}
+
 /* web/changelog.json — a static file shipped with the frontend: an array of
    { date, title, body }, newest first. Cached for the session; a missing
    file (older deploy) hides everything that depends on it. */
@@ -470,5 +493,6 @@ export {
   galaxyCache, loadGalaxy,
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,
   TOKENS_TTL_MS, tokenPages, loadTokens,
+  tokenDetails, loadTokenDetail,
   loadChangelog,
 };

@@ -326,6 +326,9 @@
     <!-- ============ TOKENS ============ -->
     <section id="view-tokens" class="view-fade" aria-label="Token directory" hidden></section>
 
+    <!-- ============ TOKEN PAGE ============ -->
+    <section id="view-token" class="view-fade" aria-label="Token page" hidden></section>
+
     <!-- ============ DECODER ============ -->
     <section id="view-decode" class="view-fade" aria-label="Playground — read" hidden>
       <div class="pg-modes" aria-label="Playground mode">
@@ -556,6 +559,7 @@
           <a href="#ep-lane">One lane</a>
           <a href="#ep-inscriptions">Inscriptions</a>
           <a href="#ep-tokens">Tokens</a>
+          <a href="#ep-token">One token</a>
           <a href="#ep-lifespans">Lifespans</a>
           <a href="#ep-reorgs">Reorgs</a>
           <div class="api-nav-group">Find</div>
@@ -910,21 +914,52 @@ data: {"covenant_id":"2ab7dcd2…","kind":"transition",
 
           <article class="api-endpoint" id="ep-tokens">
             <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/tokens.json</code></div>
-            <p class="ep-desc">The covenant-token directory behind the <a href="#/tokens">tokens</a> page — every KCC20-shaped coin the indexer decoded, its ticker and fields read straight from the chain's bytes. <strong>Decoded, not validated</strong>: kascov shows what these covenants wrote in their own bytes; it does not (yet) check KCC20 balance rules. The response repeats that warning in <code class="mono">note</code> — surface it to your users too.</p>
+            <p class="ep-desc">The covenant-token directory behind the <a href="#/tokens">tokens</a> page — every KCC20-shaped coin the indexer decoded, its ticker and fields read straight from the chain's bytes, plus a <strong>conservative validation verdict</strong> per token: <code class="mono">status</code> is <code class="mono">verified</code> only when every event in the token's history matched a known KCC20 rule and supply is conserved; anything unknown or ambiguous stays <code class="mono">unvalidated</code> with a reason — never a false "valid". The response explains itself in <code class="mono">note</code> — surface it to your users too. Older workers answer the pre-validation shape (<code class="mono">status</code> is the coin's <code class="mono">active</code>/<code class="mono">burned</code> liveness, no supply fields) — treat those tokens as unvalidated.</p>
             <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
-  "note": "decoded from chain — not validated: …",
+  "note": "validated from chain — verified means every event matched …",
   "tip_daa": 513875491, "tip_at_ms": 1783746272524,
   "tokens": [
     { "covenant_id": "9cc4fb51…68f50", "name": "humble-crimson-magpie",
       "template": "KCC20 token",
       "fields": { "tick": "NACHO", "op": "deploy" },
-      "live_value": 100000000, "status": "active",
+      "live_value": 100000000,
+      "status": "verified",
+      "supply": 2100000000, "minted": 2100000000, "burned": 0,
+      "holders": 12,
       "last_activity_daa": 513875477 }
   ]
 }</code></pre></div>
             <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
               <tr><td class="mono">tokens[].fields</td><td>object</td><td>the decoded key/values exactly as the covenant wrote them — no registry, no labels kascov invented</td></tr>
               <tr><td class="mono">tokens[].live_value</td><td>int?</td><td>sompi the coin holds right now</td></tr>
+              <tr><td class="mono">tokens[].status</td><td>string</td><td><code class="mono">verified</code> · <code class="mono">invalid</code> · <code class="mono">unvalidated</code> — conservative: verified means every event in the history matched a known rule</td></tr>
+              <tr><td class="mono">tokens[].invalid_reason</td><td>string?</td><td>why the verdict isn't verified — present on invalid (and unvalidated) tokens</td></tr>
+              <tr><td class="mono">tokens[].supply</td><td>int?</td><td>live supply in raw token units — minted − burned</td></tr>
+              <tr><td class="mono">tokens[].minted / burned</td><td>int?</td><td>lifetime totals in raw token units</td></tr>
+              <tr><td class="mono">tokens[].holders</td><td>int?</td><td>owners with a non-zero balance right now</td></tr>
+            </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-token">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/token/{covenant_id}</code></div>
+            <p class="ep-desc">One token's whole story behind its <a href="#/tokens">token page</a> — the directory row, the top 100 balances, every event classified as <code class="mono">mint</code> / <code class="mono">transfer</code> / <code class="mono">burn</code> with amounts and owners, and the validation verdict. Same conservative contract as the directory: a token is verified only when every checked event matched a known KCC20 rule. <code class="mono">404</code> when the id isn't a token this worker knows (or the worker predates token pages).</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "token": { "covenant_id": "9cc4fb51…68f50",
+             "name": "humble-crimson-magpie", "template": "KCC20 token",
+             "fields": { "tick": "NACHO" }, "status": "verified",
+             "supply": 2100000000, "minted": 2100000000, "burned": 0,
+             "holders": 12, "last_activity_daa": 513875477 },
+  "balances": [ { "owner": "3f9a…c221", "balance": 1250000000 } ],
+  "events": [ { "txid": "…", "accepting_daa": 513875477,
+                "kind": "transition", "token_kind": "mint",
+                "amount": 1000000, "owner_to": "3f9a…c221" } ],
+  "validation": { "checked": 266 }
+}</code></pre></div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">token</td><td>object</td><td>the same row the <a href="#ep-tokens">directory</a> serves for this token</td></tr>
+              <tr><td class="mono">balances</td><td>array</td><td>the top 100 balances, largest first — <code class="mono">owner</code> is the controlling pubkey, <code class="mono">balance</code> is raw token units</td></tr>
+              <tr><td class="mono">events[].token_kind</td><td>string</td><td><code class="mono">mint</code> · <code class="mono">transfer</code> · <code class="mono">burn</code> — the canonical event object plus the token classification, <code class="mono">amount</code> and <code class="mono">owner_from</code>/<code class="mono">owner_to</code></td></tr>
+              <tr><td class="mono">validation</td><td>object</td><td>the verdict's working: <code class="mono">checked</code> events walked; <code class="mono">reason</code> says what stopped a verified verdict when the status isn't verified</td></tr>
             </tbody></table>
           </article>
 
