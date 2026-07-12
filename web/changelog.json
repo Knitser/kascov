@@ -1,5 +1,30 @@
 [
   {
+    "date": "2026-07-12",
+    "title": "the mainnet galaxy tells the truth",
+    "body": "small networks now show their actual coins — glowing dots with their shared-transaction links — instead of two giant summary bubbles hiding four covenants. click a dot, get the coin."
+  },
+  {
+    "date": "2026-07-11",
+    "title": "the chain has names now",
+    "body": "the decoder learned genesis0, PURE and KCC20 from the chain's own revealed programs — thousands of covenant runs went from anonymous hex to real contract names, decoded and re-checkable by anyone."
+  },
+  {
+    "date": "2026-07-11",
+    "title": "the first open KCC20 token directory",
+    "body": "every covenant token on the network in one table — owner and amount decoded straight from chain state, honestly badged \"decoded, not validated\" until the accounting layer proves them. plus USD context on mainnet and event filters everywhere."
+  },
+  {
+    "date": "2026-07-11",
+    "title": "an API worth building on",
+    "body": "a cursorable event feed for the whole network, batch coin lookups, webhook secrets with signed deliveries, a live KAS price endpoint — and a builders guide at /guide: deploy, spend, replay in 15 minutes."
+  },
+  {
+    "date": "2026-07-10",
+    "title": "find, follow, replay",
+    "body": "search all coins by name, id or contract from any page; coin pages update live as events land; and any real spend replays through Kaspa's actual script engine, opcode by opcode."
+  },
+  {
     "date": "2026-07-10",
     "title": "every coin link is a billboard",
     "body": "share a coin anywhere and it unfurls into a live picture card — name, avatar, holdings, story. plus a sitemap, so search engines can finally find the coins."
