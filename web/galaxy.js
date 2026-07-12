@@ -167,6 +167,10 @@
     const wx = (px) => (px - panX) / scale;
     const wy = (py) => (py - panY) / scale;
     const zoomFactor = () => scale / fitScale;
+    // Aggregate "app" bubbles exist to summarize tens of thousands of dots.
+    // On a small network (mainnet today: a handful of covenants) they hide
+    // everything behind giant circles — draw the real nodes at every zoom.
+    const isFar = () => N > 200 && zoomFactor() < 2.2;
 
     // ---- draw ----
     function requestDraw() {
@@ -181,8 +185,8 @@
       if (!N && !apps.length) return;
 
       const zf = zoomFactor();
-      const far = zf < 2.2;
-      const near = zf >= 6;
+      const far = isFar();
+      const near = zf >= 6 || (N <= 200 && N > 0);
       // visible world rect (for culling)
       const vx0 = wx(-20), vy0 = wy(-20), vx1 = wx(W + 20), vy1 = wy(H + 20);
 
@@ -368,7 +372,7 @@
       requestAnimationFrame(() => { hoverQueued = false; resolveHover(hoverPx, hoverPy); });
     }
     function resolveHover(px, py) {
-      const far = zoomFactor() < 2.2;
+      const far = isFar();
       if (far) {
         const a = appAt(px, py);
         if (a !== hoverApp) { hoverApp = a; requestDraw(); }
@@ -401,7 +405,7 @@
       const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
       if (dragMoved) return;
       // a real click
-      if (zoomFactor() < 2.2) {
+      if (isFar()) {
         const a = appAt(px, py);
         if (a >= 0) { zoomToApp(a); return; }
       }
@@ -411,7 +415,21 @@
 
     function zoomToApp(a) {
       const app = apps[a];
-      const target = Math.min(fitScale * 12, Math.max(fitScale * 5, (Math.min(W, H) * 0.4) / Math.max(app.r, 8)));
+      // Fit the app's ACTUAL member spread, not the layout radius — on tiny
+      // networks (mainnet today) ar understates the extent and the old
+      // fitScale*5 floor zoomed past both members into empty space.
+      let extent = Math.max(app.r, 8);
+      for (let i = 0; i < N; i++) {
+        if (na[i] !== a) continue;
+        const d = Math.hypot(nx[i] - app.cx, ny[i] - app.cy) + nr[i];
+        if (d > extent) extent = d;
+      }
+      const fit = (Math.min(W, H) * 0.4) / extent;
+      // big worlds must land past the far->near threshold (2.2) or the zoom
+      // strands the user between LODs; small worlds draw nodes at every zoom
+      // so the extent fit wins as-is
+      const floor = N > 200 ? fitScale * 2.5 : fitScale * 1.15;
+      const target = Math.min(fitScale * 12, Math.max(floor, fit));
       animateTo(target, app.cx, app.cy);
     }
     function animateTo(toScale, worldCx, worldCy) {
