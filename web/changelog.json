@@ -1,6 +1,16 @@
 [
   {
     "date": "2026-07-12",
+    "title": "verified from the chain — not asserted",
+    "body": "the accounting layer: every KCC20 token's history replayed, supply conservation checked, every live balance cryptographically proven against its commitment. 258 of 270 tokens verified, 0 invalid, the rest honestly marked with reasons. token pages show holders, classified mint/transfer/burn timelines, and the proof."
+  },
+  {
+    "date": "2026-07-12",
+    "title": "the galaxy glows and the front page breathes",
+    "body": "coins are glowing orbs now, clusters are nebulae, the map sits on a parallax starfield — and the landing page's blockDAG is a living simulation: blocks born at kaspa's cadence, linking to parents, drifting like time. all of it pauses the instant you look away, so it costs nothing."
+  },
+  {
+    "date": "2026-07-12",
     "title": "the mainnet galaxy tells the truth",
     "body": "small networks now show their actual coins — glowing dots with their shared-transaction links — instead of two giant summary bubbles hiding four covenants. click a dot, get the coin."
   },
