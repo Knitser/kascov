@@ -1048,6 +1048,10 @@ struct ServeState {
     /// Per-network live event broadcast (SSE). A Vec, not a HashMap:
     /// `Network` has no `Hash` impl and there are at most a couple entries.
     live: Vec<(Network, LiveChannel)>,
+    /// Latest cross-indexer consistency report per network (None until the
+    /// day's first run lands). Same Vec-not-HashMap shape as `live`; a std
+    /// Mutex because it's held only to store or clone, never across awaits.
+    consistency: Vec<(Network, std::sync::Arc<std::sync::Mutex<Option<ConsistencyReport>>>)>,
     cache: tokio::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<CachedBody>)>>,
     /// Per-key build locks: concurrent cold misses on the SAME key share one
     /// rebuild instead of stampeding (at 42k covenants, N parallel grid
@@ -1120,6 +1124,8 @@ async fn serve(
         sync_health.push((network, health));
     }
 
+    let consistency =
+        networks.iter().map(|&network| (network, std::sync::Arc::default())).collect();
     let state = std::sync::Arc::new(ServeState {
         base_dir,
         networks,
@@ -1130,6 +1136,7 @@ async fn serve(
         sync_health,
         deploy_inflight: tokio::sync::Mutex::new(()),
         live,
+        consistency,
         cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         build_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         search_index: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -1182,6 +1189,10 @@ async fn serve(
             }
         });
     }
+    // Daily cross-indexer consistency check — collaborative ecosystem QA
+    // against indexer.kaspa.com (the section around consistency_forever
+    // documents the politeness contract).
+    tokio::spawn(consistency_forever(state.clone()));
     // Periodic cache sweep: the insert-time eviction only fires past 2048
     // entries, so expired multi-MB bodies (galaxy, grid pages) could otherwise
     // linger indefinitely on a quiet keyspace. Sweep every 60s; drop bodies
@@ -1236,6 +1247,7 @@ async fn serve(
         .route("/data/{network}/templates.json", get(templates_handler))
         .route("/data/{network}/tokens.json", get(tokens_handler))
         .route("/data/{network}/token/{id}", get(token_handler))
+        .route("/data/{network}/consistency.json", get(consistency_handler))
         .route("/data/{network}/events", get(events_handler))
         .route("/data/{network}/coins", get(coins_handler))
         .route("/data/{network}/activity.json", get(activity_handler))
@@ -1718,6 +1730,742 @@ async fn webhook_delivery_forever(
                 );
             }
         }
+    }
+}
+
+/* ---------------------------------------------- cross-indexer consistency */
+
+// kascov is not the only indexer reading KCC20 state, and that is healthy:
+// independent implementations cross-checking each other is quality assurance
+// for the whole ecosystem. Once a day we compare our derived token books
+// against the public API at indexer.kaspa.com and publish the comparison
+// verbatim — a difference usually means one of us has a bug; we fix ours and
+// share theirs kindly. Politeness is a requirement, not an optimization:
+// ≤1 request/second, a hard per-run request cap, and a 6-hour back-off the
+// moment the other side answers 402/403/429.
+
+/// The other indexer, identified factually.
+const CONSISTENCY_SOURCE: &str = "indexer.kaspa.com";
+/// Fixed base URL — no user input ever reaches these requests.
+const CONSISTENCY_BASE: &str = "https://indexer.kaspa.com";
+const CONSISTENCY_USER_AGENT: &str = "kascov-consistency-check/1.0 (+https://kascov.io)";
+const CONSISTENCY_NOTE: &str = "an automated cross-check between independent ecosystem indexers — \
+                                differences usually mean one of us has a bug; we fix ours and share theirs kindly";
+/// First run holds back so a fresh instance answers requests before it
+/// spends any of its own (same boot-storm thinking as the keep-warm task).
+const CONSISTENCY_BOOT_DELAY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const CONSISTENCY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+/// The whole next run moves out this far after a 402/403/429 — never
+/// retry-hammer a host that asked for room.
+const CONSISTENCY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+/// Minimum spacing between consecutive requests to the other indexer.
+const CONSISTENCY_REQUEST_GAP: std::time::Duration = std::time::Duration::from_secs(1);
+/// Hard request budget per run (one run covers every followed network).
+const CONSISTENCY_REQUEST_CAP: u32 = 120;
+/// Their /kcc20/discovery page size (limit/offset pagination).
+const CONSISTENCY_PAGE_LIMIT: u64 = 100;
+/// Report rows kept per network; the counters always cover everything.
+const CONSISTENCY_DETAILS_CAP: usize = 200;
+/// How many of our top holder balances are compared per intersecting token.
+const CONSISTENCY_TOP_HOLDERS: u64 = 5;
+
+/// One indexer's view of one token, normalized for comparison.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct TokenView {
+    supply: Option<i64>,
+    holders: Option<u64>,
+    /// Holder balances keyed by kascov's owner encoding (see
+    /// `tokens::owner_display`). None when the side's owner encoding could
+    /// not be mapped confidently — then only supply + counts are compared.
+    balances: Option<std::collections::BTreeMap<String, i64>>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct ConsistencySide {
+    supply: Option<i64>,
+    holders: Option<u64>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct ConsistencyDetail {
+    covenant_id: String,
+    name: String,
+    verdict: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ours: Option<ConsistencySide>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    other: Option<ConsistencySide>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// One network's comparison against the other indexer, held in memory only
+/// (rebuilt daily; nothing here is an archive).
+#[derive(Clone, Debug, serde::Serialize)]
+struct ConsistencyReport {
+    network: String,
+    checked_at_ms: u64,
+    /// Anchors, not a shared instant: our tip DAA and their reported source
+    /// blue score are two different clocks, each read at its own indexer's
+    /// pace — the report says where each side stood, nothing more.
+    our_tip_daa: Option<u64>,
+    other_source: &'static str,
+    other_blue_score: Option<u64>,
+    tokens_ours: u64,
+    tokens_other: u64,
+    intersection: u64,
+    agree: u64,
+    differ: u64,
+    only_kascov: u64,
+    only_other: u64,
+    not_comparable: u64,
+    /// Run-level honesty: why nothing could be compared this run (their list
+    /// empty, a different network, or a back-off), when that's the story.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    details: Vec<ConsistencyDetail>,
+    note: &'static str,
+}
+
+/// Budget + back-off latch for one polite run. The first 402/403/429 latches
+/// `denied` — no retries of any kind; the caller marks the remaining
+/// comparisons not_comparable and stretches the next run to the back-off.
+#[derive(Clone, Copy, Debug)]
+struct PolitenessGate {
+    spent: u32,
+    denied: Option<u16>,
+}
+
+impl PolitenessGate {
+    fn new() -> Self {
+        Self { spent: 0, denied: None }
+    }
+
+    /// May another request go out? (Not after a denial, not past the cap.)
+    fn may_request(&self) -> bool {
+        self.denied.is_none() && self.spent < CONSISTENCY_REQUEST_CAP
+    }
+
+    fn spend(&mut self) {
+        self.spent += 1;
+    }
+
+    fn observe_status(&mut self, status: u16) {
+        if matches!(status, 402 | 403 | 429) && self.denied.is_none() {
+            self.denied = Some(status);
+        }
+    }
+
+    /// Why the run can't fetch any more — a stopped run stays honest in the
+    /// report instead of silently thinning out.
+    fn stop_reason(&self) -> Option<String> {
+        if let Some(code) = self.denied {
+            Some(format!("{CONSISTENCY_SOURCE} answered HTTP {code} — backing off for this run"))
+        } else if self.spent >= CONSISTENCY_REQUEST_CAP {
+            Some("request budget for this run was reached".into())
+        } else {
+            None
+        }
+    }
+
+    fn next_delay(&self) -> std::time::Duration {
+        if self.denied.is_some() {
+            CONSISTENCY_BACKOFF
+        } else {
+            CONSISTENCY_INTERVAL
+        }
+    }
+}
+
+/// Verdict + human reason for one token id known to at least one side.
+/// Pure — the consistency tests drive it as a table.
+fn classify_pair(
+    ours: Option<&TokenView>,
+    other: Option<&TokenView>,
+) -> (&'static str, Option<String>) {
+    let (ours, other) = match (ours, other) {
+        (Some(a), Some(b)) => (a, b),
+        (Some(_), None) => return ("only_kascov", None),
+        (None, Some(_)) => return ("only_other", None),
+        (None, None) => return ("not_comparable", Some("listed on neither side".into())),
+    };
+    match (ours.supply, other.supply) {
+        (Some(a), Some(b)) if a != b => {
+            return (
+                "differ",
+                Some(format!("supply: kascov says {a}, {CONSISTENCY_SOURCE} says {b}")),
+            )
+        }
+        (None, _) => {
+            return (
+                "not_comparable",
+                Some("kascov could not prove this token's supply from chain".into()),
+            )
+        }
+        (_, None) => {
+            return (
+                "not_comparable",
+                Some(format!("{CONSISTENCY_SOURCE} did not report a supply we could read")),
+            )
+        }
+        _ => {}
+    }
+    if let (Some(a), Some(b)) = (ours.holders, other.holders) {
+        if a != b {
+            return (
+                "differ",
+                Some(format!("holder count: kascov says {a}, {CONSISTENCY_SOURCE} says {b}")),
+            );
+        }
+    }
+    match (&ours.balances, &other.balances) {
+        (Some(ours_top), Some(theirs)) => {
+            for (owner, our_balance) in ours_top {
+                match theirs.get(owner) {
+                    Some(their_balance) if their_balance == our_balance => {}
+                    Some(their_balance) => {
+                        return (
+                            "differ",
+                            Some(format!(
+                                "balance of {owner}: kascov says {our_balance}, \
+                                 {CONSISTENCY_SOURCE} says {their_balance}"
+                            )),
+                        )
+                    }
+                    None => {
+                        return (
+                            "differ",
+                            Some(format!(
+                                "kascov sees {owner} holding {our_balance}; \
+                                 {CONSISTENCY_SOURCE} does not list that owner"
+                            )),
+                        )
+                    }
+                }
+            }
+            ("agree", None)
+        }
+        _ => (
+            "agree",
+            Some(
+                "owner encodings could not be matched confidently — \
+                 compared supply and holder counts only"
+                    .into(),
+            ),
+        ),
+    }
+}
+
+/// Map an owner string the way the other indexer prints it onto kascov's
+/// encoding (bare pubkey hex / `script:…` / `covenant:…` — see
+/// `tokens::owner_display`). None = no confident mapping; the caller then
+/// skips balance comparison for the whole token rather than guess.
+fn normalize_owner(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.contains(':') {
+        // Already our typed form?
+        if let Some(rest) =
+            trimmed.strip_prefix("script:").or_else(|| trimmed.strip_prefix("covenant:"))
+        {
+            if rest.len() == 64 && rest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Some(trimmed.to_ascii_lowercase());
+            }
+            return None;
+        }
+        // kaspa:…/kaspatest:… — pubkeys are network-independent; script-hash
+        // addresses carry no pubkey, so they never map.
+        let addr = kaspa_addresses::Address::try_from(trimmed).ok()?;
+        if !matches!(addr.version, kaspa_addresses::Version::PubKey) {
+            return None;
+        }
+        return Some(hex::encode(&addr.payload));
+    }
+    let s = trimmed.strip_prefix("0x").unwrap_or(trimmed).to_ascii_lowercase();
+    if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    match s.len() {
+        64 => Some(s),                                      // bare pubkey hex
+        66 => Some(kascov_core::tokens::owner_display(&s)), // typed 33-byte form
+        _ => None,
+    }
+}
+
+/// An integer that may arrive as a JSON number or a decimal string.
+fn json_int(v: &serde_json::Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
+/// Pull a token/covenant id (lowercase 64-hex) out of one of their JSON
+/// objects. Their index is empty today, so the exact field name is
+/// unobserved — accept the plausible spellings and fail soft.
+fn json_covenant_id(item: &serde_json::Value) -> Option<String> {
+    for key in ["covenantId", "covenant_id", "tokenId", "token_id", "id"] {
+        if let Some(s) = item[key].as_str() {
+            let s = s.trim();
+            let s = s.strip_prefix("0x").unwrap_or(s).to_ascii_lowercase();
+            if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+fn json_supply(item: &serde_json::Value) -> Option<i64> {
+    ["supply", "totalSupply", "total_supply", "circulatingSupply", "currentSupply"]
+        .iter()
+        .find_map(|k| json_int(&item[*k]))
+}
+
+fn json_holders(item: &serde_json::Value) -> Option<u64> {
+    ["holders", "holderCount", "holder_count", "holdersCount"]
+        .iter()
+        .find_map(|k| json_int(&item[*k]).and_then(|n| u64::try_from(n).ok()))
+}
+
+/// The essentials folded out of their /kcc20/discovery pages.
+#[derive(Clone, Debug, Default)]
+struct DiscoveryView {
+    /// token id (lowercase 64-hex) → what the listing itself revealed.
+    views: std::collections::BTreeMap<String, TokenView>,
+    tokens_other: u64,
+    blue_score: Option<u64>,
+    /// Items we couldn't read an id out of — counted, never guessed at.
+    unreadable_items: u64,
+}
+
+/// Fold raw discovery pages into the id → view map. Pure — fixture-tested.
+fn assemble_discovery(pages: &[serde_json::Value]) -> DiscoveryView {
+    let mut out = DiscoveryView::default();
+    for page in pages {
+        if out.blue_score.is_none() {
+            out.blue_score = page["freshness"]["sourceBlueScore"].as_u64();
+        }
+        let Some(items) = page["items"].as_array() else { continue };
+        for item in items {
+            let Some(id) = json_covenant_id(item) else {
+                out.unreadable_items += 1;
+                continue;
+            };
+            let view = out.views.entry(id).or_default();
+            if view.supply.is_none() {
+                view.supply = json_supply(item);
+            }
+            if view.holders.is_none() {
+                view.holders = json_holders(item);
+            }
+        }
+    }
+    out.tokens_other = out.views.len() as u64;
+    out
+}
+
+/// Should another discovery page be requested? Their pagination is
+/// limit/offset under an items/total envelope: stop on a short page, or once
+/// the reported total is reached.
+fn more_discovery_pages(last_page_items: usize, fetched: u64, total: Option<u64>) -> bool {
+    if (last_page_items as u64) < CONSISTENCY_PAGE_LIMIT {
+        return false;
+    }
+    match total {
+        Some(t) => fetched < t,
+        None => true,
+    }
+}
+
+/// Their /kcc20/{id}/holders body → (holder count, balances keyed by our
+/// owner encoding). balances is None when any owner failed to normalize —
+/// a guessed match would be worse than an honest "counts only".
+fn parse_other_holders(
+    body: &str,
+) -> Option<(u64, Option<std::collections::BTreeMap<String, i64>>)> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let rows = v
+        .as_array()
+        .or_else(|| v["items"].as_array())
+        .or_else(|| v["holders"].as_array())?;
+    let mut balances = std::collections::BTreeMap::new();
+    let mut clean = true;
+    for row in rows {
+        let owner = ["owner", "ownerIdentifier", "owner_identifier", "address", "holder"]
+            .iter()
+            .find_map(|k| row[*k].as_str())
+            .and_then(normalize_owner);
+        let balance = ["balance", "amount", "value"].iter().find_map(|k| json_int(&row[*k]));
+        match (owner, balance) {
+            // One owner may back several rows (cells) — sum them.
+            (Some(owner), Some(balance)) => *balances.entry(owner).or_insert(0) += balance,
+            _ => clean = false,
+        }
+    }
+    Some((rows.len() as u64, clean.then_some(balances)))
+}
+
+/// Fold their /kcc20/{id}/stats body into a view: supply/holders when the
+/// object carries them, at the top level or one level down.
+fn merge_other_stats(view: &mut TokenView, body: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return };
+    for node in [&v, &v["token"], &v["stats"]] {
+        if view.supply.is_none() {
+            view.supply = json_supply(node);
+        }
+        if view.holders.is_none() {
+            view.holders = json_holders(node);
+        }
+    }
+}
+
+/// One polite GET: respect the gate, wait the gap FIRST (back-to-back calls
+/// can never burst), record the status. Some(body) only on 2xx.
+async fn polite_get(
+    client: &reqwest::Client,
+    gate: &mut PolitenessGate,
+    url: &str,
+) -> Option<String> {
+    if !gate.may_request() {
+        return None;
+    }
+    tokio::time::sleep(CONSISTENCY_REQUEST_GAP).await;
+    gate.spend();
+    match client.get(url).send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            gate.observe_status(status);
+            if (200..300).contains(&status) {
+                resp.text().await.ok()
+            } else {
+                tracing::debug!("consistency: {url} answered {status}");
+                None
+            }
+        }
+        Err(err) => {
+            tracing::debug!("consistency: {url} failed: {err}");
+            None
+        }
+    }
+}
+
+/// Walk their /kcc20/discovery pages, politely, returning the raw pages.
+async fn fetch_discovery_pages(
+    client: &reqwest::Client,
+    gate: &mut PolitenessGate,
+) -> Vec<serde_json::Value> {
+    let mut pages = Vec::new();
+    let mut offset = 0u64;
+    let mut fetched = 0u64;
+    let mut total: Option<u64> = None;
+    loop {
+        let url = format!(
+            "{CONSISTENCY_BASE}/kcc20/discovery?limit={CONSISTENCY_PAGE_LIMIT}&offset={offset}&includeTotal=true"
+        );
+        let Some(body) = polite_get(client, gate, &url).await else { break };
+        let Ok(page) = serde_json::from_str::<serde_json::Value>(&body) else { break };
+        let items_len = page["items"].as_array().map_or(0, |a| a.len());
+        if total.is_none() {
+            total = page["total"].as_u64();
+        }
+        fetched += items_len as u64;
+        pages.push(page);
+        if !more_discovery_pages(items_len, fetched, total) {
+            break;
+        }
+        offset += CONSISTENCY_PAGE_LIMIT;
+    }
+    pages
+}
+
+/// What one network's own store contributes to the comparison.
+struct OursSnapshot {
+    tip_daa: Option<u64>,
+    views: std::collections::BTreeMap<String, TokenView>,
+}
+
+fn read_ours(db: &std::path::Path, network: Network) -> Result<OursSnapshot> {
+    let store = kascov_core::store::Store::open(db, network)?;
+    let tip_daa = store.tip()?.map(|t| t.0);
+    let mut views = std::collections::BTreeMap::new();
+    for t in store.token_directory()? {
+        views.insert(
+            t.token_id.to_string(),
+            TokenView {
+                supply: t.supply,
+                holders: Some(t.holders),
+                balances: None, // filled for intersecting tokens only
+            },
+        );
+    }
+    Ok(OursSnapshot { tip_daa, views })
+}
+
+/// Our top holder balances for the intersecting tokens, keyed by token id.
+fn read_our_top_balances(
+    db: &std::path::Path,
+    network: Network,
+    ids: &[String],
+) -> Result<std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>>> {
+    let store = kascov_core::store::Store::open(db, network)?;
+    let mut out = std::collections::BTreeMap::new();
+    for id in ids {
+        let Ok(token_id) = id.parse::<kascov_core::CovenantId>() else { continue };
+        let balances = store
+            .token_balances(&token_id, CONSISTENCY_TOP_HOLDERS)?
+            .iter()
+            .map(|b| (kascov_core::tokens::owner_display(&b.owner), b.balance))
+            .collect();
+        out.insert(id.clone(), balances);
+    }
+    Ok(out)
+}
+
+fn consistency_side(view: &TokenView) -> ConsistencySide {
+    ConsistencySide { supply: view.supply, holders: view.holders }
+}
+
+/// Detail rows survive the cap by interest, not by id order.
+fn verdict_rank(verdict: &str) -> u8 {
+    match verdict {
+        "differ" => 0,
+        "not_comparable" => 1,
+        "only_kascov" => 2,
+        "only_other" => 3,
+        _ => 4, // agree
+    }
+}
+
+/// One network's comparison against an already-fetched discovery snapshot.
+/// Returns None only when our own store can't be read.
+async fn consistency_run(
+    network: Network,
+    db: &std::path::Path,
+    client: &reqwest::Client,
+    gate: &mut PolitenessGate,
+    discovery: &DiscoveryView,
+    base_reason: Option<String>,
+) -> Option<ConsistencyReport> {
+    let mut ours = {
+        let db = db.to_path_buf();
+        match tokio::task::spawn_blocking(move || read_ours(&db, network)).await {
+            Ok(Ok(snapshot)) => snapshot,
+            Ok(Err(err)) => {
+                tracing::warn!("{network}: consistency: cannot read our books: {err}");
+                return None;
+            }
+            Err(err) => {
+                tracing::warn!("{network}: consistency: read task failed: {err}");
+                return None;
+            }
+        }
+    };
+    let tokens_ours = ours.views.len() as u64;
+    let mut report = ConsistencyReport {
+        network: network.to_string(),
+        checked_at_ms: now_ms(),
+        our_tip_daa: ours.tip_daa,
+        other_source: CONSISTENCY_SOURCE,
+        other_blue_score: discovery.blue_score,
+        tokens_ours,
+        tokens_other: discovery.tokens_other,
+        intersection: 0,
+        agree: 0,
+        differ: 0,
+        only_kascov: 0,
+        only_other: 0,
+        not_comparable: 0,
+        reason: None,
+        details: vec![],
+        note: CONSISTENCY_NOTE,
+    };
+    // Run-level story (their list empty / unreachable / a back-off): every
+    // token of ours is honestly not comparable this run.
+    if let Some(reason) = base_reason {
+        report.not_comparable = tokens_ours;
+        report.reason = Some(reason);
+        return Some(report);
+    }
+    let mut other_views = discovery.views.clone();
+    let intersection: Vec<String> =
+        ours.views.keys().filter(|id| other_views.contains_key(*id)).cloned().collect();
+    report.intersection = intersection.len() as u64;
+    // Both sides list tokens but none overlap: covenant ids are per-chain, so
+    // this is the "their host serves some other network" signature — saying
+    // anything token-by-token would be noise.
+    if intersection.is_empty() && tokens_ours > 0 && discovery.tokens_other > 0 {
+        report.not_comparable = tokens_ours;
+        report.reason = Some(format!(
+            "{CONSISTENCY_SOURCE} appears to cover a different network — no overlapping token ids"
+        ));
+        return Some(report);
+    }
+    if !intersection.is_empty() {
+        let db = db.to_path_buf();
+        let ids = intersection.clone();
+        if let Ok(Ok(tops)) =
+            tokio::task::spawn_blocking(move || read_our_top_balances(&db, network, &ids)).await
+        {
+            for (id, balances) in tops {
+                if let Some(view) = ours.views.get_mut(&id) {
+                    view.balances = Some(balances);
+                }
+            }
+        }
+    }
+    // Enrich their side of the intersection, two polite requests per token.
+    let mut unfetched: std::collections::BTreeSet<String> = intersection.iter().cloned().collect();
+    for id in &intersection {
+        if !gate.may_request() {
+            break;
+        }
+        if let Some(body) =
+            polite_get(client, gate, &format!("{CONSISTENCY_BASE}/kcc20/{id}/stats")).await
+        {
+            merge_other_stats(other_views.get_mut(id).expect("intersection key"), &body);
+        }
+        if let Some(body) =
+            polite_get(client, gate, &format!("{CONSISTENCY_BASE}/kcc20/{id}/holders")).await
+        {
+            if let Some((count, balances)) = parse_other_holders(&body) {
+                let view = other_views.get_mut(id).expect("intersection key");
+                view.holders = Some(count);
+                view.balances = balances;
+            }
+        }
+        if gate.stop_reason().is_none() {
+            unfetched.remove(id);
+        }
+    }
+    // Classify the union of both directories.
+    let mut union: Vec<String> = ours.views.keys().chain(other_views.keys()).cloned().collect();
+    union.sort();
+    union.dedup();
+    for id in &union {
+        let (verdict, mut reason) = classify_pair(ours.views.get(id), other_views.get(id));
+        // A token we never got to fetch is uncomparable because of the
+        // budget/back-off, not because of its data — say which.
+        if verdict == "not_comparable" && unfetched.contains(id) {
+            if let Some(stop) = gate.stop_reason() {
+                reason = Some(stop);
+            }
+        }
+        match verdict {
+            "agree" => report.agree += 1,
+            "differ" => report.differ += 1,
+            "only_kascov" => report.only_kascov += 1,
+            "only_other" => report.only_other += 1,
+            _ => report.not_comparable += 1,
+        }
+        report.details.push(ConsistencyDetail {
+            covenant_id: id.clone(),
+            name: og::friendly_name(id),
+            verdict,
+            ours: ours.views.get(id).map(consistency_side),
+            other: other_views.get(id).map(consistency_side),
+            reason,
+        });
+    }
+    report.details.sort_by_key(|d| verdict_rank(d.verdict)); // stable: id order within a class
+    report.details.truncate(CONSISTENCY_DETAILS_CAP);
+    Some(report)
+}
+
+/// The daily cross-check task: one discovery walk per run (their host serves
+/// a single network, so the listing is shared), then a per-network comparison
+/// — all requests through one gate so the whole run stays inside the budget.
+async fn consistency_forever(state: std::sync::Arc<ServeState>) {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(CONSISTENCY_USER_AGENT)
+        .build()
+    {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!("consistency client unavailable ({err}) — cross-check disabled");
+            return;
+        }
+    };
+    tokio::time::sleep(CONSISTENCY_BOOT_DELAY).await;
+    loop {
+        let mut gate = PolitenessGate::new();
+        let pages = fetch_discovery_pages(&client, &mut gate).await;
+        let discovery = assemble_discovery(&pages);
+        let base_reason: Option<String> = if pages.is_empty() {
+            Some(gate.stop_reason().unwrap_or_else(|| {
+                format!("{CONSISTENCY_SOURCE} could not be reached this run")
+            }))
+        } else if discovery.views.is_empty() {
+            Some(format!("no tokens listed on {CONSISTENCY_SOURCE} yet"))
+        } else {
+            None
+        };
+        for &network in &state.networks {
+            let db = state.base_dir.join(format!("{network}.db"));
+            if !db.exists() {
+                continue;
+            }
+            let report =
+                consistency_run(network, &db, &client, &mut gate, &discovery, base_reason.clone())
+                    .await;
+            if let Some(report) = report {
+                if let Some((_, slot)) = state.consistency.iter().find(|(n, _)| *n == network) {
+                    *slot.lock().unwrap() = Some(report);
+                }
+            }
+        }
+        let delay = gate.next_delay();
+        tracing::info!(
+            "consistency: run complete ({} requests) — next in {}h",
+            gate.spent,
+            delay.as_secs() / 3600
+        );
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// GET /data/{network}/consistency.json — the latest cross-indexer report
+/// (see the section comment above: collaborative QA, not a scoreboard).
+async fn consistency_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let report = state
+        .consistency
+        .iter()
+        .find(|(n, _)| *n == network)
+        .and_then(|(_, slot)| slot.lock().unwrap().clone());
+    match report.and_then(|r| serde_json::to_string(&r).ok()) {
+        Some(json) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+                (header::CACHE_CONTROL, "public, max-age=3600, s-maxage=3600"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            json,
+        )
+            .into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            serde_json::json!({
+                "error": "first check hasn't run yet",
+                "note": CONSISTENCY_NOTE,
+                "other_source": CONSISTENCY_SOURCE,
+            })
+            .to_string(),
+        )
+            .into_response(),
     }
 }
 
@@ -4072,9 +4820,14 @@ async fn sitemap_handler(
     resp
 }
 
+/// GET /data/{network}/tx/{txid} — everything kascov saw one transaction do:
+/// the covenant events it fired, the state cells it created and spent, and
+/// the classified token deltas riding those events. `covenant_id` /
+/// `covenant_ids` stay for existing consumers; everything else is additive.
 async fn tx_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path((net_name, txid)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
@@ -4083,31 +4836,113 @@ async fn tx_handler(
         Ok(n) => n,
         Err(resp) => return resp,
     };
+    // Strict parse before the cache key (garbage must never populate the
+    // cache map); the canonical lowercase hex keys and echoes the tx.
     let tx_hex = txid.strip_suffix(".json").unwrap_or(&txid);
     let Ok(txid) = tx_hex.parse::<TxId>() else {
         return (StatusCode::BAD_REQUEST, "bad txid").into_response();
     };
 
-    // A point lookup on an indexed column — cheap enough to skip the cache.
     let db = state.base_dir.join(format!("{network}.db"));
-    let result = tokio::task::spawn_blocking(move || -> Result<Vec<kascov_core::CovenantId>> {
+    let key = format!("{network}/tx/{txid}");
+    let cc = "public, max-age=60, s-maxage=300";
+    let resp = serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
-        Ok(store.covenants_by_txid(&txid)?)
+        let events = store.events_by_txid(&txid)?;
+        if events.is_empty() {
+            return Ok(None); // uncached 404, rewritten to the canonical body below
+        }
+        // covenant_ids in event order, deduped; the first keeps the legacy field
+        let mut ids: Vec<String> = Vec::new();
+        for e in &events {
+            let id = e.covenant_id.to_string();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        let events_json: Vec<serde_json::Value> = events
+            .iter()
+            .map(|e| {
+                let id_hex = e.covenant_id.to_string();
+                let mut row = serde_json::json!({
+                    "covenant_id": id_hex,
+                    "name": og::friendly_name(&id_hex),
+                    "seq": e.seq,
+                    "kind": e.kind,
+                });
+                if let Some(i) = e.tx_index {
+                    row["tx_index"] = serde_json::json!(i);
+                }
+                row
+            })
+            .collect();
+        let created: Vec<serde_json::Value> = store
+            .cells_created_by_txid(&txid)?
+            .iter()
+            .map(|c| {
+                let mut row = serde_json::json!({
+                    "covenant_id": c.covenant_id,
+                    "index": c.index,
+                    "value": c.value,
+                });
+                if let Some(t) = &c.template {
+                    row["template"] = serde_json::json!(t);
+                }
+                row
+            })
+            .collect();
+        let spent: Vec<serde_json::Value> = store
+            .cells_spent_by_txid(&txid)?
+            .iter()
+            .map(|c| {
+                let mut row = serde_json::json!({
+                    "covenant_id": c.covenant_id,
+                    "txid": c.txid,
+                    "index": c.index,
+                    "value": c.value,
+                    "has_witness": c.has_witness,
+                });
+                if let Some(t) = &c.revealed_template {
+                    row["revealed_template"] = serde_json::json!(t);
+                }
+                row
+            })
+            .collect();
+        let token_actions: Vec<serde_json::Value> = store
+            .token_actions_by_txid(&txid)?
+            .iter()
+            .map(|a| {
+                let id_hex = a.token_id.to_string();
+                let mut row = serde_json::json!({
+                    "token_id": id_hex,
+                    "name": og::friendly_name(&id_hex),
+                    "token_kind": a.kind,
+                });
+                if let Some(v) = a.amount {
+                    row["amount"] = serde_json::json!(v);
+                }
+                row
+            })
+            .collect();
+        // One tx is accepted by exactly one chain block, so every event row
+        // shares the anchor — read it off the first.
+        let out = serde_json::json!({
+            "txid": txid,
+            "covenant_id": ids[0],
+            "covenant_ids": ids,
+            "accepting_daa": events[0].accepting_daa,
+            "accepting_block": events[0].accepting_block,
+            "events": events_json,
+            "cells": { "created": created, "spent": spent },
+            "token_actions": token_actions,
+        });
+        Ok(Some(serde_json::to_string(&out)?))
     })
     .await;
-    let ok_headers = [
-        (header::CONTENT_TYPE, "application/json; charset=utf-8"),
-        (header::CACHE_CONTROL, "public, max-age=60, s-maxage=300"),
-        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
-    ];
-    match result {
-        Ok(Ok(ids)) if !ids.is_empty() => (
-            ok_headers,
-            // covenant_id stays for existing consumers; covenant_ids is the full set
-            serde_json::json!({ "txid": tx_hex, "covenant_id": ids[0], "covenant_ids": ids }).to_string(),
-        )
-            .into_response(),
-        Ok(Ok(_)) => (
+    // serve_cached's generic 404 → this endpoint's canonical body (existing
+    // consumers match on it), with the short cache the old handler promised.
+    if resp.status() == StatusCode::NOT_FOUND {
+        return (
             StatusCode::NOT_FOUND,
             [
                 (header::CACHE_CONTROL, "public, max-age=10, s-maxage=10"),
@@ -4115,16 +4950,9 @@ async fn tx_handler(
             ],
             "transaction not seen by kascov",
         )
-            .into_response(),
-        Ok(Err(err)) => {
-            tracing::error!("{network}: tx lookup failed: {err}");
-            (StatusCode::SERVICE_UNAVAILABLE, "lookup unavailable").into_response()
-        }
-        Err(err) => {
-            tracing::error!("{network}: tx lookup panicked: {err}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
-        }
+            .into_response();
     }
+    resp
 }
 
 /// The last 24 hours as one small object — counts, value born, and the
@@ -5167,5 +5995,287 @@ mod price_tests {
         assert_eq!(parse_coingecko_price(r#"{"kaspa":{"usd":"0.07"}}"#), None); // string, not number
         assert_eq!(parse_coingecko_price(r#"{"kaspa":{"usd":0}}"#), None);
         assert_eq!(parse_coingecko_price("not json"), None);
+    }
+}
+
+#[cfg(test)]
+mod consistency_tests {
+    use super::*;
+
+    fn view(
+        supply: Option<i64>,
+        holders: Option<u64>,
+        balances: Option<&[(&str, i64)]>,
+    ) -> TokenView {
+        TokenView {
+            supply,
+            holders,
+            balances: balances
+                .map(|rows| rows.iter().map(|(owner, v)| (owner.to_string(), *v)).collect()),
+        }
+    }
+
+    /// The verdict table — every class the report can emit, from synthetic
+    /// pairs (no live calls anywhere in these tests).
+    #[test]
+    fn classifier_verdict_table() {
+        let ours = view(Some(100), Some(3), None);
+
+        // supply + counts match, encodings unmatched → agree, with the caveat
+        let (v, r) = classify_pair(Some(&ours), Some(&view(Some(100), Some(3), None)));
+        assert_eq!(v, "agree");
+        assert!(r.unwrap().contains("owner encodings"));
+
+        // supply mismatch
+        let (v, r) = classify_pair(Some(&ours), Some(&view(Some(101), Some(3), None)));
+        assert_eq!(v, "differ");
+        assert!(r.unwrap().contains("supply"));
+
+        // holder-count mismatch (supply agrees)
+        let (v, r) = classify_pair(Some(&ours), Some(&view(Some(100), Some(4), None)));
+        assert_eq!(v, "differ");
+        assert!(r.unwrap().contains("holder count"));
+
+        // one-sided listings
+        assert_eq!(classify_pair(Some(&ours), None), ("only_kascov", None));
+        assert_eq!(classify_pair(None, Some(&ours)), ("only_other", None));
+
+        // unprovable on our side is honesty, not a difference
+        let (v, r) = classify_pair(
+            Some(&view(None, Some(3), None)),
+            Some(&view(Some(100), Some(3), None)),
+        );
+        assert_eq!(v, "not_comparable");
+        assert!(r.unwrap().contains("could not prove"));
+
+        // their side carried no readable supply
+        let (v, r) = classify_pair(Some(&ours), Some(&view(None, Some(3), None)));
+        assert_eq!(v, "not_comparable");
+        assert!(r.unwrap().contains(CONSISTENCY_SOURCE));
+
+        // matched balances: agree / differ / a top holder they don't list
+        let aa = "aa".repeat(32);
+        let ours_top = view(Some(100), Some(2), Some(&[(&aa, 60)]));
+        let (v, r) =
+            classify_pair(Some(&ours_top), Some(&view(Some(100), Some(2), Some(&[(&aa, 60)]))));
+        assert_eq!((v, r), ("agree", None));
+        let (v, r) =
+            classify_pair(Some(&ours_top), Some(&view(Some(100), Some(2), Some(&[(&aa, 59)]))));
+        assert_eq!(v, "differ");
+        assert!(r.unwrap().contains("balance of"));
+        let (v, r) = classify_pair(Some(&ours_top), Some(&view(Some(100), Some(2), Some(&[]))));
+        assert_eq!(v, "differ");
+        assert!(r.unwrap().contains("does not list"));
+    }
+
+    #[test]
+    fn owner_normalization_maps_confident_forms_only() {
+        let hex64 = "AB".repeat(32);
+        assert_eq!(normalize_owner(&hex64).as_deref(), Some("ab".repeat(32).as_str()));
+        assert_eq!(normalize_owner(&format!("0x{hex64}")).as_deref(), Some("ab".repeat(32).as_str()));
+        // typed 33-byte form maps through owner_display
+        assert_eq!(
+            normalize_owner(&format!("00{}", "cd".repeat(32))).as_deref(),
+            Some("cd".repeat(32).as_str())
+        );
+        assert_eq!(
+            normalize_owner(&format!("01{}", "cd".repeat(32))),
+            Some(format!("script:{}", "cd".repeat(32)))
+        );
+        // our own typed spellings pass through
+        assert_eq!(
+            normalize_owner(&format!("covenant:{}", "ee".repeat(32))),
+            Some(format!("covenant:{}", "ee".repeat(32)))
+        );
+        // a kaspa pubkey address decodes to its payload key
+        let addr = kaspa_addresses::Address::new(
+            kaspa_addresses::Prefix::Testnet,
+            kaspa_addresses::Version::PubKey,
+            &[7u8; 32],
+        );
+        assert_eq!(normalize_owner(&addr.to_string()).as_deref(), Some("07".repeat(32).as_str()));
+        // no confident mapping → None, never a guess
+        assert_eq!(normalize_owner("not an owner"), None);
+        assert_eq!(normalize_owner(&"ab".repeat(20)), None);
+        assert_eq!(normalize_owner(&format!("script:{}", "zz".repeat(32))), None);
+    }
+
+    /// Discovery pages are assembled defensively: ids under any plausible
+    /// key, duplicates folded, unreadable items counted, the freshness
+    /// anchor read from the first page that carries one.
+    #[test]
+    fn discovery_pagination_assembly() {
+        let id_a = "11".repeat(32);
+        let id_b = "22".repeat(32);
+        let pages = vec![
+            serde_json::json!({
+                "items": [
+                    {"covenantId": id_a, "supply": 500, "holders": 3},
+                    {"tokenId": id_b, "totalSupply": "900"},
+                    {"name": "no id here"},
+                ],
+                "total": 4,
+                "freshness": {"refreshedAtMs": 1, "sourceBlueScore": 483_212_800u64},
+            }),
+            serde_json::json!({
+                // id_a repeated on page 2 — folded, first-seen fields kept
+                "items": [{"covenant_id": id_a, "supply": 999}],
+                "total": 4,
+            }),
+        ];
+        let discovery = assemble_discovery(&pages);
+        assert_eq!(discovery.tokens_other, 2);
+        assert_eq!(discovery.blue_score, Some(483_212_800));
+        assert_eq!(discovery.unreadable_items, 1);
+        assert_eq!(discovery.views[&id_a], TokenView { supply: Some(500), holders: Some(3), balances: None });
+        // string-encoded numbers parse; missing holders stays honest None
+        assert_eq!(discovery.views[&id_b], TokenView { supply: Some(900), holders: None, balances: None });
+
+        // page-walk decisions: short page stops, full page continues until
+        // the reported total is reached (or forever when total is unknown)
+        assert!(!more_discovery_pages(0, 0, Some(0)));
+        assert!(!more_discovery_pages(5, 5, Some(200)));
+        assert!(more_discovery_pages(CONSISTENCY_PAGE_LIMIT as usize, 100, Some(200)));
+        assert!(!more_discovery_pages(CONSISTENCY_PAGE_LIMIT as usize, 200, Some(200)));
+        assert!(more_discovery_pages(CONSISTENCY_PAGE_LIMIT as usize, 300, None));
+    }
+
+    #[test]
+    fn holders_parse_counts_and_normalizes() {
+        let aa = "aa".repeat(32);
+        let bb = "bb".repeat(32);
+        // bare array, one owner split over two cells → summed
+        let body = serde_json::json!([
+            {"owner": aa, "balance": 40},
+            {"owner": aa, "balance": 20},
+            {"address": bb, "amount": "5"},
+        ])
+        .to_string();
+        let (count, balances) = parse_other_holders(&body).unwrap();
+        assert_eq!(count, 3);
+        let balances = balances.unwrap();
+        assert_eq!(balances[&aa], 60);
+        assert_eq!(balances[&bb], 5);
+        // an {items:[…]} envelope also parses
+        let wrapped = serde_json::json!({"items": [{"owner": aa, "balance": 1}]}).to_string();
+        assert_eq!(parse_other_holders(&wrapped).unwrap().0, 1);
+        // one unmappable owner poisons balances but never the count
+        let mixed = serde_json::json!([
+            {"owner": aa, "balance": 40},
+            {"owner": "???", "balance": 1},
+        ])
+        .to_string();
+        let (count, balances) = parse_other_holders(&mixed).unwrap();
+        assert_eq!(count, 2);
+        assert!(balances.is_none());
+        // not a holder list at all
+        assert!(parse_other_holders("{\"error\":\"nope\"}").is_none());
+        assert!(parse_other_holders("not json").is_none());
+    }
+
+    /// The politeness state machine: budget counts down, the first
+    /// 402/403/429 latches the denial (which is what stretches the next run
+    /// to the 6h back-off), plain failures never do.
+    #[test]
+    fn politeness_gate_backoff() {
+        let mut gate = PolitenessGate::new();
+        assert!(gate.may_request());
+        assert_eq!(gate.stop_reason(), None);
+        assert_eq!(gate.next_delay(), CONSISTENCY_INTERVAL);
+
+        // ordinary statuses spend budget but never deny
+        gate.spend();
+        gate.observe_status(200);
+        gate.spend();
+        gate.observe_status(404);
+        gate.spend();
+        gate.observe_status(500);
+        assert!(gate.may_request());
+        assert_eq!(gate.next_delay(), CONSISTENCY_INTERVAL);
+
+        // a 429 latches: no more requests, back off the whole run 6h
+        gate.spend();
+        gate.observe_status(429);
+        assert!(!gate.may_request());
+        assert!(gate.stop_reason().unwrap().contains("429"));
+        assert_eq!(gate.next_delay(), CONSISTENCY_BACKOFF);
+        // the first denial wins — a later status never rewrites the story
+        gate.observe_status(402);
+        assert!(gate.stop_reason().unwrap().contains("429"));
+
+        // 402 and 403 latch the same way
+        for code in [402u16, 403] {
+            let mut gate = PolitenessGate::new();
+            gate.spend();
+            gate.observe_status(code);
+            assert!(!gate.may_request());
+            assert_eq!(gate.next_delay(), CONSISTENCY_BACKOFF);
+        }
+
+        // budget exhaustion stops the run but is NOT a denial — next run
+        // stays on the daily cadence
+        let mut gate = PolitenessGate::new();
+        for _ in 0..CONSISTENCY_REQUEST_CAP {
+            assert!(gate.may_request());
+            gate.spend();
+            gate.observe_status(200);
+        }
+        assert!(!gate.may_request());
+        assert!(gate.stop_reason().unwrap().contains("budget"));
+        assert_eq!(gate.next_delay(), CONSISTENCY_INTERVAL);
+    }
+
+    /// The wire shape the frontend consumes: every counter present, anchors
+    /// named as anchors, optional fields omitted (not null) when absent.
+    #[test]
+    fn report_serde_shape() {
+        let id = "33".repeat(32);
+        let report = ConsistencyReport {
+            network: "testnet-10".into(),
+            checked_at_ms: 1_783_900_000_000,
+            our_tip_daa: Some(297_000_000),
+            other_source: CONSISTENCY_SOURCE,
+            other_blue_score: None,
+            tokens_ours: 302,
+            tokens_other: 0,
+            intersection: 0,
+            agree: 0,
+            differ: 0,
+            only_kascov: 0,
+            only_other: 0,
+            not_comparable: 302,
+            reason: Some(format!("no tokens listed on {CONSISTENCY_SOURCE} yet")),
+            details: vec![ConsistencyDetail {
+                covenant_id: id.clone(),
+                name: og::friendly_name(&id),
+                verdict: "not_comparable",
+                ours: Some(ConsistencySide { supply: Some(1000), holders: Some(4) }),
+                other: None,
+                reason: None,
+            }],
+            note: CONSISTENCY_NOTE,
+        };
+        let v = serde_json::to_value(&report).unwrap();
+        for key in [
+            "network", "checked_at_ms", "our_tip_daa", "other_source", "other_blue_score",
+            "tokens_ours", "tokens_other", "intersection", "agree", "differ", "only_kascov",
+            "only_other", "not_comparable", "reason", "details", "note",
+        ] {
+            assert!(v.get(key).is_some(), "report must carry {key}");
+        }
+        assert_eq!(v["other_source"], CONSISTENCY_SOURCE);
+        assert_eq!(v["other_blue_score"], serde_json::Value::Null);
+        assert_eq!(v["note"], CONSISTENCY_NOTE);
+        let detail = &v["details"][0];
+        assert_eq!(detail["verdict"], "not_comparable");
+        assert_eq!(detail["ours"]["supply"], 1000);
+        assert_eq!(detail["ours"]["holders"], 4);
+        // absent sides/reasons are omitted, never null
+        assert!(detail.get("other").is_none());
+        assert!(detail.get("reason").is_none());
+        // interesting rows outrank agreement when the cap bites
+        assert!(verdict_rank("differ") < verdict_rank("not_comparable"));
+        assert!(verdict_rank("not_comparable") < verdict_rank("only_kascov"));
+        assert!(verdict_rank("only_other") < verdict_rank("agree"));
     }
 }

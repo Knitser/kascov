@@ -402,6 +402,57 @@ pub struct SpentStateRow {
     pub spent_budget: Option<u16>,
 }
 
+/// One covenant event a single transaction fired — the tx-scoped inverse of
+/// [`Store::events`], without the payload bytes (the tx endpoint links out;
+/// the covenant detail carries the heavy fields).
+#[derive(Clone, Debug, Serialize)]
+pub struct TxEventRow {
+    pub covenant_id: CovenantId,
+    pub seq: u64,
+    pub kind: String,
+    pub accepting_block: BlockHash,
+    pub accepting_daa: u64,
+    /// 0-based index in the accepting block's accepted-tx list (consensus
+    /// acceptance order). None on rows written before capture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_index: Option<u64>,
+}
+
+/// A state cell one transaction created. `template: None` covers both
+/// not-yet-decoded and decoded-without-a-match ('' in storage) — the tx view
+/// only names a shape when one is actually known.
+#[derive(Clone, Debug, Serialize)]
+pub struct TxCreatedCellRow {
+    pub covenant_id: CovenantId,
+    pub index: u32,
+    pub value: u64,
+    pub template: Option<String>,
+}
+
+/// A state cell one transaction spent — shape hints only; the full witness
+/// bytes stay on [`Store::spent_by_txid`] (the debugger's feed).
+#[derive(Clone, Debug, Serialize)]
+pub struct TxSpentCellRow {
+    pub covenant_id: CovenantId,
+    pub txid: TxId,
+    pub index: u32,
+    pub value: u64,
+    /// Verified P2SH program revealed by this spend, when one matched.
+    pub revealed_template: Option<String>,
+    /// Whether the spend's unlocking script was captured.
+    pub has_witness: bool,
+}
+
+/// One classified token delta a transaction produced.
+#[derive(Clone, Debug, Serialize)]
+pub struct TxTokenActionRow {
+    pub token_id: CovenantId,
+    /// genesis | mint | transfer | split | merge | burn | unknown
+    pub kind: String,
+    /// None exactly when the delta could not be proven.
+    pub amount: Option<i64>,
+}
+
 /// Events produced while processing one accepting chain block, applied atomically.
 pub struct BlockEvents {
     pub accepting_block: BlockHash,
@@ -2172,6 +2223,118 @@ impl Store {
         Ok(rows)
     }
 
+    /// Every covenant event this transaction fired (walks ev_by_txid), in
+    /// deterministic (covenant, seq) order. All rows of one tx share the same
+    /// accepting block — a transaction is accepted exactly once.
+    pub fn events_by_txid(&self, txid: &TxId) -> Result<Vec<TxEventRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT covenant_id, seq, kind, accepting_block, accepting_daa, tx_index
+                 FROM covenant_events WHERE txid = ?1 ORDER BY covenant_id, seq",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([txid.0.as_slice()], |row| {
+                Ok(TxEventRow {
+                    covenant_id: CovenantId(row.get(0)?),
+                    seq: row.get(1)?,
+                    kind: row.get(2)?,
+                    accepting_block: BlockHash(row.get(3)?),
+                    accepting_daa: row.get(4)?,
+                    tx_index: row.get(5)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// State cells this transaction created — a primary-key prefix walk on
+    /// (txid, output_index). NULLIF folds the '' decoded-no-match stamp into
+    /// None (see [`TxCreatedCellRow`]).
+    pub fn cells_created_by_txid(&self, txid: &TxId) -> Result<Vec<TxCreatedCellRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT covenant_id, output_index, value, NULLIF(template, '')
+                 FROM covenant_utxos WHERE txid = ?1 ORDER BY output_index",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([txid.0.as_slice()], |row| {
+                Ok(TxCreatedCellRow {
+                    covenant_id: CovenantId(row.get(0)?),
+                    index: row.get(1)?,
+                    value: row.get(2)?,
+                    template: row.get(3)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// State cells this transaction spent (walks utxo_by_spent_txid) — the
+    /// light sibling of [`Store::spent_by_txid`], carrying shape hints
+    /// instead of script bytes.
+    pub fn cells_spent_by_txid(&self, txid: &TxId) -> Result<Vec<TxSpentCellRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT covenant_id, txid, output_index, value, NULLIF(revealed_template, ''),
+                        spent_sig IS NOT NULL
+                 FROM covenant_utxos WHERE spent_txid = ?1 ORDER BY txid, output_index",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([txid.0.as_slice()], |row| {
+                Ok(TxSpentCellRow {
+                    covenant_id: CovenantId(row.get(0)?),
+                    txid: TxId(row.get(1)?),
+                    index: row.get(2)?,
+                    value: row.get(3)?,
+                    revealed_template: row.get(4)?,
+                    has_witness: row.get(5)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Classified token deltas this transaction produced. token_events has no
+    /// txid column, so join through covenant_events on its (covenant_id, seq)
+    /// key: ev_by_txid finds the events, tev_by_event probes the deltas —
+    /// index-only on both sides, no scan, no new index needed.
+    pub fn token_actions_by_txid(&self, txid: &TxId) -> Result<Vec<TxTokenActionRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT t.token_id, t.kind, t.amount
+                 FROM covenant_events e
+                 JOIN token_events t ON t.covenant_id = e.covenant_id AND t.seq = e.seq
+                 WHERE e.txid = ?1
+                 ORDER BY t.token_id, t.seq, t.delta_idx",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([txid.0.as_slice()], |row| {
+                Ok(TxTokenActionRow {
+                    token_id: CovenantId(row.get(0)?),
+                    kind: row.get(1)?,
+                    amount: row.get(2)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
     /// Transactions that touched more than one covenant, with the covenants
     /// they moved together — the raw edges of multi-contract "apps".
     /// (A single tx moving several covenants is a Toccata multi-contract flow.)
@@ -3643,6 +3806,149 @@ mod tests {
         assert_eq!(rows[0].spk_script, vec![0xaa, 0x20]);
         assert_eq!(rows[0].spent_sig.as_deref(), Some([0x01, 0x51].as_slice()));
         assert_eq!(rows[0].spent_budget, Some(60));
+    }
+
+    /// The tx-scoped queries behind /data/{network}/tx/{txid}: a genesis tx,
+    /// a multi-covenant tx (events + created + spent cells), and a token mint
+    /// tx (token_events joined through covenant_events).
+    #[test]
+    fn tx_scoped_queries_cover_genesis_multi_covenant_and_token_mint() {
+        let mut store = test_store("tx-scoped");
+        let cov_a = CovenantId([0xA1; 32]);
+        let cov_b = CovenantId([0xB2; 32]);
+        let tx1 = TxId([0x01; 32]); // genesis of A
+        let tx2 = TxId([0x02; 32]); // multi-covenant: transitions A, births B
+        let tx3 = TxId([0x03; 32]); // mint event on B (token delta wired below)
+
+        let mut b1 = BlockEvents::empty(BlockHash([1; 32]));
+        b1.accepting_daa = 100;
+        b1.events = vec![NewEvent {
+            covenant_id: cov_a,
+            kind: EventKind::Genesis,
+            txid: tx1,
+            tx_index: 0,
+            payload: None,
+            lane_namespace: None,
+        }];
+        b1.created_utxos = vec![NewUtxo {
+            outpoint: Outpoint { txid: tx1, index: 0 },
+            covenant_id: cov_a,
+            value: 5_000,
+            spk_version: 1,
+            spk_script: vec![0x51],
+        }];
+        store.apply(&b1, BlockHash([1; 32])).unwrap();
+
+        let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
+        b2.accepting_daa = 200;
+        b2.events = vec![
+            NewEvent {
+                covenant_id: cov_a,
+                kind: EventKind::Transition,
+                txid: tx2,
+                tx_index: 3,
+                payload: None,
+                lane_namespace: None,
+            },
+            NewEvent {
+                covenant_id: cov_b,
+                kind: EventKind::Genesis,
+                txid: tx2,
+                tx_index: 3,
+                payload: None,
+                lane_namespace: None,
+            },
+        ];
+        b2.created_utxos = vec![
+            NewUtxo {
+                outpoint: Outpoint { txid: tx2, index: 0 },
+                covenant_id: cov_a,
+                value: 4_000,
+                spk_version: 1,
+                spk_script: vec![0x51],
+            },
+            NewUtxo {
+                outpoint: Outpoint { txid: tx2, index: 1 },
+                covenant_id: cov_b,
+                value: 1_000,
+                spk_version: 1,
+                spk_script: vec![0x52],
+            },
+        ];
+        b2.spent_utxos = vec![(Outpoint { txid: tx1, index: 0 }, tx2, vec![0x01, 0x51], 60)];
+        store.apply(&b2, BlockHash([2; 32])).unwrap();
+
+        let mut b3 = BlockEvents::empty(BlockHash([3; 32]));
+        b3.accepting_daa = 300;
+        b3.events = vec![NewEvent {
+            covenant_id: cov_b,
+            kind: EventKind::Transition,
+            txid: tx3,
+            tx_index: 0,
+            payload: None,
+            lane_namespace: None,
+        }];
+        store.apply(&b3, BlockHash([3; 32])).unwrap();
+        // The synthetic covenants carry no KCC20 templates, so the derivation
+        // writes nothing — wire the delta by hand to exercise the join.
+        store
+            .conn
+            .execute(
+                "INSERT INTO token_events (token_id, covenant_id, seq, delta_idx, kind, amount,
+                                           owner_from, owner_to, accepting_daa, tx_index)
+                 VALUES (?1, ?2, 1, 0, 'mint', 42, NULL, ?3, 300, 0)",
+                params![cov_b.0.as_slice(), cov_b.0.as_slice(), "00".repeat(33)],
+            )
+            .unwrap();
+
+        // genesis tx: one event, one created cell, nothing spent, no deltas
+        let events = store.events_by_txid(&tx1).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].covenant_id, cov_a);
+        assert_eq!(events[0].kind, "genesis");
+        assert_eq!(events[0].seq, 0);
+        assert_eq!(events[0].accepting_block, BlockHash([1; 32]));
+        assert_eq!(events[0].accepting_daa, 100);
+        assert_eq!(events[0].tx_index, Some(0));
+        let created = store.cells_created_by_txid(&tx1).unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!((created[0].covenant_id, created[0].index, created[0].value), (cov_a, 0, 5_000));
+        assert_eq!(created[0].template, None); // NULL and '' both read as None
+        assert!(store.cells_spent_by_txid(&tx1).unwrap().is_empty());
+        assert!(store.token_actions_by_txid(&tx1).unwrap().is_empty());
+
+        // multi-covenant tx: both events, both created cells, the spent cell
+        let events = store.events_by_txid(&tx2).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events.iter().map(|e| (e.covenant_id, e.kind.as_str())).collect::<Vec<_>>(),
+            vec![(cov_a, "transition"), (cov_b, "genesis")],
+        );
+        let created = store.cells_created_by_txid(&tx2).unwrap();
+        assert_eq!(
+            created.iter().map(|c| (c.covenant_id, c.index, c.value)).collect::<Vec<_>>(),
+            vec![(cov_a, 0, 4_000), (cov_b, 1, 1_000)],
+        );
+        let spent = store.cells_spent_by_txid(&tx2).unwrap();
+        assert_eq!(spent.len(), 1);
+        assert_eq!((spent[0].covenant_id, spent[0].txid, spent[0].index), (cov_a, tx1, 0));
+        assert_eq!(spent[0].value, 5_000);
+        assert_eq!(spent[0].revealed_template, None);
+        assert!(spent[0].has_witness);
+
+        // token mint tx: the delta reaches back through (covenant_id, seq)
+        let actions = store.token_actions_by_txid(&tx3).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].token_id, cov_b);
+        assert_eq!(actions[0].kind, "mint");
+        assert_eq!(actions[0].amount, Some(42));
+
+        // a txid kascov never saw is empty everywhere, not an error
+        let unknown = TxId([0xEE; 32]);
+        assert!(store.events_by_txid(&unknown).unwrap().is_empty());
+        assert!(store.cells_created_by_txid(&unknown).unwrap().is_empty());
+        assert!(store.cells_spent_by_txid(&unknown).unwrap().is_empty());
+        assert!(store.token_actions_by_txid(&unknown).unwrap().is_empty());
     }
 
     /// The tx_index/accepting_time_ms/accepting_blue_score ALTERs must apply
