@@ -468,6 +468,30 @@ async function loadTokenDetail(network, id) {
   return rec;
 }
 
+/* one transaction's covenant footprint — the same route the search resolver
+   asks. Newer workers enrich it additively (events, created/spent cells,
+   token actions); older workers answer only { txid?, covenant_id,
+   covenant_ids? } and the page feature-detects. A 404 means kascov never saw
+   this tx touch a smart coin — remembered and reprobed after the ttl, since
+   a fresh tx can confirm late. */
+const txDetails = new Map(); // `${network}/${txid}` -> { data|missing, at }
+
+async function loadTxDetail(network, txid) {
+  const key = `${network}/${txid}`;
+  const t = txDetails.get(key);
+  if (t && Date.now() - t.at < TOKENS_TTL_MS) return t;
+  const res = await fetch(`data/${network}/tx/${txid}.json`, { cache: 'no-cache' });
+  if (res.status === 404) {
+    const rec = { missing: true, at: Date.now() };
+    txDetails.set(key, rec);
+    return rec;
+  }
+  if (!res.ok) throw new Error(`tx ${res.status}`);
+  const rec = { data: await res.json(), at: Date.now() };
+  txDetails.set(key, rec);
+  return rec;
+}
+
 /* web/changelog.json — a static file shipped with the frontend: an array of
    { date, title, body }, newest first. Cached for the session; a missing
    file (older deploy) hides everything that depends on it. */
@@ -494,5 +518,6 @@ export {
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,
   TOKENS_TTL_MS, tokenPages, loadTokens,
   tokenDetails, loadTokenDetail,
+  txDetails, loadTxDetail,
   loadChangelog,
 };

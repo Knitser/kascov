@@ -329,6 +329,9 @@
     <!-- ============ TOKEN PAGE ============ -->
     <section id="view-token" class="view-fade" aria-label="Token page" hidden></section>
 
+    <!-- ============ TRANSACTION PAGE ============ -->
+    <section id="view-tx" class="view-fade" aria-label="Transaction" hidden></section>
+
     <!-- ============ DECODER ============ -->
     <section id="view-decode" class="view-fade" aria-label="Playground — read" hidden>
       <div class="pg-modes" aria-label="Playground mode">
@@ -562,6 +565,7 @@
           <a href="#ep-token">One token</a>
           <a href="#ep-lifespans">Lifespans</a>
           <a href="#ep-reorgs">Reorgs</a>
+          <a href="#ep-consistency">Consistency</a>
           <div class="api-nav-group">Find</div>
           <a href="#ep-search">Search</a>
           <a href="#ep-debug">Spend debugger</a>
@@ -782,11 +786,40 @@ data: {"covenant_id":"2ab7dcd2…","kind":"transition",
 
           <article class="api-endpoint" id="ep-tx">
             <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/tx/{txid}.json</code></div>
-            <p class="ep-desc">Which smart coin did this transaction touch? Genesis, moves and burns all resolve.</p>
+            <p class="ep-desc">What did this transaction do, in covenant terms? Newer workers answer the whole story — the per-covenant events, the cells created and spent, and the decoded token actions — behind the site's <code class="mono">#/{network}/tx/{txid}</code> pages. Older workers answer only <code class="mono">covenant_id</code> / <code class="mono">covenant_ids</code>; every added field is additive, so feature-detect and fall back gracefully.</p>
             <div class="ep-cols">
-              <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{ "covenant_id": "b11acf6c…459c6" }</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "txid": "8e7040…3e2bb",
+  "covenant_id": "b11acf6c…459c6",
+  "covenant_ids": [ "b11acf6c…459c6" ],
+  "accepting_daa": 513870178, "accepting_block": "3d1c00…45e7e2",
+  "events": [
+    { "covenant_id": "b11acf6c…459c6", "name": "brave-jade-osprey",
+      "seq": 2, "kind": "burn", "tx_index": 18 }
+  ],
+  "cells": {
+    "created": [ { "covenant_id": "…", "index": 0,
+                   "value": 230415954231, "template": "p2sh commitment" } ],
+    "spent": [ { "covenant_id": "…", "txid": "82aabd…25dcb", "index": 0,
+                 "value": 230415954231,
+                 "revealed_template": "SilverScript · Escrow",
+                 "has_witness": true } ]
+  },
+  "token_actions": [
+    { "token_id": "9cc4fb51…68f50", "name": "humble-crimson-magpie",
+      "token_kind": "transfer", "amount": 1000000 }
+  ]
+}</code></pre></div>
               <div class="ep-example"><div class="ep-ex-head">Not covenant traffic · <span class="warn">404</span></div><pre class="codeblock"><code>{ "error": "not found" }</code></pre></div>
             </div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">covenant_id · covenant_ids</td><td>hex · array</td><td>the coin(s) this transaction touched — the only fields every worker serves</td></tr>
+              <tr><td class="mono">accepting_daa · accepting_block</td><td>int? · hex?</td><td><em>newer workers</em> — where the chain accepted this transaction</td></tr>
+              <tr><td class="mono">events[]</td><td>array?</td><td><em>newer workers</em> — one row per covenant life event: <code class="mono">covenant_id</code>, <code class="mono">name</code>, <code class="mono">seq</code>, <code class="mono">kind</code> (<code class="mono">genesis</code> · <code class="mono">transition</code> · <code class="mono">burn</code>), <code class="mono">tx_index?</code></td></tr>
+              <tr><td class="mono">cells.created[]</td><td>array?</td><td><em>newer workers</em> — covenant state this transaction made: <code class="mono">covenant_id</code>, output <code class="mono">index</code>, <code class="mono">value</code> (sompi), <code class="mono">template?</code></td></tr>
+              <tr><td class="mono">cells.spent[]</td><td>array?</td><td><em>newer workers</em> — covenant state it consumed: the outpoint's <code class="mono">txid</code> + <code class="mono">index</code>, <code class="mono">value</code>, <code class="mono">revealed_template?</code>, and <code class="mono">has_witness</code> (the captured unlocking script — replayable through the <a href="#ep-debug">spend debugger</a>)</td></tr>
+              <tr><td class="mono">token_actions[]</td><td>array?</td><td><em>newer workers</em> — the decoded token view: <code class="mono">token_id</code>, <code class="mono">name</code>, <code class="mono">token_kind</code> (<code class="mono">mint</code> · <code class="mono">transfer</code> · <code class="mono">burn</code>), <code class="mono">amount?</code> in raw token units</td></tr>
+            </tbody></table>
           </article>
 
           <article class="api-endpoint" id="ep-addr">
@@ -978,6 +1011,33 @@ data: {"covenant_id":"2ab7dcd2…","kind":"transition",
             <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
   "reorgs": [ { "daa": 509571904, "at_ms": 1751799000000, "rolled_back": 2 } ]
 }</code></pre></div>
+          </article>
+
+          <article class="api-endpoint" id="ep-consistency">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/consistency.json</code></div>
+            <p class="ep-desc">An automated cross-check between independent ecosystem indexers — kascov's decoded token set compared against another indexer's, token by token. Differences usually mean one of us has a bug; we fix ours and share theirs kindly. Served by newer workers; older ones <code class="mono">404</code>.</p>
+            <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "network": "mainnet", "checked_at_ms": 1783948200000,
+  "our_tip_daa": 513875477, "other_source": "…",
+  "other_blue_score": 513875470,
+  "tokens_ours": 270, "tokens_other": 268, "intersection": 265,
+  "agree": 261, "differ": 4,
+  "only_kascov": 5, "only_other": 3, "not_comparable": 0,
+  "details": [ { "token_id": "…", "field": "supply",
+                 "ours": 2100000000, "theirs": 2099999000 } ],
+  "note": "tips differ — small disagreements near the tip are expected"
+}</code></pre></div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">network · checked_at_ms</td><td>string · int</td><td>which network was compared, and when the check ran</td></tr>
+              <tr><td class="mono">our_tip_daa</td><td>int</td><td>kascov's chain tip at check time</td></tr>
+              <tr><td class="mono">other_source · other_blue_score</td><td>string · int</td><td>the other indexer's identity and its chain position — two indexers at different tips can honestly disagree</td></tr>
+              <tr><td class="mono">tokens_ours · tokens_other · intersection</td><td>int</td><td>how many tokens each side knows, and how many both do</td></tr>
+              <tr><td class="mono">agree · differ</td><td>int</td><td>of the intersection: tokens whose compared fields match, and tokens where they don't</td></tr>
+              <tr><td class="mono">only_kascov · only_other</td><td>int</td><td>tokens one side has indexed that the other hasn't (yet)</td></tr>
+              <tr><td class="mono">not_comparable</td><td>int</td><td>tokens skipped because the two sides expose incompatible shapes for them</td></tr>
+              <tr><td class="mono">details[]</td><td>array</td><td>the actual disagreements, per token — what we say, what they say</td></tr>
+              <tr><td class="mono">note</td><td>string</td><td>plain-language context for reading the numbers</td></tr>
+            </tbody></table>
           </article>
 
           <article class="api-endpoint" id="ep-search">

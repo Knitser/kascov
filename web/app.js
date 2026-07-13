@@ -29,6 +29,7 @@ import {
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,
   TOKENS_TTL_MS, tokenPages, loadTokens,
   tokenDetails, loadTokenDetail,
+  txDetails, loadTxDetail,
   loadChangelog,
 } from './core/data.js';
 
@@ -1952,7 +1953,7 @@ function timelineItem(entry, ev, data, network, flashTx) {
     `<span class="tl-icon" title="${esc(GLOSSARY[ev.kind] || '')}">${ICONS[meta.icon]}</span>` +
     `<div class="tl-body">` +
     `<p class="tl-text">${eventSentence(entry, ev, network, true)}</p>` +
-    `<p class="tl-meta"><span title="${esc(utcTitle(ms))}">${esc(relTime(ms))}</span> · <span class="abs-t" title="${esc(utcTitle(ms))}">${esc(absShort(ms))}</span> · <a href="${esc(txUrl(network, ev.txid))}" target="_blank" rel="noopener noreferrer">view transaction ↗</a>${nerdBits}</p>` +
+    `<p class="tl-meta"><span title="${esc(utcTitle(ms))}">${esc(relTime(ms))}</span> · <span class="abs-t" title="${esc(utcTitle(ms))}">${esc(absShort(ms))}</span> · <a href="#/${esc(network)}/tx/${esc(ev.txid)}">view transaction →</a>${nerdBits}</p>` +
     inscBits +
     payloadBits +
     withBits +
@@ -3881,7 +3882,7 @@ function tokenEventItem(ev, network, toMs) {
     `<div class="tl-body">` +
     `<p class="tl-text"><span class="tok-ev-chip ${meta.chip}">${esc(kind || 'event')}</span> ${text}</p>` +
     `<p class="tl-meta">${when}` +
-    (ev.txid ? ` · <a href="${esc(txUrl(network, ev.txid))}" target="_blank" rel="noopener noreferrer">view transaction ↗</a>` : '') +
+    (ev.txid ? ` · <a href="#/${esc(network)}/tx/${esc(ev.txid)}">view transaction →</a>` : '') +
     `</p></div></li>`;
 }
 
@@ -4052,6 +4053,210 @@ function tokenBacklinkHtml(network, covId) {
   return `<a class="token-backlink" href="#/${esc(network)}/token/${esc(covId)}">part of token ${esc(name)} →</a>`;
 }
 
+/* ---------------------------------------------------------------- tx page */
+
+/* #/{net}/tx/{txid} — one transaction's covenant footprint. Feature-detected
+   three ways: a newer worker's enriched answer (events, created/spent cells,
+   token actions) renders the whole story; an older worker's bare
+   { covenant_id, covenant_ids } renders the coin links; a 404 says honestly
+   that kascov never saw it. Born modular like renderTokenPage: renders from
+   core/data's loadTxDetail cache and core helpers only. */
+
+const TX_KIND_LABEL = { genesis: 'born', transition: 'moved', burn: 'retired' };
+const TX_KIND_CHIP = { genesis: 'tok-mint', transition: 'tok-transfer', burn: 'tok-burn' };
+
+/* a coin as avatar + friendly name, linking to its page with this tx flashed
+   in the timeline; the grid's dedup-suffixed name wins when it's loaded */
+function txCoinLink(network, covId, txid, fallbackName) {
+  const id = String(covId || '');
+  const entry = state.cache[network];
+  const rec = entry && entry.index.byId.get(id);
+  const name = (rec && rec.name) || fallbackName || friendlyName(id);
+  return `<a class="token-coin tx-coin" href="#/${esc(network)}/c/${esc(id)}?tx=${esc(txid)}" title="${esc(id)}">` +
+    `${avatarSvg(id, 26)} <span class="token-name">${esc(name)}</span></a>`;
+}
+
+/* the plain-language headline: "touched N smart coins — X born, Y moved, Z retired" */
+function txStoryLine(events, covCount) {
+  const n = (k) => events.filter((e) => e && e.kind === k).length;
+  const parts = [
+    [n('genesis'), 'born'], [n('transition'), 'moved'], [n('burn'), 'retired'],
+  ].filter(([c]) => c > 0).map(([c, word]) => `${fmtInt(c)} ${word}`);
+  return `this transaction touched ${fmtInt(covCount)} smart coin${covCount === 1 ? '' : 's'}` +
+    (parts.length ? ` — ${parts.join(', ')}` : '');
+}
+
+function renderTxPage(route) {
+  const network = state.network;
+  const view = $('#view-tx');
+  if (!view) return; /* stale cached index.html */
+  const txid = route.id;
+  const net = NETWORKS[network];
+  document.title = `tx ${shortHex(txid, 10, 8)} — kascov`;
+  const back = `<a class="back" href="#/${esc(network)}/explore">← all smart coins</a>`;
+  const cached = txDetails.get(`${network}/${txid}`);
+  const fresh = cached && Date.now() - cached.at < TOKENS_TTL_MS;
+  if (!fresh) {
+    /* stale-while-revalidate, same shape as token pages */
+    loadTxDetail(network, txid)
+      .then(() => {
+        const r = parseRoute();
+        if (state.network === network && r.view === 'tx' && r.id === txid) renderTxPage(r);
+      })
+      .catch(() => {
+        if (cached) return; /* stale data beats an error card */
+        const r = parseRoute();
+        if (state.network === network && r.view === 'tx' && r.id === txid) {
+          view.innerHTML = back + `<div class="empty-card"><h2>couldn’t look up this transaction.</h2>` +
+            `<p class="dim">the lookup didn’t answer — the worker may be busy. it’s not you.</p>` +
+            `<button type="button" class="btn" data-action="retry-tx">try again</button></div>`;
+        }
+      });
+  }
+  if (!cached) {
+    view.innerHTML = back + `<p class="dim">reading this transaction…</p>`;
+    return;
+  }
+  if (cached.missing) {
+    view.innerHTML = back + `<div class="empty-card"><h2>not seen by kascov — it may not touch any smart coin.</h2>` +
+      `<p class="dim">kascov only watches covenant traffic on ${esc(net.label)}: this could be a regular payment, still unconfirmed, or on the other network — ` +
+      `<a href="${esc(txUrl(network, txid))}" target="_blank" rel="noopener noreferrer">check it on the block explorer ↗</a></p></div>`;
+    return;
+  }
+  const d = cached.data || {};
+
+  /* daa→ms: the payload's own tip anchor first (feature-detected), the grid
+     snapshot's second, the raw DAA (never a made-up time) last — the same
+     policy as token pages */
+  const entry = state.cache[network];
+  const toMs = (daa) => {
+    if (daa == null) return null;
+    if (d.tip_daa != null && (d.tip_at_ms != null || d.generated_at_ms != null)) {
+      return (d.tip_at_ms != null ? d.tip_at_ms : d.generated_at_ms) - (d.tip_daa - daa) * MS_PER_DAA;
+    }
+    return entry ? daaToMs(daa, entry.data) : null;
+  };
+
+  const ms = toMs(d.accepting_daa);
+  const whenBits = [];
+  if (ms != null) {
+    whenBits.push(`<span title="${esc(utcTitle(ms))}">accepted ${esc(relTime(ms))}</span>`);
+    whenBits.push(`<span class="abs-t" title="${esc(utcTitle(ms))}">${esc(absShort(ms))}</span>`);
+  }
+  if (d.accepting_daa != null && (ms == null || state.nerd)) {
+    whenBits.push(`<span class="mono dim">DAA ${esc(fmtInt(d.accepting_daa))}</span>`);
+  }
+  const header =
+    `<header class="page-head tx-head"><h1>transaction</h1>` +
+    `<p class="id-chip"><span class="mono" title="${esc(txid)}">${esc(shortHex(txid, 12, 10))}</span>` +
+    `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(txid)}" aria-label="copy this transaction’s full id">copy txid</button>` +
+    `<a class="token-coin-link" href="${esc(txUrl(network, txid))}" target="_blank" rel="noopener noreferrer">raw tx ↗</a></p>` +
+    `<p class="page-sub dim">a transaction on ${esc(net.label)}` +
+    (whenBits.length ? ` · ${whenBits.join(' · ')}` : '') +
+    (d.accepting_block ? ` · in block <span class="mono" title="${esc(d.accepting_block)}">${esc(shortHex(String(d.accepting_block), 8, 6))}</span>` : '') +
+    `</p></header>`;
+
+  /* covenant events — the enriched shape; older workers only name the coins */
+  const events = Array.isArray(d.events) ? d.events : null;
+  let story = '';
+  let eventsSection = '';
+  if (events && events.length) {
+    const covIds = [...new Set(events.map((e) => String((e && e.covenant_id) || '')).filter(Boolean))];
+    story = `<p class="tx-story">${esc(txStoryLine(events, covIds.length || 1))}</p>`;
+    const rows = events.slice().sort((a, b) => ((a && a.seq) || 0) - ((b && b.seq) || 0)).map((ev) => {
+      const kind = String((ev && ev.kind) || '');
+      const meta = KIND_META[kind] || KIND_META.transition;
+      const chip = `<span class="tok-ev-chip ${TX_KIND_CHIP[kind] || 'tok-transfer'}" title="${esc(GLOSSARY[kind] || '')}">${esc(TX_KIND_LABEL[kind] || kind || 'event')}</span>`;
+      const idx = ev && ev.tx_index != null
+        ? ` <span class="dim mono" title="this transaction’s position within its accepting block">tx #${esc(fmtInt(ev.tx_index))}</span>` : '';
+      return `<li class="tl-item ${meta.cls}">` +
+        `<span class="tl-icon" title="${esc(GLOSSARY[kind] || '')}">${ICONS[meta.icon]}</span>` +
+        `<div class="tl-body"><p class="tl-text">${chip} ${txCoinLink(network, ev.covenant_id, txid, ev.name)}${idx}</p></div></li>`;
+    }).join('');
+    eventsSection = `<section aria-label="Smart coins touched"><h2>smart coins touched</h2>` +
+      `<ol class="timeline tx-events">${rows}</ol></section>`;
+  } else {
+    /* covenant-links-only fallback (older worker, or an enriched answer with
+       no event rows) — still answers the real question: which coins? */
+    const ids = [...new Set(
+      [...(Array.isArray(d.covenant_ids) ? d.covenant_ids : []), d.covenant_id]
+        .filter((x) => typeof x === 'string' && /^[0-9a-fA-F]{64}$/.test(x))
+        .map((x) => x.toLowerCase())
+    )];
+    if (ids.length) {
+      story = `<p class="tx-story">${esc(`this transaction touched ${fmtInt(ids.length)} smart coin${ids.length === 1 ? '' : 's'}`)}</p>`;
+      eventsSection = `<section aria-label="Smart coins touched"><h2>smart coins touched</h2>` +
+        `<ul class="tx-coin-list">${ids.map((id) => `<li>${txCoinLink(network, id, txid)}</li>`).join('')}</ul>` +
+        `<p class="dim">this kascov worker doesn’t serve the full per-transaction story yet — each coin’s page carries its timeline.</p></section>`;
+    }
+  }
+
+  /* token actions — the same conservative wording as token-page timelines:
+     amounts are the cells' full decoded state amounts, never net deltas */
+  const acts = Array.isArray(d.token_actions) ? d.token_actions : [];
+  let tokenSection = '';
+  if (acts.length) {
+    const rows = acts.map((a) => {
+      const tid = String((a && a.token_id) || '');
+      const kind = String((a && a.token_kind) || '');
+      const meta = TOKEN_EV_META[kind] || TOKEN_EV_META.transfer;
+      const name = (a && a.name) || friendlyName(tid);
+      const amount = a && a.amount != null
+        ? ` — ${kind === 'burn' ? 'burned a cell holding' : 'cell now holds'} <strong>${esc(fmtTokenAmount(a.amount))}</strong>` : '';
+      return `<li class="tl-item ${meta.cls}"><span class="tl-icon" aria-hidden="true">${ICONS[meta.icon]}</span>` +
+        `<div class="tl-body"><p class="tl-text"><span class="tok-ev-chip ${meta.chip}">${esc(kind || 'event')}</span> ` +
+        `<a class="token-coin tx-coin" href="#/${esc(network)}/token/${esc(tid)}" title="${esc(tid)}">${avatarSvg(tid, 26)} <span class="token-name">${esc(name)}</span></a>` +
+        `${amount}</p></div></li>`;
+    }).join('');
+    tokenSection = `<section aria-label="Token actions"><h2>token actions</h2>` +
+      `<ol class="timeline tx-events">${rows}</ol></section>`;
+  }
+
+  /* the cells this transaction created and consumed */
+  const cells = d.cells || {};
+  const created = Array.isArray(cells.created) ? cells.created : [];
+  const spent = Array.isArray(cells.spent) ? cells.spent : [];
+  let cellsSection = '';
+  if (created.length || spent.length) {
+    const createdRows = created.map((c) => `<li class="tx-cell">` +
+      txCoinLink(network, c && c.covenant_id, txid) +
+      `<span class="tx-cell-meta"><span>${esc(amountWithUsd((c && c.value) || 0, network))}</span>` +
+      `<span class="dim mono">output #${esc(fmtInt((c && c.index) || 0))}</span>` +
+      (c && c.template ? `<span class="flag flag-tpl">${esc(c.template)}</span>` : '') +
+      `</span></li>`).join('');
+    const spentRows = spent.map((c) => {
+      const outpoint = c && c.txid
+        ? `${shortHex(String(c.txid).toLowerCase(), 8, 6)}:${c.index != null ? c.index : '?'}` : '';
+      /* has_witness means the worker captured the unlocking script — the
+         real spend can replay through the engine, same flow as coin pages */
+      const replay = c && c.has_witness
+        ? `<div class="replay-row"><button type="button" class="btn dbg-btn replay-btn" data-action="replay-spend" data-txid="${esc(txid)}">⧉ replay this spend</button>` +
+          `<span class="dim replay-hint">the real on-chain spend, opcode by opcode</span>` +
+          `<span class="replay-result"></span></div><div class="replay-panel"></div>`
+        : '';
+      return `<li class="tx-cell">` +
+        txCoinLink(network, c && c.covenant_id, txid) +
+        `<span class="tx-cell-meta"><span>${esc(amountWithUsd((c && c.value) || 0, network))}</span>` +
+        (outpoint ? `<span class="dim mono" title="the outpoint this transaction consumed">${esc(outpoint)}</span>` : '') +
+        (c && c.revealed_template ? `<span class="flag flag-tpl" title="the program this cell actually ran — revealed and hash-verified at spend">${esc(c.revealed_template)}</span>` : '') +
+        `</span>${replay}</li>`;
+    }).join('');
+    cellsSection = `<section class="tx-cells" aria-label="Cells">` +
+      (created.length
+        ? `<div class="tx-cell-col"><h2>cells created</h2><p class="dim">new covenant state born in this transaction</p><ul class="tx-cell-list">${createdRows}</ul></div>` : '') +
+      (spent.length
+        ? `<div class="tx-cell-col"><h2>cells spent</h2><p class="dim">covenant state this transaction consumed</p><ul class="tx-cell-list">${spentRows}</ul></div>` : '') +
+      `</section>`;
+  }
+
+  if (!eventsSection && !tokenSection && !cellsSection) {
+    view.innerHTML = back + header +
+      `<p class="dim">kascov knows this transaction, but its answer named no smart coins — that shouldn’t happen; please report it.</p>`;
+    return;
+  }
+  view.innerHTML = back + header + story + eventsSection + tokenSection + cellsSection;
+}
+
 /* ---------------------------------------------------------------- routing */
 
 function parseRoute() {
@@ -4088,6 +4293,9 @@ function parseRoute() {
   /* '#/<network>/token/<covenant id>' — one decoded token's page */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?token\/([0-9a-fA-F]{6,64})\/?$/);
   if (m) return { view: 'token', network: m[1] || null, id: m[2].toLowerCase() };
+  /* '#/<network>/tx/<txid>' and bare '#/tx/<txid>' — one transaction's page */
+  m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?tx\/([0-9a-fA-F]{64})\/?$/);
+  if (m) return { view: 'tx', network: m[1] || null, id: m[2].toLowerCase() };
   /* '#/explore' and '#/<network>/explore' — '?galaxy=1' opens the galaxy */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
   if (m) return { view: 'explore', network: m[1] || null, galaxy: params.get('galaxy') === '1' };
@@ -4111,6 +4319,9 @@ function routeHash(view, id) {
   /* the token directory exists on any network — keep the page, switch the data */
   if (view === 'tokens') return `#/${state.network}/tokens`;
   if (view === 'token') return `#/${state.network}/token/${id}`;
+  /* a txid lives on one network only, but the page says so honestly —
+     keep it across a switch, like lane pages */
+  if (view === 'tx') return `#/${state.network}/tx/${id}`;
   if (view === 'explore') return `#/${state.network}/explore`;
   /* decode/dev/changelog are network-free — switching networks keeps the page (and its query) */
   if (view === 'decode' || view === 'dev' || view === 'build' || view === 'changelog') return location.hash || `#/${view}`;
@@ -4167,6 +4378,7 @@ async function render() {
     lane: $('#view-lane'),
     tokens: $('#view-tokens'),
     token: $('#view-token'),
+    tx: $('#view-tx'),
     decode: $('#view-decode'),
     build: $('#view-build'),
     dev: $('#view-dev'),
@@ -4191,9 +4403,9 @@ async function render() {
      endpoint), so it stays reachable on every view; ⌘K focuses it anywhere */
   $('#header-search').hidden = false;
 
-  /* the decoder, dev docs, changelog, address, lane and token pages never
+  /* the decoder, dev docs, changelog, address, lane, token and tx pages never
      need a snapshot — don't block them on data (they fetch their own) */
-  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'build' || route.view === 'address' || route.view === 'lane' || route.view === 'tokens' || route.view === 'token' || route.view === 'changelog') && views[route.view]) {
+  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'build' || route.view === 'address' || route.view === 'lane' || route.view === 'tokens' || route.view === 'token' || route.view === 'tx' || route.view === 'changelog') && views[route.view]) {
     panel.hidden = true;
     for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
     views.detail.innerHTML = '';
@@ -4202,6 +4414,7 @@ async function render() {
     else if (route.view === 'lane') renderLane(route);
     else if (route.view === 'tokens') renderTokens();
     else if (route.view === 'token') renderTokenPage(route);
+    else if (route.view === 'tx') renderTxPage(route);
     else if (route.view === 'build') renderBuild();
     else if (route.view === 'changelog') renderChangelog();
     else renderDev();
@@ -5162,6 +5375,10 @@ const ACTIONS = {
   'retry-token'(el) {
     render(); /* failed token-page loads are never cached — this refetches */
   },
+
+  'retry-tx'(el) {
+    render(); /* failed tx-page loads are never cached — this refetches */
+  },
 };
 
 document.addEventListener('click', (e) => {
@@ -5236,21 +5453,23 @@ $('#search').addEventListener('input', (e) => {
   renderSuggest();
 });
 
-/* Ask the worker which covenant a transaction touched; navigate on a hit,
-   remember the miss so the grid can answer honestly. */
+/* Ask the worker whether a transaction touched a smart coin; navigate to its
+   tx page on a hit (warming the page's cache with the answer we already
+   hold), remember the miss so the grid can answer honestly. */
 async function resolveTxQuery(network, txid, input) {
   if (state.txLookup[txid]) return; /* already pending or answered */
   state.txLookup[txid] = 'pending';
   try {
     const res = await fetch(`data/${network}/tx/${txid}.json`, { cache: 'no-cache' });
     if (res.ok) {
-      const { covenant_id } = await res.json();
+      const data = await res.json();
+      txDetails.set(`${network}/${txid}`, { data, at: Date.now() });
       delete state.txLookup[txid];
       if (state.network === network && state.query === txid) {
         if (input) input.value = '';
         state.query = '';
         closeSuggest();
-        location.hash = `#/${network}/c/${covenant_id}?tx=${txid}`;
+        location.hash = `#/${network}/tx/${txid}`;
       }
       return;
     }

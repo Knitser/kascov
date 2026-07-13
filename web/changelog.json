@@ -1,5 +1,15 @@
 [
   {
+    "date": "2026-07-13",
+    "title": "every transaction gets a page",
+    "body": "paste any txid — in search, or from any timeline — and land on its own page: which smart coins it touched, what was born, moved or retired, the cells it created and spent, the decoded token actions, and a one-click replay of the real spend through Kaspa's actual script engine. older workers still answer with the coin links; nothing breaks."
+  },
+  {
+    "date": "2026-07-13",
+    "title": "friends check each other's math",
+    "body": "a new consistency endpoint cross-checks kascov's token accounting against other independent ecosystem indexers, automatically — token counts, supplies, the lot. differences usually mean one of us has a bug; we fix ours and share theirs kindly."
+  },
+  {
     "date": "2026-07-12",
     "title": "verified from the chain — not asserted",
     "body": "the accounting layer: every KCC20 token's history replayed, supply conservation checked, every live balance cryptographically proven against its commitment. 258 of 270 tokens verified, 0 invalid, the rest honestly marked with reasons. token pages show holders, classified mint/transfer/burn timelines, and the proof."

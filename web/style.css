@@ -2923,6 +2923,31 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
 .tok-transfer { background: var(--move-soft); color: var(--move); }
 .tok-burn { background: var(--burn-soft); color: var(--burn); }
 
+/* ------------------------------------------------------ transaction page */
+
+.tx-head { padding-bottom: 0.6rem; }
+.tx-head .id-chip { margin-top: 0.5rem; }
+.tx-story { margin: 0.4rem 0 1.6rem; font-size: 1.05rem; }
+.tx-coin { white-space: normal; }
+.tx-coin .token-name { overflow-wrap: anywhere; }
+.tx-events .tl-text { display: flex; align-items: center; flex-wrap: wrap; gap: 0.15rem 0.5rem; }
+.tx-coin-list { list-style: none; padding: 0; margin: 0 0 1rem; display: grid; gap: 0.55rem; }
+.tx-cells { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 2.2rem; margin: 0 0 2rem; }
+.tx-cell-list { list-style: none; padding: 0; margin: 0; }
+.tx-cell {
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.tx-cell:last-child { border-bottom: none; }
+.tx-cell-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.8rem;
+  margin: 0.25rem 0 0 2.1rem;
+  font-size: 0.86rem;
+}
+
 /* the galaxy hint: touch copy replaces the mouse copy on small screens */
 .galaxy-hint-mobile { display: none; }
 @media (max-width: 640px) {
