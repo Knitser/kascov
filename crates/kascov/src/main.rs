@@ -5029,7 +5029,10 @@ fn relabel_xml(mut resp: axum::response::Response, content_type: &'static str) -
 
 /// The changelog ships inside the worker binary: entries land with worker
 /// deploys, so the feed can never disagree with the running code.
-const CHANGELOG_JSON: &str = include_str!("../../../web/changelog.json");
+// The crate-local copy of web/changelog.json: the Docker build context only
+// carries crates/** (kaniko also failed to materialize a web/ COPY reliably).
+// A test below pins the two files byte-identical so they can't drift.
+const CHANGELOG_JSON: &str = include_str!("../assets/changelog.json");
 
 /// A changelog title → a stable slug for the Atom entry id
 /// ("every transaction gets a page" → "every-transaction-gets-a-page").
@@ -6585,6 +6588,16 @@ mod feed_and_sitemap_tests {
     use kascov_core::{CovenantId, Outpoint};
 
     const ATOM: &str = "http://www.w3.org/2005/Atom";
+
+    /// The feed embeds the crate-local changelog copy; web/changelog.json is
+    /// what the site serves. If they drift, whoever edited one forgot the
+    /// other — run: cp web/changelog.json crates/kascov/assets/changelog.json
+    #[test]
+    fn crate_changelog_copy_matches_the_site_changelog() {
+        let site = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/changelog.json"))
+            .expect("web/changelog.json must exist in the repo checkout");
+        assert_eq!(CHANGELOG_JSON, site, "crates/kascov/assets/changelog.json is out of sync with web/changelog.json");
+    }
 
     #[test]
     fn feed_is_wellformed_atom_and_mirrors_the_changelog() {
