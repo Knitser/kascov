@@ -1,4 +1,5 @@
 mod og;
+mod preflight;
 
 use std::collections::{HashSet, VecDeque};
 
@@ -1223,6 +1224,13 @@ async fn serve(
         .route("/healthz", get(healthz_handler))
         .route("/health", get(healthz_handler))
         .route("/data/{network}/simulate", post(simulate_handler))
+        .route(
+            "/data/{network}/preflight",
+            post(preflight_handler)
+                // the one POST body that may legitimately carry a whole
+                // transaction with witnesses — capped well below the default
+                .layer(axum::extract::DefaultBodyLimit::max(PREFLIGHT_BODY_CAP)),
+        )
         .route("/data/{network}/zk-verify", post(zk_verify_handler))
         .route("/data/{network}/compile", post(compile_handler))
         .route("/data/{network}/deploy", post(deploy_handler))
@@ -1260,6 +1268,7 @@ async fn serve(
         .route("/og/{network}/{id}", get(og_card_handler))
         .route("/share/{network}/{id}", get(share_handler))
         .route("/sitemap.xml", get(sitemap_handler))
+        .route("/feed.xml", get(feed_handler))
         // compresses the small dynamic responses; the big cached bodies are
         // pre-gzipped (Content-Encoding already set, so this layer skips them)
         .layer(tower_http::compression::CompressionLayer::new())
@@ -4323,6 +4332,53 @@ async fn simulate_handler(
     }
 }
 
+/// Hard cap on a preflight body — a whole transaction with witnesses fits
+/// comfortably (max signature script is 10KB, max 1000 inputs never fits
+/// anyway); anything bigger is abuse, answered 413 by the extractor.
+const PREFLIGHT_BODY_CAP: usize = 256 * 1024;
+
+/// POST /data/{network}/preflight — "will this transaction pass?" before
+/// broadcast: SDK/RPC JSON in, trap findings + consensus masses + optional
+/// real engine execution out (see crate::preflight). Pure computation, but
+/// engine runs burn CPU — covered by the shared ToolLimiter like the other
+/// compiler-adjacent endpoints.
+async fn preflight_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    if body.len() > PREFLIGHT_BODY_CAP {
+        // Belt and braces — DefaultBodyLimit on the route already 413s.
+        return json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            serde_json::json!({ "ok": false, "error": "transaction JSON too large (256KB cap)" }),
+        );
+    }
+    if let Err(reason) = state.tool_limiter.lock().await.try_take(&client_ip(&headers)) {
+        return too_many(reason);
+    }
+    match tokio::task::spawn_blocking(move || preflight::run(&body, network)).await {
+        Ok(Ok(report)) => json_resp(report),
+        Ok(Err(err)) => json_error(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "ok": false, "error": err }),
+        ),
+        Err(err) => {
+            tracing::error!("preflight panicked: {err}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "ok": false, "error": "preflight failed to run" }),
+            )
+        }
+    }
+}
+
 async fn lifespans_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path(net_name): axum::extract::Path<String>,
@@ -4625,6 +4681,60 @@ fn share_info(
     Ok(ShareInfo { name, alive, balance_line, born_line, description })
 }
 
+/// The crawler-visible substance under the share page's summary line: a
+/// holders line, the token status when the coin is a KCC20 token, and a
+/// compact life story (the 10 newest events, tip-anchored dates). Returns ""
+/// when there's nothing to add, keeping older pages byte-identical; content
+/// stays comfortably inside the share surface's ~6KB budget.
+fn share_body_extra(store: &kascov_core::store::Store, id: &CovenantId) -> Result<String> {
+    let mut out = String::new();
+    // Distinct p2pk keys that have held state of this coin (capped scan —
+    // the exact spirit of the coin page's holders panel, one line of it).
+    let holders = store.holders_of_covenant(id, 25)?;
+    if !holders.is_empty() {
+        let in_control = holders.iter().filter(|h| h.controls_now).count();
+        out.push_str(&format!(
+            "<p>holder keys seen: {}{} · in control now: {in_control}</p>\n",
+            holders.len(),
+            if holders.len() == 25 { "+" } else { "" },
+        ));
+    }
+    if let Some(token) = store.token_row(id)? {
+        let mut line = format!("KCC20 token — {}", og::esc(&token.validation));
+        if let Some(supply) = token.supply {
+            line.push_str(&format!(" · supply {supply}"));
+        }
+        line.push_str(&format!(
+            " · {} holder{}",
+            token.holders,
+            if token.holders == 1 { "" } else { "s" }
+        ));
+        out.push_str(&format!("<p>{line}</p>\n"));
+    }
+    let events = store.events(id)?;
+    if !events.is_empty() {
+        let tip = store.tip()?;
+        out.push_str("<h2 style=\"font-size:1rem\">life story</h2>\n<ol reversed style=\"font-size:.9rem\">\n");
+        for event in events.iter().rev().take(10) {
+            // Same tip-anchored DAA→wall-clock estimate share_info makes.
+            let when = match tip {
+                Some((tip_daa, tip_ms)) => og::fmt_date(
+                    tip_ms.saturating_sub(tip_daa.saturating_sub(event.accepting_daa) * 100),
+                ),
+                None => format!("DAA {}", event.accepting_daa),
+            };
+            let txid = event.txid.to_string();
+            out.push_str(&format!(
+                "<li>{} — {when} · tx {}…</li>\n",
+                og::esc(&event.kind),
+                &txid[..txid.len().min(12)],
+            ));
+        }
+        out.push_str("</ol>\n");
+    }
+    Ok(out)
+}
+
 /// GET /og/{network}/{id}.png — the 1200x630 Open Graph card. Rendered on
 /// demand (SVG -> resvg -> PNG, embedded fonts); the CDN holds it for a week,
 /// so no in-process cache (serve_cached stores strings, this is bytes).
@@ -4713,6 +4823,7 @@ async fn share_handler(
         let store = kascov_core::store::Store::open(&db, network)?;
         let Some(summary) = store.summary(&covenant_id)? else { return Ok(None) };
         let info = share_info(&store, &summary, network)?;
+        let body_extra = share_body_extra(&store, &covenant_id)?;
         // id is validated hex and the name comes from fixed word lists, but
         // everything interpolated is escaped anyway — belt and braces.
         let id = og::esc(&covenant_id.to_string());
@@ -4745,7 +4856,7 @@ async fn share_handler(
 <meta name="twitter:image" content="{image}">
 </head><body style="background:#0a100f;color:#e9f1ef;font-family:system-ui,sans-serif;padding:2rem">
 <p>{title} — {desc}. <a href="{app}" style="color:#70c7ba">Open in the kascov explorer</a></p>
-<script>location.replace('{app}');</script>
+{body_extra}<script>location.replace('{app}');</script>
 </body></html>
 "#
         )))
@@ -4772,52 +4883,164 @@ async fn share_handler(
     }
 }
 
+/// Build the sitemap XML: the root (fresh as of now) plus the newest 5000
+/// coins from `store`, each stamped `<lastmod>` from its last_activity_daa
+/// via the tip-anchored DAA→wall-clock conversion share_info uses (~10 DAA
+/// per second). No tip yet → entries simply omit lastmod (still valid).
+fn build_sitemap_xml(store: Option<&kascov_core::store::Store>, now: u64) -> Result<String> {
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
+    );
+    xml.push_str(&format!(
+        "<url><loc>https://kascov.io/</loc><lastmod>{}</lastmod></url>\n",
+        og::iso_date(now)
+    ));
+    if let Some(store) = store {
+        let tip = store.tip()?;
+        for c in store.list_page(None, 5000)? {
+            let lastmod = tip
+                .map(|(tip_daa, tip_ms)| {
+                    tip_ms.saturating_sub(tip_daa.saturating_sub(c.last_activity_daa) * 100)
+                })
+                .map(|ms| format!("<lastmod>{}</lastmod>", og::iso_date(ms)))
+                .unwrap_or_default();
+            xml.push_str(&format!(
+                "<url><loc>https://kascov.io/share/mainnet/{}</loc>{lastmod}</url>\n",
+                c.covenant_id
+            ));
+        }
+    }
+    xml.push_str("</urlset>\n");
+    Ok(xml)
+}
+
 /// GET /sitemap.xml — the root plus the newest 5000 MAINNET coins as /share
 /// urls. Testnets are excluded on purpose: resets would churn the sitemap.
 async fn sitemap_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    use axum::http::header;
-
     let include_mainnet = state.networks.contains(&Network::Mainnet);
     let db = state.base_dir.join("mainnet.db");
-    let mut resp = serve_cached(
+    let resp = serve_cached(
         &state,
         "sitemap".to_string(),
         600,
         "public, max-age=600, s-maxage=3600",
         accepts_gzip(&headers),
         move || {
-            let mut xml = String::from(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-                 <urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n\
-                 <url><loc>https://kascov.io/</loc></url>\n",
-            );
-            if include_mainnet {
-                let store = kascov_core::store::Store::open(&db, Network::Mainnet)?;
-                for c in store.list_page(None, 5000)? {
-                    xml.push_str(&format!(
-                        "<url><loc>https://kascov.io/share/mainnet/{}</loc></url>\n",
-                        c.covenant_id
-                    ));
-                }
-            }
-            xml.push_str("</urlset>\n");
-            Ok(Some(xml))
+            let store = include_mainnet
+                .then(|| kascov_core::store::Store::open(&db, Network::Mainnet))
+                .transpose()?;
+            Ok(Some(build_sitemap_xml(store.as_ref(), now_ms())?))
         },
     )
     .await;
-    // serve_cached stamps application/json on everything it serves; the body
-    // here is XML, so correct the label (success path only — error bodies are
-    // plain text and never cached).
+    relabel_xml(resp, "application/xml; charset=utf-8")
+}
+
+/// serve_cached stamps application/json on everything it serves; the XML
+/// surfaces (/sitemap.xml, /feed.xml) correct the label after the fact
+/// (success path only — error bodies are plain text and never cached).
+fn relabel_xml(mut resp: axum::response::Response, content_type: &'static str) -> axum::response::Response {
+    use axum::http::header;
     if resp.status().is_success() {
-        resp.headers_mut().insert(
-            header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("application/xml; charset=utf-8"),
-        );
+        resp.headers_mut()
+            .insert(header::CONTENT_TYPE, axum::http::HeaderValue::from_static(content_type));
     }
     resp
+}
+
+/// The changelog ships inside the worker binary: entries land with worker
+/// deploys, so the feed can never disagree with the running code.
+const CHANGELOG_JSON: &str = include_str!("../../../web/changelog.json");
+
+/// A changelog title → a stable slug for the Atom entry id
+/// ("every transaction gets a page" → "every-transaction-gets-a-page").
+fn feed_slug(title: &str) -> String {
+    let mut slug = String::with_capacity(title.len());
+    for c in title.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.ends_with('-') && !slug.is_empty() {
+            slug.push('-');
+        }
+    }
+    slug.trim_end_matches('-').to_string()
+}
+
+/// Build the Atom feed from the embedded changelog. `now` only backstops the
+/// feed-level `<updated>` when the changelog is empty.
+fn build_feed_xml(changelog_json: &str, now: u64) -> Result<String> {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        date: String,
+        title: String,
+        body: String,
+    }
+    let entries: Vec<Entry> = serde_json::from_str(changelog_json).context("changelog.json unreadable")?;
+    let updated = entries
+        .iter()
+        .map(|e| e.date.as_str())
+        .max() // ISO dates sort lexicographically
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| og::iso_date(now));
+    let mut xml = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <feed xmlns=\"http://www.w3.org/2005/Atom\">\n\
+         <title>kascov — what's new</title>\n\
+         <subtitle>ship notes from the Kaspa covenant explorer</subtitle>\n\
+         <id>tag:kascov.io,2026:changelog</id>\n\
+         <link rel=\"self\" type=\"application/atom+xml\" href=\"https://kascov.io/feed.xml\"/>\n\
+         <link rel=\"alternate\" type=\"text/html\" href=\"https://kascov.io/\"/>\n\
+         <updated>{updated}T00:00:00Z</updated>\n\
+         <author><name>kascov</name></author>\n"
+    );
+    // Same-day entries share a date; the slug keeps ids unique, and a
+    // counter backstops even a repeated title.
+    let mut seen: Vec<String> = Vec::new();
+    for entry in &entries {
+        let mut id = format!("tag:kascov.io,{}:{}", entry.date, feed_slug(&entry.title));
+        let mut n = 1;
+        while seen.contains(&id) {
+            n += 1;
+            id = format!("tag:kascov.io,{}:{}-{n}", entry.date, feed_slug(&entry.title));
+        }
+        seen.push(id.clone());
+        xml.push_str(&format!(
+            "<entry>\n\
+             <id>{id}</id>\n\
+             <title>{}</title>\n\
+             <updated>{}T00:00:00Z</updated>\n\
+             <link rel=\"alternate\" type=\"text/html\" href=\"https://kascov.io/\"/>\n\
+             <content type=\"text\">{}</content>\n\
+             </entry>\n",
+            og::esc(&entry.title),
+            og::esc(&entry.date),
+            og::esc(&entry.body),
+        ));
+    }
+    xml.push_str("</feed>\n");
+    Ok(xml)
+}
+
+/// GET /feed.xml — the changelog as an Atom feed, for readers and the
+/// crawlers that treat feeds as a freshness signal.
+async fn feed_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let resp = serve_cached(
+        &state,
+        "feed".to_string(),
+        3600,
+        "public, max-age=3600, s-maxage=3600",
+        accepts_gzip(&headers),
+        move || Ok(Some(build_feed_xml(CHANGELOG_JSON, now_ms())?)),
+    )
+    .await;
+    relabel_xml(resp, "application/atom+xml; charset=utf-8")
 }
 
 /// GET /data/{network}/tx/{txid} — everything kascov saw one transaction do:
@@ -6277,5 +6500,188 @@ mod consistency_tests {
         assert!(verdict_rank("differ") < verdict_rank("not_comparable"));
         assert!(verdict_rank("not_comparable") < verdict_rank("only_kascov"));
         assert!(verdict_rank("only_other") < verdict_rank("agree"));
+    }
+}
+
+#[cfg(test)]
+mod feed_and_sitemap_tests {
+    use super::*;
+    use kascov_core::store::{BlockEvents, EventKind, NewEvent, Store};
+    use kascov_core::{CovenantId, Outpoint};
+
+    const ATOM: &str = "http://www.w3.org/2005/Atom";
+
+    #[test]
+    fn feed_is_wellformed_atom_and_mirrors_the_changelog() {
+        let xml = build_feed_xml(CHANGELOG_JSON, now_ms()).unwrap();
+        let doc = roxmltree::Document::parse(&xml).expect("feed must be well-formed XML");
+        let feed = doc.root_element();
+        assert_eq!(feed.tag_name().name(), "feed");
+        assert_eq!(feed.tag_name().namespace(), Some(ATOM));
+        for required in ["id", "title", "updated", "author"] {
+            assert!(
+                feed.children().any(|n| n.has_tag_name((ATOM, required))),
+                "feed-level <{required}> is required by RFC 4287"
+            );
+        }
+        let entries: Vec<_> = feed.children().filter(|n| n.has_tag_name((ATOM, "entry"))).collect();
+        let changelog: serde_json::Value = serde_json::from_str(CHANGELOG_JSON).unwrap();
+        assert_eq!(entries.len(), changelog.as_array().unwrap().len(), "one entry per changelog item");
+        let mut ids = Vec::new();
+        for entry in &entries {
+            let text = |tag: &str| {
+                entry
+                    .children()
+                    .find(|n| n.has_tag_name((ATOM, tag)))
+                    .and_then(|n| n.text())
+                    .unwrap_or_else(|| panic!("entry <{tag}> missing"))
+                    .to_string()
+            };
+            let id = text("id");
+            assert!(id.starts_with("tag:kascov.io,"), "stable tag: ids, got {id}");
+            assert!(!ids.contains(&id), "entry ids must be unique: {id}");
+            ids.push(id);
+            assert!(!text("title").is_empty());
+            assert!(!text("content").is_empty());
+            let updated = text("updated");
+            assert!(
+                updated.len() == 20 && updated.ends_with("T00:00:00Z") && updated[..10].split('-').count() == 3,
+                "day-precision RFC 3339 stamps, got {updated}"
+            );
+        }
+    }
+
+    #[test]
+    fn feed_escapes_markup_in_titles_and_bodies() {
+        let spiky = r#"[{"date":"2026-01-02","title":"a <b> & \"c\"","body":"x < y & z"}]"#;
+        let xml = build_feed_xml(spiky, 0).unwrap();
+        let doc = roxmltree::Document::parse(&xml).expect("escaped feed still parses");
+        let title = doc.descendants().find(|n| n.has_tag_name((ATOM, "title")) && n.parent().unwrap().has_tag_name((ATOM, "entry"))).unwrap();
+        assert_eq!(title.text(), Some("a <b> & \"c\""));
+        // same-day duplicate titles still get unique ids
+        let dup = r#"[{"date":"2026-01-02","title":"same","body":"1"},{"date":"2026-01-02","title":"same","body":"2"}]"#;
+        let xml = build_feed_xml(dup, 0).unwrap();
+        assert!(xml.contains("tag:kascov.io,2026-01-02:same</id>"));
+        assert!(xml.contains("tag:kascov.io,2026-01-02:same-2</id>"));
+    }
+
+    #[test]
+    fn feed_slug_is_url_safe() {
+        assert_eq!(feed_slug("every transaction gets a page"), "every-transaction-gets-a-page");
+        assert_eq!(feed_slug("the galaxy — glows & breathes!"), "the-galaxy-glows-breathes");
+        assert_eq!(feed_slug("---"), "");
+    }
+
+    #[test]
+    fn sitemap_carries_lastmod_from_last_activity() {
+        let path = std::env::temp_dir().join(format!("kascov-sitemap-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = Store::open(&path, Network::Mainnet).unwrap();
+        let block = BlockEvents {
+            accepting_block: BlockHash([1; 32]),
+            accepting_daa: 1_000,
+            accepting_time_ms: 1_700_000_000_000,
+            accepting_blue_score: 1_000,
+            events: vec![NewEvent {
+                covenant_id: CovenantId([0xA1; 32]),
+                kind: EventKind::Genesis,
+                txid: TxId([0x10; 32]),
+                tx_index: 0,
+                payload: None,
+                lane_namespace: None,
+            }],
+            created_utxos: vec![],
+            spent_utxos: vec![],
+        };
+        store.apply(&block, BlockHash([1; 32])).unwrap();
+        // Tip 1,000 DAA past the event: the coin's lastmod anchors 100s back.
+        store.set_tip(2_000, 1_700_000_100_000).unwrap();
+
+        let now = 1_752_000_000_000; // fixed "now" for the root entry
+        let xml = build_sitemap_xml(Some(&store), now).unwrap();
+        let doc = roxmltree::Document::parse(&xml).expect("sitemap must be well-formed XML");
+        let urls: Vec<_> = doc.root_element().children().filter(|n| n.has_tag_name("url")).collect();
+        assert_eq!(urls.len(), 2, "root + the one coin");
+        let lastmod_of = |n: &roxmltree::Node<'_, '_>| {
+            n.children().find(|c| c.has_tag_name("lastmod")).and_then(|c| c.text()).map(str::to_string)
+        };
+        assert_eq!(lastmod_of(&urls[0]), Some(og::iso_date(now)));
+        // tip_ms − (tip_daa − last_activity_daa) × 100ms = 1,700,000,000,000
+        assert_eq!(lastmod_of(&urls[1]), Some(og::iso_date(1_700_000_000_000)));
+        let loc = urls[1].children().find(|c| c.has_tag_name("loc")).unwrap().text().unwrap();
+        assert!(loc.contains("/share/mainnet/"));
+        // W3C date shape (YYYY-MM-DD)
+        let lm = lastmod_of(&urls[1]).unwrap();
+        assert_eq!(lm.len(), 10);
+        assert!(lm.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() }));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sitemap_without_a_store_still_lists_the_root() {
+        let xml = build_sitemap_xml(None, 0).unwrap();
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let urls: Vec<_> = doc.root_element().children().filter(|n| n.has_tag_name("url")).collect();
+        assert_eq!(urls.len(), 1);
+        assert!(xml.contains("<lastmod>1970-01-01</lastmod>"));
+    }
+
+    #[test]
+    fn share_body_extra_tells_the_life_story() {
+        let path = std::env::temp_dir().join(format!("kascov-share-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = Store::open(&path, Network::Testnet(10)).unwrap();
+        let id = CovenantId([0xA1; 32]);
+        let mut events = vec![NewEvent {
+            covenant_id: id,
+            kind: EventKind::Genesis,
+            txid: TxId([0x10; 32]),
+            tx_index: 0,
+            payload: None,
+            lane_namespace: None,
+        }];
+        for i in 1..15u8 {
+            events.push(NewEvent {
+                covenant_id: id,
+                kind: EventKind::Transition,
+                txid: TxId([i; 32]),
+                tx_index: i as u32,
+                payload: None,
+                lane_namespace: None,
+            });
+        }
+        let block = BlockEvents {
+            accepting_block: BlockHash([1; 32]),
+            accepting_daa: 1_000,
+            accepting_time_ms: 1_700_000_000_000,
+            accepting_blue_score: 1_000,
+            events,
+            created_utxos: vec![kascov_core::store::NewUtxo {
+                outpoint: Outpoint { txid: TxId([0x10; 32]), index: 0 },
+                covenant_id: id,
+                value: 1_000_000_000,
+                spk_version: 0,
+                // p2pk shape so the holders line recognizes the key
+                spk_script: {
+                    let mut s = vec![0x20];
+                    s.extend_from_slice(&[0x42; 32]);
+                    s.push(0xac);
+                    s
+                },
+            }],
+            spent_utxos: vec![],
+        };
+        store.apply(&block, BlockHash([1; 32])).unwrap();
+        store.set_tip(1_000, 1_700_000_000_000).unwrap();
+
+        let html = share_body_extra(&store, &id).unwrap();
+        assert!(html.contains("holder keys seen: 1"), "{html}");
+        assert!(html.contains("<ol reversed"), "{html}");
+        // capped at the 10 newest events
+        assert_eq!(html.matches("<li>").count(), 10, "{html}");
+        assert!(html.contains("transition —"), "{html}");
+        // comfortably inside the share page's ~6KB budget
+        assert!(html.len() < 2_500, "body extra must stay small, got {}", html.len());
+        let _ = std::fs::remove_file(&path);
     }
 }

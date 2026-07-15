@@ -22,6 +22,7 @@ use kaspa_consensus_core::{
         TransactionOutpoint, TransactionOutput, UtxoEntry,
     },
 };
+use kaspa_consensus_core::mass::units::ScriptUnits;
 use kaspa_txscript::{
     caches::Cache, pay_to_address_script, pay_to_script_hash_script, EngineCtx, EngineFlags,
     TxScriptEngine,
@@ -280,6 +281,40 @@ pub struct DebugResult {
     pub note: String,
 }
 
+/// Build the fabricated 1-in/1-out replay context `debug_witness` and the
+/// preflight's isolated execution share: the input spends the given state
+/// coin, and output 0 re-locks value−1000 to the SAME state script, bound to
+/// the same covenant when known — the closest generic stand-in for "the state
+/// moves forward one step".
+fn fabricated_replay_tx(
+    spk_version: u16,
+    spk_script: &[u8],
+    sig_script: &[u8],
+    value: u64,
+    budget: u16,
+    covenant_id: Option<[u8; 32]>,
+) -> MutableTransaction<Transaction> {
+    let state_spk = ScriptPublicKey::from_vec(spk_version, spk_script.to_vec());
+    let outpoint = TransactionOutpoint::new(kaspa_consensus_core::Hash::from_bytes([0x11; 32]), 0);
+    let input = TransactionInput::new_with_mass(
+        outpoint,
+        sig_script.to_vec(),
+        0,
+        ComputeCommit::ComputeBudget(ComputeBudget(budget)),
+    );
+    let cov_hash = covenant_id.map(kaspa_consensus_core::Hash::from_bytes);
+    let output = TransactionOutput::with_covenant(
+        value.saturating_sub(1000),
+        state_spk.clone(),
+        cov_hash.map(|id| kaspa_consensus_core::tx::CovenantBinding::new(0, id)),
+    );
+    let tx = Transaction::new(TX_VERSION_TOCCATA, vec![input], vec![output], 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
+    // block_daa_score = 0 → the coin reads as maximally old, so relative
+    // timelocks don't mask the data flow under inspection.
+    let entry = UtxoEntry::new(value, state_spk, 0, false, cov_hash);
+    MutableTransaction::with_entries(tx, vec![entry])
+}
+
 /// Replay a REAL captured spend — the state coin's locking script
 /// (`spk_version` + `spk_script`), its value, and the on-chain unlocking
 /// script (`sig_script`) — through Kaspa's `TxScriptEngine`, capturing the
@@ -313,32 +348,57 @@ pub fn debug_witness(
             note: NOTE.into(),
         };
     }
-    let state_spk = ScriptPublicKey::from_vec(spk_version, spk_script.to_vec());
-    let outpoint = TransactionOutpoint::new(kaspa_consensus_core::Hash::from_bytes([0x11; 32]), 0);
-    let input = TransactionInput::new_with_mass(
-        outpoint,
-        sig_script.to_vec(),
-        0,
-        // The real budget commitment when captured; otherwise generous, so a
-        // fabricated budget shortfall never masks the rules under test.
-        ComputeCommit::ComputeBudget(ComputeBudget(budget.unwrap_or(u16::MAX))),
-    );
-    // A deterministic fabricated continuation: output 0 re-locks value−1000
-    // to the SAME state script, bound to the same covenant when known — the
-    // closest generic stand-in for "the state moves forward one step".
-    let cov_hash = covenant_id.map(kaspa_consensus_core::Hash::from_bytes);
-    let output = TransactionOutput::with_covenant(
-        value.saturating_sub(1000),
-        state_spk.clone(),
-        cov_hash.map(|id| kaspa_consensus_core::tx::CovenantBinding::new(0, id)),
-    );
-    let tx = Transaction::new(TX_VERSION_TOCCATA, vec![input], vec![output], 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
-    // block_daa_score = 0 → the coin reads as maximally old, so relative
-    // timelocks don't mask the data flow under inspection.
-    let entry = UtxoEntry::new(value, state_spk, 0, false, cov_hash);
-    let mtx = MutableTransaction::with_entries(tx, vec![entry]);
-    let (pass, verdict, trace) = run_engine(&mtx, true);
+    // The real budget commitment when captured; otherwise generous, so a
+    // fabricated budget shortfall never masks the rules under test.
+    let mtx = fabricated_replay_tx(spk_version, spk_script, sig_script, value, budget.unwrap_or(u16::MAX), covenant_id);
+    let (pass, verdict, trace, _) = run_engine_at(&mtx, 0, true, None);
     DebugResult { ok: true, pass, verdict, trace, note: NOTE.into() }
+}
+
+/// One input's preflight execution verdict: did the real engine accept the
+/// witness, and how many script units did it burn against the input's own
+/// committed allowance (budget × 10,000 + the 9,999 free units).
+#[derive(Debug, Clone, Serialize)]
+pub struct InputExec {
+    pub input_index: usize,
+    pub pass: bool,
+    pub verdict: String,
+    pub script_units_used: u64,
+    pub allowance: u64,
+}
+
+/// Execute the listed inputs of a fully-populated transaction through the
+/// real engine, each limited to its OWN committed compute budget — exactly
+/// the per-input allowance a node enforces. The caller guarantees every
+/// entry in `mtx.entries` is populated (the preflight only takes this path
+/// when the submitted JSON carries a utxo for every input).
+pub fn preflight_execute(mtx: &MutableTransaction<Transaction>, indices: &[usize]) -> Vec<InputExec> {
+    indices
+        .iter()
+        .map(|&i| {
+            let limit = mtx.tx.inputs[i].compute_commit.allowed_script_units();
+            let (pass, verdict, _, used) = run_engine_at(mtx, i, false, Some(limit));
+            InputExec { input_index: i, pass, verdict, script_units_used: used, allowance: limit.0 }
+        })
+        .collect()
+}
+
+/// Execute ONE input in the fabricated 1-in/1-out context `debug_witness`
+/// uses (for transactions where not every input carries a utxo, so the real
+/// tx context can't be populated), limited to the input's own budget.
+pub fn preflight_execute_isolated(
+    input_index: usize,
+    spk_version: u16,
+    spk_script: &[u8],
+    sig_script: &[u8],
+    value: u64,
+    budget: u16,
+    covenant_id: Option<[u8; 32]>,
+) -> InputExec {
+    let mtx = fabricated_replay_tx(spk_version, spk_script, sig_script, value, budget, covenant_id);
+    let limit = ComputeCommit::ComputeBudget(ComputeBudget(budget)).allowed_script_units();
+    let (pass, verdict, _, used) = run_engine_at(&mtx, 0, false, Some(limit));
+    InputExec { input_index, pass, verdict, script_units_used: used, allowance: limit.0 }
 }
 
 /// Run a self-contained ZK verification script (public inputs + proof + vk +
@@ -354,37 +414,58 @@ pub fn verify_zk_script(program: &[u8]) -> (bool, String) {
 }
 
 fn run_engine(mtx: &MutableTransaction<Transaction>, trace: bool) -> (bool, String, Vec<TraceStep>) {
+    let (pass, verdict, steps, _) = run_engine_at(mtx, 0, trace, None);
+    (pass, verdict, steps)
+}
+
+/// Run input `idx` of a fully-populated transaction through the engine.
+/// `limit` bounds execution to a real per-input script-unit allowance (what a
+/// node enforces from the committed budget); `None` runs unmetered. Returns
+/// (pass, verdict, trace steps, script units actually consumed).
+fn run_engine_at(
+    mtx: &MutableTransaction<Transaction>,
+    idx: usize,
+    trace: bool,
+    limit: Option<ScriptUnits>,
+) -> (bool, String, Vec<TraceStep>, u64) {
     let reused = SigHashReusedValuesUnsync::new();
     let vtx = mtx.as_verifiable();
     let sig_cache = Cache::new(10_000);
-    let entry = mtx.entries[0].clone().expect("entry present");
+    let entry = mtx.entries[idx].clone().expect("entry present");
     // The covenant introspection context a node would precompute for this tx
     // (input/output indices per covenant id) — without it every OpCov* opcode
     // sees an empty map and errors out immediately.
     let cov_ctx = match kaspa_txscript::covenants::CovenantsContext::from_tx(&vtx) {
         Ok(ctx) => ctx,
-        Err(e) => return (false, format!("covenant bindings invalid: {e}"), Vec::new()),
+        Err(e) => return (false, format!("covenant bindings invalid: {e}"), Vec::new(), 0),
     };
     let mut buf: Vec<u8> = Vec::new();
-    let (pass, verdict) = {
-        let mut vm = TxScriptEngine::from_transaction_input(
-            &vtx,
-            &mtx.tx.inputs[0],
-            0,
-            &entry,
-            EngineCtx::new(&sig_cache).with_reused(&reused).with_covenants_ctx(&cov_ctx),
-            EngineFlags { covenants_enabled: true, ..Default::default() },
-        );
+    let (pass, verdict, used) = {
+        let ctx = EngineCtx::new(&sig_cache).with_reused(&reused).with_covenants_ctx(&cov_ctx);
+        let flags = EngineFlags { covenants_enabled: true, ..Default::default() };
+        let mut vm = match limit {
+            Some(limit) => TxScriptEngine::from_transaction_input_with_script_units_limit(
+                &vtx,
+                &mtx.tx.inputs[idx],
+                idx,
+                &entry,
+                ctx,
+                flags,
+                limit,
+            ),
+            None => TxScriptEngine::from_transaction_input(&vtx, &mtx.tx.inputs[idx], idx, &entry, ctx, flags),
+        };
         if trace {
             vm = vm.with_opcode_execution_log_buffer(&mut buf);
         }
-        match vm.execute() {
+        let outcome = match vm.execute() {
             Ok(()) => (true, "the spend satisfies the contract — a node would accept it".to_string()),
             Err(e) => (false, format!("{e}")),
-        }
+        };
+        (outcome.0, outcome.1, vm.used_script_units().0)
     };
     let steps = if trace { parse_trace(&String::from_utf8_lossy(&buf)) } else { Vec::new() };
-    (pass, verdict, steps)
+    (pass, verdict, steps, used)
 }
 
 /// Parse the engine's opcode log — each line is
@@ -530,6 +611,42 @@ mod debug_witness_tests {
         assert!(!r.ok);
         let r = debug_witness(1, &[0x51], &[], 1_000, None, None);
         assert!(!r.ok);
+    }
+}
+
+#[cfg(test)]
+mod preflight_exec_tests {
+    use super::*;
+
+    #[test]
+    fn isolated_execution_meters_units_against_the_committed_budget() {
+        let program = vec![0x51]; // OpTrue
+        let spk = pay_to_script_hash_script(&program);
+        let sig_script = kascov_decode::encode_push(&program);
+        let r = preflight_execute_isolated(3, spk.version(), spk.script(), &sig_script, 100_000_000, 1, Some([0xAB; 32]));
+        assert_eq!(r.input_index, 3);
+        assert!(r.pass, "OpTrue p2sh reveal should pass: {}", r.verdict);
+        // 1 budget unit × 10,000 script units + the 9,999 free units
+        assert_eq!(r.allowance, 19_999);
+        assert!(r.script_units_used > 0 && r.script_units_used <= r.allowance, "used {} units", r.script_units_used);
+    }
+
+    #[test]
+    fn budget_zero_fails_a_heavy_witness_with_units_exceeded() {
+        // Literal pushes are free, but stack GROWTH is charged per byte —
+        // OpDup on a 12KB item blows straight through the 9,999 free units a
+        // zero-budget input gets.
+        let program = vec![0x76, 0x75, 0x75, 0x51]; // OpDup OpDrop OpDrop OpTrue
+        let spk = pay_to_script_hash_script(&program);
+        let mut sig_script = kascov_decode::encode_push(&vec![0x42u8; 12_000]);
+        sig_script.extend_from_slice(&kascov_decode::encode_push(&program));
+        let fail = preflight_execute_isolated(0, spk.version(), spk.script(), &sig_script, 100_000_000, 0, None);
+        assert!(!fail.pass, "budget 0 must not cover a 12KB witness: {}", fail.verdict);
+        assert_eq!(fail.allowance, 9_999);
+        // The same witness passes once the budget covers it.
+        let pass = preflight_execute_isolated(0, spk.version(), spk.script(), &sig_script, 100_000_000, 3, None);
+        assert!(pass.pass, "budget 3 (30,000 units + free) should cover it: {}", pass.verdict);
+        assert!(pass.script_units_used > 9_999 && pass.script_units_used <= pass.allowance);
     }
 }
 

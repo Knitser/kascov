@@ -10,6 +10,7 @@ kascov-decode = { workspace = true }
 kascov-sim = { workspace = true }
 kascov-labkit = { path = "../kascov-labkit" }
 kaspa-addresses = { workspace = true }
+kaspa-consensus-core = { workspace = true }
 kaspa-wrpc-client = { workspace = true }
 secp256k1 = { workspace = true }
 
@@ -32,3 +33,8 @@ resvg = { workspace = true }
 # Webhook delivery. rustls only — no openssl; no default features (those would
 # pull native-tls). `json` for the POST bodies.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+[dev-dependencies]
+# Well-formedness checks for the XML surfaces (/feed.xml, /sitemap.xml) —
+# tests parse what the handlers build, no hand-rolled assertions on strings.
+roxmltree = "0.20"

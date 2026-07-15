@@ -198,9 +198,9 @@ const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-/// ms since epoch -> "Mar 3, 2026" (UTC), no chrono dependency.
+/// ms since epoch -> civil (year, month, day) in UTC, no chrono dependency.
 /// Civil-from-days per Howard Hinnant's algorithm.
-pub fn fmt_date(ms: u64) -> String {
+fn civil_date(ms: u64) -> (i64, i64, i64) {
     let days = (ms / 86_400_000) as i64;
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -211,8 +211,20 @@ pub fn fmt_date(ms: u64) -> String {
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// ms since epoch -> "Mar 3, 2026" (UTC).
+pub fn fmt_date(ms: u64) -> String {
+    let (y, m, d) = civil_date(ms);
     format!("{} {}, {}", MONTHS[(m - 1) as usize], d, y)
+}
+
+/// ms since epoch -> "2026-03-03" (UTC) — the W3C date the sitemap's
+/// `<lastmod>` and the Atom feed's day-precision stamps want.
+pub fn iso_date(ms: u64) -> String {
+    let (y, m, d) = civil_date(ms);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /* --------------------------------------------------------------- OG card */
