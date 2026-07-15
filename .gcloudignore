@@ -5,5 +5,8 @@ video
 node_modules
 .claude
 *.db
-web
+# web/ stays out of the worker build context EXCEPT the changelog,
+# which /feed.xml embeds at compile time (include_str! in main.rs)
+web/*
+!web/changelog.json
 docs
