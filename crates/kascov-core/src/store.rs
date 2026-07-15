@@ -1336,6 +1336,88 @@ impl Store {
         tx.commit().map_err(db_err)
     }
 
+    /// The newest accepting chain blocks in the index as (block, DAA), newest
+    /// first — candidate anchors when re-anchoring a wedged cursor. DISTINCT
+    /// over the pair is distinct blocks (an accepting block has exactly one
+    /// DAA score); ev_by_daa serves the scan backwards, so cost is O(limit).
+    pub fn recent_accepting_blocks(&self, limit: u64) -> Result<Vec<(BlockHash, u64)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT accepting_block, accepting_daa FROM covenant_events
+                 ORDER BY accepting_daa DESC LIMIT ?1",
+            )
+            .map_err(db_err)?;
+        let limit = limit.min(i64::MAX as u64) as i64;
+        let rows = stmt
+            .query_map([limit], |row| {
+                Ok((BlockHash(row.get::<_, [u8; 32]>(0)?), row.get(1)?))
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Anchor candidates spread evenly through the WHOLE indexed DAA range —
+    /// one accepting block at (or just below) each of `samples` evenly spaced
+    /// DAA targets, newest first, both endpoints included. Each sample is one
+    /// O(log n) probe on ev_by_daa; adjacent samples can resolve to the same
+    /// block on sparse history, so callers should dedupe.
+    pub fn spread_accepting_blocks(&self, samples: u64) -> Result<Vec<(BlockHash, u64)>> {
+        let bounds: Option<(u64, u64)> = self
+            .conn
+            .query_row(
+                "SELECT MIN(accepting_daa), MAX(accepting_daa) FROM covenant_events",
+                [],
+                |row| Ok(row.get::<_, Option<u64>>(0)?.zip(row.get::<_, Option<u64>>(1)?)),
+            )
+            .map_err(db_err)?;
+        let Some((min_daa, max_daa)) = bounds else { return Ok(vec![]) };
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT accepting_block, accepting_daa FROM covenant_events
+                 WHERE accepting_daa <= ?1 ORDER BY accepting_daa DESC LIMIT 1",
+            )
+            .map_err(db_err)?;
+        let span = max_daa - min_daa;
+        let mut out = Vec::with_capacity(samples as usize);
+        for i in 0..samples {
+            let target = max_daa - span * i / samples.max(2).saturating_sub(1);
+            let row = stmt
+                .query_row([target], |row| {
+                    Ok((BlockHash(row.get::<_, [u8; 32]>(0)?), row.get(1)?))
+                })
+                .optional()
+                .map_err(db_err)?;
+            if let Some(sample) = row {
+                out.push(sample);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every accepting block with indexed activity above the given DAA,
+    /// newest first — the rollback set when re-anchoring below them. Blocks
+    /// the cursor visited without covenant activity never enter
+    /// covenant_events and carry nothing to undo. ev_by_daa covers the range.
+    pub fn accepting_blocks_above(&self, daa: u64) -> Result<Vec<BlockHash>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT accepting_block, accepting_daa FROM covenant_events
+                 WHERE accepting_daa > ?1 ORDER BY accepting_daa DESC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([daa], |row| Ok(BlockHash(row.get::<_, [u8; 32]>(0)?)))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
     /// Stamp acceptance-order indices onto event rows that predate capture:
     /// `blocks` is one RPC response's worth of `(accepting block, [(txid,
     /// index)])`, applied in a single write transaction (the batch discipline

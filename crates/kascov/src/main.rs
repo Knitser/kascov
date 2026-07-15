@@ -1023,11 +1023,17 @@ impl Drop for SubscriberSlot {
     }
 }
 
-/// Per-network follower liveness, shared with /healthz. Epoch ms of the last
-/// successful sync pass; initialized to boot time so a fresh instance gets the
-/// same 10-minute grace as a healthy one.
+/// Per-network follower liveness, shared with /healthz. Epoch ms; both fields
+/// initialized to boot time so a fresh instance gets the same 10-minute grace
+/// as a healthy one.
 struct SyncHealth {
+    /// The last successful sync pass.
     last_sync_ok_ms: std::sync::atomic::AtomicI64,
+    /// The last pass that MOVED processed_daa. Tracked separately because a
+    /// stranded cursor can make passes "succeed" without doing anything
+    /// (some nodes answer it with an empty walk) — liveness alone would keep
+    /// reporting ok while the index falls behind forever.
+    last_progress_ms: std::sync::atomic::AtomicI64,
 }
 
 struct ServeState {
@@ -1107,6 +1113,7 @@ async fn serve(
         let channel = LiveChannel::new();
         let health = std::sync::Arc::new(SyncHealth {
             last_sync_ok_ms: std::sync::atomic::AtomicI64::new(now_ms() as i64),
+            last_progress_ms: std::sync::atomic::AtomicI64::new(now_ms() as i64),
         });
         let db = base_dir.join(format!("{network}.db"));
         // Webhook delivery rides the same event callback as SSE: the follower
@@ -1300,7 +1307,10 @@ async fn serve(
 const HEALTHZ_STALL_MS: i64 = 10 * 60 * 1000;
 
 /// GET /healthz — follower liveness + index progress per network. 503 as soon
-/// as ANY followed network hasn't completed a sync pass in HEALTHZ_STALL_MS.
+/// as ANY followed network hasn't completed a sync pass in HEALTHZ_STALL_MS —
+/// or keeps completing passes without moving processed_daa while the index
+/// lags far behind the tip (the empty-walk wedge: "success" that syncs
+/// nothing keeps last_sync_ok_ms fresh forever).
 async fn healthz_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
 ) -> axum::response::Response {
@@ -1311,13 +1321,17 @@ async fn healthz_handler(
     let mut stalled = false;
     let mut networks = serde_json::Map::new();
     for &network in &state.networks {
-        let last_ok = state
+        let (last_ok, last_progress) = state
             .sync_health
             .iter()
             .find(|(n, _)| *n == network)
-            .map(|(_, h)| h.last_sync_ok_ms.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(0);
-        stalled |= now.saturating_sub(last_ok) > HEALTHZ_STALL_MS;
+            .map(|(_, h)| {
+                (
+                    h.last_sync_ok_ms.load(std::sync::atomic::Ordering::Relaxed),
+                    h.last_progress_ms.load(std::sync::atomic::Ordering::Relaxed),
+                )
+            })
+            .unwrap_or((0, 0));
         let db = state.base_dir.join(format!("{network}.db"));
         // Nulls until the follower has created the DB; an open/read failure
         // degrades to the same nulls rather than failing the whole probe.
@@ -1337,13 +1351,20 @@ async fn healthz_handler(
             None
         };
         let (processed, tip, backfill_done) = indexed.unwrap_or((None, None, false));
+        let lag = tip.zip(processed).map(|(t, p)| t.saturating_sub(p));
+        let network_stalled = now.saturating_sub(last_ok) > HEALTHZ_STALL_MS
+            || (lag.is_some_and(|l| l > kascov_core::sync::WEDGE_LAG_DAA)
+                && now.saturating_sub(last_progress) > HEALTHZ_STALL_MS);
+        stalled |= network_stalled;
         networks.insert(
             network.to_string(),
             serde_json::json!({
+                "status": if network_stalled { "stalled" } else { "ok" },
                 "processed_daa": processed,
                 "tip_daa": tip,
-                "lag_daa": tip.zip(processed).map(|(t, p)| t.saturating_sub(p)),
+                "lag_daa": lag,
                 "last_sync_ok_ms": last_ok,
+                "last_progress_ms": last_progress,
                 "tx_index_backfill_done": backfill_done,
             }),
         );
@@ -1365,21 +1386,56 @@ async fn healthz_handler(
         .into_response()
 }
 
-/// After repeated sync failures, check for the testnet-reset signature: the
-/// node answers fine but our stored cursor block no longer exists there.
-/// Recovery restarts the cursor at the current sink — indexed history stays,
-/// and the gap is real (the old chain is gone), not an artifact.
+/// After repeated sync failures — or passes that succeed without advancing —
+/// try to un-wedge the cursor. Preferred: re-anchor onto the newest walkable
+/// block of our own indexed history (a STRANDED cursor: the block still
+/// exists, but the node refuses to walk the virtual chain from it — a branch
+/// abandoned by a deep reorg, or past walk retention). Last resort, only when
+/// nothing we indexed is walkable AND the cursor block is gone entirely (the
+/// true testnet-reset signature): restart at the current sink — indexed
+/// history stays, and the gap is real (the old chain is gone), not an artifact.
 async fn recover_wedged_cursor(node: &NodeHandle, store: &mut Store, network: Network) -> bool {
-    let Ok(Some(cursor)) = store.cursor() else { return false };
-    let Ok(dag) = node.dag_info().await else { return false };
-    if node.block_with_txs(cursor).await.is_ok() {
-        return false; // cursor exists — the failures are something else
+    use kascov_core::sync::ReAnchor;
+    match kascov_core::sync::re_anchor(node, store).await {
+        Ok(ReAnchor::NotWedged) => false, // the failures are something else
+        Ok(ReAnchor::Anchored(anchor)) => {
+            let anchor_daa = store.processed_daa().ok().flatten().unwrap_or(0);
+            let gap = match node.dag_info().await {
+                Ok(dag) => {
+                    format!("{} DAA to re-sync", dag.virtual_daa_score.saturating_sub(anchor_daa))
+                }
+                Err(_) => "gap unknown".into(),
+            };
+            tracing::warn!(
+                "{network}: cursor was stranded — re-anchored at {anchor} (DAA {anchor_daa}, {gap})"
+            );
+            true
+        }
+        Ok(ReAnchor::NothingWalkable) => {
+            let Ok(Some(cursor)) = store.cursor() else { return false };
+            let Ok(dag) = node.dag_info().await else { return false };
+            // Two signatures forfeit the gap: the cursor block is GONE (the
+            // classic testnet reset), or its header survives while the node —
+            // provably able to walk from its own sink — can walk from neither
+            // the cursor nor ANY sampled block of our history (deep-reorg
+            // strand past retention; observed in the Jul-2026 TN10 incident).
+            // A node that fails the sink control is sick, not authoritative.
+            if node.block_with_txs(cursor).await.is_ok()
+                && node.virtual_chain_from(dag.sink).await.is_err()
+            {
+                return false;
+            }
+            tracing::error!(
+                "{network}: cursor {cursor} is wedged beyond re-anchoring (nothing indexed is walkable) — restarting from sink {}; the skipped gap is real and unrecoverable from this node",
+                dag.sink
+            );
+            store.reset_cursor(dag.sink).is_ok()
+        }
+        Err(err) => {
+            tracing::warn!("{network}: re-anchor attempt failed ({err})");
+            false
+        }
     }
-    tracing::error!(
-        "{network}: cursor {cursor} is unknown to a healthy node (testnet reset?) — restarting from sink {}",
-        dag.sink
-    );
-    store.reset_cursor(dag.sink).is_ok()
 }
 
 /// A pending tx_index backfill re-fetches every retained block over RPC —
@@ -1403,6 +1459,9 @@ async fn follow_forever(
     // so a per-session counter would reset before ever reaching the
     // testnet-reset recovery threshold below.
     let mut consecutive_errors = 0u32;
+    // Also across reconnects: catches the wedge consecutive_errors can't see
+    // (passes that "succeed" without moving the cursor).
+    let mut progress = kascov_core::sync::ProgressWatch::default();
     loop {
         let mut store = match kascov_core::store::Store::open(&db, network) {
             Ok(store) => store,
@@ -1501,9 +1560,25 @@ async fn follow_forever(
             match result {
                 Ok(_) => {
                     consecutive_errors = 0;
-                    health
-                        .last_sync_ok_ms
-                        .store(now_ms() as i64, std::sync::atomic::Ordering::Relaxed);
+                    let now = now_ms() as i64;
+                    health.last_sync_ok_ms.store(now, std::sync::atomic::Ordering::Relaxed);
+                    let verdict = progress.observe(
+                        store.processed_daa().ok().flatten(),
+                        store.tip().ok().flatten().map(|(daa, _)| daa),
+                    );
+                    if verdict.advanced {
+                        health.last_progress_ms.store(now, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if verdict.demand_recovery {
+                        tracing::warn!(
+                            "{network}: {} passes succeeded without moving the cursor while > {} DAA behind the tip — attempting recovery",
+                            kascov_core::sync::WEDGE_PASSES,
+                            kascov_core::sync::WEDGE_LAG_DAA
+                        );
+                        if recover_wedged_cursor(&node, &mut store, network).await {
+                            continue;
+                        }
+                    }
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
                 Err(err) => {

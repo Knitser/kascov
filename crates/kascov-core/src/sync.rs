@@ -223,6 +223,139 @@ pub async fn sync_once(
     Ok(stats)
 }
 
+/// Newest candidate anchors probed one by one — a shallow strand is the
+/// common case.
+const RE_ANCHOR_DENSE_PROBES: u64 = 8;
+/// Candidate anchors sampled evenly through the WHOLE indexed DAA range.
+/// Depth must come from DAA spacing, not row counts: on the production TN10
+/// index the newest 400 distinct accepting blocks span only ~12 minutes of
+/// chain. Total probes stay bounded (~24); each response is server-capped
+/// (~2,480 blocks), so probing is cheap.
+const RE_ANCHOR_SPREAD_PROBES: u64 = 16;
+
+/// Outcome of a [`re_anchor`] attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReAnchor {
+    /// The cursor walk works (and does something when we lag) — whatever is
+    /// failing, it isn't the cursor. Nothing was touched.
+    NotWedged,
+    /// Re-anchored: rolled back everything above the anchor and repointed
+    /// the cursor there.
+    Anchored(BlockHash),
+    /// The cursor is unwalkable and so is every sampled block of our own
+    /// history — node-side data for our indexed span is gone. Nothing was
+    /// touched; the caller owns the last resort.
+    NothingWalkable,
+}
+
+/// Recovery for a STRANDED cursor: the block still exists on the node
+/// (headers outlive walkability), but `virtual_chain_from` refuses it —
+/// typically a branch abandoned by a deep testnet reorg, or a block past the
+/// node's walk retention. Existence checks can't see this, so we probe
+/// walkability directly: candidate anchors come from our own indexed history
+/// (the newest few, then samples spread through the whole indexed range),
+/// and the first one the node can walk from becomes the new cursor.
+/// Everything indexed above it lived on the abandoned side and goes through
+/// the same [`Store::rollback`] a witnessed reorg would get, including its
+/// reorg_log entry.
+///
+/// Walkability is judged lag-aware: while the store is far behind the tip, a
+/// truthful walk must return blocks, so an EMPTY "success" (how some nodes
+/// answer a stranded cursor) counts as unwalkable rather than as health.
+pub async fn re_anchor(node: &impl ChainSource, store: &mut Store) -> Result<ReAnchor> {
+    let Some(cursor) = store.cursor()? else { return Ok(ReAnchor::NotWedged) };
+    let lagging = match (store.processed_daa()?, store.tip()?) {
+        (Some(processed), Some((tip, _))) => tip.saturating_sub(processed) > WEDGE_LAG_DAA,
+        _ => false,
+    };
+    let walkable = |step: &ChainStep| {
+        !(lagging && step.removed.is_empty() && step.added.is_empty())
+    };
+    if node.virtual_chain_from(cursor).await.is_ok_and(|step| walkable(&step)) {
+        return Ok(ReAnchor::NotWedged);
+    }
+    let mut candidates = store.recent_accepting_blocks(RE_ANCHOR_DENSE_PROBES)?;
+    candidates.extend(store.spread_accepting_blocks(RE_ANCHOR_SPREAD_PROBES)?);
+    let mut probed = HashSet::new();
+    for (anchor, anchor_daa) in candidates {
+        if anchor == cursor || !probed.insert(anchor) {
+            continue; // the cursor is already proven unwalkable above
+        }
+        if !node.virtual_chain_from(anchor).await.is_ok_and(|step| walkable(&step)) {
+            continue;
+        }
+        let above = store.accepting_blocks_above(anchor_daa)?;
+        if !above.is_empty() {
+            tracing::info!(
+                "re-anchor: rolling back {} accepting blocks above DAA {anchor_daa}",
+                above.len()
+            );
+            store.rollback(&above)?;
+        }
+        // Cursor repoint carrying the anchor's own DAA (unlike reset_cursor's
+        // bare repoint), so processed_daa is honest immediately instead of
+        // overstating progress until the next completed pass.
+        let mut checkpoint = BlockEvents::empty(anchor);
+        checkpoint.accepting_daa = anchor_daa;
+        store.apply(&checkpoint, anchor)?;
+        return Ok(ReAnchor::Anchored(anchor));
+    }
+    Ok(ReAnchor::NothingWalkable)
+}
+
+/// Lag (virtual tip DAA ahead of processed DAA) beyond which a cursor that
+/// stops advancing counts as wedged — ~30 minutes at TN10's 10 blocks/s.
+pub const WEDGE_LAG_DAA: u64 = 18_000;
+/// Consecutive no-progress passes (while lagging beyond [`WEDGE_LAG_DAA`])
+/// before [`ProgressWatch`] demands recovery.
+pub const WEDGE_PASSES: u32 = 10;
+
+/// Success-that-does-nothing detector: some nodes answer a stranded cursor
+/// with an EMPTY successful walk, so sync passes "succeed", error counters
+/// stay zero, and the follower sleeps forever while the chain runs away.
+/// Feed it (processed, tip) after each successful pass; it demands recovery
+/// once the cursor has sat still for [`WEDGE_PASSES`] passes while more than
+/// [`WEDGE_LAG_DAA`] behind the tip. Pure state machine — the caller owns
+/// the clock and the recovery.
+#[derive(Debug, Default)]
+pub struct ProgressWatch {
+    last_processed: Option<u64>,
+    stuck_passes: u32,
+}
+
+/// What one successful sync pass told the [`ProgressWatch`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PassVerdict {
+    /// processed_daa moved — in either direction: a recovery rollback is the
+    /// index acting, not a stall.
+    pub advanced: bool,
+    /// The wedge signature held for [`WEDGE_PASSES`]: attempt recovery now.
+    pub demand_recovery: bool,
+}
+
+impl ProgressWatch {
+    /// Record one successful pass's (processed_daa, tip_daa).
+    pub fn observe(&mut self, processed: Option<u64>, tip: Option<u64>) -> PassVerdict {
+        let advanced = processed.is_some() && processed != self.last_processed;
+        if advanced {
+            self.last_processed = processed;
+        }
+        let lagging = matches!((processed, tip), (Some(p), Some(t)) if t.saturating_sub(p) > WEDGE_LAG_DAA);
+        if advanced || !lagging {
+            self.stuck_passes = 0;
+            return PassVerdict { advanced, demand_recovery: false };
+        }
+        self.stuck_passes += 1;
+        if self.stuck_passes >= WEDGE_PASSES {
+            // Re-arm: a recovery attempt that changes nothing earns another
+            // full window before the next demand.
+            self.stuck_passes = 0;
+            return PassVerdict { advanced, demand_recovery: true };
+        }
+        PassVerdict { advanced, demand_recovery: false }
+    }
+}
+
 /// One-shot backfill of `tx_index` onto event rows written before capture,
 /// bounded by node retention: walk the selected chain from the pruning point
 /// (the oldest block with acceptance data) to the store's sync cursor,
@@ -532,6 +665,213 @@ mod tests {
         node.rpc_calls.store(0, Ordering::Relaxed);
         assert_eq!(backfill_tx_index(&node, &mut store).await.unwrap(), 0);
         assert_eq!(node.rpc_calls.load(Ordering::Relaxed), 0);
+    }
+
+    fn utxo(cov: u8, txid: TxId, index: u32) -> NewUtxo {
+        NewUtxo {
+            outpoint: Outpoint { txid, index },
+            covenant_id: CovenantId([cov; 32]),
+            value: 1_000,
+            spk_version: 0,
+            spk_script: vec![0x51],
+        }
+    }
+
+    /// An empty successful step — what a node answers for a walkable cursor
+    /// already at the tip (and how some nodes answer a STRANDED one).
+    fn walkable() -> ChainStep {
+        ChainStep { removed: vec![], added: vec![] }
+    }
+
+    /// A successful walk that actually returns chain blocks — what a
+    /// truthful node answers for a walkable block below the tip.
+    fn walkable_with_blocks() -> ChainStep {
+        ChainStep {
+            removed: vec![],
+            added: vec![AcceptedBlock { accepting_block: h(9), accepted_tx_ids: vec![] }],
+        }
+    }
+
+    /// Four indexed accepting blocks (daa 100..400); h2 creates a covenant
+    /// UTXO that h3 spends; cursor at h4.
+    fn stranded_store(name: &str) -> Store {
+        let db =
+            std::env::temp_dir().join(format!("kascov-sync-{name}-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
+        store.apply(&block_events(h(1), 100, vec![event(0xA1, tx_id(0xA0), 1)]), h(1)).unwrap();
+        let mut b2 = block_events(h(2), 200, vec![event(0xB2, tx_id(0xB0), 1)]);
+        b2.created_utxos.push(utxo(0xB2, tx_id(0xB0), 0));
+        store.apply(&b2, h(2)).unwrap();
+        let mut b3 = block_events(h(3), 300, vec![event(0xC3, tx_id(0xC0), 1)]);
+        b3.created_utxos.push(utxo(0xC3, tx_id(0xC0), 0));
+        b3.spent_utxos.push((Outpoint { txid: tx_id(0xB0), index: 0 }, tx_id(0xC0), vec![0xAA], 7));
+        store.apply(&b3, h(3)).unwrap();
+        let mut b4 = block_events(h(4), 400, vec![event(0xA1, tx_id(0xD0), 1)]);
+        b4.created_utxos.push(utxo(0xA1, tx_id(0xD0), 0));
+        store.apply(&b4, h(4)).unwrap();
+        assert_eq!(store.cursor().unwrap(), Some(h(4)));
+        store
+    }
+
+    /// The stranded cursor (h4) fails the walk, so does h3; h2 is the newest
+    /// walkable candidate. Everything above it rolls back — h3's spend of
+    /// h2's UTXO un-spends, h3/h4's rows disappear — and the cursor lands on
+    /// the anchor with an honest processed_daa.
+    #[tokio::test]
+    async fn re_anchor_picks_newest_walkable_and_rolls_back_above() {
+        let mut store = stranded_store("re-anchor");
+        let node = FakeAcceptance {
+            pruning_point: h(0),
+            steps: HashMap::from([(h(2), walkable())]),
+            rpc_calls: AtomicU64::new(0),
+        };
+
+        let outcome = re_anchor(&node, &mut store).await.unwrap();
+        assert_eq!(outcome, ReAnchor::Anchored(h(2)));
+        assert_eq!(store.cursor().unwrap(), Some(h(2)));
+        assert_eq!(store.processed_daa().unwrap(), Some(200));
+        // Cursor probe + h3 + h2 (h4 = the cursor is skipped, h1 never needed).
+        assert_eq!(node.rpc_calls.load(Ordering::Relaxed), 3);
+
+        // Rolled back above DAA 200: A1 keeps only its daa-100 event, its h4
+        // UTXO is gone; C3 (born in h3) disappears entirely.
+        let a1 = store.events(&CovenantId([0xA1; 32])).unwrap();
+        assert_eq!(a1.len(), 1);
+        assert!(store.utxos(&CovenantId([0xA1; 32]), false).unwrap().is_empty());
+        assert!(store.events(&CovenantId([0xC3; 32])).unwrap().is_empty());
+        assert!(store.utxos(&CovenantId([0xC3; 32]), false).unwrap().is_empty());
+        // h2's UTXO survives and its rolled-back spend is undone.
+        let b2 = store.utxos(&CovenantId([0xB2; 32]), false).unwrap();
+        assert_eq!(b2.len(), 1);
+        assert!(b2[0].live);
+        assert_eq!(b2[0].spent_txid, None);
+    }
+
+    /// The re-anchor rollback lands in reorg_log exactly like a witnessed
+    /// reorg: the DAA we had reached, and how many chain blocks were undone.
+    #[tokio::test]
+    async fn re_anchor_rollback_records_reorg_log() {
+        let mut store = stranded_store("re-anchor-log");
+        assert!(store.reorg_log(10).unwrap().is_empty());
+        let node = FakeAcceptance {
+            pruning_point: h(0),
+            steps: HashMap::from([(h(2), walkable())]),
+            rpc_calls: AtomicU64::new(0),
+        };
+
+        re_anchor(&node, &mut store).await.unwrap();
+        let log = store.reorg_log(10).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].daa, 400);
+        assert_eq!(log[0].rolled_back, 2); // h3 and h4
+    }
+
+    /// Nothing we indexed is walkable: report so (the caller owns the last
+    /// resort) and leave the store byte-for-byte alone.
+    #[tokio::test]
+    async fn re_anchor_without_walkable_candidate_leaves_store_untouched() {
+        let mut store = stranded_store("re-anchor-none");
+        let node = FakeAcceptance {
+            pruning_point: h(0),
+            steps: HashMap::new(),
+            rpc_calls: AtomicU64::new(0),
+        };
+
+        assert_eq!(re_anchor(&node, &mut store).await.unwrap(), ReAnchor::NothingWalkable);
+        assert_eq!(store.cursor().unwrap(), Some(h(4)));
+        assert_eq!(store.processed_daa().unwrap(), Some(400));
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap().len(), 2);
+        assert_eq!(store.events(&CovenantId([0xC3; 32])).unwrap().len(), 1);
+        assert!(store.reorg_log(10).unwrap().is_empty());
+        // Cursor probe + h3, h2, h1 (h4 = the cursor is skipped).
+        assert_eq!(node.rpc_calls.load(Ordering::Relaxed), 4);
+    }
+
+    /// A walkable cursor means the failures are something else: hands off,
+    /// zero candidate probes.
+    #[tokio::test]
+    async fn re_anchor_healthy_cursor_short_circuits() {
+        let mut store = stranded_store("re-anchor-healthy");
+        let node = FakeAcceptance {
+            pruning_point: h(0),
+            steps: HashMap::from([(h(4), walkable())]),
+            rpc_calls: AtomicU64::new(0),
+        };
+
+        assert_eq!(re_anchor(&node, &mut store).await.unwrap(), ReAnchor::NotWedged);
+        assert_eq!(store.cursor().unwrap(), Some(h(4)));
+        assert_eq!(node.rpc_calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// The empty-walk lie: a node answers the stranded cursor with an EMPTY
+    /// "success" while the index lags far behind the tip. A truthful walk
+    /// would return blocks, so re_anchor treats it as unwalkable and still
+    /// re-anchors onto a candidate whose walk actually returns chain blocks.
+    #[tokio::test]
+    async fn re_anchor_sees_through_empty_success_walks_when_lagging() {
+        let mut store = stranded_store("re-anchor-emptylie");
+        store.set_tip(400 + WEDGE_LAG_DAA + 1, 1).unwrap();
+        let node = FakeAcceptance {
+            pruning_point: h(0),
+            steps: HashMap::from([
+                (h(4), walkable()), // the lie
+                (h(2), walkable_with_blocks()),
+            ]),
+            rpc_calls: AtomicU64::new(0),
+        };
+
+        assert_eq!(re_anchor(&node, &mut store).await.unwrap(), ReAnchor::Anchored(h(2)));
+        assert_eq!(store.cursor().unwrap(), Some(h(2)));
+        assert_eq!(store.processed_daa().unwrap(), Some(200));
+        // Cursor probe + h3 + h2 (h4 = the cursor is skipped as a candidate).
+        assert_eq!(node.rpc_calls.load(Ordering::Relaxed), 3);
+    }
+
+    /// The success-that-does-nothing wedge: passes succeed, the cursor sits
+    /// still far behind the tip. The watch demands recovery on exactly the
+    /// WEDGE_PASSES-th such pass, then re-arms for another full window.
+    #[test]
+    fn progress_watch_demands_recovery_after_stuck_passes() {
+        let mut watch = ProgressWatch::default();
+        let tip = 100 + WEDGE_LAG_DAA + 1;
+        assert!(watch.observe(Some(100), Some(tip)).advanced); // first sighting
+        for pass in 1..WEDGE_PASSES {
+            let verdict = watch.observe(Some(100), Some(tip));
+            assert!(!verdict.advanced);
+            assert!(!verdict.demand_recovery, "demanded too early at pass {pass}");
+        }
+        assert!(watch.observe(Some(100), Some(tip)).demand_recovery);
+        // Re-armed: the next demand needs a full window again.
+        assert!(!watch.observe(Some(100), Some(tip)).demand_recovery);
+    }
+
+    /// Any cursor movement — forward progress or a recovery rollback — and
+    /// any pass within the lag threshold reset the wedge counter.
+    #[test]
+    fn progress_watch_resets_on_movement_or_small_lag() {
+        let mut watch = ProgressWatch::default();
+        let tip = 100 + WEDGE_LAG_DAA + 1;
+        for _ in 0..WEDGE_PASSES - 1 {
+            watch.observe(Some(100), Some(tip));
+        }
+        // Forward movement resets the window.
+        assert!(watch.observe(Some(101), Some(tip)).advanced);
+        for _ in 0..WEDGE_PASSES - 1 {
+            assert!(!watch.observe(Some(101), Some(tip)).demand_recovery);
+        }
+        // A rollback (processed moves DOWN) is the index acting, not a stall.
+        assert!(watch.observe(Some(50), Some(tip)).advanced);
+        // Lag at (not beyond) the threshold never counts as wedged.
+        for _ in 0..WEDGE_PASSES * 2 {
+            let verdict = watch.observe(Some(50), Some(50 + WEDGE_LAG_DAA));
+            assert!(!verdict.demand_recovery);
+        }
+        // A fresh index (no processed mark yet) never demands recovery.
+        let mut fresh = ProgressWatch::default();
+        for _ in 0..WEDGE_PASSES * 2 {
+            assert!(!fresh.observe(None, Some(tip)).demand_recovery);
+        }
     }
 
     /// Rows older than the pruning point are unreachable — the walk stamps
