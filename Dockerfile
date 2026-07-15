@@ -10,6 +10,8 @@ WORKDIR /src
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# the worker embeds the changelog for /feed.xml (include_str! in main.rs)
+COPY web/changelog.json ./web/changelog.json
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS build
@@ -17,6 +19,8 @@ COPY --from=planner /src/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# the worker embeds the changelog for /feed.xml (include_str! in main.rs)
+COPY web/changelog.json ./web/changelog.json
 RUN cargo build --release -p kascov
 
 # ---- silverc: the SilverScript compiler, built standalone. It pins a
