@@ -48,6 +48,7 @@
     }
   </script>
   <meta name="theme-color" content="#0a100f">
+  <link rel="alternate" type="application/atom+xml" title="kascov — what's new" href="/feed.xml">
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
   <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230a100f'/%3E%3Ccircle cx='32' cy='32' r='19' fill='none' stroke='%2370C7BA' stroke-width='5'/%3E%3Ccircle cx='32' cy='32' r='7' fill='%2370C7BA'/%3E%3C/svg%3E">
@@ -174,6 +175,12 @@
           <h3>make a smart coin</h3>
           <p>build a covenant without writing code and deploy it on testnet in one click — it reveals itself here, named forever.</p>
         </a>
+      </section>
+
+      <section class="community" id="section-community" aria-label="Built with covenants" hidden>
+        <h2>built with covenants</h2>
+        <p class="dim community-sub">what builders are shipping on Kaspa&rsquo;s smart coins — real projects, their contracts verifiable right here.</p>
+        <div id="community-cards" class="community-cards"></div>
       </section>
 
       <section class="whats-new" id="section-whatsnew" aria-label="What's new" hidden>
@@ -337,6 +344,7 @@
       <div class="pg-modes" aria-label="Playground mode">
         <a class="pg-mode pg-active" href="#/decode">📄 read a script</a>
         <a class="pg-mode" href="#/build">✎ write a covenant</a>
+        <a class="pg-mode" href="#/preflight">🛫 check a transaction</a>
       </div>
       <header class="page-head">
         <h1>read a script</h1>
@@ -381,6 +389,7 @@
       <div class="pg-modes" aria-label="Playground mode">
         <a class="pg-mode" href="#/decode">📄 read a script</a>
         <a class="pg-mode pg-active" href="#/build">✎ write a covenant</a>
+        <a class="pg-mode" href="#/preflight">🛫 check a transaction</a>
       </div>
       <header class="page-head build-head">
         <p class="page-eyebrow">the lab</p>
@@ -527,6 +536,31 @@
       </details>
     </section>
 
+    <!-- ============ PREFLIGHT — CHECK A TRANSACTION ============ -->
+    <section id="view-preflight" class="view-fade" aria-label="Playground — preflight" hidden>
+      <div class="pg-modes" aria-label="Playground mode">
+        <a class="pg-mode" href="#/decode">📄 read a script</a>
+        <a class="pg-mode" href="#/build">✎ write a covenant</a>
+        <a class="pg-mode pg-active" href="#/preflight">🛫 check a transaction</a>
+      </div>
+      <header class="page-head">
+        <h1>will this transaction pass?</h1>
+        <p class="page-sub">paste a transaction as JSON (the SDK / RPC shape) and find out <strong>before you broadcast</strong>: every input&rsquo;s compute budget checked against the classic <a href="/guide.html#trap" target="_blank" rel="noopener">&ldquo;script units exceeded&rdquo; trap</a>, masses measured against the block limit, an honest fee estimate — and for inputs that carry both their witness and their UTXO&rsquo;s script, a real run through Kaspa&rsquo;s script engine.</p>
+      </header>
+      <div class="decode-box">
+        <textarea id="preflight-input" rows="10" spellcheck="false" autocomplete="off" placeholder='{"version": 1, "inputs": [ … ], "outputs": [ … ], "lockTime": 0}'></textarea>
+        <div class="decode-actions">
+          <button type="button" class="btn btn-accent" data-action="preflight-run">🛫 preflight</button>
+        </div>
+        <div class="example-row" role="group" aria-label="Example transactions">
+          <span class="dim example-label">try an example:</span>
+          <button type="button" class="chip" data-action="preflight-example">the budget trap — a v1 tx that will fail</button>
+        </div>
+        <p class="dim pf-privacy">your transaction goes into the preflight call and nowhere else — the worker computes the verdict and forgets it (<code class="mono">no-store</code>). nothing is broadcast, nothing is kept.</p>
+      </div>
+      <div id="preflight-out" class="preflight-out" aria-live="polite"></div>
+    </section>
+
     <!-- ============ API DOCS ============ -->
     <section id="view-dev" class="view-fade api-docs" aria-label="API reference" hidden>
       <header class="page-head">
@@ -547,6 +581,7 @@
           <a href="#ep-events">Event feed</a>
           <a href="#ep-stream">Event stream</a>
           <a href="#ep-price">Price</a>
+          <a href="#ep-feed">Atom feed</a>
           <div class="api-nav-group">Coins</div>
           <a href="#ep-coin">One coin</a>
           <a href="#ep-coins">Coins by id</a>
@@ -573,6 +608,7 @@
           <a href="#ep-share">Share cards</a>
           <div class="api-nav-group">Write</div>
           <a href="#ep-simulate">Simulate a spend</a>
+          <a href="#ep-preflight">Preflight a tx</a>
           <a href="#ep-compile">Compile</a>
           <a href="#ep-publish">Publish source</a>
           <a href="#ep-verified">Verified source</a>
@@ -727,6 +763,12 @@ data: {"covenant_id":"2ab7dcd2…","kind":"transition",
               <tr><td class="mono">updated_at_ms</td><td>int</td><td>when the rate was last refreshed (unix ms)</td></tr>
               <tr><td class="mono">source</td><td>string</td><td>where the rate came from</td></tr>
             </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-feed">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/feed.xml</code></div>
+            <p class="ep-desc">What&rsquo;s new, as an Atom feed — the same milestones as <a href="#/changelog">the changelog</a>, one entry each with a stable id, newest first. Lives on the site root next to <code class="mono">/sitemap.xml</code> (no network segment), cached for an hour. Point any feed reader at it. Served by newer workers; older deploys answer <code class="mono">404</code>.</p>
+            <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -s https://kascov.io/feed.xml</code></pre></div>
           </article>
 
           <article class="api-endpoint" id="ep-coin">
@@ -1114,6 +1156,50 @@ data: {"covenant_id":"2ab7dcd2…","kind":"transition",
             </div>
           </article>
 
+          <article class="api-endpoint" id="ep-preflight">
+            <div class="ep-head"><span class="method post">POST</span><code class="ep-path">/data/{network}/preflight</code></div>
+            <p class="ep-desc">Will this transaction pass? Post a transaction as JSON (the SDK / RPC shape — <code class="mono">{version, inputs, outputs, lockTime, …}</code>) and get a verdict <em>before you broadcast</em>: per-input compute-budget checks (the classic <a href="/guide.html#trap" target="_blank" rel="noopener">&ldquo;script units exceeded&rdquo; trap</a>), compute/storage mass against the block limit, an honest fee estimate — and for inputs that carry both their <code class="mono">signatureScript</code> and their <code class="mono">utxo.scriptPublicKey</code>, a real run through the script engine with the budget the transaction declares. Nothing is broadcast, nothing is stored: responses are <code class="mono">no-store</code> and the transaction goes into the call and nowhere else. The network segment picks the mass limits. Served by newer workers; older ones answer <code class="mono">404</code>. Also behind the playground&rsquo;s <a href="#/preflight">check-a-transaction mode</a>.</p>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">Request body — the transaction itself</div><pre class="codeblock"><code>{
+  "version": 1,
+  "inputs": [
+    { "previousOutpoint": { "transactionId": "…", "index": 0 },
+      "signatureScript": "…", "sequence": 0,
+      "sigOpCount": 1, "computeBudget": 20,
+      "utxo": { "amount": 1000000000,
+                "scriptPublicKey": { "version": 0, "script": "…" } } }
+  ],
+  "outputs": [ { "value": 999999000,
+                 "scriptPublicKey": { "version": 0, "script": "…" } } ],
+  "lockTime": 0
+}</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "ok": true, "verdict": "will_fail",
+  "findings": [
+    { "severity": "error", "code": "compute_budget_missing",
+      "message": "input 0 is a v1 input with no computeBudget — its
+                  effective allowance is 9,999 script units and one
+                  CheckSig needs 100,000",
+      "input_index": 0, "suggestion": "set computeBudget: 10" }
+  ],
+  "masses": { "compute": 12345, "storage": 0,
+              "transient": 512, "limit": 500000 },
+  "fee": { "estimate_sompi": 202400, "note": "an estimate, not consensus" },
+  "executed": [
+    { "input_index": 0, "pass": false,
+      "script_units_used": 100000, "allowance": 9999 }
+  ]
+}</code></pre></div>
+            </div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">verdict</td><td>string</td><td><code class="mono">ready</code> — every check passed · <code class="mono">will_fail</code> — a node would reject this as-is · <code class="mono">incomplete</code> — not enough of the transaction to decide</td></tr>
+              <tr><td class="mono">findings[]</td><td>array</td><td>each check&rsquo;s answer: <code class="mono">severity</code> (<code class="mono">error</code> · <code class="mono">warn</code> · <code class="mono">info</code>), a stable machine-readable <code class="mono">code</code>, a plain-English <code class="mono">message</code>, the offending <code class="mono">input_index?</code>, and a concrete <code class="mono">suggestion?</code> (the fix, e.g. <code class="mono">set computeBudget: 10</code>)</td></tr>
+              <tr><td class="mono">masses</td><td>object?</td><td><code class="mono">compute</code> / <code class="mono">storage</code> / <code class="mono">transient</code> against the network&rsquo;s block <code class="mono">limit</code>; omitted when budget findings block the mass calculation</td></tr>
+              <tr><td class="mono">fee</td><td>object?</td><td><code class="mono">estimate_sompi</code> + <code class="mono">note</code> — labeled an estimate honestly: no consensus min-fee primitive exists</td></tr>
+              <tr><td class="mono">executed[]</td><td>array?</td><td>per executable input: <code class="mono">pass</code>, <code class="mono">script_units_used</code>, <code class="mono">allowance</code> — the real engine, the transaction&rsquo;s own declared budget</td></tr>
+            </tbody></table>
+          </article>
+
           <article class="api-endpoint" id="ep-compile">
             <div class="ep-head"><span class="method post">POST</span><code class="ep-path">/data/{network}/compile</code></div>
             <p class="ep-desc">Compile SilverScript source server-side. Body is <code class="mono">{ source, args }</code> — source up to 40,000 characters, at most 16 constructor args of ≤200 characters each.</p>
@@ -1206,7 +1292,7 @@ X-Kascov-Signature: 3f9c41…  (keyed with your subscription's secret)
   <footer class="site-footer">
     <div class="container footer-inner">
       <p class="footer-motto">Kaspa nodes forget after ~3 days. <strong>kascov remembers.</strong></p>
-      <p class="footer-nav"><a class="footer-link" href="#/explore">explorer</a> · <a class="footer-link" href="#/decode">playground</a> · <a class="footer-link" href="#/dev">JSON API &amp; docs</a> · <a class="footer-link" href="/guide.html">the 15-minute guide</a> · <a class="footer-link" href="#/changelog">what&rsquo;s new</a></p>
+      <p class="footer-nav"><a class="footer-link" href="#/explore">explorer</a> · <a class="footer-link" href="#/decode">playground</a> · <a class="footer-link" href="#/dev">JSON API &amp; docs</a> · <a class="footer-link" href="/guide.html">the 15-minute guide</a> · <a class="footer-link" href="#/changelog">what&rsquo;s new</a> · <a class="footer-link" href="/feed.xml">feed</a></p>
       <p><a class="footer-link" href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov</a></p>
       <p class="footer-dim">data streams live from the kascov indexer — it never stops watching</p>
       <p class="footer-dim">not affiliated with the Kaspa Foundation</p>

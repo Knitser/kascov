@@ -279,6 +279,13 @@ the amount committed in the input: used=100000, limit=9999</span></code></pre>
       <p>For plain (non-covenant) transfers, rusty-kaspa’s own <code>consensus-core sign()</code> already stamps
         <code>ComputeBudget(10)</code> on every v1 input — exactly one signature check. That is what labkit’s deploy relies on.</p>
     </div>
+    <p>
+      Or let the tool run this whole section for you:
+      <a href="https://kascov.io/#/preflight"><strong>kascov’s transaction preflight</strong></a> takes your
+      transaction as JSON and answers <em>ready / will fail / incomplete</em> before you broadcast —
+      per-input budgets checked against exactly this trap, masses against the block limit, and the fix
+      spelled out (“set <code>computeBudget: 10</code>”). Your transaction goes into the call and nowhere else.
+    </p>
 
     <h2 id="spend"><span class="stepno">4</span>Spend it — <code>--entrypoint receive</code></h2>
     <p>
@@ -352,6 +359,15 @@ the amount committed in the input: used=100000, limit=9999</span></code></pre>
       Mecenas program whose blake2b matches the deploy commitment — the coin page shows the decoded
       constructor args (<code>recipient</code>, <code>funder_hash</code>, <code>pledge</code>, <code>period</code>) it
       recovered from those bytes.
+    </p>
+    <p>
+      And it isn’t just this guide’s own loop anymore — builders are shipping on covenants. The
+      <a href="https://github.com/w00c00/kaspa-covenant-game-kit"><strong>Kaspa Covenant Game Kit</strong></a>
+      (by @w00c00) runs 1v1 games on player-funded covenant escrow with on-chain settlement, and its
+      escrow contract verifies byte-identical on kascov —
+      <a href="https://kascov.io/#/testnet-10/c/6a56fc3fb56fe86a57b55a0e588003cbc8cc8799c67f52a0936b67d4c820cb0b">inspect
+      the verified escrow coin</a> yourself. More projects live in the
+      <a href="https://kascov.io/">“built with covenants” showcase</a> on the landing page.
     </p>
 
     <footer>

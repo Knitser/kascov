@@ -2954,3 +2954,157 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
   .galaxy-hint-desktop { display: none; }
   .galaxy-hint-mobile { display: block; margin-top: 0.3rem; }
 }
+
+/* ---------------------------------- built with covenants (landing showcase) */
+
+.community { margin-bottom: 2.6rem; }
+.community-sub { margin: -0.4rem 0 0.9rem; font-size: 0.9rem; }
+.community-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.9rem;
+}
+.community-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  padding: 1.1rem 1.2rem;
+}
+.community-card h3 { margin: 0 0 0.15rem; font-size: 1.05rem; color: var(--accent); }
+.community-by { margin: 0 0 0.5rem; font-size: 0.82rem; }
+.community-card p { margin: 0 0 0.55rem; color: var(--muted); font-size: 0.9rem; line-height: 1.55; }
+.community-links { font-size: 0.88rem; }
+.community-links a { white-space: nowrap; }
+
+/* ------------------------------------------- transaction preflight (#/preflight) */
+
+.preflight-out { margin-top: 0.4rem; }
+.pf-privacy { margin: 0.7rem 0 0; font-size: 0.82rem; }
+
+/* the verdict banner: ready = teal, will fail = burn, incomplete = muted */
+.pf-verdict {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.7rem;
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius-sm);
+  margin-bottom: 1rem;
+}
+.pf-verdict .pf-icon { font-size: 1.1rem; }
+.pf-verdict strong { font-size: 1.05rem; }
+.pf-verdict .pf-sub { color: var(--muted); font-size: 0.88rem; }
+.pf-ready { background: var(--accent-soft); border: 1px solid rgba(112, 199, 186, 0.45); }
+.pf-ready .pf-icon, .pf-ready strong { color: var(--accent); }
+.pf-fail { background: var(--burn-soft); border: 1px solid rgba(242, 165, 102, 0.45); }
+.pf-fail .pf-icon, .pf-fail strong { color: var(--burn); }
+.pf-incomplete { background: var(--bg-soft); border: 1px solid var(--border); }
+.pf-incomplete .pf-icon, .pf-incomplete strong { color: var(--muted); }
+
+/* findings: one row per check, severity chip + message + fix line */
+.pf-findings { list-style: none; margin: 0 0 1rem; padding: 0; }
+.pf-finding {
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-soft);
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 0.5rem;
+}
+.pf-chip {
+  flex: none;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-radius: 6px;
+  padding: 0.12rem 0.5rem;
+  margin-top: 0.15rem;
+}
+.pf-chip-error { background: var(--burn-soft); color: var(--burn); }
+.pf-chip-warn { background: var(--watch-soft); color: var(--watch); }
+.pf-chip-info { background: var(--accent-soft); color: var(--accent); }
+.pf-finding-body { min-width: 0; }
+.pf-finding-body p { margin: 0; color: var(--text); font-size: 0.92rem; line-height: 1.5; }
+.pf-meta {
+  margin-top: 0.25rem;
+  font-size: 0.78rem;
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.pf-input-link {
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.pf-input-link:hover { color: var(--text); }
+/* suggestions styled as the fix, not more prose */
+.pf-fix { margin-top: 0.35rem; font-size: 0.85rem; color: var(--born); }
+.pf-fix code { background: var(--born-soft); border-color: rgba(111, 217, 164, 0.35); }
+
+/* masses / fee cards */
+.pf-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0.9rem;
+  margin-bottom: 1rem;
+}
+.pf-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  padding: 0.9rem 1rem;
+}
+.pf-card h3 {
+  margin: 0 0 0.6rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.pf-card .dim { font-size: 0.82rem; }
+.pf-mass {
+  display: grid;
+  grid-template-columns: 5.2rem 1fr;
+  gap: 0.15rem 0.6rem;
+  align-items: center;
+  margin-bottom: 0.55rem;
+  font-size: 0.84rem;
+}
+.pf-mass-label { color: var(--muted); }
+.pf-mass-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+.pf-mass-fill { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+.pf-mass-over { background: var(--burn); }
+.pf-mass-n { grid-column: 2; font-size: 0.76rem; color: var(--faint); }
+.pf-fee-n { font-size: 1.15rem; margin: 0 0 0.3rem; color: var(--text); }
+
+/* executed inputs — the same PASS/FAIL flags the debugger wears */
+.pf-exec-card { margin-bottom: 1rem; }
+.pf-exec-list { list-style: none; margin: 0.4rem 0 0; padding: 0; }
+.pf-exec {
+  display: flex;
+  gap: 0.7rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: 0.45rem 0.2rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.88rem;
+}
+.pf-exec:last-child { border-bottom: none; }
+.pf-hilite { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+.pf-foot { font-size: 0.85rem; }

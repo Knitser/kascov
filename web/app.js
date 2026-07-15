@@ -31,6 +31,7 @@ import {
   tokenDetails, loadTokenDetail,
   txDetails, loadTxDetail,
   loadChangelog,
+  loadCommunity,
 } from './core/data.js';
 
 
@@ -394,6 +395,7 @@ function renderLiteLanding(live, network) {
   $('#landing-empty').hidden = !empty;
   $('#section-teaser').hidden = empty;
   renderDigestStrip(network, empty);
+  renderCommunity();
   renderWhatsNew();
   updateTourOffer();
   if (empty) {
@@ -1838,6 +1840,7 @@ function renderLanding(entry) {
   $('#landing-empty').hidden = !empty;
   $('#section-teaser').hidden = empty;
   renderDigestStrip(network, empty);
+  renderCommunity();
   renderWhatsNew();
   updateTourOffer();
 
@@ -3392,6 +3395,143 @@ function renderBuild() {
   initCompiler();
 }
 
+/* ------------------------------------------- transaction preflight (#/preflight)
+   The playground's third mode: paste a transaction as JSON, the worker
+   answers "would a node accept this?" — without broadcasting. Everything
+   below is a pure html helper over the response shape
+   { ok, verdict, findings[], masses?, fee?, executed? }, so each piece
+   renders whatever fields this worker serves and skips the rest.
+   Feature-detected end-to-end: a 404 from an older worker degrades to an
+   honest "needs a newer worker" card. The pasted tx is sent to the
+   preflight call and nowhere else — the endpoint is no-store. */
+
+/* a small broken v1 tx demonstrating the classic budget trap
+   (rusty-kaspa#1073): one input with a signature check and NO computeBudget
+   — the effective allowance is 9,999 script units, one CheckSig needs
+   100,000. The guide's trap section decodes the numbers. */
+const PREFLIGHT_EXAMPLE = `{
+  "version": 1,
+  "inputs": [
+    {
+      "previousOutpoint": {
+        "transactionId": "a9a7df1a71307c0518aa001920b42b9afecbaa503d61c279c08e45ee6bfc8bdb",
+        "index": 0
+      },
+      "signatureScript": "",
+      "sequence": 0,
+      "sigOpCount": 1
+    }
+  ],
+  "outputs": [
+    {
+      "value": 99999000,
+      "scriptPublicKey": {
+        "version": 0,
+        "script": "201111111111111111111111111111111111111111111111111111111111111111ac"
+      }
+    }
+  ],
+  "lockTime": 0
+}`;
+
+function renderPreflight() {
+  document.title = 'transaction preflight — kascov';
+  /* the section is static html; a previous verdict survives view switches,
+     the same way the decoder keeps its output */
+}
+
+function preflightVerdictHtml(d) {
+  const meta = {
+    ready: { cls: 'pf-ready', icon: '✓', label: 'ready to broadcast', sub: 'every check passed — a node should accept this transaction' },
+    will_fail: { cls: 'pf-fail', icon: '✗', label: 'will fail', sub: 'a node would reject this transaction as-is — the findings below say why, and how to fix it' },
+    incomplete: { cls: 'pf-incomplete', icon: '…', label: 'incomplete', sub: 'not enough of the transaction to decide — the findings below say what is missing' },
+  }[String(d.verdict || '')] || { cls: 'pf-incomplete', icon: '?', label: String(d.verdict || 'no verdict'), sub: '' };
+  return `<div class="pf-verdict ${meta.cls}"><span class="pf-icon" aria-hidden="true">${meta.icon}</span>` +
+    `<strong>${esc(meta.label)}</strong>` +
+    (meta.sub ? `<span class="pf-sub">${esc(meta.sub)}</span>` : '') + `</div>`;
+}
+
+function preflightFindingHtml(f) {
+  const sev = f.severity === 'error' ? 'error' : f.severity === 'warn' ? 'warn' : 'info';
+  const metaBits = [];
+  if (Number.isInteger(f.input_index)) {
+    metaBits.push(`<button type="button" class="pf-input-link" data-action="pf-goto" data-target="pf-input-${f.input_index}">input #${f.input_index}</button>`);
+  }
+  if (f.code) metaBits.push(`<span class="pf-code mono dim">${esc(String(f.code))}</span>`);
+  const fix = f.suggestion
+    ? `<div class="pf-fix">fix: <code class="mono">${esc(String(f.suggestion))}</code></div>`
+    : '';
+  return `<li class="pf-finding"><span class="pf-chip pf-chip-${sev}">${sev}</span>` +
+    `<div class="pf-finding-body"><p>${esc(String(f.message || ''))}</p>` +
+    (metaBits.length ? `<div class="pf-meta">${metaBits.join(' ')}</div>` : '') +
+    fix + `</div></li>`;
+}
+
+function preflightMassesHtml(m) {
+  if (!m) return '';
+  /* the worker sends per-dimension limits ({compute, transient, storage} —
+     transient's ceiling differs from the others); a bare number is tolerated */
+  const lims = (m.limit && typeof m.limit === 'object') ? m.limit
+    : { compute: m.limit, storage: m.limit, transient: m.limit };
+  const bar = (label, val, limRaw) => {
+    if (val == null) return '';
+    const n = Number(val) || 0;
+    const limit = Number(limRaw) || 0;
+    const pct = limit > 0 ? Math.min(100, (n / limit) * 100) : 0;
+    const over = limit > 0 && n > limit;
+    return `<div class="pf-mass"><span class="pf-mass-label">${esc(label)}</span>` +
+      `<span class="pf-mass-bar"><span class="pf-mass-fill${over ? ' pf-mass-over' : ''}" style="width:${pct.toFixed(1)}%"></span></span>` +
+      `<span class="pf-mass-n mono">${esc(fmtInt(n))}${limit ? ` / ${esc(fmtInt(limit))}` : ''}${over ? ' — over the limit' : ''}</span></div>`;
+  };
+  return `<div class="pf-card"><h3>masses vs the block limit</h3>` +
+    bar('compute', m.compute, lims.compute) + bar('storage', m.storage, lims.storage) + bar('transient', m.transient, lims.transient) +
+    `</div>`;
+}
+
+function preflightFeeHtml(fee) {
+  if (!fee || fee.estimate_sompi == null) return '';
+  return `<div class="pf-card"><h3>fee</h3>` +
+    `<p class="pf-fee-n mono">${esc(fmtInt(Number(fee.estimate_sompi) || 0))} sompi</p>` +
+    (fee.note ? `<p class="dim">${esc(String(fee.note))}</p>` : '') + `</div>`;
+}
+
+function preflightExecutedHtml(list) {
+  if (!Array.isArray(list) || !list.length) return '';
+  const rows = list.map((r) => {
+    const pass = r.pass === true;
+    const idx = Number.isInteger(r.input_index) ? r.input_index : 0;
+    const used = r.script_units_used;
+    const allow = r.allowance;
+    return `<li class="pf-exec" id="pf-input-${idx}">` +
+      `<span class="flag ${pass ? 'flag-yes' : 'flag-no'}">${pass ? '✓ pass' : '✗ fail'}</span>` +
+      `<span class="mono">input #${idx}</span>` +
+      (used != null
+        ? `<span class="dim">${esc(fmtInt(Number(used) || 0))} script units used${allow != null ? ` of ${esc(fmtInt(Number(allow) || 0))} allowed` : ''}</span>`
+        : '') +
+      `</li>`;
+  }).join('');
+  return `<div class="pf-card pf-exec-card"><h3>executed inputs — the real script engine</h3>` +
+    `<p class="dim">inputs carrying both their witness and their UTXO&rsquo;s script ran through Kaspa&rsquo;s actual engine, with the budget your transaction declares.</p>` +
+    `<ul class="pf-exec-list">${rows}</ul></div>`;
+}
+
+function preflightResultHtml(d) {
+  if (!d || typeof d !== 'object') {
+    return `<div class="pf-verdict pf-incomplete"><span class="pf-icon" aria-hidden="true">?</span><strong>no answer</strong><span class="pf-sub">the worker sent nothing readable back — try again in a moment</span></div>`;
+  }
+  if (d.ok === false && !d.verdict) {
+    return `<div class="pf-verdict pf-incomplete"><span class="pf-icon" aria-hidden="true">?</span><strong>can&rsquo;t preflight</strong><span class="pf-sub">${esc(String(d.error || 'the worker rejected the request'))}</span></div>`;
+  }
+  const findings = Array.isArray(d.findings) && d.findings.length
+    ? `<ul class="pf-findings">${d.findings.map(preflightFindingHtml).join('')}</ul>`
+    : '';
+  const cards = preflightMassesHtml(d.masses) + preflightFeeHtml(d.fee);
+  const foot = `<p class="pf-foot dim">the checks are the <a href="/guide.html#trap" target="_blank" rel="noopener">guide&rsquo;s trap section</a>, automated — and once you broadcast, paste the txid into search: every transaction gets a page here.</p>`;
+  return preflightVerdictHtml(d) + findings +
+    (cards ? `<div class="pf-cards">${cards}</div>` : '') +
+    preflightExecutedHtml(d.executed) + foot;
+}
+
 /* -------------------------------------------------------------- changelog */
 
 /* the "have you seen the newest entry" stamp — date alone can repeat across
@@ -3415,6 +3555,40 @@ function renderWhatsNew() {
       `<h3>${fresh ? '<span class="new-dot" aria-hidden="true"></span>' : ''}what’s new</h3>` +
       `<p><strong>${esc(latest.title || '')}</strong> — ${esc(latest.body || '')}</p>` +
       `<span class="whatsnew-meta dim">${esc(latest.date || '')} · everything that changed →</span>`;
+    sec.hidden = false;
+  });
+}
+
+/* the landing "built with covenants" showcase — curated entries committed in
+   web/community.json ({ name, by, blurb, links:{site?,repo?,example?}, date }).
+   Hidden entirely when the file is missing or empty, so older deploys are
+   unaffected. Adding a future project = edit community.json only. */
+function renderCommunity() {
+  const sec = $('#section-community');
+  const host = $('#community-cards');
+  if (!sec || !host) return; /* stale cached index.html */
+  loadCommunity().then((list) => {
+    if (!list) { sec.hidden = true; return; }
+    if (parseRoute().view !== 'landing') return;
+    /* curated content, but keep the cheap guard: internal hash routes or
+       plain http(s) only */
+    const safe = (u) => /^(https?:\/\/|#\/)/.test(u);
+    host.innerHTML = list.map((e) => {
+      const L = e.links || {};
+      const links = [];
+      if (L.repo && safe(String(L.repo))) links.push(`<a href="${esc(String(L.repo))}" target="_blank" rel="noopener noreferrer">the repo ↗</a>`);
+      if (L.example && safe(String(L.example))) {
+        const ex = String(L.example);
+        links.push(`<a href="${esc(ex)}"${ex.startsWith('#') ? '' : ' target="_blank" rel="noopener noreferrer"'}>see it on kascov →</a>`);
+      }
+      if (L.site && safe(String(L.site))) links.push(`<a href="${esc(String(L.site))}" target="_blank" rel="noopener noreferrer">site ↗</a>`);
+      return `<div class="community-card">` +
+        `<h3>${esc(String(e.name || ''))}</h3>` +
+        (e.by ? `<p class="community-by dim">by ${esc(String(e.by))}</p>` : '') +
+        `<p>${esc(String(e.blurb || ''))}</p>` +
+        (links.length ? `<p class="community-links">${links.join(' · ')}</p>` : '') +
+        `</div>`;
+    }).join('');
     sec.hidden = false;
   });
 }
@@ -4303,6 +4477,9 @@ function parseRoute() {
   if (/^#\/decode\/?$/.test(path)) return { view: 'decode', network: null, s: params.get('s') || '' };
   if (/^#\/playground\/?$/.test(path)) return { view: 'decode', network: null, s: params.get('s') || '' };
   if (/^#\/build\/?$/.test(path)) return { view: 'build', network: null };
+  /* '#/preflight' — the playground's third mode; network-independent like
+     #/decode (the POST's network segment only picks the mass limits) */
+  if (/^#\/preflight\/?$/.test(path)) return { view: 'preflight', network: null };
   if (/^#\/dev\/?$/.test(path)) return { view: 'dev', network: null };
   /* old home links '#/<network>' were data views — send them to the explorer */
   m = path.match(/^#\/(testnet-10|mainnet)\/?$/);
@@ -4324,7 +4501,7 @@ function routeHash(view, id) {
   if (view === 'tx') return `#/${state.network}/tx/${id}`;
   if (view === 'explore') return `#/${state.network}/explore`;
   /* decode/dev/changelog are network-free — switching networks keeps the page (and its query) */
-  if (view === 'decode' || view === 'dev' || view === 'build' || view === 'changelog') return location.hash || `#/${view}`;
+  if (view === 'decode' || view === 'dev' || view === 'build' || view === 'preflight' || view === 'changelog') return location.hash || `#/${view}`;
   return '#/';
 }
 
@@ -4381,6 +4558,7 @@ async function render() {
     tx: $('#view-tx'),
     decode: $('#view-decode'),
     build: $('#view-build'),
+    preflight: $('#view-preflight'),
     dev: $('#view-dev'),
     changelog: $('#view-changelog'),
   };
@@ -4391,9 +4569,9 @@ async function render() {
   document.querySelectorAll('.network-tab').forEach((b) => {
     b.setAttribute('aria-pressed', String(b.dataset.network === state.network));
   });
-  /* decode + build are the two modes of the unified "playground" nav entry;
-     a token page lives under the "tokens" nav entry */
-  const navFor = route.view === 'decode' || route.view === 'build' ? 'playground'
+  /* decode + build + preflight are the modes of the unified "playground" nav
+     entry; a token page lives under the "tokens" nav entry */
+  const navFor = route.view === 'decode' || route.view === 'build' || route.view === 'preflight' ? 'playground'
     : route.view === 'token' ? 'tokens' : route.view;
   document.querySelectorAll('.nav-link').forEach((a) => {
     if (a.dataset.nav === navFor) a.setAttribute('aria-current', 'page');
@@ -4405,7 +4583,7 @@ async function render() {
 
   /* the decoder, dev docs, changelog, address, lane, token and tx pages never
      need a snapshot — don't block them on data (they fetch their own) */
-  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'build' || route.view === 'address' || route.view === 'lane' || route.view === 'tokens' || route.view === 'token' || route.view === 'tx' || route.view === 'changelog') && views[route.view]) {
+  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'build' || route.view === 'preflight' || route.view === 'address' || route.view === 'lane' || route.view === 'tokens' || route.view === 'token' || route.view === 'tx' || route.view === 'changelog') && views[route.view]) {
     panel.hidden = true;
     for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
     views.detail.innerHTML = '';
@@ -4416,6 +4594,7 @@ async function render() {
     else if (route.view === 'token') renderTokenPage(route);
     else if (route.view === 'tx') renderTxPage(route);
     else if (route.view === 'build') renderBuild();
+    else if (route.view === 'preflight') renderPreflight();
     else if (route.view === 'changelog') renderChangelog();
     else renderDev();
     fadeIn(views[route.view]);
@@ -4984,6 +5163,61 @@ const ACTIONS = {
   'decode-all'(el) {
     decodeShowAll = !decodeShowAll;
     runDecode(false);
+  },
+
+  'preflight-run'(el) {
+    /* POST the pasted tx JSON to the worker's preflight — feature-detected:
+       a 404 (older worker) degrades to an honest card, a network error to a
+       one-liner. The raw pasted text IS the request body; it goes into this
+       call and nowhere else. */
+    const input = $('#preflight-input');
+    const out = $('#preflight-out');
+    if (!input || !out) return;
+    const raw = input.value.trim();
+    if (!raw) {
+      out.innerHTML = '<p class="dim">paste a transaction as JSON above — or load the example — then preflight it.</p>';
+      return;
+    }
+    try { JSON.parse(raw); } catch (err) {
+      out.innerHTML = `<div class="pf-verdict pf-incomplete"><span class="pf-icon" aria-hidden="true">?</span>` +
+        `<strong>that isn&rsquo;t JSON yet</strong><span class="pf-sub">${esc(String(err && err.message || 'unparseable'))}</span></div>`;
+      return;
+    }
+    out.innerHTML = '<p class="dim"><span class="radar" aria-hidden="true"></span>preflighting — budgets, masses, fee, engine…</p>';
+    fetch(`data/${state.network}/preflight`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: raw })
+      .then((r) => {
+        if (r.status === 404) {
+          out.innerHTML = `<div class="empty-card"><h2>preflight needs a newer worker.</h2>` +
+            `<p class="dim">this kascov worker doesn&rsquo;t answer preflight yet — the decoder and the builder still work, and the <a href="/guide.html#trap" target="_blank" rel="noopener">guide&rsquo;s trap section</a> walks the same checks by hand.</p></div>`;
+          return undefined;
+        }
+        return r.json().catch(() => ({ ok: false, error: `the worker answered ${r.status} without a readable body` }));
+      })
+      .then((d) => {
+        if (d === undefined) return; /* the newer-worker card is already up */
+        out.innerHTML = preflightResultHtml(d);
+      })
+      .catch(() => {
+        out.innerHTML = '<div class="pf-verdict pf-incomplete"><span class="pf-icon" aria-hidden="true">?</span><strong>preflight unreachable</strong><span class="pf-sub">network error — nothing was sent anywhere else; try again in a moment</span></div>';
+      });
+  },
+
+  'preflight-example'(el) {
+    /* fill the paste box with the #1073-style broken v1 tx and run it */
+    const input = $('#preflight-input');
+    if (!input) return;
+    input.value = PREFLIGHT_EXAMPLE;
+    ACTIONS['preflight-run'](el);
+  },
+
+  'pf-goto'(el) {
+    /* findings' "input #n" anchors — scroll to the executed row without
+       touching location.hash (a bare #pf-input-N would bounce the router) */
+    const target = document.getElementById(el.dataset.target || '');
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target.classList.add('pf-hilite');
+    setTimeout(() => target.classList.remove('pf-hilite'), 1600);
   },
 
   'gen-example'(el) {

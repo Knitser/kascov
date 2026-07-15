@@ -1,5 +1,15 @@
 [
   {
+    "date": "2026-07-14",
+    "title": "will this transaction pass? find out before you broadcast",
+    "body": "the playground grew a third mode: paste a transaction as JSON and preflight it — every input's compute budget checked against the classic 'script units exceeded' trap, masses measured against the block limit, an honest fee estimate, and a real script-engine run for inputs that carry their witness. every finding comes with its fix, plain as 'set computeBudget: 10'. your transaction goes into the call and nowhere else — nothing broadcast, nothing kept."
+  },
+  {
+    "date": "2026-07-13",
+    "title": "built with covenants — and a feed to follow it",
+    "body": "the landing page now showcases what builders are shipping on Kaspa's smart coins, starting with the Kaspa Covenant Game Kit by @w00c00 — 1v1 games on player-funded covenant escrow, its contract verified byte-identical on kascov. and everything on this page is now an Atom feed at /feed.xml, so your reader hears the news before your timeline does."
+  },
+  {
     "date": "2026-07-13",
     "title": "every transaction gets a page",
     "body": "paste any txid — in search, or from any timeline — and land on its own page: which smart coins it touched, what was born, moved or retired, the cells it created and spent, the decoded token actions, and a one-click replay of the real spend through Kaspa's actual script engine. older workers still answer with the coin links; nothing breaks."

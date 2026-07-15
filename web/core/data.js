@@ -508,6 +508,24 @@ async function loadChangelog() {
   return changelogCache;
 }
 
+/* web/community.json — curated "built with covenants" showcase entries,
+   committed with the frontend: an array of { name, by, blurb,
+   links:{site?, repo?, example?}, date }, newest first. Same graceful-null
+   contract as the changelog: a missing or empty file (older deploy) hides
+   the landing section entirely. */
+let communityCache;
+async function loadCommunity() {
+  if (communityCache !== undefined) return communityCache;
+  try {
+    const res = await fetch('community.json', { cache: 'no-cache' });
+    const data = res.ok ? await res.json() : null;
+    communityCache = Array.isArray(data) && data.length ? data : null;
+  } catch (e) {
+    communityCache = null;
+  }
+  return communityCache;
+}
+
 export {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -520,4 +538,5 @@ export {
   tokenDetails, loadTokenDetail,
   txDetails, loadTxDetail,
   loadChangelog,
+  loadCommunity,
 };
