@@ -110,6 +110,12 @@ gcs_put() {
 # stable, one per line.
 backup_loop() {
   [ -n "$BACKUP_BUCKET" ] || return 0
+  # KASCOV_NO_BACKUP: a maintenance revision restores + serves normally but never
+  # writes GCS. Used to promote a rebuilt index: run one revision with the flag
+  # (backups off, no clobber), overwrite gs://…/NET.db out of band, then drop the
+  # flag so the next revision restores the new object. Without this, the live
+  # backup loop (or a SIGTERM final backup) would overwrite the promoted DB.
+  [ -z "${KASCOV_NO_BACKUP:-}" ] || { echo "[entrypoint] KASCOV_NO_BACKUP set — periodic backups suspended (promote/maintenance)"; return 0; }
   # Bucket versioning + lifecycle + the uptime checks/alert policies are
   # applied idempotently by scripts/deploy-worker.sh (see scripts/lifecycle.json).
   while true; do
@@ -152,6 +158,9 @@ backup_loop() {
 # window visible after the fact.
 final_backup() {
   [ -n "$BACKUP_BUCKET" ] || exit 0
+  # See backup_loop: a maintenance revision must NOT write its (soon-stale) DB
+  # over the freshly promoted object when it drains.
+  [ -z "${KASCOV_NO_BACKUP:-}" ] || { echo "[entrypoint] KASCOV_NO_BACKUP set — final backup skipped (promote/maintenance)"; exit 0; }
   echo "[entrypoint] $(date -u +%H:%M:%S) SIGTERM — final backup starting"
   if ! token=$(gcs_token); then
     echo "[entrypoint] KASCOV_BACKUP_FAIL reason=token phase=final"
