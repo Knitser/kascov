@@ -5,8 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 # A thin CLI over kascov-labkit, which holds all the tx-building logic.
+# kascov-core is pulled in for the offline index-surgery commands
+# (recover-gap), which drive the indexer's own store/sync machinery.
 [dependencies]
 kascov-labkit = { path = "../kascov-labkit" }
+kascov-core = { workspace = true }
 
 tokio = { workspace = true }
 clap = { workspace = true }

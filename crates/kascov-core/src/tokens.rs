@@ -430,10 +430,23 @@ struct ClassifiedEvent {
 }
 
 /// Does any covenant_utxos row evidence this covenant as a KCC20 token?
-fn has_token_evidence(conn: &Connection, id: &[u8; 32]) -> Result<bool> {
+pub(crate) fn has_token_evidence(conn: &Connection, id: &[u8; 32]) -> Result<bool> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM covenant_utxos WHERE covenant_id = ?1
              AND (template = 'KCC20 token' OR revealed_template = 'KCC20 token'))",
+        [id.as_slice()],
+        |r| r.get(0),
+    )
+    .map_err(db_err)
+}
+
+/// Does any covenant_utxos row evidence this covenant as a KCC20 minter?
+/// (The write-time stamp equivalent of apply()'s `kcc20_seen` minter bit —
+/// used by gap recovery, which stamps templates the same way apply does.)
+pub(crate) fn has_minter_evidence(conn: &Connection, id: &[u8; 32]) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM covenant_utxos WHERE covenant_id = ?1
+             AND (template = 'KCC20 minter' OR revealed_template = 'KCC20 minter'))",
         [id.as_slice()],
         |r| r.get(0),
     )

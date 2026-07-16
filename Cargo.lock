@@ -2224,6 +2224,7 @@ dependencies = [
  "anyhow",
  "clap",
  "hex",
+ "kascov-core",
  "kascov-labkit",
  "tokio",
 ]

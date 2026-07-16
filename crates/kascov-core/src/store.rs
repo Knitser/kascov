@@ -540,6 +540,31 @@ pub struct NewUtxo {
     pub spk_script: Vec<u8>,
 }
 
+/// Tallies from [`Store::merge_recovered_block`] — what a gap-recovery merge
+/// actually changed (dedup makes these smaller than what was offered).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MergeCounts {
+    pub events_added: u64,
+    pub utxos_added: u64,
+    pub spends_repaired: u64,
+}
+
+impl MergeCounts {
+    pub fn add(&mut self, other: MergeCounts) {
+        self.events_added += other.events_added;
+        self.utxos_added += other.utxos_added;
+        self.spends_repaired += other.spends_repaired;
+    }
+}
+
+/// What [`Store::finalize_gap_recovery`] touched.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FinalizeCounts {
+    pub covenants_refreshed: u64,
+    pub covenants_resequenced: u64,
+    pub tokens_rederived: u64,
+}
+
 pub(crate) fn db_err(e: rusqlite::Error) -> Error {
     Error::Rpc(format!("store: {e}"))
 }
@@ -1477,6 +1502,411 @@ impl Store {
 
     pub fn set_tx_index_backfill_done(&self) -> Result<()> {
         self.set_meta("tx_index_backfilled_to", "done")
+    }
+
+    /* ---------- gap recovery (see sync::recover_gap) ----------
+       A deep-reorg wedge answered by a sink reset leaves a DAA window with
+       zero indexed events between two healthy segments. These methods merge
+       the canonical history of that window back in, offline, on a COPY. */
+
+    /// The widest DAA discontinuity between consecutive indexed events, as
+    /// `(last DAA before, first DAA after)`, when it spans at least
+    /// `min_span`. A sink-reset gap is exactly such a discontinuity: the
+    /// resumed index writes events only above the reset point.
+    pub fn find_daa_gap(&self, min_span: u64) -> Result<Option<(u64, u64)>> {
+        self.conn
+            .query_row(
+                "SELECT prev_daa, daa FROM (
+                     SELECT accepting_daa AS daa,
+                            LAG(accepting_daa) OVER (ORDER BY accepting_daa) AS prev_daa
+                     FROM (SELECT DISTINCT accepting_daa FROM covenant_events)
+                 )
+                 WHERE prev_daa IS NOT NULL AND daa - prev_daa >= ?1
+                 ORDER BY daa - prev_daa DESC LIMIT 1",
+                [min_span],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
+    /// Every recorded gap recovery as `(from_daa, to_daa)`, newest first —
+    /// the idempotence marker recover_gap consults before doing anything.
+    pub fn gap_recoveries(&self) -> Result<Vec<(u64, u64)>> {
+        let Some(raw) = self.meta("gap_recoveries")? else { return Ok(vec![]) };
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+        let mut out: Vec<(u64, u64)> = entries
+            .iter()
+            .filter_map(|e| Some((e.get("from_daa")?.as_u64()?, e.get("to_daa")?.as_u64()?)))
+            .collect();
+        out.reverse(); // stored in append order → newest first
+        Ok(out)
+    }
+
+    /// The gap window an interrupted recovery run was working on, if any —
+    /// recorded BEFORE the walk starts, because a partial merge shrinks the
+    /// DAA discontinuity and a re-run's auto-detection would otherwise see
+    /// only a sub-window of the original gap and skip the rest.
+    pub fn gap_recovery_pending(&self) -> Result<Option<(u64, u64)>> {
+        let Some(raw) = self.meta("gap_recovery_pending")? else { return Ok(None) };
+        let mut parts = raw.splitn(2, ':').map(|p| p.parse::<u64>().ok());
+        Ok(parts.next().flatten().zip(parts.next().flatten()))
+    }
+
+    /// Record the window a recovery run is about to walk (cleared by
+    /// [`Store::finalize_gap_recovery`] in the same transaction that writes
+    /// the completed-recovery marker).
+    pub fn set_gap_recovery_pending(&self, gap_lo: u64, gap_hi: u64) -> Result<()> {
+        self.set_meta("gap_recovery_pending", &format!("{gap_lo}:{gap_hi}"))
+    }
+
+    /// The canonical chain block the recovery walk last advanced past — so a
+    /// run interrupted by a node disconnect resumes mid-walk instead of
+    /// re-walking from the pruning point. Any block we already walked is newer
+    /// than the pruning point and still walkable on a fresh node; merges dedup,
+    /// so a slightly-stale cursor only re-does a few cheap blocks.
+    pub fn gap_walk_cursor(&self) -> Result<Option<BlockHash>> {
+        Ok(self.meta("gap_walk_cursor")?.and_then(|s| s.parse().ok()))
+    }
+
+    pub fn set_gap_walk_cursor(&self, hash: &BlockHash) -> Result<()> {
+        self.set_meta("gap_walk_cursor", &hash.to_string())
+    }
+
+    /// Does this covenant have any indexed event at or below the given DAA?
+    /// The gap capture's "would this be the covenant's chronologically-first
+    /// event" probe (ev_by_daa + the PK both serve it).
+    pub(crate) fn has_event_at_or_below(&self, id: &CovenantId, daa: u64) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM covenant_events
+                 WHERE covenant_id = ?1 AND accepting_daa <= ?2)",
+                params![id.0.as_slice(), daa],
+                |r| r.get(0),
+            )
+            .map_err(db_err)
+    }
+
+    /// Merge one recovered chain block's covenant activity into the index —
+    /// [`Store::apply`]'s twin for out-of-order history, with three deliberate
+    /// differences: the sync cursor / processed_daa / tip are NEVER touched
+    /// (this is not progress, it's the past), every write is dedup-aware (a
+    /// re-run, or the inclusive window boundary re-walking an already-indexed
+    /// block, must change nothing), and event seqs are provisional appends —
+    /// [`Store::finalize_gap_recovery`] re-sequences afterwards, so no token
+    /// hook runs here either.
+    pub fn merge_recovered_block(&mut self, block: &BlockEvents) -> Result<MergeCounts> {
+        let mut counts = MergeCounts::default();
+        let tx = self.conn.transaction().map_err(db_err)?;
+        // Created cells land BEFORE spends are marked — same intra-block
+        // chain discipline as apply(). INSERT OR IGNORE (not REPLACE): an
+        // existing row may carry spend capture this recovered view lacks.
+        for utxo in &block.created_utxos {
+            let template =
+                registry().decode(utxo.spk_version, &utxo.spk_script).template.unwrap_or("");
+            let inserted = tx
+                .execute(
+                    "INSERT OR IGNORE INTO covenant_utxos
+                     (txid, output_index, covenant_id, value, spk_version, spk_script,
+                      created_block, created_daa, spent_block, spent_txid, template)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, ?9)",
+                    params![
+                        utxo.outpoint.txid.0.as_slice(),
+                        utxo.outpoint.index,
+                        utxo.covenant_id.0.as_slice(),
+                        utxo.value,
+                        utxo.spk_version,
+                        utxo.spk_script,
+                        block.accepting_block.0.as_slice(),
+                        block.accepting_daa,
+                        template
+                    ],
+                )
+                .map_err(db_err)?;
+            counts.utxos_added += inserted as u64;
+        }
+        for (outpoint, spending_txid, sig, budget) in &block.spent_utxos {
+            // Only a still-unspent row is repaired: an existing spend record
+            // (production's own, or an earlier recovery run) always wins —
+            // one outpoint has exactly one canonical spend.
+            let row: Option<(u16, Vec<u8>)> = tx
+                .query_row(
+                    "SELECT spk_version, spk_script FROM covenant_utxos
+                     WHERE txid = ?1 AND output_index = ?2 AND spent_block IS NULL",
+                    params![outpoint.txid.0.as_slice(), outpoint.index],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(db_err)?;
+            let Some((version, spk)) = row else { continue };
+            // Spend-time recognition, same as apply(): the reveal names the
+            // program that actually ran ('' = spend seen, nothing matched).
+            let revealed = kascov_decode::p2sh_reveal(&spk, sig)
+                .and_then(|redeem| registry().decode(version, &redeem).template)
+                .unwrap_or("");
+            let updated = tx
+                .execute(
+                    "UPDATE covenant_utxos
+                     SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3, spent_budget = ?4, revealed_template = ?5
+                     WHERE txid = ?6 AND output_index = ?7 AND spent_block IS NULL",
+                    params![
+                        block.accepting_block.0.as_slice(),
+                        spending_txid.0.as_slice(),
+                        sig,
+                        budget,
+                        revealed,
+                        outpoint.txid.0.as_slice(),
+                        outpoint.index
+                    ],
+                )
+                .map_err(db_err)?;
+            counts.spends_repaired += updated as u64;
+        }
+        for event in &block.events {
+            // Dedup on (covenant, txid): one covenant fires at most one event
+            // per transaction (classify aggregates), and the same tx observed
+            // under a different accepting block (canonical vs. the stranded
+            // branch the old cursor died on) is still the same historic event.
+            let exists: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM covenant_events
+                     WHERE covenant_id = ?1 AND txid = ?2)",
+                    params![event.covenant_id.0.as_slice(), event.txid.0.as_slice()],
+                    |r| r.get(0),
+                )
+                .map_err(db_err)?;
+            if exists {
+                continue;
+            }
+            // Bare covenant row for gap-born ids; every summary column
+            // (event_count, last_activity, genesis columns) is recomputed by
+            // finalize_gap_recovery from the merged truth.
+            tx.execute(
+                "INSERT INTO covenants (covenant_id, lineage_complete) VALUES (?1, 0)
+                 ON CONFLICT(covenant_id) DO NOTHING",
+                [event.covenant_id.0.as_slice()],
+            )
+            .map_err(db_err)?;
+            let (tag, ikind) = match &event.payload {
+                Some(p) => (Some(payload_tag(p)), Some(inscription_kind_of(p))),
+                None => (None, None),
+            };
+            // Provisional seq: MAX+1 keeps walk order among merged rows and
+            // never collides; the finalize pass renumbers chronologically.
+            tx.execute(
+                "INSERT INTO covenant_events (covenant_id, seq, kind, txid, accepting_block, accepting_daa, payload, lane_namespace, payload_tag, inscription_kind, tx_index, accepting_time_ms, accepting_blue_score)
+                 VALUES (?1,
+                   (SELECT COALESCE(MAX(seq), -1) + 1 FROM covenant_events WHERE covenant_id = ?1),
+                   ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    event.covenant_id.0.as_slice(),
+                    event.kind.as_str(),
+                    event.txid.0.as_slice(),
+                    block.accepting_block.0.as_slice(),
+                    block.accepting_daa,
+                    event.payload,
+                    event.lane_namespace,
+                    tag,
+                    ikind,
+                    event.tx_index,
+                    block.accepting_time_ms,
+                    block.accepting_blue_score
+                ],
+            )
+            .map_err(db_err)?;
+            counts.events_added += 1;
+        }
+        tx.commit().map_err(db_err)?;
+        Ok(counts)
+    }
+
+    /// Close out a gap recovery in ONE transaction: re-sequence, refresh
+    /// summaries, re-derive token accounting, record the recovery in meta.
+    ///
+    /// The working set is every covenant with an event inside the recovered
+    /// window — derived from the events table itself, NOT from merge
+    /// bookkeeping, so a run that died between merging and finalizing is
+    /// fully repaired by the next run (whose merges all dedup to no-ops).
+    /// Every step below is idempotent for the same reason.
+    pub fn finalize_gap_recovery(
+        &mut self,
+        gap_lo: u64,
+        gap_hi: u64,
+        merged: &MergeCounts,
+    ) -> Result<FinalizeCounts> {
+        let mut counts = FinalizeCounts::default();
+        let tx = self.conn.transaction().map_err(db_err)?;
+        let refresh: Vec<[u8; 32]> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT DISTINCT covenant_id FROM covenant_events
+                     WHERE accepting_daa BETWEEN ?1 AND ?2",
+                )
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map(params![gap_lo, gap_hi], |r| r.get(0))
+                .map_err(db_err)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(db_err)?;
+            rows
+        };
+        for id in &refresh {
+            // Chronological order = (accepting_daa, existing seq). seq as the
+            // tie-break preserves indexing order within one DAA score — the
+            // same contract live sync gives such rows — and merged rows carry
+            // later provisional seqs, so on an exact-DAA tie at the window
+            // boundary the already-indexed row (the earlier truth) stays first.
+            let ordered: Vec<i64> = {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT seq FROM covenant_events WHERE covenant_id = ?1
+                         ORDER BY accepting_daa, seq",
+                    )
+                    .map_err(db_err)?;
+                let rows = stmt
+                    .query_map([id.as_slice()], |r| r.get(0))
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?;
+                rows
+            };
+            if !ordered.iter().enumerate().all(|(new_seq, &old_seq)| old_seq == new_seq as i64) {
+                // The prior-art trick (scripts/repair-lineage.py, 99b5bba):
+                // an in-place renumber can transiently collide with its own
+                // unmoved rows on the (covenant_id, seq) PK — park every row
+                // at a bijective NEGATIVE temp first, then flip back in one
+                // sweep: -(new+1) → -(-(new+1))-1 = new.
+                for (new_seq, &old_seq) in ordered.iter().enumerate() {
+                    tx.execute(
+                        "UPDATE covenant_events SET seq = ?1 WHERE covenant_id = ?2 AND seq = ?3",
+                        params![-(new_seq as i64) - 1, id.as_slice(), old_seq],
+                    )
+                    .map_err(db_err)?;
+                }
+                tx.execute(
+                    "UPDATE covenant_events SET seq = -seq - 1 WHERE covenant_id = ?1 AND seq < 0",
+                    [id.as_slice()],
+                )
+                .map_err(db_err)?;
+                counts.covenants_resequenced += 1;
+            }
+            // Summary refresh from the merged truth.
+            tx.execute(
+                "UPDATE covenants SET
+                   event_count = (SELECT COUNT(*) FROM covenant_events WHERE covenant_id = ?1),
+                   last_activity_daa = (SELECT COALESCE(MAX(accepting_daa), 0) FROM covenant_events WHERE covenant_id = ?1)
+                 WHERE covenant_id = ?1",
+                [id.as_slice()],
+            )
+            .map_err(db_err)?;
+            // Genesis columns follow the chronologically-first event: a
+            // KIP-20-proven genesis merged from the gap completes a lineage
+            // production could only see mid-life; a first event that is
+            // still a transition keeps the lineage honestly incomplete.
+            let first: Option<(String, [u8; 32], u64)> = tx
+                .query_row(
+                    "SELECT kind, txid, accepting_daa FROM covenant_events
+                     WHERE covenant_id = ?1 AND seq = 0",
+                    [id.as_slice()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(db_err)?;
+            match first {
+                Some((kind, txid, daa)) if kind == "genesis" => {
+                    tx.execute(
+                        "UPDATE covenants SET genesis_txid = ?2, genesis_daa = ?3, lineage_complete = 1
+                         WHERE covenant_id = ?1",
+                        params![id.as_slice(), txid.as_slice(), daa],
+                    )
+                    .map_err(db_err)?;
+                }
+                _ => {
+                    tx.execute(
+                        "UPDATE covenants SET genesis_txid = NULL, genesis_daa = NULL, lineage_complete = 0
+                         WHERE covenant_id = ?1",
+                        [id.as_slice()],
+                    )
+                    .map_err(db_err)?;
+                }
+            }
+        }
+        counts.covenants_refreshed = refresh.len() as u64;
+
+        // Token accounting: the cheapest CORRECT re-derivation is the
+        // per-covenant closure — NOT a TOKEN_DERIVATION_VERSION bump.
+        // derive_token is deterministic from the source tables per token, so
+        // only tokens whose covenant rows changed (or whose derived rows cite
+        // changed covenants — their (covenant_id, seq) references just went
+        // stale under the renumber) can differ. That is exactly the closure
+        // apply()'s hook and rollback() already trust for correctness. A
+        // version bump would rebuild EVERY token on EVERY database (mainnet
+        // included) at next boot, for a repair scoped to one testnet window.
+        {
+            let mut tokens_todo: std::collections::BTreeSet<[u8; 32]> = Default::default();
+            let mut minters_todo: std::collections::BTreeSet<[u8; 32]> = Default::default();
+            for id in &refresh {
+                if crate::tokens::is_token(&tx, id)? || crate::tokens::has_token_evidence(&tx, id)? {
+                    tokens_todo.insert(*id);
+                }
+                if crate::tokens::is_minter(&tx, id)? || crate::tokens::has_minter_evidence(&tx, id)? {
+                    minters_todo.insert(*id);
+                }
+                let mut stmt = tx
+                    .prepare("SELECT DISTINCT token_id FROM token_events WHERE covenant_id = ?1")
+                    .map_err(db_err)?;
+                let citing = stmt
+                    .query_map([id.as_slice()], |r| r.get::<_, [u8; 32]>(0))
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?;
+                tokens_todo.extend(citing);
+            }
+            // Mirrors tokens::rederive_affected, inlined for the tally.
+            let mut todo = tokens_todo;
+            for minter in &minters_todo {
+                todo.extend(crate::tokens::derive_minter(&tx, minter)?);
+            }
+            for token in &todo {
+                crate::tokens::derive_token(&tx, token)?;
+            }
+            counts.tokens_rederived = todo.len() as u64;
+        }
+
+        // Honest history: the recovery is recorded in meta (machine-readable,
+        // append-only) rather than reorg_log — nothing was rolled back, and
+        // the reorg feed's consumers count rollbacks. This entry is also the
+        // marker that makes the next recover_gap run a no-op.
+        let existing: Option<String> = tx
+            .query_row("SELECT value FROM meta WHERE key = 'gap_recoveries'", [], |r| r.get(0))
+            .optional()
+            .map_err(db_err)?;
+        let mut entries: Vec<serde_json::Value> =
+            existing.and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+        entries.push(serde_json::json!({
+            "from_daa": gap_lo,
+            "to_daa": gap_hi,
+            "at_ms": now_ms(),
+            "events_added": merged.events_added,
+            "utxos_added": merged.utxos_added,
+            "spends_repaired": merged.spends_repaired,
+            "covenants_refreshed": counts.covenants_refreshed,
+            "note": "recover-gap: canonical history merged from a node walk (the window was skipped by a deep-reorg sink reset)",
+        }));
+        let raw = serde_json::to_string(&entries)
+            .map_err(|e| Error::Invalid { what: "gap_recoveries meta", value: e.to_string() })?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('gap_recoveries', ?1)",
+            [raw],
+        )
+        .map_err(db_err)?;
+        // The in-flight window marker and the walk-resume cursor retire with
+        // the completed marker, in the same transaction: either all survive a
+        // crash or none do.
+        tx.execute("DELETE FROM meta WHERE key = 'gap_recovery_pending'", []).map_err(db_err)?;
+        tx.execute("DELETE FROM meta WHERE key = 'gap_walk_cursor'", []).map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
+        Ok(counts)
     }
 
     /// Raw connection access for crate-internal tests (planting sentinels,
@@ -3002,6 +3432,103 @@ mod tests {
             created_utxos: vec![],
             spent_utxos: vec![],
         }
+    }
+
+    /// A sink-reset gap is the widest discontinuity in the DAA distribution;
+    /// routine quiet stretches below the threshold are never called a gap.
+    #[test]
+    fn find_daa_gap_spots_the_reset_discontinuity() {
+        let mut store = test_store("gap-find");
+        for (hash, daa) in [(1u8, 100u64), (2, 200), (3, 2_000_000), (4, 2_000_050)] {
+            store
+                .apply(
+                    &block_with_events(hash, daa, vec![(0xA1, EventKind::Transition, hash)]),
+                    BlockHash([hash; 32]),
+                )
+                .unwrap();
+        }
+        assert_eq!(store.find_daa_gap(100_000).unwrap(), Some((200, 2_000_000)));
+        // A threshold above the widest discontinuity finds nothing.
+        assert_eq!(store.find_daa_gap(3_000_000).unwrap(), None);
+        // An empty-ish window (single distinct DAA) can't produce a gap.
+        let store2 = test_store("gap-find-empty");
+        assert_eq!(store2.find_daa_gap(1).unwrap(), None);
+    }
+
+    /// finalize_gap_recovery renumbers merged rows chronologically via the
+    /// negative-temp two-step (no (covenant_id, seq) PK collision), refreshes
+    /// the covenant summary from the merged truth, and re-derives any token
+    /// whose derived rows cite the covenant — stale (covenant_id, seq)
+    /// citations cannot survive the renumber.
+    #[test]
+    fn finalize_gap_recovery_resequences_and_rederives_citing_tokens() {
+        let mut store = test_store("gap-finalize");
+        let cov = CovenantId([0xA1; 32]);
+        // Pre-gap genesis (daa 100) + post-gap transition (daa 2_000_000) —
+        // exactly the shape a sink reset leaves behind.
+        store
+            .apply(&block_with_events(1, 100, vec![(0xA1, EventKind::Genesis, 0x0A)]), BlockHash([1; 32]))
+            .unwrap();
+        store
+            .apply(
+                &block_with_events(2, 2_000_000, vec![(0xA1, EventKind::Transition, 0x0C)]),
+                BlockHash([2; 32]),
+            )
+            .unwrap();
+        // The gap event arrives out of order through the merge path (twice —
+        // the second offer must dedup away).
+        let gap_block = block_with_events(3, 1_000_000, vec![(0xA1, EventKind::Transition, 0x0B)]);
+        assert_eq!(store.merge_recovered_block(&gap_block).unwrap().events_added, 1);
+        assert_eq!(store.merge_recovered_block(&gap_block).unwrap().events_added, 0);
+        // A token whose derived rows cite the covenant's about-to-move seq 1.
+        store
+            .raw_conn()
+            .execute("INSERT INTO tokens (token_id, status) VALUES (?1, 'unvalidated')", [[0xEEu8; 32].as_slice()])
+            .unwrap();
+        store
+            .raw_conn()
+            .execute(
+                "INSERT INTO token_events (token_id, covenant_id, seq, delta_idx, kind, amount, accepting_daa)
+                 VALUES (?1, ?2, 1, 0, 'transfer', NULL, 2000000)",
+                params![[0xEEu8; 32].as_slice(), [0xA1u8; 32].as_slice()],
+            )
+            .unwrap();
+
+        let counts = store
+            .finalize_gap_recovery(100, 2_000_000, &MergeCounts::default())
+            .unwrap();
+        assert_eq!(counts.covenants_refreshed, 1);
+        assert_eq!(counts.covenants_resequenced, 1);
+        assert_eq!(counts.tokens_rederived, 1);
+
+        // Chronological seqs: 0x0A (100) → 0x0B (1M) → 0x0C (2M).
+        let events = store.events(&cov).unwrap();
+        let view: Vec<(u64, TxId)> = events.iter().map(|e| (e.seq, e.txid)).collect();
+        assert_eq!(view, [(0, TxId([0x0A; 32])), (1, TxId([0x0B; 32])), (2, TxId([0x0C; 32]))]);
+        // Summary refreshed from the merged truth.
+        let sum = store.summary(&cov).unwrap().unwrap();
+        assert_eq!(sum.event_count, 3);
+        assert_eq!(sum.last_activity_daa, 2_000_000);
+        assert!(sum.lineage_complete);
+        assert_eq!(sum.genesis_txid, Some(TxId([0x0A; 32])));
+        // The citing token was re-derived: with no real KCC20 evidence and no
+        // minter pin, derive_token deletes its rows — the stale seq-1
+        // citation is gone with them.
+        assert!(store.token_row(&CovenantId([0xEE; 32])).unwrap().is_none());
+        assert_eq!(store.token_event_count(&CovenantId([0xEE; 32])).unwrap(), 0);
+        // Honest history recorded, and it doubles as the idempotence marker.
+        assert_eq!(store.gap_recoveries().unwrap(), [(100, 2_000_000)]);
+
+        // Finalizing again is byte-stable on the data (marker grows, which is
+        // what makes recover_gap itself a hard no-op before ever re-walking).
+        let counts = store
+            .finalize_gap_recovery(100, 2_000_000, &MergeCounts::default())
+            .unwrap();
+        assert_eq!(counts.covenants_resequenced, 0, "already in chronological order");
+        assert_eq!(
+            store.events(&cov).unwrap().iter().map(|e| (e.seq, e.txid)).collect::<Vec<_>>(),
+            view
+        );
     }
 
     #[test]
