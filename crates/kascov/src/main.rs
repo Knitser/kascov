@@ -1453,6 +1453,18 @@ async fn follow_forever(
     health: std::sync::Arc<SyncHealth>,
 ) {
     use kascov_core::sync::SyncUpdate;
+    // Per-network node override: KASCOV_RPC_TESTNET_10 / KASCOV_RPC_MAINNET.
+    // The global --rpc can't express "TN10 on our node, mainnet on the
+    // resolver", and connect() verifies the node's network, so a URL pasted
+    // under the wrong variable fails loudly instead of cross-feeding.
+    let env_key = format!("KASCOV_RPC_{}", network.to_string().to_uppercase().replace('-', "_"));
+    let rpc = match std::env::var(&env_key) {
+        Ok(url) if !url.trim().is_empty() => {
+            tracing::info!("{network}: following via {env_key}={url}");
+            Some(url)
+        }
+        _ => rpc,
+    };
     // This task is spawned once per network at boot, so "task start" = boot.
     let boot = tokio::time::Instant::now();
     // Lives across reconnects: every sync failure breaks to a fresh session,
