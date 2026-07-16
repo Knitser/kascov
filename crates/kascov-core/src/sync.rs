@@ -106,69 +106,16 @@ pub async fn sync_once(
 
         let accepting = block?;
         last_daa = accepting.daa_score;
-        let wanted: HashSet<TxId> = accepted.accepted_tx_ids.iter().copied().collect();
-
-        // Resolve accepted transaction bodies: the accepting block's own txs
-        // first, then its mergeset blocks for the rest.
-        let mut bodies: HashMap<TxId, Transaction> = HashMap::new();
-        for tx in &accepting.transactions {
-            if wanted.contains(&tx.txid) {
-                bodies.insert(tx.txid, tx.clone());
-            }
-        }
-        if bodies.len() < wanted.len() {
-            let mut fetches: FuturesUnordered<_> = accepting
-                .mergeset
-                .iter()
-                .map(|&hash| async move { node.block_with_txs(hash).await })
-                .collect();
-            while let Some(block) = fetches.next().await {
-                let block = match block {
-                    Ok(b) => b,
-                    Err(e) => {
-                        // Correctness is covered by the sequential retry below
-                        // (which hard-fails the pass) — but count what we
-                        // swallow here so a persistently flaky node is visible.
-                        static MERGESET_FETCH_ERRORS: std::sync::atomic::AtomicU64 =
-                            std::sync::atomic::AtomicU64::new(0);
-                        let n = MERGESET_FETCH_ERRORS
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                            + 1;
-                        tracing::warn!("mergeset block fetch failed ({n} total): {e}");
-                        continue;
-                    }
-                };
-                for tx in block.transactions {
-                    if wanted.contains(&tx.txid) {
-                        bodies.insert(tx.txid, tx);
-                    }
-                }
-            }
-        }
-        if bodies.len() < wanted.len() {
-            // One sequential retry for transient RPC failures, then fail the
-            // pass: advancing the cursor past unresolved bodies would drop
-            // covenant events silently and permanently.
-            for &hash in &accepting.mergeset {
-                if bodies.len() == wanted.len() {
-                    break;
-                }
-                if let Ok(block) = node.block_with_txs(hash).await {
-                    for tx in block.transactions {
-                        if wanted.contains(&tx.txid) {
-                            bodies.insert(tx.txid, tx);
-                        }
-                    }
-                }
-            }
-            if bodies.len() < wanted.len() {
-                return Err(crate::Error::Rpc(format!(
-                    "unresolved accepted tx bodies in chain block {} ({} of {}) — failing the pass to retry",
-                    accepted.accepting_block,
-                    bodies.len(),
-                    wanted.len()
-                )));
-            }
+        let (bodies, unresolved) = resolve_accepted_bodies(node, &accepted, &accepting).await?;
+        if unresolved > 0 {
+            // Live sync at the tip must never skip acceptable data — a missing
+            // body here is a flaky/lagging node, not pruned history (tip blocks
+            // are always retained). Fail the pass so the follower reconnects
+            // and retries; recover_gap is the one that tolerates residuals.
+            return Err(crate::Error::Rpc(format!(
+                "unresolved accepted tx bodies in chain block {} ({unresolved} missing) — retrying the pass",
+                accepted.accepting_block
+            )));
         }
 
         // Enumerate BEFORE the body filter so each index is the tx's position
@@ -221,6 +168,85 @@ pub async fn sync_once(
         }
     }
     Ok(stats)
+}
+
+/// Resolve the bodies of one accepting chain block's accepted transactions:
+/// the accepting block's own txs first, then its mergeset blocks for the
+/// rest, with one sequential retry before hard-failing — proceeding past
+/// unresolved bodies would drop covenant events silently and permanently.
+async fn resolve_accepted_bodies(
+    node: &impl ChainSource,
+    accepted: &AcceptedBlock,
+    accepting: &Block,
+) -> Result<(HashMap<TxId, Transaction>, u64)> {
+    let wanted: HashSet<TxId> = accepted.accepted_tx_ids.iter().copied().collect();
+
+    let mut bodies: HashMap<TxId, Transaction> = HashMap::new();
+    for tx in &accepting.transactions {
+        if wanted.contains(&tx.txid) {
+            bodies.insert(tx.txid, tx.clone());
+        }
+    }
+    if bodies.len() < wanted.len() {
+        let mut fetches: FuturesUnordered<_> = accepting
+            .mergeset
+            .iter()
+            .map(|&hash| async move { node.block_with_txs(hash).await })
+            .collect();
+        while let Some(block) = fetches.next().await {
+            let block = match block {
+                Ok(b) => b,
+                Err(e) => {
+                    // Correctness is covered by the sequential retry below
+                    // (which hard-fails the pass) — but count what we
+                    // swallow here so a persistently flaky node is visible.
+                    static MERGESET_FETCH_ERRORS: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let n = MERGESET_FETCH_ERRORS
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
+                    tracing::warn!("mergeset block fetch failed ({n} total): {e}");
+                    continue;
+                }
+            };
+            for tx in block.transactions {
+                if wanted.contains(&tx.txid) {
+                    bodies.insert(tx.txid, tx);
+                }
+            }
+        }
+    }
+    if bodies.len() < wanted.len() {
+        // One sequential retry for transient RPC failures, then fail.
+        for &hash in &accepting.mergeset {
+            if bodies.len() == wanted.len() {
+                break;
+            }
+            if let Ok(block) = node.block_with_txs(hash).await {
+                for tx in block.transactions {
+                    if wanted.contains(&tx.txid) {
+                        bodies.insert(tx.txid, tx);
+                    }
+                }
+            }
+        }
+        if bodies.len() < wanted.len() {
+            // Not fatal: a mergeset body pruned from THIS node makes those
+            // accepted txs invisible — but a pruned body was never indexable,
+            // and classify()/reconcile() already filter per-tx on bodies.get(),
+            // so the block simply contributes whatever resolved. The caller
+            // records the shortfall as a residual for the honest report and
+            // for a possible re-run on a node with deeper retention.
+            tracing::warn!(
+                "unresolved accepted tx bodies in chain block {} ({} of {} resolved) — skipping the rest",
+                accepted.accepting_block,
+                bodies.len(),
+                wanted.len()
+            );
+        }
+    }
+    let unresolved = wanted.len().saturating_sub(bodies.len()) as u64;
+    Ok((bodies, unresolved))
 }
 
 /// Newest candidate anchors probed one by one — a shallow strand is the
@@ -424,6 +450,384 @@ pub async fn backfill_tx_index(node: &impl ChainSource, store: &mut Store) -> Re
     }
     store.set_tx_index_backfill_done()?;
     Ok(stamped)
+}
+
+/// Options for [`recover_gap`]. With no explicit bounds the gap is derived
+/// from the store's own DAA distribution (see [`Store::find_daa_gap`]).
+#[derive(Clone, Copy, Debug)]
+pub struct GapRecoveryOptions {
+    /// Explicit lower bound (highest indexed accepting DAA below the gap).
+    pub from_daa: Option<u64>,
+    /// Explicit upper bound (lowest indexed accepting DAA above the gap).
+    pub to_daa: Option<u64>,
+    /// The smallest DAA discontinuity auto-detection may call a gap
+    /// (~100k DAA ≈ 2.8 h on TN10 — well under the 1.77M-DAA incident gap,
+    /// well over a routine quiet stretch between covenant events).
+    pub min_gap_daa: u64,
+}
+
+impl Default for GapRecoveryOptions {
+    fn default() -> Self {
+        Self { from_daa: None, to_daa: None, min_gap_daa: 100_000 }
+    }
+}
+
+/// What one [`recover_gap`] run did.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GapRecoveryReport {
+    pub gap_lo: u64,
+    pub gap_hi: u64,
+    /// The run was a no-op: a previous recovery already covers this window.
+    pub already_recovered: bool,
+    pub chain_blocks_walked: u64,
+    pub blocks_captured: u64,
+    pub events_added: u64,
+    pub utxos_added: u64,
+    pub spends_repaired: u64,
+    pub covenants_refreshed: u64,
+    pub covenants_resequenced: u64,
+    pub tokens_rederived: u64,
+    /// Chain blocks whose accepted-tx bodies could not be resolved from THIS
+    /// node (mergeset body pruned) — skipped, not fatal. A pruned body was
+    /// never indexable, so the only real loss is a covenant tx whose body
+    /// survives on a *different* node; a re-run picks those up (merges dedup).
+    pub residual_blocks: u64,
+    /// Total accepted txs left unresolved across residual_blocks.
+    pub residual_txs: u64,
+    /// DAA span the residual blocks fell in (0,0 = none).
+    pub residual_daa_lo: u64,
+    pub residual_daa_hi: u64,
+}
+
+/// One-shot recovery of an indexing gap: merge the CANONICAL covenant history
+/// of a DAA window the production index skipped (a deep-reorg wedge answered
+/// by a sink reset) into an offline COPY of the database.
+///
+/// The walk starts at the node's own pruning point — the oldest chain block
+/// every node can serve `virtual_chain_from` for — and advances a LOCAL
+/// cursor batch by batch (the server caps each response); the store's live
+/// sync cursor and processed_daa are never touched. Blocks are handled by
+/// their accepting DAA:
+///
+///   * `daa < gap_lo`            — production has this history: skipped
+///     (whole batches are skipped with a single last-block DAA probe).
+///   * `gap_lo ≤ daa ≤ gap_hi`   — the gap: full capture through the same
+///     [`classify`] + body-resolution path live sync uses, merged with
+///     dedup (bounds inclusive: the boundary blocks are re-walked and their
+///     already-indexed events skipped, so DAA ties can't lose data).
+///   * `gap_hi < daa ≤ processed_daa` — production already walked these, but
+///     WITHOUT knowledge of gap-created cells, so it could not see their
+///     spends ([`classify`]'s input detection is a live-UTXO lookup):
+///     reconcile-only — record the missed spends and the pure-burn events
+///     production never got to record. Blocks past `processed_daa` belong to
+///     the resumed live follower: once the healed DB is restored, its store
+///     KNOWS the gap cells and normal sync handles them.
+///
+/// After the walk, [`Store::finalize_gap_recovery`] re-sequences affected
+/// covenants (seq is per-covenant INDEXING order; the merged rows must slot
+/// chronologically before/among the already-resumed post-gap rows), refreshes
+/// covenant summaries, re-derives affected token accounting, and records the
+/// recovery in meta — which also makes a second run a no-op.
+pub async fn recover_gap(
+    node: &impl ChainSource,
+    store: &mut Store,
+    opts: &GapRecoveryOptions,
+    mut progress: impl FnMut(String),
+) -> Result<GapRecoveryReport> {
+    let recovered = store.gap_recoveries()?;
+    let explicit = match (opts.from_daa, opts.to_daa) {
+        (Some(lo), Some(hi)) if lo < hi => Some((lo, hi)),
+        (Some(_), Some(_)) => {
+            return Err(crate::Error::Invalid {
+                what: "gap bounds",
+                value: "--from-daa must be below --to-daa".into(),
+            })
+        }
+        (None, None) => None,
+        _ => {
+            return Err(crate::Error::Invalid {
+                what: "gap bounds",
+                value: "--from-daa and --to-daa must be given together".into(),
+            })
+        }
+    };
+    let (gap_lo, gap_hi) = match explicit {
+        Some(bounds) => bounds,
+        None => {
+            if let Some((lo, hi)) = store.gap_recovery_pending()? {
+                // An earlier run recorded this window and died mid-walk. Its
+                // partial merge SHRANK the DAA discontinuity, so re-detection
+                // would see only a sub-window and silently skip the rest —
+                // resume the original bounds instead (every merge dedups).
+                progress(format!("resuming interrupted recovery of gap [{lo}, {hi}]"));
+                (lo, hi)
+            } else if let Some(&(lo, hi)) = recovered.first() {
+                // Idempotence, path 1: once a recovery is on record,
+                // auto-detect never runs again — any residual discontinuity
+                // inside a healed window (sparse traffic) must not trigger a
+                // pointless re-walk, and any OTHER discontinuity needs a
+                // human's explicit bounds.
+                progress(format!(
+                    "gap [{lo}, {hi}] already recovered — pass --from-daa/--to-daa to run another window"
+                ));
+                return Ok(GapRecoveryReport { gap_lo: lo, gap_hi: hi, already_recovered: true, ..Default::default() });
+            } else {
+                store.find_daa_gap(opts.min_gap_daa)?.ok_or(crate::Error::Invalid {
+                    what: "gap detection",
+                    value: format!(
+                        "no DAA discontinuity ≥ {} found in covenant_events — nothing to recover (or pass explicit bounds)",
+                        opts.min_gap_daa
+                    ),
+                })?
+            }
+        }
+    };
+    // Idempotence, path 2: explicit bounds inside an already-recovered window.
+    if recovered.iter().any(|&(lo, hi)| gap_lo >= lo && gap_hi <= hi) {
+        progress(format!("gap [{gap_lo}, {gap_hi}] already recovered — no-op"));
+        return Ok(GapRecoveryReport { gap_lo, gap_hi, already_recovered: true, ..Default::default() });
+    }
+    // Persist the window before the first fetch: an interrupted run must
+    // resume THESE bounds, not whatever discontinuity its partial merge left.
+    store.set_gap_recovery_pending(gap_lo, gap_hi)?;
+
+    // Reconcile ceiling: the last chain block production actually applied at
+    // the moment this DB copy was taken. Above it, the restored follower's
+    // own walk resumes from the stored cursor and sees everything with full
+    // gap knowledge.
+    let stop_daa = store.processed_daa()?.unwrap_or(gap_hi).max(gap_hi);
+    progress(format!(
+        "recovering gap [{gap_lo}, {gap_hi}] (span {} DAA), reconciling through {stop_daa}",
+        gap_hi - gap_lo
+    ));
+
+    let dag = node.dag_info().await?;
+    // Resume from where an interrupted run left off (a node disconnect mid-walk
+    // is common on public resolvers over a ~1000-batch walk); the pruning point
+    // is the from-scratch start.
+    let mut cursor = match store.gap_walk_cursor()? {
+        Some(c) => {
+            progress(format!("resuming walk from saved cursor {c}"));
+            c
+        }
+        None => dag.pruning_point,
+    };
+    let mut report = GapRecoveryReport { gap_lo, gap_hi, ..Default::default() };
+    let mut merged = crate::store::MergeCounts::default();
+
+    'walk: loop {
+        let step = node.virtual_chain_from(cursor).await?;
+        if !step.removed.is_empty() {
+            // The walk cursor only lives on canonical chain blocks we just
+            // received, so removals mean the chain reorged underneath a
+            // near-tip batch. Everything merged so far is deduped on re-run —
+            // fail loudly instead of guessing.
+            return Err(crate::Error::Rpc(format!(
+                "chain reorged under the recovery walk at {cursor} ({} removed) — re-run recover-gap",
+                step.removed.len()
+            )));
+        }
+        let Some(last) = step.added.last() else { break };
+        let next_cursor = last.accepting_block;
+
+        // Cheap pre-gap skip: DAA is non-decreasing along the selected chain,
+        // so if the batch's LAST block is still below the gap the whole batch
+        // is — one header probe instead of ~2,480 body fetches.
+        let last_block = node.block_with_txs(next_cursor).await?;
+        if last_block.daa_score < gap_lo {
+            report.chain_blocks_walked += step.added.len() as u64;
+            cursor = next_cursor;
+            store.set_gap_walk_cursor(&cursor)?;
+            progress(format!(
+                "skipped {} pre-gap chain blocks (through DAA {})",
+                step.added.len(),
+                last_block.daa_score
+            ));
+            continue;
+        }
+
+        // Ordered prefetch, same discipline as sync_once: fetches are
+        // WAN-bound; store work stays strictly sequential per chain block.
+        let mut prefetched = futures::stream::iter(step.added)
+            .map(|accepted| async move {
+                let block = node.block_with_txs(accepted.accepting_block).await;
+                (accepted, block)
+            })
+            .buffered(FETCH_AHEAD);
+
+        while let Some((accepted, block)) = prefetched.next().await {
+            report.chain_blocks_walked += 1;
+            let accepting = block?;
+            if accepting.daa_score < gap_lo {
+                continue;
+            }
+            if accepting.daa_score > stop_daa {
+                break 'walk;
+            }
+            let (bodies, unresolved) = resolve_accepted_bodies(node, &accepted, &accepting).await?;
+            if unresolved > 0 {
+                report.residual_blocks += 1;
+                report.residual_txs += unresolved;
+                let d = accepting.daa_score;
+                report.residual_daa_lo = if report.residual_daa_lo == 0 { d } else { report.residual_daa_lo.min(d) };
+                report.residual_daa_hi = report.residual_daa_hi.max(d);
+            }
+            let block_events = if accepting.daa_score <= gap_hi {
+                // CAPTURE: the same classification live sync would have run
+                // had the cursor walked this block when it was young. The
+                // store already holds pre-gap cells AND every gap cell merged
+                // so far (blocks arrive in chain order), so spend detection
+                // and intra-block chains behave exactly like live sync.
+                let mut block_events = classify(
+                    store,
+                    &accepted,
+                    &accepting,
+                    accepted
+                        .accepted_tx_ids
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, id)| bodies.get(id).map(|tx| (i as u32, tx))),
+                )?;
+                // Genesis rescue: classify() consults the covenants table,
+                // which — unlike during live sync — already knows covenants
+                // born in the gap (production created partial rows at their
+                // first POST-gap sighting). That demotes a true in-gap
+                // genesis to "transition". If nothing chronologically earlier
+                // exists and the KIP-20 hash recomputes, restore the truth.
+                for event in &mut block_events.events {
+                    if event.kind == EventKind::Genesis
+                        || store.has_event_at_or_below(&event.covenant_id, accepting.daa_score)?
+                    {
+                        continue;
+                    }
+                    if let Some(tx) = bodies.get(&event.txid) {
+                        if is_valid_genesis(tx, &event.covenant_id) {
+                            event.kind = EventKind::Genesis;
+                        }
+                    }
+                }
+                report.blocks_captured += 1;
+                block_events
+            } else {
+                // RECONCILE: production walked this block already; only what
+                // it PROVABLY could not see is recorded (see reconcile_block).
+                reconcile_block(store, &accepted, &accepting, &bodies)?
+            };
+            if !block_events.events.is_empty()
+                || !block_events.created_utxos.is_empty()
+                || !block_events.spent_utxos.is_empty()
+            {
+                merged.add(store.merge_recovered_block(&block_events)?);
+            }
+        }
+        cursor = next_cursor;
+        store.set_gap_walk_cursor(&cursor)?;
+        progress(format!(
+            "walked {} chain blocks — {} events, {} cells, {} spends merged so far",
+            report.chain_blocks_walked, merged.events_added, merged.utxos_added, merged.spends_repaired
+        ));
+    }
+
+    report.events_added = merged.events_added;
+    report.utxos_added = merged.utxos_added;
+    report.spends_repaired = merged.spends_repaired;
+    let fin = store.finalize_gap_recovery(gap_lo, gap_hi, &merged)?;
+    report.covenants_refreshed = fin.covenants_refreshed;
+    report.covenants_resequenced = fin.covenants_resequenced;
+    report.tokens_rederived = fin.tokens_rederived;
+    progress(format!(
+        "finalized: {} covenants refreshed ({} re-sequenced), {} tokens re-derived",
+        fin.covenants_refreshed, fin.covenants_resequenced, fin.tokens_rederived
+    ));
+    if report.residual_txs > 0 {
+        progress(format!(
+            "RESIDUAL: {} txs across {} blocks (DAA {}–{}) had bodies pruned from this node — re-run on another node to try to recover them (merges dedup)",
+            report.residual_txs, report.residual_blocks, report.residual_daa_lo, report.residual_daa_hi
+        ));
+    }
+    Ok(report)
+}
+
+/// What the production follower PROVABLY missed in one post-gap chain block
+/// it already walked. Detection is the flip side of [`classify`]'s: an input
+/// spending a cell that is STILL LIVE in the (now gap-aware) store is a spend
+/// production could not have seen — when it walked this block, the cell
+/// (created inside the gap) was not in its store, so the live-UTXO lookup
+/// missed and the input was treated as plain KAS.
+///
+/// The exhaustive UTXO cases and where each is handled:
+///   * created + spent inside the gap        → both sides land in the CAPTURE
+///     phase (classify sees the creation first, then the spend);
+///   * created BEFORE the gap, spent in it   → the cell already sits live in
+///     the store, so CAPTURE's classify detects the spend normally;
+///   * created in the gap, spent AFTER it    → THIS function: the cell is
+///     live post-merge, the spending input shows up here. Two sub-cases:
+///       – the spending tx also bound outputs to the covenant: production DID
+///         record a (transition) event for it — bound outputs are visible
+///         without store state — so only the UTXO spend columns (+ captured
+///         reveal sig/budget) are repaired; the event insert dedups away;
+///       – a pure burn (no bound outputs): production recorded NOTHING — the
+///         burn event is inserted here with full capture (tx_index/time/blue
+///         from this block), and re-sequencing slots it chronologically;
+///   * covenant born (and possibly dying) entirely inside the gap → plain
+///     CAPTURE inserts; the summary refresh in finalize_gap_recovery gives it
+///     genesis columns / lineage_complete.
+fn reconcile_block(
+    store: &Store,
+    accepted: &AcceptedBlock,
+    accepting: &Block,
+    bodies: &HashMap<TxId, Transaction>,
+) -> Result<BlockEvents> {
+    let mut block_events = BlockEvents {
+        accepting_block: accepted.accepting_block,
+        accepting_daa: accepting.daa_score,
+        accepting_time_ms: accepting.timestamp_ms,
+        accepting_blue_score: accepting.blue_score,
+        events: vec![],
+        created_utxos: vec![],
+        spent_utxos: vec![],
+    };
+    // No created_overlay here: every cell a reconcile-range tx could spend
+    // already exists in the store — gap cells were merged by the capture
+    // phase, post-gap cells were indexed by production itself (and intra-
+    // block chains among post-gap cells were caught by production's own
+    // overlay when it walked this block).
+    for (tx_index, tx) in accepted
+        .accepted_tx_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(i, id)| bodies.get(id).map(|tx| (i as u32, tx)))
+    {
+        let mut touched: Vec<CovenantId> = vec![];
+        for input in &tx.inputs {
+            let Some(id) = store.live_covenant_utxo(&input.previous_outpoint)? else { continue };
+            block_events.spent_utxos.push((
+                input.previous_outpoint,
+                tx.txid,
+                input.signature_script.clone(),
+                input.compute_budget,
+            ));
+            if !touched.contains(&id) {
+                touched.push(id);
+            }
+        }
+        for covenant_id in touched {
+            // Emitted as Burn: if the tx had ALSO bound outputs to this
+            // covenant, production already holds its (transition) event and
+            // the merge dedups this one away — so every event that actually
+            // lands here is a spend with no continuation. (A same-covenant
+            // event is unique per tx: classify aggregates the same way.)
+            block_events.events.push(NewEvent {
+                covenant_id,
+                kind: EventKind::Burn,
+                txid: tx.txid,
+                tx_index,
+                payload: (!tx.payload.is_empty()).then(|| tx.payload.clone()),
+                lane_namespace: crate::store::lane_namespace(&tx.payload),
+            });
+        }
+    }
+    Ok(block_events)
 }
 
 /// Classify the covenant activity of one accepting chain block's accepted
@@ -872,6 +1276,43 @@ mod tests {
         for _ in 0..WEDGE_PASSES * 2 {
             assert!(!fresh.observe(None, Some(tip)).demand_recovery);
         }
+    }
+
+    /// An interrupted recovery left its window in meta: the next run resumes
+    /// THOSE bounds instead of re-detecting (a partial merge shrinks the
+    /// discontinuity, so re-detection would see only a sub-window), and the
+    /// finalize retires the pending marker together with the completed one.
+    #[tokio::test]
+    async fn recover_gap_resumes_a_pending_window_over_detection() {
+        let db = std::env::temp_dir()
+            .join(format!("kascov-sync-gap-pending-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
+        store.apply(&block_events(h(1), 100, vec![event(0xA1, tx_id(0xA0), 0)]), h(1)).unwrap();
+        store
+            .apply(&block_events(h(2), 2_000_000, vec![event(0xA1, tx_id(0xB0), 0)]), h(2))
+            .unwrap();
+        store.set_gap_recovery_pending(100, 2_000_000).unwrap();
+
+        // The node's walk from its pruning point is empty (nothing to merge);
+        // detection is provably never consulted: min_gap_daa = u64::MAX would
+        // make it fail, and block bodies are never fetched (FakeAcceptance
+        // panics on any body fetch).
+        let node = FakeAcceptance {
+            pruning_point: h(0),
+            steps: HashMap::from([(h(0), ChainStep { removed: vec![], added: vec![] })]),
+            rpc_calls: AtomicU64::new(0),
+        };
+        let opts = GapRecoveryOptions { min_gap_daa: u64::MAX, ..Default::default() };
+        let report = recover_gap(&node, &mut store, &opts, |_| {}).await.unwrap();
+        assert!(!report.already_recovered);
+        assert_eq!((report.gap_lo, report.gap_hi), (100, 2_000_000));
+        assert_eq!(report.events_added, 0);
+        // Pending retired, completed marker on record — the next run no-ops.
+        assert_eq!(store.gap_recovery_pending().unwrap(), None);
+        assert_eq!(store.gap_recoveries().unwrap(), [(100, 2_000_000)]);
+        let again = recover_gap(&node, &mut store, &opts, |_| {}).await.unwrap();
+        assert!(again.already_recovered);
     }
 
     /// Rows older than the pruning point are unreachable — the walk stamps

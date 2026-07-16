@@ -92,11 +92,15 @@ valid_sqlite() {
   head -c 16 "$f" | grep -q "SQLite format 3" || return 1
 }
 
-# gcs_put FILE OBJECT — upload FILE to gs://$BACKUP_BUCKET/OBJECT.
+# gcs_put FILE TOKEN OBJECT — upload FILE to gs://$BACKUP_BUCKET/OBJECT.
+# -T streams from disk at constant memory; --data-binary "@file" buffers the
+# WHOLE file in RAM first, which at 1GB+ leaned on the container's memory
+# limit and made the single-shot upload fragile (TN10 backups failed for
+# hours while the 10MB mainnet ones sailed through). Retries cover resets.
 gcs_put() {
-  curl -sf -X POST -H "Authorization: Bearer $2" \
+  curl -sf -X POST -T "$1" -H "Authorization: Bearer $2" \
     -H "Content-Type: application/octet-stream" \
-    --data-binary "@$1" \
+    --retry 3 --retry-all-errors --max-time 600 \
     "https://storage.googleapis.com/upload/storage/v1/b/$BACKUP_BUCKET/o?uploadType=media&name=$3" \
     > /dev/null
 }

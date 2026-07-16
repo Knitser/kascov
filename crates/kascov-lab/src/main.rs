@@ -126,6 +126,31 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// One-shot index surgery: merge the CANONICAL covenant history of a DAA
+    /// window the production index skipped (deep-reorg wedge → sink reset)
+    /// into an offline COPY of the database, by walking the node's virtual
+    /// chain from its own pruning point. Never point this at the live DB —
+    /// run it on a copy, verify, then upload/restore. Idempotent: a second
+    /// run over the same window is a no-op.
+    RecoverGap {
+        /// Directory holding <network>.db — a COPY of production, never live
+        #[arg(long)]
+        db_dir: std::path::PathBuf,
+        /// Network whose index to heal
+        #[arg(long, default_value = "testnet-10")]
+        network: String,
+        /// Override the gap's lower bound (the highest indexed accepting DAA
+        /// below the gap). Default: auto-detected from the DAA discontinuity.
+        #[arg(long, requires = "to_daa")]
+        from_daa: Option<u64>,
+        /// Override the gap's upper bound (the lowest indexed accepting DAA
+        /// above the gap). Given together with --from-daa.
+        #[arg(long, requires = "from_daa")]
+        to_daa: Option<u64>,
+        /// Smallest DAA discontinuity auto-detection may call a gap
+        #[arg(long, default_value_t = 100_000)]
+        min_gap_daa: u64,
+    },
 }
 
 #[tokio::main]
@@ -175,7 +200,89 @@ async fn main() -> Result<()> {
             let client = kascov_labkit::connect(cli.rpc.as_deref()).await?;
             kascov_labkit::escrow_demo(&client, &keypair, value).await
         }
+        Command::RecoverGap { ref db_dir, ref network, from_daa, to_daa, min_gap_daa } => {
+            recover_gap(cli.rpc.as_deref(), db_dir, network, from_daa, to_daa, min_gap_daa).await
+        }
     }
+}
+
+/// Drive kascov-core's gap recovery against an offline DB copy. All the real
+/// logic lives in `kascov_core::sync::recover_gap` (walk + capture +
+/// reconcile) and `Store::finalize_gap_recovery` (re-sequence + summaries +
+/// token re-derivation + the honest meta note).
+async fn recover_gap(
+    rpc: Option<&str>,
+    db_dir: &std::path::Path,
+    network: &str,
+    from_daa: Option<u64>,
+    to_daa: Option<u64>,
+    min_gap_daa: u64,
+) -> Result<()> {
+    use kascov_core::sync::{recover_gap, GapRecoveryOptions};
+
+    let network: kascov_core::Network =
+        network.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let db = db_dir.join(format!("{network}.db"));
+    anyhow::ensure!(db.exists(), "no index at {} — copy the production DB there first", db.display());
+    let mut store = kascov_core::store::Store::open(&db, network)
+        .with_context(|| format!("open {}", db.display()))?;
+
+    let opts = GapRecoveryOptions { from_daa, to_daa, min_gap_daa };
+    // The walk is ~1000 batched RPC calls over ~15 min; public resolver nodes
+    // routinely drop a long-lived WebSocket. recover_gap persists a walk cursor
+    // and dedups every merge, so a dropped connection just means: reconnect
+    // (fresh node) and resume where we left off. Retry generously.
+    const MAX_ATTEMPTS: u32 = 40;
+    let report = {
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let node = match kascov_core::node::NodeHandle::connect(network, rpc).await {
+                Ok(n) => n,
+                Err(e) if attempt < MAX_ATTEMPTS => {
+                    eprintln!("recover-gap: node connect failed (attempt {attempt}): {e} — reconnecting");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+                Err(e) => return Err(anyhow::anyhow!(e)).context("node connect"),
+            };
+            match recover_gap(&node, &mut store, &opts, |line| eprintln!("recover-gap: {line}")).await {
+                Ok(r) => break r,
+                Err(e) if attempt < MAX_ATTEMPTS => {
+                    eprintln!("recover-gap: pass failed (attempt {attempt}): {e} — reconnecting and resuming from saved cursor");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+                Err(e) => return Err(anyhow::anyhow!(e)).context("gap recovery (all attempts exhausted)"),
+            }
+        }
+    };
+
+    if report.already_recovered {
+        println!(
+            "no-op: gap [{}, {}] already recovered (meta gap_recoveries)",
+            report.gap_lo, report.gap_hi
+        );
+        return Ok(());
+    }
+    println!("recovered gap [{}, {}] on {network}:", report.gap_lo, report.gap_hi);
+    println!("  chain blocks walked      {}", report.chain_blocks_walked);
+    println!("  blocks captured (in-gap) {}", report.blocks_captured);
+    println!("  events merged            {}", report.events_added);
+    println!("  state cells merged       {}", report.utxos_added);
+    println!("  spends repaired          {}", report.spends_repaired);
+    println!("  covenants refreshed      {}", report.covenants_refreshed);
+    println!("  covenants re-sequenced   {}", report.covenants_resequenced);
+    println!("  tokens re-derived        {}", report.tokens_rederived);
+    if report.residual_txs > 0 {
+        println!(
+            "  RESIDUAL (unrecoverable) {} txs / {} blocks, DAA {}–{} — bodies pruned from this node",
+            report.residual_txs, report.residual_blocks, report.residual_daa_lo, report.residual_daa_hi
+        );
+        println!("  → re-run recover-gap (lands on another node; merges dedup) to shrink the residual");
+    }
+    println!("verify, then hand {} to ops for upload/restore", db.display());
+    Ok(())
 }
 
 /// Copy-paste cheat sheet — the fastest way to see everything the lab does.
