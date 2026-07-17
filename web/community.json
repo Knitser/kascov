@@ -5,7 +5,7 @@
     "blurb": "an SDK for 1v1 games with player-funded covenant escrow and on-chain settlement — the escrow contract verifies byte-identical on kascov",
     "links": {
       "repo": "https://github.com/w00c00/kaspa-covenant-game-kit",
-      "example": "#/testnet-10/c/6a56fc3fb56fe86a57b55a0e588003cbc8cc8799c67f52a0936b67d4c820cb0b"
+      "example": "#/mainnet/c/6a56fc3fb56fe86a57b55a0e588003cbc8cc8799c67f52a0936b67d4c820cb0b"
     },
     "date": "2026-07-13"
   }
