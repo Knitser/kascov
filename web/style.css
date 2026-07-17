@@ -1313,7 +1313,10 @@ a.btn:hover { text-decoration: none; }
 .page-sub { color: var(--muted); max-width: 68ch; margin: 0; }
 
 .decode-box { margin-bottom: 1.2rem; }
-#decode-input {
+/* one rule for every playground paste box — a new box means adding its id here,
+   or it ships as a raw browser-default textarea (preflight did, Jul 17) */
+#decode-input,
+#preflight-input {
   width: 100%;
   background: var(--bg-soft);
   border: 1px solid var(--border);
@@ -1326,8 +1329,11 @@ a.btn:hover { text-decoration: none; }
   resize: vertical;
   transition: border-color 0.15s ease;
 }
-#decode-input::placeholder { color: var(--faint); }
-#decode-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+#decode-input::placeholder,
+#preflight-input::placeholder { color: var(--faint); }
+#decode-input:focus,
+#preflight-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+#preflight-input { min-height: 13rem; }
 .decode-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.7rem; }
 
 .decode-out { margin-bottom: 1.6rem; }
