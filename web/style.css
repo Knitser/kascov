@@ -1418,6 +1418,22 @@ a.btn:hover { text-decoration: none; }
 .spend-note { margin: 0.5rem 0 0; font-size: 0.8rem; }
 
 .flag-tpl { background: var(--accent-soft); color: var(--accent); text-transform: none; letter-spacing: 0.02em; }
+/* KCC-1 draft role badges on tx-page spent cells: leader carries the
+   covenant id for the transition, delegators ride along muted */
+.flag-role-leader { background: var(--accent-soft); color: var(--accent); }
+.flag-role-delegator { background: var(--bg-soft); color: var(--muted); border: 1px solid var(--border); }
+/* KCC-1 draft template-identity chips (templates panel + coin id row) */
+.kcc1-chip {
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  margin-left: 0.45rem;
+  white-space: nowrap;
+}
+.kcc1-row .mono { font-size: 0.82rem; }
 /* the semantic template promoted to the primary "what is this?" badge —
    first after the name on cards, coin headers and suggestions */
 .flag-tpl-primary {

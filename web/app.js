@@ -1468,7 +1468,15 @@ function renderTemplates(network) {
         : `a compiled ${r.label} contract, recognized by its instruction skeleton with constructor arguments labeled`);
     const countsTip = `coins: distinct smart coins whose effective shape this is \u00b7 live: their state pieces unspent right now \u00b7 ever: all their state pieces indexed` +
       (r.revealed_runs > 0 ? ' \u00b7 ran at spend: hidden programs revealed and hash-verified when spent' : '');
-    return `<div class="tpl-row"><span class="tpl-name" title="${esc(nameTip)}">${esc(r.label)}</span>` +
+    /* KCC-1 draft identity chip: the canonical hash when the family's reveals
+       all share one build, the build count when they span several. Absent
+       fields (older worker) render nothing. */
+    const kcc1Chip = r.kcc1_template_hash
+      ? `<span class="kcc1-chip mono" title="canonical template identity per the KCC-1 draft spec — all of this family’s reveals share this hash">${esc(String(r.kcc1_template_hash).slice(0, 10))}…</span>`
+      : (Number(r.kcc1_template_hashes_count) > 1
+        ? `<span class="kcc1-chip mono" title="this family spans ${esc(String(r.kcc1_template_hashes_count))} distinct KCC-1 draft template hashes (per-build identities)">${esc(String(r.kcc1_template_hashes_count))} builds</span>`
+        : '');
+    return `<div class="tpl-row"><span class="tpl-name" title="${esc(nameTip)}">${esc(r.label)}</span>${kcc1Chip}` +
       `<span class="tpl-track" aria-hidden="true"><span class="tpl-fill" style="width:${w}%;background:${color}"></span></span>` +
       `<span class="tpl-counts dim" title="${esc(countsTip)}">${esc(bits.join(' · '))}</span></div>`;
   }).join('');
@@ -2901,6 +2909,11 @@ function renderDetail(entry, covId, flashTx, program) {
     `<p class="id-chip"><span class="mono">${esc(shortHex(c.covenant_id, 10, 8))}</span>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(c.covenant_id)}" aria-label="copy this coin’s full id">copy id</button>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(shareUrl(network, c.covenant_id))}" aria-label="copy a shareable link to this coin">share</button></p>` +
+    (c.kcc1_template_hash
+      ? `<p class="id-chip kcc1-row"><span class="dim" title="canonical template identity per the KCC-1 draft spec — the hash of this coin’s revealed program with its proven state range excised">KCC-1 template</span>` +
+        ` <span class="mono">${esc(shortHex(c.kcc1_template_hash, 10, 8))}</span>` +
+        `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(c.kcc1_template_hash)}" aria-label="copy the full KCC-1 template hash">copy</button></p>`
+      : '') +
     `</div></header>` +
     `<p class="detail-summary">${esc(summaryBits.join(' · '))}.</p>` +
     coinContractSectionHtml(c) +
@@ -4413,6 +4426,7 @@ function renderTxPage(route) {
         `<span class="tx-cell-meta"><span>${esc(amountWithUsd((c && c.value) || 0, network))}</span>` +
         (outpoint ? `<span class="dim mono" title="the outpoint this transaction consumed">${esc(outpoint)}</span>` : '') +
         (c && c.revealed_template ? `<span class="flag flag-tpl" title="the program this cell actually ran — revealed and hash-verified at spend">${esc(c.revealed_template)}</span>` : '') +
+        (c && c.role ? `<span class="flag flag-role flag-role-${esc(c.role)}" title="KCC-1 draft role: the leader input carries the covenant id for this transition${c.role === 'delegator' ? '; a delegator rides along under the leader’s id' : ''}">${esc(c.role)}</span>` : '') +
         `</span>${replay}</li>`;
     }).join('');
     cellsSection = `<section class="tx-cells" aria-label="Cells">` +

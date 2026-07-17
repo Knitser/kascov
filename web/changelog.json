@@ -1,6 +1,11 @@
 [
   {
     "date": "2026-07-17",
+    "title": "speaking the standard: KCC-1 template identities",
+    "body": "covenant conventions are becoming a real standard — KCC-1, drafted by Romain Billot with Michael Sutton and Ori Newman — and kascov now speaks it. every conformance vector from the draft passes as a unit test in the new kcc1 module, KCC20 reveals carry their canonical template hash (3 identities across 2,889 verified reveals, each recomputed independently to check our own math), coin pages and the templates panel display them, /data/{network}/template/{hash} looks them up, and new spends record the draft's leader/delegator input ordering. tracking the draft honestly, not claiming compliance: it is a draft, and the vocabulary may still move."
+  },
+  {
+    "date": "2026-07-17",
     "title": "the gap, healed — and an honest hole",
     "body": "testnet-10's frozen window is back: 60,789 events, 47,956 spends, and 48,469 state cells re-derived straight from the chain and promoted into the live index — 13,297 covenants got their history back. honesty where it's owed: the oldest slice of the gap had already been pruned from every reachable node before recovery could touch it, and that part is gone for good. the chart shows the hole rather than papering over it. this loss is exactly why the next entry exists."
   },
