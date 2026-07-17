@@ -799,13 +799,14 @@ fn reconcile_block(
         .filter_map(|(i, id)| bodies.get(id).map(|tx| (i as u32, tx)))
     {
         let mut touched: Vec<CovenantId> = vec![];
-        for input in &tx.inputs {
+        for (input_index, input) in tx.inputs.iter().enumerate() {
             let Some(id) = store.live_covenant_utxo(&input.previous_outpoint)? else { continue };
             block_events.spent_utxos.push((
                 input.previous_outpoint,
                 tx.txid,
                 input.signature_script.clone(),
                 input.compute_budget,
+                input_index as u32,
             ));
             if !touched.contains(&id) {
                 touched.push(id);
@@ -856,7 +857,7 @@ fn classify<'a>(
         // covenant_id -> (spent utxos, created outputs)
         let mut touched: HashMap<CovenantId, (u32, u32)> = HashMap::new();
 
-        for input in &tx.inputs {
+        for (input_index, input) in tx.inputs.iter().enumerate() {
             let id = match created_overlay.get(&input.previous_outpoint) {
                 Some(&id) => Some(id),
                 None => store.live_covenant_utxo(&input.previous_outpoint)?,
@@ -870,6 +871,7 @@ fn classify<'a>(
                     tx.txid,
                     input.signature_script.clone(),
                     input.compute_budget,
+                    input_index as u32,
                 ));
             }
         }
@@ -1109,7 +1111,7 @@ mod tests {
         store.apply(&b2, h(2)).unwrap();
         let mut b3 = block_events(h(3), 300, vec![event(0xC3, tx_id(0xC0), 1)]);
         b3.created_utxos.push(utxo(0xC3, tx_id(0xC0), 0));
-        b3.spent_utxos.push((Outpoint { txid: tx_id(0xB0), index: 0 }, tx_id(0xC0), vec![0xAA], 7));
+        b3.spent_utxos.push((Outpoint { txid: tx_id(0xB0), index: 0 }, tx_id(0xC0), vec![0xAA], 7, 0));
         store.apply(&b3, h(3)).unwrap();
         let mut b4 = block_events(h(4), 400, vec![event(0xA1, tx_id(0xD0), 1)]);
         b4.created_utxos.push(utxo(0xA1, tx_id(0xD0), 0));

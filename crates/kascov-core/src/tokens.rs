@@ -1275,6 +1275,7 @@ mod tests {
                 TxId(spender),
                 sig,
                 0,
+                0,
             ));
             self
         }

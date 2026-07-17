@@ -381,6 +381,13 @@ fn build_templates_snapshot(store: &Store, network: kascov_core::Network) -> Res
     for (name, runs) in store.revealed_template_counts()? {
         named.entry(name).or_default().revealed_runs = runs;
     }
+    // KCC-1 draft §8.3 identities per family: the canonical hash when the
+    // family's reveals all share one, else just the distinct-build count.
+    let kcc1: std::collections::BTreeMap<String, (u64, Option<[u8; 32]>)> = store
+        .kcc1_hashes_by_template()?
+        .into_iter()
+        .map(|(name, count, hash)| (name, (count, hash)))
+        .collect();
     let mut rows: Vec<(String, Row)> = named.into_iter().collect();
     rows.sort_by(|a, b| {
         (b.1.ever_seen + b.1.revealed_runs)
@@ -393,14 +400,23 @@ fn build_templates_snapshot(store: &Store, network: kascov_core::Network) -> Res
         "generated_at_ms": now_ms(),
         "tip_daa": tip.map(|t| t.0),
         "tip_at_ms": tip.map(|t| t.1),
-        "templates": rows.iter().map(|(name, r)| serde_json::json!({
-            "name": name,
-            "live_states": r.live_states,
-            "live_value": r.live_value,
-            "ever_seen": r.ever_seen,
-            "covenants": r.covenants,
-            "revealed_runs": r.revealed_runs,
-        })).collect::<Vec<_>>(),
+        "templates": rows.iter().map(|(name, r)| {
+            let mut row = serde_json::json!({
+                "name": name,
+                "live_states": r.live_states,
+                "live_value": r.live_value,
+                "ever_seen": r.ever_seen,
+                "covenants": r.covenants,
+                "revealed_runs": r.revealed_runs,
+            });
+            if let Some((count, hash)) = kcc1.get(name) {
+                row["kcc1_template_hashes_count"] = serde_json::json!(count);
+                if let Some(h) = hash {
+                    row["kcc1_template_hash"] = serde_json::json!(hex::encode(h));
+                }
+            }
+            row
+        }).collect::<Vec<_>>(),
         "unrecognized": {
             "live_states": unrecognized.live_states,
             "live_value": unrecognized.live_value,
@@ -434,6 +450,11 @@ fn build_covenant_detail(
     // covenants_by_pubkey). Cheap single query, capped at 100 recent owners.
     let holders = store.holders_of_covenant(&summary.covenant_id, 100)?;
     obj.insert("holders".into(), serde_json::json!(holders));
+    // KCC-1 draft §8.3 identity — emitted only when the covenant's reveals
+    // prove exactly one hash (more than one build stays ambiguous, absent).
+    if let [hash] = store.covenant_kcc1_hashes(&summary.covenant_id)?.as_slice() {
+        obj.insert("kcc1_template_hash".into(), serde_json::json!(hex::encode(hash)));
+    }
     Ok(detail)
 }
 
@@ -1251,6 +1272,7 @@ async fn serve(
         .route("/data/price.json", get(price_handler))
         .route("/data/{file}", get(data_handler))
         .route("/data/{network}/c/{id}", get(detail_handler))
+        .route("/data/{network}/template/{hash}", get(kcc1_template_handler))
         .route("/data/{network}/tx/{txid}", get(tx_handler))
         .route("/data/{network}/families.json", get(families_handler))
         .route("/data/{network}/reorgs.json", get(reorgs_handler))
@@ -5137,6 +5159,47 @@ async fn feed_handler(
 /// the covenant events it fired, the state cells it created and spent, and
 /// the classified token deltas riding those events. `covenant_id` /
 /// `covenant_ids` stay for existing consumers; everything else is additive.
+/// GET /data/{network}/template/{hash} — the covenants whose reveals proved
+/// this KCC-1 draft §8.3 TemplateHash. 404 for unknown hashes; 400 for
+/// non-hex input so garbage never populates the cache.
+async fn kcc1_template_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, hash)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let hash_hex = hash.strip_suffix(".json").unwrap_or(&hash).to_lowercase();
+    let mut hash_bytes = [0u8; 32];
+    if hash_hex.len() != 64 || hex::decode_to_slice(&hash_hex, &mut hash_bytes).is_err() {
+        return (StatusCode::BAD_REQUEST, "bad template hash").into_response();
+    }
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/template/{hash_hex}");
+    let cc = "public, max-age=60, s-maxage=300";
+    serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let covenants = store.covenants_by_kcc1_hash(&hash_bytes)?;
+        if covenants.is_empty() {
+            return Ok(None);
+        }
+        let ids: Vec<String> = covenants.iter().map(|c| c.to_string()).collect();
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "template_hash": hash_hex,
+            "count": ids.len(),
+            "covenants": ids,
+        }))?))
+    })
+    .await
+}
+
 async fn tx_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path((net_name, txid)): axum::extract::Path<(String, String)>,
@@ -5204,8 +5267,20 @@ async fn tx_handler(
                 row
             })
             .collect();
-        let spent: Vec<serde_json::Value> = store
-            .cells_spent_by_txid(&txid)?
+        let spent_cells = store.cells_spent_by_txid(&txid)?;
+        // KCC-1 draft roles: the leader is the lowest-indexed input carrying
+        // a given covenant id in this tx; the rest are delegators. Only rows
+        // with a captured input index participate — unknown stays unlabeled.
+        let mut leader_index: std::collections::HashMap<CovenantId, u32> = Default::default();
+        for c in &spent_cells {
+            if let Some(i) = c.input_index {
+                leader_index
+                    .entry(c.covenant_id)
+                    .and_modify(|m| *m = (*m).min(i))
+                    .or_insert(i);
+            }
+        }
+        let spent: Vec<serde_json::Value> = spent_cells
             .iter()
             .map(|c| {
                 let mut row = serde_json::json!({
@@ -5217,6 +5292,15 @@ async fn tx_handler(
                 });
                 if let Some(t) = &c.revealed_template {
                     row["revealed_template"] = serde_json::json!(t);
+                }
+                if let Some(i) = c.input_index {
+                    row["input_index"] = serde_json::json!(i);
+                    row["role"] = serde_json::json!(
+                        if leader_index.get(&c.covenant_id) == Some(&i) { "leader" } else { "delegator" }
+                    );
+                }
+                if let Some(h) = &c.kcc1_template_hash {
+                    row["kcc1_template_hash"] = serde_json::json!(hex::encode(h));
                 }
                 row
             })

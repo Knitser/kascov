@@ -97,6 +97,16 @@ pub fn has_state_block(program: &[u8]) -> bool {
         && program[47] == 0x6c
 }
 
+/// KCC-1 draft §8.3 TemplateHash of a program carrying the verified KCC20
+/// state block: prefix is the leading alt-stack guard byte, the state range
+/// is bytes [1, 47), suffix is everything from the closing guard on. `None`
+/// when the block is absent — the canonical hash is only computed where the
+/// state range is proven, never guessed. Derivation pinned to spec commit
+/// 55b28d8; recompute is gated by the store's `kcc1_abi_version` meta.
+pub fn kcc1_template_hash(program: &[u8]) -> Option<[u8; 32]> {
+    has_state_block(program).then(|| crate::kcc1::template_hash(&program[..1], &program[47..]))
+}
+
 /// Splice a candidate state into a same-build program at the fixed state
 /// block. Returns `None` when the base program doesn't carry the block.
 /// The result is only meaningful after a hash check against a commitment.

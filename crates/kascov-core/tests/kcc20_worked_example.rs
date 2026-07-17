@@ -84,6 +84,7 @@ fn worked_example_replays_and_verifies() {
                 TxId(h32(&ev.txid)),
                 hex::decode(u.spent_sig.as_deref().expect("fixture spends carry sigs")).unwrap(),
                 0,
+                0,
             ));
         }
         block.events.push(NewEvent {

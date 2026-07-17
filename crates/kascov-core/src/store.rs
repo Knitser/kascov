@@ -441,6 +441,12 @@ pub struct TxSpentCellRow {
     pub revealed_template: Option<String>,
     /// Whether the spend's unlocking script was captured.
     pub has_witness: bool,
+    /// The spending input's 0-based index (KCC-1 leader/delegator ordering).
+    /// None on rows spent before capture — role stays unknown, never guessed.
+    pub input_index: Option<u32>,
+    /// KCC-1 §8.3 TemplateHash of the revealed program (proven state range
+    /// only). None = no hash or not yet stamped.
+    pub kcc1_template_hash: Option<[u8; 32]>,
 }
 
 /// One classified token delta a transaction produced.
@@ -464,8 +470,9 @@ pub struct BlockEvents {
     pub accepting_blue_score: u64,
     pub events: Vec<NewEvent>,
     pub created_utxos: Vec<NewUtxo>,
-    /// (outpoint, spending txid, spending input's signature script, budget)
-    pub spent_utxos: Vec<(Outpoint, TxId, Vec<u8>, u16)>,
+    /// (outpoint, spending txid, spending input's signature script, budget,
+    /// spending input's 0-based index — the KCC-1 leader/delegator ordering)
+    pub spent_utxos: Vec<(Outpoint, TxId, Vec<u8>, u16, u32)>,
 }
 
 impl BlockEvents {
@@ -680,6 +687,11 @@ pub(crate) fn registry() -> &'static kascov_decode::Registry {
 /// the 512 B → 2 KiB inscription window.
 const CLASSIFIER_VERSION: &str = "2";
 
+/// KCC-1 spec commit the §8.3 TemplateHash derivation is pinned to. Bump on
+/// any change to the derivation (spec churn or state-range coverage) — see
+/// rehash_kcc1_if_stale.
+const KCC1_ABI_VERSION: &str = "55b28d8";
+
 impl Store {
     pub fn open(path: &Path, network: Network) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -709,6 +721,16 @@ impl Store {
             "ALTER TABLE covenant_events ADD COLUMN accepting_time_ms INTEGER",
             "ALTER TABLE covenant_events ADD COLUMN accepting_blue_score INTEGER",
             "ALTER TABLE webhook_subscriptions ADD COLUMN secret TEXT",
+            // KCC-1 draft §8.3 TemplateHash of the revealed program, stamped
+            // with revealed_template: 32 bytes, x'' = reveal checked / no
+            // proven state range, NULL = not yet checked (todo). Derivation
+            // pinned via the kcc1_abi_version meta gate below.
+            "ALTER TABLE covenant_utxos ADD COLUMN kcc1_template_hash BLOB",
+            // 0-based index of the spending input within its tx — the KCC-1
+            // leader/delegator ordering. NULL on rows spent before capture
+            // (no deep backfill: bodies beyond node retention are gone, the
+            // same limitation tx_index documents above).
+            "ALTER TABLE covenant_utxos ADD COLUMN spent_input_index INTEGER",
         ];
         for sql in &migrations {
             if let Err(e) = conn.execute(sql, []) {
@@ -733,6 +755,18 @@ impl Store {
         .map_err(db_err)?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS utxo_reveal_todo ON covenant_utxos(revealed_template) WHERE spent_sig IS NOT NULL AND revealed_template IS NULL",
+            [],
+        )
+        .map_err(db_err)?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS utxo_kcc1_todo ON covenant_utxos(kcc1_template_hash) WHERE spent_sig IS NOT NULL AND kcc1_template_hash IS NULL",
+            [],
+        )
+        .map_err(db_err)?;
+        // /template/{hash} lookups and per-template aggregates; x'' rows
+        // (checked, no hash) are excluded so the index stays hash-only.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS utxo_by_kcc1 ON covenant_utxos(kcc1_template_hash) WHERE kcc1_template_hash IS NOT NULL AND kcc1_template_hash <> x''",
             [],
         )
         .map_err(db_err)?;
@@ -809,8 +843,10 @@ impl Store {
         // mutated. Stale generic stamps are cleared before the backfills so
         // one open re-derives them with the current classifier.
         store.reclassify_if_stale()?;
+        store.rehash_kcc1_if_stale()?;
         store.backfill_templates()?;
         store.backfill_payload_tags()?;
+        store.backfill_kcc1_hashes()?;
         Ok(store)
     }
 
@@ -1003,6 +1039,88 @@ impl Store {
         Ok(())
     }
 
+    /// The KCC-1 TemplateHash derivation is pinned to a spec commit; bumping
+    /// `KCC1_ABI_VERSION` clears every stamp (hashes AND x'' "checked" marks)
+    /// so backfill_kcc1_hashes re-derives under the new rules. The spec is a
+    /// Draft — this is the cheap recompute path when its §8.3 framing churns.
+    fn rehash_kcc1_if_stale(&mut self) -> Result<()> {
+        if self.meta("kcc1_abi_version")?.as_deref() == Some(KCC1_ABI_VERSION) {
+            return Ok(());
+        }
+        let tx = self.conn.transaction().map_err(db_err)?;
+        tx.execute("UPDATE covenant_utxos SET kcc1_template_hash = NULL WHERE kcc1_template_hash IS NOT NULL", [])
+            .map_err(db_err)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('kcc1_abi_version', ?1)",
+            [KCC1_ABI_VERSION],
+        )
+        .map_err(db_err)?;
+        tx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Stamp the KCC-1 §8.3 TemplateHash onto spent rows whose reveal carries
+    /// the proven KCC20 state block (the only programs whose state range is
+    /// known, not guessed): 32-byte hash, or x'' for "checked, no proven
+    /// range". One-shot after the migration, then O(1) probes against the
+    /// empty utxo_kcc1_todo partial index — same shape as backfill_templates.
+    fn backfill_kcc1_hashes(&mut self) -> Result<()> {
+        const BATCH: i64 = 2000;
+        let mut checked = 0u64;
+        let mut hashed = 0u64;
+        loop {
+            let rows: Vec<(i64, Vec<u8>, Vec<u8>)> = {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT rowid, spk_script, spent_sig FROM covenant_utxos
+                         WHERE spent_sig IS NOT NULL AND kcc1_template_hash IS NULL LIMIT ?1",
+                    )
+                    .map_err(db_err)?;
+                let collected = stmt
+                    .query_map([BATCH], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?;
+                collected
+            };
+            if rows.is_empty() {
+                break;
+            }
+            let tx = self.conn.transaction().map_err(db_err)?;
+            for (rowid, spk, sig) in &rows {
+                let hash = kascov_decode::p2sh_reveal(spk, sig)
+                    .as_deref()
+                    .and_then(kascov_decode::kcc20::kcc1_template_hash);
+                if hash.is_some() {
+                    hashed += 1;
+                }
+                tx.execute(
+                    "UPDATE covenant_utxos SET kcc1_template_hash = ?1 WHERE rowid = ?2",
+                    params![hash.as_ref().map(|h| h.as_slice()).unwrap_or(&[]), rowid],
+                )
+                .map_err(db_err)?;
+            }
+            tx.commit().map_err(db_err)?;
+            checked += rows.len() as u64;
+        }
+        if checked > 0 {
+            let distinct: i64 = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(DISTINCT kcc1_template_hash) FROM covenant_utxos
+                     WHERE kcc1_template_hash IS NOT NULL AND kcc1_template_hash <> x''",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(db_err)?;
+            tracing::info!(
+                "kcc1 backfill: {checked} reveals checked, {hashed} template hashes stamped ({distinct} distinct)"
+            );
+        }
+        Ok(())
+    }
+
     /// Stamp payload_tag + inscription_kind onto event rows that predate the
     /// columns: one-shot after a migration, an O(1) probe against the empty
     /// ev_payload_tag_todo partial index on every open after that. Both
@@ -1135,12 +1253,13 @@ impl Store {
             )
             .map_err(db_err)?;
         }
-        for (outpoint, spending_txid, sig, budget) in &block.spent_utxos {
+        for (outpoint, spending_txid, sig, budget, input_index) in &block.spent_utxos {
             // Spend-time recognition: a verified P2SH reveal names the program
             // that actually ran ('' = spend seen, nothing recognized). Reading
             // the row here is safe because created rows land first (above); a
             // row we never indexed matches neither the SELECT nor the UPDATE
             // and self-heals via the backfill at the next open.
+            let mut kcc1_hash: Option<[u8; 32]> = None;
             let revealed: Option<String> = tx
                 .query_row(
                     "SELECT spk_version, spk_script, covenant_id FROM covenant_utxos
@@ -1151,21 +1270,25 @@ impl Store {
                 .optional()
                 .map_err(db_err)?
                 .map(|(version, spk, covenant_id)| {
-                    let template = kascov_decode::p2sh_reveal(&spk, sig)
+                    let redeem = kascov_decode::p2sh_reveal(&spk, sig);
+                    kcc1_hash = redeem.as_deref().and_then(kascov_decode::kcc20::kcc1_template_hash);
+                    let template = redeem
                         .and_then(|redeem| registry().decode(version, &redeem).template)
                         .unwrap_or("");
                     note_kcc20(&CovenantId(covenant_id), template);
                     template.to_string()
                 });
             tx.execute(
-                "UPDATE covenant_utxos SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3, spent_budget = ?4, revealed_template = ?5
-                 WHERE txid = ?6 AND output_index = ?7",
+                "UPDATE covenant_utxos SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3, spent_budget = ?4, revealed_template = ?5, kcc1_template_hash = ?6, spent_input_index = ?7
+                 WHERE txid = ?8 AND output_index = ?9",
                 params![
                     block.accepting_block.0.as_slice(),
                     spending_txid.0.as_slice(),
                     sig,
                     budget,
                     revealed,
+                    kcc1_hash.as_ref().map(|h| h.as_slice()).unwrap_or(&[]),
+                    input_index,
                     outpoint.txid.0.as_slice(),
                     outpoint.index
                 ],
@@ -1625,7 +1748,7 @@ impl Store {
                 .map_err(db_err)?;
             counts.utxos_added += inserted as u64;
         }
-        for (outpoint, spending_txid, sig, budget) in &block.spent_utxos {
+        for (outpoint, spending_txid, sig, budget, input_index) in &block.spent_utxos {
             // Only a still-unspent row is repaired: an existing spend record
             // (production's own, or an earlier recovery run) always wins —
             // one outpoint has exactly one canonical spend.
@@ -1641,20 +1764,24 @@ impl Store {
             let Some((version, spk)) = row else { continue };
             // Spend-time recognition, same as apply(): the reveal names the
             // program that actually ran ('' = spend seen, nothing matched).
-            let revealed = kascov_decode::p2sh_reveal(&spk, sig)
+            let redeem = kascov_decode::p2sh_reveal(&spk, sig);
+            let kcc1_hash = redeem.as_deref().and_then(kascov_decode::kcc20::kcc1_template_hash);
+            let revealed = redeem
                 .and_then(|redeem| registry().decode(version, &redeem).template)
                 .unwrap_or("");
             let updated = tx
                 .execute(
                     "UPDATE covenant_utxos
-                     SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3, spent_budget = ?4, revealed_template = ?5
-                     WHERE txid = ?6 AND output_index = ?7 AND spent_block IS NULL",
+                     SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3, spent_budget = ?4, revealed_template = ?5, kcc1_template_hash = ?6, spent_input_index = ?7
+                     WHERE txid = ?8 AND output_index = ?9 AND spent_block IS NULL",
                     params![
                         block.accepting_block.0.as_slice(),
                         spending_txid.0.as_slice(),
                         sig,
                         budget,
                         revealed,
+                        kcc1_hash.as_ref().map(|h| h.as_slice()).unwrap_or(&[]),
+                        input_index,
                         outpoint.txid.0.as_slice(),
                         outpoint.index
                     ],
@@ -2797,7 +2924,8 @@ impl Store {
             .conn
             .prepare(
                 "SELECT covenant_id, txid, output_index, value, NULLIF(revealed_template, ''),
-                        spent_sig IS NOT NULL
+                        spent_sig IS NOT NULL, spent_input_index,
+                        NULLIF(kcc1_template_hash, x'')
                  FROM covenant_utxos WHERE spent_txid = ?1 ORDER BY txid, output_index",
             )
             .map_err(db_err)?;
@@ -2810,7 +2938,72 @@ impl Store {
                     value: row.get(3)?,
                     revealed_template: row.get(4)?,
                     has_witness: row.get(5)?,
+                    input_index: row.get(6)?,
+                    kcc1_template_hash: row.get::<_, Option<[u8; 32]>>(7)?,
                 })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Distinct KCC-1 TemplateHashes proven across this covenant's reveals
+    /// (x'' "checked, no proven range" rows excluded). Usually 0 or 1; more
+    /// means the covenant ran under multiple builds.
+    pub fn covenant_kcc1_hashes(&self, id: &CovenantId) -> Result<Vec<[u8; 32]>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT kcc1_template_hash FROM covenant_utxos
+                 WHERE covenant_id = ?1 AND kcc1_template_hash IS NOT NULL AND kcc1_template_hash <> x''
+                 ORDER BY kcc1_template_hash",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([id.0.as_slice()], |row| row.get::<_, [u8; 32]>(0))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Covenants that revealed a program with this KCC-1 TemplateHash —
+    /// the /template/{hash} lookup (utxo_by_kcc1 partial index).
+    pub fn covenants_by_kcc1_hash(&self, hash: &[u8; 32]) -> Result<Vec<CovenantId>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT covenant_id FROM covenant_utxos
+                 WHERE kcc1_template_hash = ?1 ORDER BY covenant_id",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([hash.as_slice()], |row| Ok(CovenantId(row.get(0)?)))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Per revealed-template name: how many distinct KCC-1 TemplateHashes its
+    /// reveals carry, and the hash itself when there is exactly one.
+    pub fn kcc1_hashes_by_template(&self) -> Result<Vec<(String, u64, Option<[u8; 32]>)>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT revealed_template, COUNT(DISTINCT kcc1_template_hash),
+                        CASE WHEN COUNT(DISTINCT kcc1_template_hash) = 1
+                             THEN MAX(kcc1_template_hash) END
+                 FROM covenant_utxos
+                 WHERE revealed_template IS NOT NULL AND revealed_template <> ''
+                   AND kcc1_template_hash IS NOT NULL AND kcc1_template_hash <> x''
+                 GROUP BY revealed_template",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?, row.get::<_, Option<[u8; 32]>>(2)?))
             })
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -3676,7 +3869,7 @@ mod tests {
                     spk_version: 0,
                     spk_script: spk,
                 }],
-                spent_utxos: vec![(outpoint, TxId([8; 32]), sig, 0)],
+                spent_utxos: vec![(outpoint, TxId([8; 32]), sig, 0, 0)],
             };
             store.apply(&block, BlockHash([1; 32])).unwrap();
             // Write-time recognition names the real program immediately.
@@ -4022,8 +4215,8 @@ mod tests {
         b2.accepting_daa = 200;
         b2.created_utxos = vec![utxo(0x04, 0xA1, p2pk(&key_a))]; // keyA state #2, live
         b2.spent_utxos = vec![
-            (Outpoint { txid: TxId([0x01; 32]), index: 0 }, TxId([0x04; 32]), vec![], 0),
-            (Outpoint { txid: TxId([0x05; 32]), index: 0 }, TxId([0x06; 32]), vec![], 0),
+            (Outpoint { txid: TxId([0x01; 32]), index: 0 }, TxId([0x04; 32]), vec![], 0, 0),
+            (Outpoint { txid: TxId([0x05; 32]), index: 0 }, TxId([0x06; 32]), vec![], 0, 1),
         ];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
@@ -4095,7 +4288,7 @@ mod tests {
         let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
         b2.accepting_daa = 200;
         b2.spent_utxos =
-            vec![(Outpoint { txid: TxId([0x03; 32]), index: 0 }, TxId([0x04; 32]), sig, 0)];
+            vec![(Outpoint { txid: TxId([0x03; 32]), index: 0 }, TxId([0x04; 32]), sig, 0, 0)];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
         let stats = store.template_stats().unwrap();
@@ -4132,7 +4325,7 @@ mod tests {
         b3.accepting_daa = 300;
         b3.created_utxos = vec![utxo(0x05, 0xC3, p2sh2)];
         b3.spent_utxos =
-            vec![(Outpoint { txid: TxId([0x05; 32]), index: 0 }, TxId([0x06; 32]), sig2, 0)];
+            vec![(Outpoint { txid: TxId([0x05; 32]), index: 0 }, TxId([0x06; 32]), sig2, 0, 0)];
         store.apply(&b3, BlockHash([3; 32])).unwrap();
         assert_eq!(
             store.revealed_template_counts().unwrap(),
@@ -4174,7 +4367,7 @@ mod tests {
         let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
         b2.accepting_daa = 200;
         b2.spent_utxos =
-            vec![(Outpoint { txid: TxId([0x01; 32]), index: 0 }, TxId([0x04; 32]), vec![], 0)];
+            vec![(Outpoint { txid: TxId([0x01; 32]), index: 0 }, TxId([0x04; 32]), vec![], 0, 0)];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
         // every cell classifies as a commitment until a reveal names the coin
@@ -4242,7 +4435,7 @@ mod tests {
         ];
         store.apply(&b1, BlockHash([1; 32])).unwrap();
         let mut b2 = block_with_events(2, 200, vec![(0xB2, EventKind::Burn, 0x03)]);
-        b2.spent_utxos = vec![(Outpoint { txid: TxId([0x02; 32]), index: 0 }, TxId([0x03; 32]), vec![], 0)];
+        b2.spent_utxos = vec![(Outpoint { txid: TxId([0x02; 32]), index: 0 }, TxId([0x03; 32]), vec![], 0, 0)];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
         let flags = store.active_flags().unwrap();
@@ -4292,7 +4485,7 @@ mod tests {
         );
         b2.created_utxos = vec![utxo(0x03, 0xA1, 11)];
         b2.spent_utxos =
-            vec![(Outpoint { txid: TxId([0x02; 32]), index: 0 }, TxId([0x04; 32]), vec![], 0)];
+            vec![(Outpoint { txid: TxId([0x02; 32]), index: 0 }, TxId([0x04; 32]), vec![], 0, 0)];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
         // Stamp templates directly to exercise every pick-rule branch:
@@ -4404,7 +4597,7 @@ mod tests {
 
         let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
         b2.accepting_daa = 200;
-        b2.spent_utxos = vec![(outpoint, spender, vec![0x01, 0x51], 60)];
+        b2.spent_utxos = vec![(outpoint, spender, vec![0x01, 0x51], 60, 0)];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
         let rows = store.spent_by_txid(&spender).unwrap();
@@ -4484,7 +4677,7 @@ mod tests {
                 spk_script: vec![0x52],
             },
         ];
-        b2.spent_utxos = vec![(Outpoint { txid: tx1, index: 0 }, tx2, vec![0x01, 0x51], 60)];
+        b2.spent_utxos = vec![(Outpoint { txid: tx1, index: 0 }, tx2, vec![0x01, 0x51], 60, 0)];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
         let mut b3 = BlockEvents::empty(BlockHash([3; 32]));
