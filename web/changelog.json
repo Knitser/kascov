@@ -1,5 +1,20 @@
 [
   {
+    "date": "2026-07-17",
+    "title": "the gap, healed — and an honest hole",
+    "body": "testnet-10's frozen window is back: 60,789 events, 47,956 spends, and 48,469 state cells re-derived straight from the chain and promoted into the live index — 13,297 covenants got their history back. honesty where it's owed: the oldest slice of the gap had already been pruned from every reachable node before recovery could touch it, and that part is gone for good. the chart shows the hole rather than papering over it. this loss is exactly why the next entry exists."
+  },
+  {
+    "date": "2026-07-16",
+    "title": "kascov runs its own kaspa node now",
+    "body": "production's testnet-10 follower now reads from kascov's own archival node over a private link instead of public resolver nodes — block fetches went from internet round-trips to sub-millisecond hops, catch-ups that took a day now take minutes, and archival mode means nothing the node has seen ever gets pruned again. mainnet joins it on dedicated hardware next."
+  },
+  {
+    "date": "2026-07-16",
+    "title": "the follower learned to fail loudly",
+    "body": "testnet-10 froze for 49 hours and the dashboard said nothing — never again. the sync follower now probes whether its cursor is actually walkable (a block can exist and still be a dead end after a deep reorg), forces recovery when it's moving without progressing, and reports 'stalled' on /health instead of pretending. email alerts fire within minutes, backups stream every 5 minutes with verification (the old uploader silently choked on databases past 1GB), and a gap-recovery tool can rebuild lost windows from the chain itself while it's still within node retention."
+  },
+  {
     "date": "2026-07-14",
     "title": "will this transaction pass? find out before you broadcast",
     "body": "the playground grew a third mode: paste a transaction as JSON and preflight it — every input's compute budget checked against the classic 'script units exceeded' trap, masses measured against the block limit, an honest fee estimate, and a real script-engine run for inputs that carry their witness. every finding comes with its fix, plain as 'set computeBudget: 10'. your transaction goes into the call and nowhere else — nothing broadcast, nothing kept."
