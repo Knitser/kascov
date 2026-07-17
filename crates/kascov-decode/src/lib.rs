@@ -2,6 +2,7 @@
 //! always-correct fallback is an opcode disassembly of the state script.
 
 pub mod disasm;
+pub mod kcc1;
 pub mod kcc20;
 pub mod observed;
 
