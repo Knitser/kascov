@@ -1472,7 +1472,7 @@ function renderTemplates(network) {
        all share one build, the build count when they span several. Absent
        fields (older worker) render nothing. */
     const kcc1Chip = r.kcc1_template_hash
-      ? `<span class="kcc1-chip mono" title="canonical template identity per the KCC-1 draft spec — all of this family’s reveals share this hash">${esc(String(r.kcc1_template_hash).slice(0, 10))}…</span>`
+      ? `<span class="kcc1-chip mono" title="canonical template identity per the KCC-1 draft at revision 55b28d8 — all of this family’s reveals share this hash. the draft is still moving; kascov recomputes on meaningful revisions">${esc(String(r.kcc1_template_hash).slice(0, 10))}…</span>`
       : (Number(r.kcc1_template_hashes_count) > 1
         ? `<span class="kcc1-chip mono" title="this family spans ${esc(String(r.kcc1_template_hashes_count))} distinct KCC-1 draft template hashes (per-build identities)">${esc(String(r.kcc1_template_hashes_count))} builds</span>`
         : '');
@@ -2910,7 +2910,7 @@ function renderDetail(entry, covId, flashTx, program) {
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(c.covenant_id)}" aria-label="copy this coin’s full id">copy id</button>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(shareUrl(network, c.covenant_id))}" aria-label="copy a shareable link to this coin">share</button></p>` +
     (c.kcc1_template_hash
-      ? `<p class="id-chip kcc1-row"><span class="dim" title="canonical template identity per the KCC-1 draft spec — the hash of this coin’s revealed program with its proven state range excised">KCC-1 template</span>` +
+      ? `<p class="id-chip kcc1-row"><span class="dim" title="canonical template identity per the KCC-1 draft at revision 55b28d8 — the hash of this coin’s revealed program with its proven state range excised. the draft is still moving; kascov recomputes on meaningful revisions">KCC-1 template</span>` +
         ` <span class="mono">${esc(shortHex(c.kcc1_template_hash, 10, 8))}</span>` +
         `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(c.kcc1_template_hash)}" aria-label="copy the full KCC-1 template hash">copy</button></p>`
       : '') +
