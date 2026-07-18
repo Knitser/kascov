@@ -129,7 +129,16 @@ async function fetchGridPage(network, afterDaa, afterId, limit) {
 
 async function loadNetwork(network) {
   if (state.cache[network]) return state.cache[network];
-  const data = await fetchGridPage(network, null, null, GRID_PAGE);
+  /* one silent retry: a single dropped request must not paint the
+     "couldn't load" card — that card should mean the worker is actually
+     unreachable, not that one packet died */
+  let data;
+  try {
+    data = await fetchGridPage(network, null, null, GRID_PAGE);
+  } catch (_) {
+    await new Promise((r) => setTimeout(r, 1200));
+    data = await fetchGridPage(network, null, null, GRID_PAGE);
+  }
   data.__anchor = makeAnchor(data, network);
   /* a cursor means the worker paginated and older rows remain; its absence
      means we already hold the full snapshot (older worker or a small net) */
