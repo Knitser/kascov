@@ -62,25 +62,32 @@ gcloud run deploy $SERVICE \
 # Everything is created WITHOUT a notification channel (channels are
 # account-specific) — attaching one in the console is the manual step that
 # arms the alerts; the pointer is printed below.
-echo "==> ensuring uptime check on /data/mainnet-live.json"
+# ensure_uptime NAME PATH — `uptime create` is NOT idempotent (it happily
+# minted one duplicate per deploy; 7 of each accumulated by Jul 18) — so
+# look before creating, same discipline as ensure_log_alert below.
 HOST=$(gcloud run services describe $SERVICE --project $PROJECT --region $REGION --format='value(status.url)' | sed 's|https://||')
-gcloud monitoring uptime create kascov-live \
-  --resource-type=uptime-url \
-  --resource-labels="host=$HOST,project_id=$PROJECT" \
-  --path=/data/mainnet-live.json \
-  --project $PROJECT 2>/dev/null \
-  || echo "    (uptime check exists or CLI unsupported)"
+ensure_uptime() {
+  local name="$1" path="$2"
+  if gcloud monitoring uptime list-configs --project "$PROJECT" \
+      --filter="displayName='$name'" --format='value(name)' 2>/dev/null | grep -q .; then
+    echo "    uptime check '$name' already exists"
+    return 0
+  fi
+  gcloud monitoring uptime create "$name" \
+    --resource-type=uptime-url \
+    --resource-labels="host=$HOST,project_id=$PROJECT" \
+    --path="$path" \
+    --project $PROJECT 2>/dev/null \
+    || echo "    (uptime create failed or CLI unsupported)"
+}
+echo "==> ensuring uptime check on /data/mainnet-live.json"
+ensure_uptime kascov-live /data/mainnet-live.json
 
 # "No backups happening" is not expressible as a log-based alert (log alerts
 # fire on presence, not absence) — the /health uptime check is the liveness
 # proxy until a metric-absence policy is worth the ceremony.
 echo "==> ensuring uptime check on /health (GFE swallows /healthz on run.app)"
-gcloud monitoring uptime create kascov-healthz \
-  --resource-type=uptime-url \
-  --resource-labels="host=$HOST,project_id=$PROJECT" \
-  --path=/health \
-  --project $PROJECT 2>/dev/null \
-  || echo "    (uptime check exists or CLI unsupported)"
+ensure_uptime kascov-healthz /health
 
 # ensure_log_alert NAME REGEX — log-based alert policy, idempotent by
 # displayName (`policies create` happily makes duplicates, so look first).

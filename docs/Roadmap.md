@@ -41,5 +41,5 @@ What kascov covers: covenant ids/lineage (consensus-validated genesis), P2SH rev
 
 - Bump the rusty-kaspa git pin **together with** the node version (borsh compatibility — [[Architecture#Design rules]] Rule 2).
 - Testnet resets: `kascov reset --yes`, re-sync from scratch, done.
-- An archival node would extend lineage beyond the ~3-day pruning window for covenants indexed late.
+- An archival node extends lineage beyond the ~30-hour pruning window for covenants indexed late (kascov runs one since Jul 16 2026).
 - Cloud Run worker: `scripts/deploy-worker.sh` (idempotent); DB continuity via `gs://kascov-explorer-index`; health probe is `/data/mainnet-live.json` (small forever) — `/healthz` is swallowed by the Google frontend on the deterministic URL.

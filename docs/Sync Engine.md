@@ -29,7 +29,7 @@ An **intra-block overlay** handles chains within one accepting block (tx B spend
 
 ## Pruning and truncated lineage
 
-Nodes prune after ~3 days. Covenants first seen mid-life get `lineage_complete = false` and `trace` prints `[history truncated — covenant first seen mid-life]` instead of silently lying. Continuous indexing from day one is what makes the record complete — see [[Home#Why indexing matters (the product moat)]].
+Nodes retain at least ~30 hours of prunable data at 10 bps (not the pre-Crescendo ~3 days). Covenants first seen mid-life get `lineage_complete = false` and `trace` prints `[history truncated — covenant first seen mid-life]` instead of silently lying. Continuous indexing from day one is what makes the record complete — see [[Home#Why indexing matters (the product moat)]].
 
 ## Testing
 

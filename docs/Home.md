@@ -17,7 +17,7 @@
 
 ## Why indexing matters (the product moat)
 
-Kaspa nodes prune block data after ~3 days. A covenant's history older than the pruning point is **unrecoverable** from a regular node — unless someone indexed it while it happened. **This stopped being theoretical on July 2, 2026**: mainnet's first covenants appeared (`c7948684ae…`, 195 events in its first hour) and kascov indexed them live; TN10 produced a covenant storm the same day (1,100 → 5,800+ covenants within hours). Whoever runs the index from day one owns the complete record. See [[Sync Engine#Pruning and truncated lineage]].
+Kaspa nodes retain at least ~30 hours of prunable consensus data at 10 bps (per IzioDev, Jul 17 2026 — the old "~3 days" figure was pre-Crescendo). A covenant's history older than the pruning point is **unrecoverable** from a regular node — unless someone indexed it while it happened. **This stopped being theoretical on July 2, 2026**: mainnet's first covenants appeared (`c7948684ae…`, 195 events in its first hour) and kascov indexed them live; TN10 produced a covenant storm the same day (1,100 → 5,800+ covenants within hours). Whoever runs the index from day one owns the complete record. See [[Sync Engine#Pruning and truncated lineage]].
 
 ## Status (July 2, 2026 — evening)
 
