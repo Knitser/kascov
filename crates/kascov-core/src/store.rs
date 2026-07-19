@@ -2971,11 +2971,12 @@ impl Store {
     /// (≤12), optionally `image` (≤256, surfaced as a link, never hotlinked).
     /// These are CLAIMS by whoever authored the genesis, not unique and not
     /// validated — callers must present them with that provenance. Returns
-    /// (name, ticker, image).
+    /// (name, ticker, image, image_hash) — image_hash only when it is 64 hex
+    /// chars (SHA-256 of the image bytes, the pin future rendering verifies).
     pub fn claimed_token_meta(
         &self,
         id: &CovenantId,
-    ) -> Result<Option<(Option<String>, Option<String>, Option<String>)>> {
+    ) -> Result<Option<(Option<String>, Option<String>, Option<String>, Option<String>)>> {
         let payload: Option<Vec<u8>> = self
             .conn
             .query_row(
@@ -3013,10 +3014,14 @@ impl Store {
         let name = clean(&["name"], 48);
         let ticker = clean(&["ticker", "symbol"], 12);
         let image = clean(&["image"], 256);
+        // 64 lowercase hex chars or nothing — a malformed hash is no hash.
+        let image_hash = clean(&["image_hash"], 64).filter(|h| {
+            h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())
+        }).map(|h| h.to_lowercase());
         if name.is_none() && ticker.is_none() {
             return Ok(None);
         }
-        Ok(Some((name, ticker, image)))
+        Ok(Some((name, ticker, image, image_hash)))
     }
 
     /// Distinct KCC-1 TemplateHashes proven across this covenant's reveals

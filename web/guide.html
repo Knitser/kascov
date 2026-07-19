@@ -346,15 +346,25 @@ the amount committed in the input: used=100000, limit=9999</span></code></pre>
       genesis (you, or your launchpad) is exactly the right party to claim the name, and anyone
       can verify it from the chain forever.
     </p>
-    <pre><code>{"name": "My Token", "ticker": "MTK", "image": "https://…/mtk.png"}</code></pre>
+    <pre><code>{"name": "My Token", "ticker": "MTK",
+ "image": "https://…/mtk.png",
+ "image_hash": "sha256 hex of the image bytes"}</code></pre>
     <p>
       Rules kascov applies when reading it: <code>name</code> up to 48 characters,
       <code>ticker</code> (or <code>symbol</code>) up to 12, plain JSON or hex-encoded JSON both
       work, and the whole payload stays under 4&nbsp;KB. The token page and directory then show the
       claimed name with a <em>named on chain</em> badge — honestly labeled as a deployer claim
-      (names aren’t unique; the canonical kascov name never disappears). <code>image</code> is
-      surfaced as a link, not embedded. The KCC-0020 token draft doesn’t cover display metadata
-      yet; if a metadata convention lands in the standards track, kascov will read that too.
+      (names aren’t unique; the canonical kascov name never disappears).
+    </p>
+    <p>
+      <strong>Images:</strong> include <code>image_hash</code> — the SHA-256 of the exact image
+      bytes — next to the URL. Today kascov surfaces the image as a link. Hash-committed images
+      are the path to being <em>rendered</em>: because the genesis pins the bytes forever, kascov
+      can fetch, verify, and serve the art itself, and nobody can swap it afterwards. An
+      <code>image</code> without a hash stays a link permanently — an unpinned URL can change
+      under everyone’s feet, and kascov doesn’t display what the chain can’t hold to account.
+      The KCC-0020 token draft doesn’t cover display metadata yet; if a metadata convention lands
+      in the standards track, kascov will read that too.
     </p>
 
     <h2 id="real"><span class="stepno">6</span>A real production example you can inspect right now</h2>

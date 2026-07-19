@@ -3058,7 +3058,7 @@ async fn coins_handler(
 /// workers). `alive` keeps liveness available without overloading `status`.
 fn token_row_json(
     t: &kascov_core::tokens::TokenDirRow,
-    claimed: Option<&(Option<String>, Option<String>, Option<String>)>,
+    claimed: Option<&(Option<String>, Option<String>, Option<String>, Option<String>)>,
 ) -> serde_json::Value {
     let id_hex = t.token_id.to_string();
     let mut row = serde_json::json!({
@@ -3091,7 +3091,7 @@ fn token_row_json(
     }
     // Deployer-claimed identity from the genesis payload — claims, not
     // uniqueness; the canonical friendly name above stays primary identity.
-    if let Some((name, ticker, image)) = claimed {
+    if let Some((name, ticker, image, image_hash)) = claimed {
         if let Some(n) = name {
             row["claimed_name"] = serde_json::json!(n);
         }
@@ -3100,6 +3100,9 @@ fn token_row_json(
         }
         if let Some(img) = image {
             row["claimed_image"] = serde_json::json!(img);
+        }
+        if let Some(ih) = image_hash {
+            row["claimed_image_hash"] = serde_json::json!(ih);
         }
         row["metadata_source"] = serde_json::json!("genesis_payload");
     }

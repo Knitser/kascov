@@ -4178,8 +4178,19 @@ function renderTokenPage(route) {
     `<a class="token-coin-link" href="#/${esc(network)}/c/${esc(id)}">underlying smart coin →</a></p>` +
     `</div></header>`;
 
-  const fieldsLine = t.fields && Object.keys(t.fields).length
-    ? `<div class="tokens-fields token-page-fields">${tokenFieldChips(t.fields)}</div>` : '';
+  /* claimed image: a LINK, never hotlinked — an unpinned URL can change under
+     everyone's feet. hash-committed art (claimed_image_hash) is what the
+     future verified-image pipeline will render. */
+  const imageLine = t.claimed_image
+    ? `<p class="dim token-image-line">token art (deployer link): ` +
+      `<a href="${esc(t.claimed_image)}" target="_blank" rel="noopener noreferrer nofollow">${esc(t.claimed_image.length > 60 ? t.claimed_image.slice(0, 57) + '…' : t.claimed_image)} ↗</a>` +
+      (t.claimed_image_hash
+        ? ` <span class="flag flag-claimed" title="the genesis payload pins this image's SHA-256 — the bytes can never be swapped">hash-committed</span>`
+        : ` <span title="no hash in the genesis payload — the link's content can change; kascov will only ever render hash-committed art">unpinned</span>`) +
+      `</p>`
+    : '';
+  const fieldsLine = (t.fields && Object.keys(t.fields).length
+    ? `<div class="tokens-fields token-page-fields">${tokenFieldChips(t.fields)}</div>` : '') + imageLine;
 
   const tiles = [
     ['supply', t.supply], ['minted', t.minted], ['burned', t.burned], ['holders', t.holders],
