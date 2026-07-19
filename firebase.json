@@ -1,28 +1,54 @@
 {
   "hosting": {
     "public": "web",
-    "ignore": ["firebase.json", "**/.*", "**/data/**"],
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/data/**"
+    ],
     "cleanUrls": true,
     "rewrites": [
       {
         "source": "/data/**",
-        "run": { "serviceId": "kascov-worker", "region": "europe-west4" }
+        "run": {
+          "serviceId": "kascov-worker",
+          "region": "europe-west4"
+        }
       },
       {
         "source": "/share/**",
-        "run": { "serviceId": "kascov-worker", "region": "europe-west4" }
+        "run": {
+          "serviceId": "kascov-worker",
+          "region": "europe-west4"
+        }
       },
       {
         "source": "/og/**",
-        "run": { "serviceId": "kascov-worker", "region": "europe-west4" }
+        "run": {
+          "serviceId": "kascov-worker",
+          "region": "europe-west4"
+        }
+      },
+      {
+        "source": "/badge/**",
+        "run": {
+          "serviceId": "kascov-worker",
+          "region": "europe-west4"
+        }
       },
       {
         "source": "/sitemap.xml",
-        "run": { "serviceId": "kascov-worker", "region": "europe-west4" }
+        "run": {
+          "serviceId": "kascov-worker",
+          "region": "europe-west4"
+        }
       },
       {
         "source": "/feed.xml",
-        "run": { "serviceId": "kascov-worker", "region": "europe-west4" }
+        "run": {
+          "serviceId": "kascov-worker",
+          "region": "europe-west4"
+        }
       },
       {
         "source": "**",
@@ -32,15 +58,30 @@
     "headers": [
       {
         "source": "/",
-        "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
       },
       {
         "source": "**/*.html",
-        "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
       },
       {
         "source": "**/*.@(js|css)",
-        "headers": [{ "key": "Cache-Control", "value": "public, max-age=300" }]
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=300"
+          }
+        ]
       }
     ]
   }

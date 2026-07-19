@@ -1,5 +1,10 @@
 [
   {
+    "date": "2026-07-19",
+    "title": "open doors: badges, a front door for the API, and honest timestamps",
+    "body": "builders can now embed a live 'verified on kascov' badge in any README — /badge/{network}/{id}.svg re-renders from chain state on every fetch, so it stays honest by construction. the API grew a machine-readable front door at /data/{network}/index.json (production logs showed integrators guessing URLs on first contact — now a guess lands somewhere useful), every event now carries its accepting block's real header timestamp and blue score (stored since the capture migration, served never — until now), and share pages stopped shooing crawlers away, so the site can finally be indexed. under the hood: the shutdown backup now runs smallest-database-first so mainnet's snapshot always fits the grace window, and archives went hourly."
+  },
+  {
     "date": "2026-07-17",
     "title": "speaking the standard: KCC-1 template identities",
     "body": "covenant conventions are becoming a real standard — KCC-1, drafted by Romain Billot with Michael Sutton and Ori Newman — and kascov now speaks it. every conformance vector from the draft passes as a unit test in the new kcc1 module, KCC20 reveals carry their canonical template hash (3 identities across 2,889 verified reveals, each recomputed independently to check our own math), coin pages and the templates panel display them, /data/{network}/template/{hash} looks them up, and new spends record the draft's leader/delegator input ordering. tracking the draft honestly, not claiming compliance: it is a draft, and the vocabulary may still move."

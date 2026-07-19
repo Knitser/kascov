@@ -1295,6 +1295,8 @@ async fn serve(
         // hash-routed, so scrapers never see #/… urls) + PNG OG cards
         // (Facebook/X reject SVG og:images) + the sitemap that feeds them.
         .route("/og/{network}/{id}", get(og_card_handler))
+        .route("/badge/{network}/{id}", get(badge_handler))
+        .route("/data/{network}/index.json", get(data_index_handler))
         .route("/share/{network}/{id}", get(share_handler))
         .route("/sitemap.xml", get(sitemap_handler))
         .route("/feed.xml", get(feed_handler))
@@ -4847,6 +4849,137 @@ fn share_body_extra(store: &kascov_core::store::Store, id: &CovenantId) -> Resul
 /// GET /og/{network}/{id}.png — the 1200x630 Open Graph card. Rendered on
 /// demand (SVG -> resvg -> PNG, embedded fonts); the CDN holds it for a week,
 /// so no in-process cache (serve_cached stores strings, this is bytes).
+/// GET /data/{network}/index.json — the machine-readable front door.
+/// Production 404 logs showed integrators guessing URLs on first contact;
+/// this document is what a guessed URL should land near. Static per
+/// network, no DB touch.
+async fn data_index_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let n = network.to_string();
+    let body = serde_json::json!({
+        "network": n,
+        "docs": "https://kascov.io/#/dev",
+        "openapi": null,
+        "endpoints": {
+            "snapshot": format!("/data/{n}.json"),
+            "live": format!("/data/{n}-live.json"),
+            "events": format!("/data/{n}/events?after_daa=&after_seq=&limit="),
+            "coin": format!("/data/{n}/c/{{covenant_id}}.json"),
+            "coins_batch": format!("/data/{n}/coins?ids="),
+            "tx": format!("/data/{n}/tx/{{txid}}.json"),
+            "tokens": format!("/data/{n}/tokens.json"),
+            "token": format!("/data/{n}/token/{{token_id}}.json"),
+            "templates": format!("/data/{n}/templates.json"),
+            "template_by_kcc1_hash": format!("/data/{n}/template/{{hash}}.json"),
+            "search": format!("/data/{n}/search?q="),
+            "stream_sse": format!("/data/{n}/stream (connect to the run.app origin — hosting buffers SSE)"),
+            "badge_svg": format!("/badge/{n}/{{covenant_id}}.svg"),
+            "og_card_png": format!("/og/{n}/{{covenant_id}}.png"),
+            "share_page": format!("/share/{n}/{{covenant_id}}"),
+        },
+        "clients": ["clients/js/kascov.mjs", "clients/py/kascov.py (github.com/Knitser/kascov)"],
+        "note": "open JSON, no keys — every displayed fact is decodable from the chain's own revealed programs",
+    });
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+/// GET /badge/{network}/{id}.svg — a shields-style README badge: live
+/// status straight from the index, embeddable anywhere. Every embed is a
+/// backlink that stays honest (it re-renders from chain state on each
+/// fetch, cached 1h).
+async fn badge_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let Some(id_hex) = id.strip_suffix(".svg") else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    let Ok(covenant_id) = id_hex.parse::<kascov_core::CovenantId>() else {
+        return (StatusCode::BAD_REQUEST, "bad covenant id").into_response();
+    };
+
+    let _ = &headers;
+    let db = state.base_dir.join(format!("{network}.db"));
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let Some(summary) = store.summary(&covenant_id)? else { return Ok(None) };
+        let name = og::friendly_name(&summary.covenant_id.to_string());
+        let alive = summary.live_utxos > 0;
+        let (msg, color) = if alive {
+            (format!("{name} · alive"), "#2ea44f")
+        } else {
+            (format!("{name} · retired"), "#8b949e")
+        };
+        let label = "verified on kascov";
+        // Verdana-ish width estimate the shields ecosystem uses: ~6.5px/char
+        // at font-size 11, plus 10px padding each side.
+        let lw = (label.len() as f32 * 6.5 + 20.0).ceil() as u32;
+        let mw = (msg.chars().count() as f32 * 6.5 + 20.0).ceil() as u32;
+        let (w, h) = (lw + mw, 20);
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" role="img" aria-label="{label}: {msg}">
+<title>{label}: {msg}</title>
+<clipPath id="r"><rect width="{w}" height="{h}" rx="3" fill="#fff"/></clipPath>
+<g clip-path="url(#r)">
+<rect width="{lw}" height="{h}" fill="#0d1a17"/>
+<rect x="{lw}" width="{mw}" height="{h}" fill="{color}"/>
+</g>
+<g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
+<text x="{lx}" y="14" fill="#49eacb">{label}</text>
+<text x="{mx}" y="14">{msg}</text>
+</g>
+</svg>"##,
+            lx = lw / 2,
+            mx = lw + mw / 2,
+        );
+        Ok(Some(svg))
+    })
+    .await;
+    match result {
+        Ok(Ok(Some(svg))) => (
+            [
+                (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+                (header::CACHE_CONTROL, "public, max-age=3600, s-maxage=3600"),
+            ],
+            svg,
+        )
+            .into_response(),
+        Ok(Ok(None)) => (StatusCode::NOT_FOUND, "unknown covenant").into_response(),
+        Ok(Err(err)) => {
+            tracing::error!("{network}: badge failed: {err}");
+            (StatusCode::SERVICE_UNAVAILABLE, "badge unavailable").into_response()
+        }
+        Err(err) => {
+            tracing::error!("{network}: badge panicked: {err}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
+}
+
 async fn og_card_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
@@ -4965,7 +5098,13 @@ async fn share_handler(
 <meta name="twitter:image" content="{image}">
 </head><body style="background:#0a100f;color:#e9f1ef;font-family:system-ui,sans-serif;padding:2rem">
 <p>{title} — {desc}. <a href="{app}" style="color:#70c7ba">Open in the kascov explorer</a></p>
-{body_extra}<script>location.replace('{app}');</script>
+{body_extra}<script>
+/* Auto-forward humans into the app; crawlers read this page as-is. Same
+   content either way (this is routing, not cloaking) — an unconditional
+   replace() made JS-executing crawlers treat every /share URL as a redirect
+   to a hash route, which is why site:kascov.io indexed nothing. */
+if (!/bot|crawl|spider|slurp|preview|fetch|scrape|google|bing|duckduck|yandex|baidu|claude|gpt|perplexity/i.test(navigator.userAgent) && location.search.indexOf('stay') < 0) location.replace('{app}');
+</script>
 </body></html>
 "#
         )))

@@ -235,6 +235,13 @@ pub struct EventRow {
     /// The transaction's v1 payload, when it carried one.
     #[serde(skip_serializing_if = "Option::is_none", serialize_with = "opt_hex_ser")]
     pub payload: Option<Vec<u8>>,
+    /// Accepting block header timestamp (ms) — real chain time, not a DAA
+    /// estimate. None on rows written before capture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepting_time_ms: Option<u64>,
+    /// Accepting block blue score: with tx_index it totally orders events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepting_blue_score: Option<u64>,
 }
 
 fn opt_hex_ser<S: serde::Serializer>(bytes: &Option<Vec<u8>>, s: S) -> std::result::Result<S::Ok, S::Error> {
@@ -3313,7 +3320,8 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT seq, kind, txid, accepting_block, accepting_daa, payload, tx_index
+                "SELECT seq, kind, txid, accepting_block, accepting_daa, payload, tx_index,
+                        accepting_time_ms, accepting_blue_score
                  FROM covenant_events WHERE covenant_id = ?1 ORDER BY seq",
             )
             .map_err(db_err)?;
@@ -3327,6 +3335,8 @@ impl Store {
                     accepting_daa: row.get(4)?,
                     payload: row.get(5)?,
                     tx_index: row.get(6)?,
+                    accepting_time_ms: row.get(7)?,
+                    accepting_blue_score: row.get(8)?,
                 })
             })
             .map_err(db_err)?
