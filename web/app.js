@@ -72,8 +72,17 @@ function renderLanes(network) {
   section.hidden = false;
   const cnt = $('#lanes-count');
   if (cnt) cnt.textContent = `${lanes.length} namespace${lanes.length === 1 ? '' : 's'}`;
-  const max = Math.max(1, ...lanes.map((l) => l.events));
-  host.innerHTML = lanes.slice(0, 14).map((l) => {
+  /* raw 0x tags are honest data but noisy chrome: fold them into one row
+     so named namespaces surface — the fold states its own count. */
+  const hexTags = lanes.filter((l) => l.kind !== 'inscription' && String(l.label || '').startsWith('0x'));
+  const namedLanes = lanes.filter((l) => !hexTags.includes(l));
+  const hexRow = hexTags.length
+    ? `<div class="lane-row"><span class="lane-ns dim" title="4-byte tags with no printable label — real payload namespaces, folded so the named ones stay readable">unlabeled binary tags (${fmtInt(hexTags.length)})</span>` +
+      `<span class="lane-track"></span>` +
+      `<span class="lane-counts dim">${fmtInt(hexTags.reduce((n, l) => n + l.events, 0))} txs · ${fmtInt(hexTags.reduce((n, l) => n + l.covenants, 0))} coins</span></div>`
+    : '';
+  const max = Math.max(1, ...namedLanes.map((l) => l.events), 1);
+  host.innerHTML = namedLanes.slice(0, 14).map((l) => {
     const w = Math.max((l.events / max) * 100, 3).toFixed(1);
     const name = l.kind === 'inscription' ? 'JSON inscriptions' : esc(l.label);
     const title = l.ascii ? ` title="0x${esc(l.hex)}"` : '';
@@ -87,7 +96,7 @@ function renderLanes(network) {
     return `<div class="lane-row"><span class="lane-ns"${title}>${name}</span>` +
       `<span class="lane-track"><span class="lane-fill" style="width:${w}%"></span></span>` +
       `<span class="lane-counts dim">${fmtInt(l.events)} tx${l.events === 1 ? '' : 's'} · ${fmtInt(l.covenants)} coin${l.covenants === 1 ? '' : 's'}</span></div>`;
-  }).join('');
+  }).join('') + hexRow;
 }
 
 function renderInscriptions(network) {
@@ -299,8 +308,19 @@ function renderFamilies(network) {
   const fams = (cached.data && cached.data.families) || [];
   if (!fams.length) { section.hidden = true; return; }
   section.hidden = false;
+  /* genesis0 bulk listings move thousands of coins in one marketplace tx —
+     real activity, but one operator's plumbing, not thousands of "apps".
+     Honest counting: fold them into a single summary card and keep the
+     headline count organic. */
+  const isBatch = (f) => {
+    const named = f.members.filter((m) => m.template && !/^p2(pk|sh)/.test(m.template));
+    return named.length > 0 && named.every((m) => /^genesis0/.test(m.template));
+  };
+  const batches = fams.filter(isBatch);
+  const organic = fams.filter((f) => !isBatch(f));
   const fcnt = $('#families-count');
-  if (fcnt) fcnt.textContent = `${fams.length} app${fams.length === 1 ? '' : 's'}`;
+  if (fcnt) fcnt.textContent = `${fmtInt(organic.length)} app${organic.length === 1 ? '' : 's'}` +
+    (batches.length ? ` · ${fmtInt(batches.length)} marketplace batches` : '');
   // the galaxy section shares this families data
   const gsec = $('#section-galaxy');
   if (gsec) {
@@ -322,7 +342,12 @@ function renderFamilies(network) {
       gsec.hidden = true;
     }
   }
-  host.innerHTML = fams.slice(0, 6).map((f) => {
+  const batchCard = batches.length
+    ? `<div class="family-card"><div class="family-head"><span class="family-label">genesis0 · marketplace batches</span>` +
+      `<span class="family-sub dim">${fmtInt(batches.length)} bulk listing transactions folded into this card — the biggest moved ` +
+      `${fmtInt(Math.max(...batches.map((x) => x.size)))} coins at once. one marketplace's plumbing, counted honestly as one app.</span></div></div>`
+    : '';
+  host.innerHTML = batchCard + organic.slice(0, 6).map((f) => {
     const named = f.members.filter((m) => m.template && !/^p2(pk|sh)/.test(m.template));
     const label = named.length
       ? [...new Set(named.map((m) => m.template.replace('SilverScript · ', '')))].join(' + ')
@@ -1476,7 +1501,7 @@ function renderTemplates(network) {
       : (Number(r.kcc1_template_hashes_count) > 1
         ? `<span class="kcc1-chip mono" title="this family spans ${esc(String(r.kcc1_template_hashes_count))} distinct KCC-1 draft template hashes (per-build identities)">${esc(String(r.kcc1_template_hashes_count))} builds</span>`
         : '');
-    return `<div class="tpl-row"><span class="tpl-name" title="${esc(nameTip)}">${esc(r.label)}</span>${kcc1Chip}` +
+    return `<div class="tpl-row"><span class="tpl-name" title="${esc(nameTip)}">${esc(r.label)}${kcc1Chip}</span>` +
       `<span class="tpl-track" aria-hidden="true"><span class="tpl-fill" style="width:${w}%;background:${color}"></span></span>` +
       `<span class="tpl-counts dim" title="${esc(countsTip)}">${esc(bits.join(' · '))}</span></div>`;
   }).join('');
