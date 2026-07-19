@@ -3996,8 +3996,15 @@ function renderTokens() {
        every old-worker row — keep going straight to the coin page, because
        the token endpoint only knows derived tokens (minter ids 404 there) */
     const href = tokenVstatus(t) ? `#/${esc(network)}/token/${esc(cid)}` : `#/${esc(network)}/c/${esc(cid)}`;
+    /* deployer-claimed identity from the genesis payload: shown first when
+       present, with the canonical name kept beside it — a claim is a claim,
+       not uniqueness, and the tooltip says so */
+    const claimed = t.claimed_name || t.claimed_ticker;
+    const nameHtml = claimed
+      ? `<span class="token-name" title="named on chain by its deployer in the genesis payload — claims aren’t unique; the canonical name stays ${esc(name)}">${esc(t.claimed_name || t.claimed_ticker)}${t.claimed_ticker && t.claimed_name ? ` <span class="dim mono">$${esc(t.claimed_ticker)}</span>` : ''}</span> <span class="dim token-canonical">${esc(name)}</span>`
+      : `<span class="token-name">${esc(name)}</span>`;
     return `<tr>` +
-      `<td><a class="token-coin" href="${href}">${avatarSvg(cid, 26)} <span class="token-name">${esc(name)}</span></a></td>` +
+      `<td><a class="token-coin" href="${href}">${avatarSvg(cid, 26)} ${nameHtml}</a></td>` +
       `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}</td>` +
       `<td><div class="tokens-fields">${tokenFieldChips(t.fields)}</div></td>` +
       (validated
@@ -4150,13 +4157,21 @@ function renderTokenPage(route) {
     return entry ? daaToMs(daa, entry.data) : null;
   };
 
+  /* deployer-claimed identity leads when the genesis payload carries one —
+     canonical name demoted to a subtitle, never hidden: a claim is a claim */
+  const claimedTitle = t.claimed_name
+    ? `${t.claimed_name}${t.claimed_ticker ? ` ($${t.claimed_ticker})` : ''}`
+    : (t.claimed_ticker ? `$${t.claimed_ticker}` : null);
   const header =
     `<header class="detail-head">` +
     `<span role="img" aria-label="avatar of ${esc(name)}">${avatarSvg(id, 88)}</span>` +
-    `<div class="detail-id"><h1>${esc(name)}</h1>` +
+    `<div class="detail-id"><h1>${esc(claimedTitle || name)}</h1>` +
     `<p class="detail-tags">` +
     tokenStatusBadge(t) +
     (t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '') +
+    (claimedTitle
+      ? `<span class="flag flag-claimed" title="this name comes from the token’s genesis transaction payload — written on chain by its deployer at launch. claims aren’t unique; the canonical kascov name is ${esc(name)}">named on chain</span><span class="dim">${esc(name)}</span>`
+      : '') +
     `<span class="dim">covenant token on ${esc(net.label)}</span></p>` +
     `<p class="id-chip"><span class="mono">${esc(shortHex(id, 10, 8))}</span>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(id)}" aria-label="copy this token’s covenant id">copy id</button>` +

@@ -338,6 +338,25 @@ the amount committed in the input: used=100000, limit=9999</span></code></pre>
       does not mean the on-chain spend was invalid (it was accepted by consensus).
     </p>
 
+    <h2 id="token-name"><span class="stepno">★</span>Name your token on chain (launchpads, this one’s for you)</h2>
+    <p>
+      kascov shows a token’s <em>real</em> name only when that name lives on the chain itself —
+      never from anyone’s private database. The convention is simple: put a small JSON document in
+      the <strong>genesis transaction’s payload</strong> when you launch. Whoever authors the
+      genesis (you, or your launchpad) is exactly the right party to claim the name, and anyone
+      can verify it from the chain forever.
+    </p>
+    <pre><code>{"name": "Krex", "ticker": "KREX", "image": "https://…/krex.png"}</code></pre>
+    <p>
+      Rules kascov applies when reading it: <code>name</code> up to 48 characters,
+      <code>ticker</code> (or <code>symbol</code>) up to 12, plain JSON or hex-encoded JSON both
+      work, and the whole payload stays under 4&nbsp;KB. The token page and directory then show the
+      claimed name with a <em>named on chain</em> badge — honestly labeled as a deployer claim
+      (names aren’t unique; the canonical kascov name never disappears). <code>image</code> is
+      surfaced as a link, not embedded. The KCC-0020 token draft doesn’t cover display metadata
+      yet; if a metadata convention lands in the standards track, kascov will read that too.
+    </p>
+
     <h2 id="real"><span class="stepno">6</span>A real production example you can inspect right now</h2>
     <p>
       This exact loop ran end-to-end on the live site on <strong>July 10, 2026</strong> — deploy →

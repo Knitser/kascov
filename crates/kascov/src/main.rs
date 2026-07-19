@@ -3056,7 +3056,10 @@ async fn coins_handler(
 /// (verified | invalid | unvalidated) — the frontend feature-detects it and
 /// falls back to liveness rendering for rows without one (minters, old
 /// workers). `alive` keeps liveness available without overloading `status`.
-fn token_row_json(t: &kascov_core::tokens::TokenDirRow) -> serde_json::Value {
+fn token_row_json(
+    t: &kascov_core::tokens::TokenDirRow,
+    claimed: Option<&(Option<String>, Option<String>, Option<String>)>,
+) -> serde_json::Value {
     let id_hex = t.token_id.to_string();
     let mut row = serde_json::json!({
         "covenant_id": id_hex,
@@ -3086,6 +3089,20 @@ fn token_row_json(t: &kascov_core::tokens::TokenDirRow) -> serde_json::Value {
     {
         row["fields"] = fields;
     }
+    // Deployer-claimed identity from the genesis payload — claims, not
+    // uniqueness; the canonical friendly name above stays primary identity.
+    if let Some((name, ticker, image)) = claimed {
+        if let Some(n) = name {
+            row["claimed_name"] = serde_json::json!(n);
+        }
+        if let Some(tk) = ticker {
+            row["claimed_ticker"] = serde_json::json!(tk);
+        }
+        if let Some(img) = image {
+            row["claimed_image"] = serde_json::json!(img);
+        }
+        row["metadata_source"] = serde_json::json!("genesis_payload");
+    }
     row
 }
 
@@ -3110,7 +3127,8 @@ async fn tokens_handler(
         let store = kascov_core::store::Store::open(&db, network)?;
         let mut tokens: Vec<(u64, String, serde_json::Value)> = Vec::new();
         for t in store.token_directory()? {
-            tokens.push((t.last_activity_daa, t.token_id.to_string(), token_row_json(&t)));
+            let claimed = store.claimed_token_meta(&t.token_id)?;
+            tokens.push((t.last_activity_daa, t.token_id.to_string(), token_row_json(&t, claimed.as_ref())));
         }
         // Vault/"minter" covenants keep their legacy row shape (liveness in
         // `status`, no verdict) so old and new frontends render them as
@@ -3280,7 +3298,7 @@ async fn token_handler(
             "generated_at_ms": now_ms(),
             "tip_daa": tip.map(|t| t.0),
             "tip_at_ms": tip.map(|t| t.1),
-            "token": token_row_json(&t),
+            "token": token_row_json(&t, store.claimed_token_meta(&t.token_id)?.as_ref()),
             "balances": balances,
             "events": events,
             "validation": {

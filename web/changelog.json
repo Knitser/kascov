@@ -1,6 +1,11 @@
 [
   {
     "date": "2026-07-19",
+    "title": "real token names, read from the chain itself",
+    "body": "a launchpad shipped with a verify-on-kascov button and asked the obvious question: why no real names? because kascov only shows what the chain proves — and until now, nobody's token name lived on chain. now there's a way: put {\"name\": …, \"ticker\": …} in the genesis transaction's payload at launch, and kascov reads it, shows it first, and badges it 'named on chain' — honestly labeled as a deployer claim, with the canonical name always alongside. the recipe is in the guide. names from private databases still don't appear here, and never will: verified, not asserted."
+  },
+  {
+    "date": "2026-07-19",
     "title": "open doors: badges, a front door for the API, and honest timestamps",
     "body": "builders can now embed a live 'verified on kascov' badge in any README — /badge/{network}/{id}.svg re-renders from chain state on every fetch, so it stays honest by construction. the API grew a machine-readable front door at /data/{network}/index.json (production logs showed integrators guessing URLs on first contact — now a guess lands somewhere useful), every event now carries its accepting block's real header timestamp and blue score (stored since the capture migration, served never — until now), and share pages stopped shooing crawlers away, so the site can finally be indexed. under the hood: the shutdown backup now runs smallest-database-first so mainnet's snapshot always fits the grace window, and archives went hourly."
   },

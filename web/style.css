@@ -1418,6 +1418,10 @@ a.btn:hover { text-decoration: none; }
 .spend-note { margin: 0.5rem 0 0; font-size: 0.8rem; }
 
 .flag-tpl { background: var(--accent-soft); color: var(--accent); text-transform: none; letter-spacing: 0.02em; }
+/* deployer-claimed token identity (genesis-payload names): the claim leads,
+   the canonical name rides along dim — provenance in the tooltip */
+.flag-claimed { background: var(--bg-soft); color: var(--accent); border: 1px dashed rgba(73, 234, 203, 0.4); text-transform: none; letter-spacing: 0.02em; }
+.token-canonical { font-size: 0.78rem; margin-left: 0.35rem; }
 /* KCC-1 draft role badges on tx-page spent cells: leader carries the
    covenant id for the transition, delegators ride along muted */
 .flag-role-leader { background: var(--accent-soft); color: var(--accent); }

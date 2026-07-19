@@ -2964,6 +2964,61 @@ impl Store {
         Ok(rows)
     }
 
+    /// Deployer-claimed token metadata from the genesis transaction's payload.
+    /// Convention (kascov-defined, pending a metadata KCC): the genesis tx of
+    /// a token covenant may carry JSON — directly or hex-encoded, same as the
+    /// payload_tag conventions — with `name` (≤48 chars) and `ticker`/`symbol`
+    /// (≤12), optionally `image` (≤256, surfaced as a link, never hotlinked).
+    /// These are CLAIMS by whoever authored the genesis, not unique and not
+    /// validated — callers must present them with that provenance. Returns
+    /// (name, ticker, image).
+    pub fn claimed_token_meta(
+        &self,
+        id: &CovenantId,
+    ) -> Result<Option<(Option<String>, Option<String>, Option<String>)>> {
+        let payload: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT payload FROM covenant_events
+                 WHERE covenant_id = ?1 AND kind = 'genesis' AND payload IS NOT NULL
+                 ORDER BY seq LIMIT 1",
+                [id.0.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)?
+            .flatten();
+        let Some(raw) = payload else { return Ok(None) };
+        if raw.is_empty() || raw.len() > 4096 {
+            return Ok(None);
+        }
+        // Direct JSON first, then hex-encoded JSON (both shapes exist in the
+        // wild — payload_tag classifies the same two).
+        let parsed: Option<serde_json::Value> = serde_json::from_slice(&raw).ok().or_else(|| {
+            std::str::from_utf8(&raw)
+                .ok()
+                .and_then(|s| hex::decode(s.trim()).ok())
+                .and_then(|b| serde_json::from_slice(&b).ok())
+        });
+        let Some(v) = parsed else { return Ok(None) };
+        let clean = |key: &[&str], max: usize| -> Option<String> {
+            key.iter().find_map(|k| v.get(k)).and_then(|x| x.as_str()).and_then(|s| {
+                let s = s.trim();
+                (!s.is_empty()
+                    && s.chars().count() <= max
+                    && s.chars().all(|c| !c.is_control()))
+                .then(|| s.to_string())
+            })
+        };
+        let name = clean(&["name"], 48);
+        let ticker = clean(&["ticker", "symbol"], 12);
+        let image = clean(&["image"], 256);
+        if name.is_none() && ticker.is_none() {
+            return Ok(None);
+        }
+        Ok(Some((name, ticker, image)))
+    }
+
     /// Distinct KCC-1 TemplateHashes proven across this covenant's reveals
     /// (x'' "checked, no proven range" rows excluded). Usually 0 or 1; more
     /// means the covenant ran under multiple builds.
