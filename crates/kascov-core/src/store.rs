@@ -763,6 +763,15 @@ impl Store {
             [],
         )
         .map_err(db_err)?;
+        // Covering partial index for the live-state probes: SUMMARY_SELECT's
+        // COUNT/SUM(value) subqueries filter `spent_block IS NULL` per
+        // covenant on every summary row — with (covenant_id, value) covered,
+        // both are index-only instead of probe-then-fetch.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS utxo_live ON covenant_utxos(covenant_id, value) WHERE spent_block IS NULL",
+            [],
+        )
+        .map_err(db_err)?;
         // /template/{hash} lookups and per-template aggregates; x'' rows
         // (checked, no hash) are excluded so the index stays hash-only.
         conn.execute(

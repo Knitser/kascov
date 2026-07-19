@@ -51,7 +51,7 @@ gcloud run deploy $SERVICE \
   --min-instances 1 \
   --max-instances 1 \
   --no-cpu-throttling \
-  --memory 4Gi \
+  --memory 8Gi \
   --cpu 2 \
   --cpu-boost \
   --update-env-vars "^@^BACKUP_BUCKET=$BUCKET@NETWORKS=testnet-10,mainnet" \

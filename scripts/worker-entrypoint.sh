@@ -139,8 +139,14 @@ backup_loop() {
       bytes=$(wc -c < "/tmp/$n.bak" | tr -d ' ')
       # Timestamped archival copy first (history survives even without bucket
       # versioning), then advance the stable 'latest' that restore reads.
-      gcs_put "/tmp/$n.bak" "$token" "archive/$n-$stamp.db" \
-        || echo "[entrypoint] KASCOV_BACKUP_FAIL net=$n reason=archive-upload — latest will still advance"
+      # Archives are HOURLY, not per-cycle: 5-min copies of a 1.3GB DB under
+      # the 14-day lifecycle held ~5TB (~$120/mo) for no extra recovery power
+      # — 'latest' still advances every cycle.
+      m=$(date -u +%M); m=${m#0}
+      if [ "${m:-0}" -lt $(( BACKUP_EVERY / 60 + 1 )) ]; then
+        gcs_put "/tmp/$n.bak" "$token" "archive/$n-$stamp.db" \
+          || echo "[entrypoint] KASCOV_BACKUP_FAIL net=$n reason=archive-upload — latest will still advance"
+      fi
       if gcs_put "/tmp/$n.bak" "$token" "$n.db"; then
         echo "[entrypoint] KASCOV_BACKUP_OK net=$n bytes=$bytes"
       else
@@ -166,7 +172,14 @@ final_backup() {
     echo "[entrypoint] KASCOV_BACKUP_FAIL reason=token phase=final"
     exit 0
   fi
-  for n in $(echo "$NETWORKS" | tr ',' ' '); do
+  # Smallest DB first: the grace window is ~10s and a 1GB+ VACUUM cannot fit
+  # it — in NETWORKS order the TN10 snapshot didn't just die, it STARVED
+  # mainnet's (11MB, fits easily) final backup from ever starting. Ordering
+  # by size guarantees every network that CAN make the window does.
+  by_size=$(for n in $(echo "$NETWORKS" | tr ',' ' '); do
+    [ -f "$DB_DIR/$n.db" ] && echo "$(wc -c < "$DB_DIR/$n.db" | tr -d ' ') $n"
+  done | sort -n | awk '{print $2}')
+  for n in $by_size; do
     [ -f "$DB_DIR/$n.db" ] || continue
     if ! kascov --network "$n" --db "$DB_DIR/$n.db" backup --out "/tmp/$n.final.bak" 2>/dev/null; then
       echo "[entrypoint] KASCOV_BACKUP_FAIL net=$n reason=snapshot phase=final"
