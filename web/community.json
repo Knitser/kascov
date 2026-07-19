@@ -8,5 +8,15 @@
       "example": "#/mainnet/c/6a56fc3fb56fe86a57b55a0e588003cbc8cc8799c67f52a0936b67d4c820cb0b"
     },
     "date": "2026-07-13"
+  },
+  {
+    "name": "KaspaRocket",
+    "by": "@KaspaRocket",
+    "blurb": "a memecoin launchpad on Kaspa covenants — every token page ships with a verify-on-kascov button, so anyone can check the coin against the chain itself",
+    "links": {
+      "site": "https://kasparocket.fun",
+      "example": "#/testnet-10/c/272e132c6be16afffc69929c7bb5139635eb0b06fd40564265784ed8171086c9"
+    },
+    "date": "2026-07-19"
   }
 ]
