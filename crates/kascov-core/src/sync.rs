@@ -591,7 +591,11 @@ pub async fn recover_gap(
         }
     };
     // Idempotence, path 2: explicit bounds inside an already-recovered window.
-    if recovered.iter().any(|&(lo, hi)| gap_lo >= lo && gap_hi <= hi) {
+    // An explicit archival anchor overrides it — the operator is deliberately
+    // re-walking a window whose recorded recovery could not reach deep history
+    // (the walk was pruning-point-bounded then); every merge dedups, so the
+    // re-walk only ever adds what the first pass physically couldn't see.
+    if opts.anchor_block.is_none() && recovered.iter().any(|&(lo, hi)| gap_lo >= lo && gap_hi <= hi) {
         progress(format!("gap [{gap_lo}, {gap_hi}] already recovered — no-op"));
         return Ok(GapRecoveryReport { gap_lo, gap_hi, already_recovered: true, ..Default::default() });
     }
