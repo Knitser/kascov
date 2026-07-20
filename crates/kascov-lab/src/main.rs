@@ -159,6 +159,12 @@ enum Command {
         /// Smallest DAA discontinuity auto-detection may call a gap
         #[arg(long, default_value_t = 100_000)]
         min_gap_daa: u64,
+        /// Anchor the walk at this chain block (hex hash) instead of the
+        /// node's pruning point — for ARCHIVAL nodes that serve deep history
+        /// below their pruning point. Probe it first with `probe-block`.
+        /// Requires explicit --from-daa/--to-daa bounds.
+        #[arg(long, requires = "from_daa")]
+        anchor_block: Option<String>,
     },
 }
 
@@ -209,8 +215,12 @@ async fn main() -> Result<()> {
             let client = kascov_labkit::connect(cli.rpc.as_deref()).await?;
             kascov_labkit::escrow_demo(&client, &keypair, value).await
         }
-        Command::RecoverGap { ref db_dir, ref network, from_daa, to_daa, min_gap_daa } => {
-            recover_gap(cli.rpc.as_deref(), db_dir, network, from_daa, to_daa, min_gap_daa).await
+        Command::RecoverGap { ref db_dir, ref network, from_daa, to_daa, min_gap_daa, ref anchor_block } => {
+            let anchor = anchor_block
+                .as_deref()
+                .map(|h| h.parse::<kascov_core::BlockHash>().map_err(|_| anyhow::anyhow!("bad anchor block hash: {h}")))
+                .transpose()?;
+            recover_gap(cli.rpc.as_deref(), db_dir, network, from_daa, to_daa, min_gap_daa, anchor).await
         }
         Command::ProbeBlock { ref hash } => {
             let block_hash: kascov_core::BlockHash =
@@ -251,6 +261,7 @@ async fn recover_gap(
     from_daa: Option<u64>,
     to_daa: Option<u64>,
     min_gap_daa: u64,
+    anchor_block: Option<kascov_core::BlockHash>,
 ) -> Result<()> {
     use kascov_core::sync::{recover_gap, GapRecoveryOptions};
 
@@ -261,7 +272,7 @@ async fn recover_gap(
     let mut store = kascov_core::store::Store::open(&db, network)
         .with_context(|| format!("open {}", db.display()))?;
 
-    let opts = GapRecoveryOptions { from_daa, to_daa, min_gap_daa };
+    let opts = GapRecoveryOptions { from_daa, to_daa, min_gap_daa, anchor_block };
     // The walk is ~1000 batched RPC calls over ~15 min; public resolver nodes
     // routinely drop a long-lived WebSocket. recover_gap persists a walk cursor
     // and dedups every merge, so a dropped connection just means: reconnect

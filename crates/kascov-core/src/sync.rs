@@ -464,11 +464,19 @@ pub struct GapRecoveryOptions {
     /// (~100k DAA ≈ 2.8 h on TN10 — well under the 1.77M-DAA incident gap,
     /// well over a routine quiet stretch between covenant events).
     pub min_gap_daa: u64,
+    /// Explicit chain block to anchor the walk at instead of the node's
+    /// pruning point. An ARCHIVAL node keeps serving `virtual_chain_from`
+    /// for blocks far below its (still-advancing) pruning point, but the
+    /// default anchor would start the walk above deep history and never
+    /// reach it — this override starts the walk inside it. Probe the block
+    /// first (`kascov-lab probe-block`); only meaningful with explicit
+    /// bounds, and ignored when a saved walk cursor resumes.
+    pub anchor_block: Option<crate::model::BlockHash>,
 }
 
 impl Default for GapRecoveryOptions {
     fn default() -> Self {
-        Self { from_daa: None, to_daa: None, min_gap_daa: 100_000 }
+        Self { from_daa: None, to_daa: None, min_gap_daa: 100_000, anchor_block: None }
     }
 }
 
@@ -610,7 +618,13 @@ pub async fn recover_gap(
             progress(format!("resuming walk from saved cursor {c}"));
             c
         }
-        None => dag.pruning_point,
+        None => match opts.anchor_block {
+            Some(anchor) => {
+                progress(format!("anchoring walk at explicit block {anchor} (archival override)"));
+                anchor
+            }
+            None => dag.pruning_point,
+        },
     };
     let mut report = GapRecoveryReport { gap_lo, gap_hi, ..Default::default() };
     let mut merged = crate::store::MergeCounts::default();
