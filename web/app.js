@@ -4029,7 +4029,7 @@ function renderTokens() {
       ? `<span class="token-name" title="named on chain by its deployer in the genesis payload — claims aren’t unique; the canonical name stays ${esc(name)}">${esc(t.claimed_name || t.claimed_ticker)}${t.claimed_ticker && t.claimed_name ? ` <span class="dim mono">$${esc(t.claimed_ticker)}</span>` : ''}</span> <span class="dim token-canonical">${esc(name)}</span>`
       : `<span class="token-name">${esc(name)}</span>`;
     const rowArt = t.claimed_image_hash
-      ? `<span class="token-art-wrap token-art-wrap-sm">${avatarSvg(cid, 26)}<img class="token-art token-art-sm" src="img/${esc(network)}/${esc(cid)}" alt="" onerror="this.remove()"></span>`
+      ? `<span class="token-art-wrap token-art-wrap-sm">${avatarSvg(cid, 26)}<img class="token-art token-art-sm" src="img/${esc(network)}/${esc(cid)}" alt="" onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`
       : avatarSvg(cid, 26);
     return `<tr>` +
       `<td><a class="token-coin" href="${href}">${rowArt} ${nameHtml}</a></td>` +
@@ -4194,7 +4194,7 @@ function renderTokenPage(route) {
     `<header class="detail-head">` +
     `<span class="token-art-wrap" role="img" aria-label="avatar of ${esc(name)}">${avatarSvg(id, 88)}` +
     (t.claimed_image_hash
-      ? `<img class="token-art" src="img/${esc(network)}/${esc(id)}" alt="" title="art served from bytes proven against the sha256 committed in this token’s genesis" onerror="this.remove()">`
+      ? `<img class="token-art" src="img/${esc(network)}/${esc(id)}" alt="" title="art served from bytes proven against the sha256 committed in this token’s genesis" onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()">`
       : '') +
     `</span>` +
     `<div class="detail-id"><h1>${esc(claimedTitle || name)}</h1>` +
