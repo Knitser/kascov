@@ -4214,12 +4214,12 @@ function renderTokenPage(route) {
      everyone's feet. hash-committed art (claimed_image_hash) is what the
      future verified-image pipeline will render. */
   const imageLine = t.claimed_image
-    ? `<p class="dim token-image-line">token art (deployer link): ` +
-      `<a href="${esc(t.claimed_image)}" target="_blank" rel="noopener noreferrer nofollow">${esc(t.claimed_image.length > 60 ? t.claimed_image.slice(0, 57) + '…' : t.claimed_image)} ↗</a>` +
-      (t.claimed_image_hash
-        ? ` <span class="flag flag-claimed" title="the genesis payload pins this image's SHA-256 — the bytes can never be swapped">hash-committed</span>`
-        : ` <span title="no hash in the genesis payload — the link's content can change; kascov will only ever render hash-committed art">unpinned</span>`) +
-      `</p>`
+    ? (t.claimed_image_hash
+      ? `<p class="dim token-image-line"><span class="flag flag-claimed" title="the artwork shown is served from bytes kascov proved against the SHA-256 committed in this token's genesis — it can never be swapped">✓ art verified from chain</span>` +
+        ` <a class="dim" href="${esc(t.claimed_image)}" target="_blank" rel="noopener noreferrer nofollow" title="the deployer's original source URL">source ↗</a></p>`
+      : `<p class="dim token-image-line">token art link (unpinned): ` +
+        `<a href="${esc(t.claimed_image)}" target="_blank" rel="noopener noreferrer nofollow">${esc(t.claimed_image.length > 48 ? t.claimed_image.slice(0, 45) + '…' : t.claimed_image)} ↗</a>` +
+        ` <span title="no hash in the genesis payload — the link's content can change; kascov only renders hash-committed art">unpinned</span></p>`)
     : '';
   const fieldsLine = (t.fields && Object.keys(t.fields).length
     ? `<div class="tokens-fields token-page-fields">${tokenFieldChips(t.fields)}</div>` : '') + imageLine;
