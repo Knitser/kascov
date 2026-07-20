@@ -32,6 +32,7 @@ import {
   txDetails, loadTxDetail,
   loadChangelog,
   loadCommunity,
+  loadLaunchpads,
 } from './core/data.js';
 
 
@@ -4208,6 +4209,7 @@ function renderTokenPage(route) {
     `<p class="id-chip"><span class="mono">${esc(shortHex(id, 10, 8))}</span>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(id)}" aria-label="copy this token’s covenant id">copy id</button>` +
     `<a class="token-coin-link" href="#/${esc(network)}/c/${esc(id)}">underlying smart coin →</a></p>` +
+    `<p class="trade-line" id="token-trade-line" hidden></p>` +
     `</div></header>`;
 
   /* claimed image: a LINK, never hotlinked — an unpinned URL can change under
@@ -4277,6 +4279,27 @@ function renderTokenPage(route) {
     tokenValidationHtml(t, d.validation) +
     holdersSection +
     timelineSection;
+
+  /* launchpad trade button: the genesis payload committed art hosted by a
+     known launchpad — an on-chain fact that marks where the token launched.
+     Filled in async from the curated registry; missing registry, no match,
+     or an already-replaced view all mean: no button. */
+  if (t.claimed_image) {
+    loadLaunchpads().then((pads) => {
+      const el = document.getElementById('token-trade-line');
+      if (!pads || !el) return;
+      const pad = pads.find((p) =>
+        Array.isArray(p.image_prefixes) &&
+        p.image_prefixes.some((pre) => t.claimed_image.startsWith(pre)) &&
+        (!Array.isArray(p.networks) || p.networks.includes(network)));
+      if (!pad || !pad.trade_url) return;
+      const url = pad.trade_url.replace('{id}', id);
+      el.innerHTML = `<a class="trade-btn" href="${esc(url)}" target="_blank" rel="noopener noreferrer" ` +
+        `title="this token’s genesis committed art hosted by ${esc(pad.name)} — that marks where it launched. kascov only links out; trading happens on their site">` +
+        `trade on ${esc(pad.name)} ↗</a>`;
+      el.hidden = false;
+    });
+  }
 }
 
 /* a coin page's "part of token …" backlink — built only from data ALREADY in

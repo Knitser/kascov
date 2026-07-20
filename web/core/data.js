@@ -522,6 +522,22 @@ async function loadChangelog() {
    links:{site?, repo?, example?}, date }, newest first. Same graceful-null
    contract as the changelog: a missing or empty file (older deploy) hides
    the landing section entirely. */
+/* curated launchpad registry: identifies a token's launch platform from the
+   image host its genesis payload committed — an on-chain fact, not an API
+   handshake. missing/empty file simply means no trade buttons. */
+let launchpadsCache;
+async function loadLaunchpads() {
+  if (launchpadsCache !== undefined) return launchpadsCache;
+  try {
+    const res = await fetch('launchpads.json', { cache: 'no-cache' });
+    const data = res.ok ? await res.json() : null;
+    launchpadsCache = Array.isArray(data) && data.length ? data : null;
+  } catch (e) {
+    launchpadsCache = null;
+  }
+  return launchpadsCache;
+}
+
 let communityCache;
 async function loadCommunity() {
   if (communityCache !== undefined) return communityCache;
@@ -548,4 +564,5 @@ export {
   txDetails, loadTxDetail,
   loadChangelog,
   loadCommunity,
+  loadLaunchpads,
 };

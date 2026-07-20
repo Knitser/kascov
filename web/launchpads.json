@@ -1,0 +1,9 @@
+[
+  {
+    "name": "KaspaRocket",
+    "site": "https://kasparocket.fun",
+    "trade_url": "https://kasparocket.fun/token/{id}",
+    "image_prefixes": ["https://storage.googleapis.com/kaspa-rocket-prod-uploads/"],
+    "networks": ["testnet-10"]
+  }
+]

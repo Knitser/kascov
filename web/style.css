@@ -1435,6 +1435,22 @@ a.btn:hover { text-decoration: none; }
   object-fit: cover;
   border: 1px solid rgba(73, 234, 203, 0.35);
 }
+/* launchpad trade button: outbound link to where the token launched,
+   identified by the art host its genesis committed */
+.trade-line { margin: 0.55rem 0 0; }
+.trade-btn {
+  display: inline-block;
+  padding: 0.38rem 0.85rem;
+  border: 1px solid rgba(73, 234, 203, 0.45);
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.85rem;
+  transition: background 0.15s ease;
+}
+.trade-btn:hover { background: rgba(112, 199, 186, 0.22); }
+
 /* deployer-claimed token identity (genesis-payload names): the claim leads,
    the canonical name rides along dim — provenance in the tooltip */
 .flag-claimed { background: var(--bg-soft); color: var(--accent); border: 1px dashed rgba(73, 234, 203, 0.4); text-transform: none; letter-spacing: 0.02em; }
