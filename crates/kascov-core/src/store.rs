@@ -728,6 +728,17 @@ impl Store {
             "ALTER TABLE covenant_events ADD COLUMN accepting_time_ms INTEGER",
             "ALTER TABLE covenant_events ADD COLUMN accepting_blue_score INTEGER",
             "ALTER TABLE webhook_subscriptions ADD COLUMN secret TEXT",
+            // Verified token art: bytes fetched from the deployer's claimed
+            // image URL and PROVEN against the sha256 committed in the
+            // genesis payload. status: verified | mismatch | fetch_failed |
+            // too_large | not_image. Only 'verified' rows ever serve.
+            "CREATE TABLE IF NOT EXISTS token_image_cache (
+                covenant_id BLOB PRIMARY KEY,
+                status TEXT NOT NULL,
+                content_type TEXT,
+                bytes BLOB,
+                fetched_ms INTEGER NOT NULL
+            )",
             // KCC-1 draft §8.3 TemplateHash of the revealed program, stamped
             // with revealed_template: 32 bytes, x'' = reveal checked / no
             // proven state range, NULL = not yet checked (todo). Derivation
@@ -3022,6 +3033,42 @@ impl Store {
             return Ok(None);
         }
         Ok(Some((name, ticker, image, image_hash)))
+    }
+
+    /// Cached verified-art row: (status, content_type, bytes, fetched_ms).
+    pub fn token_image(
+        &self,
+        id: &CovenantId,
+    ) -> Result<Option<(String, Option<String>, Option<Vec<u8>>, u64)>> {
+        self.conn
+            .query_row(
+                "SELECT status, content_type, bytes, fetched_ms FROM token_image_cache WHERE covenant_id = ?1",
+                [id.0.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
+    /// Record a fetch outcome. Only 'verified' rows carry bytes; failures are
+    /// negative-cached (the serving layer decides retry windows off
+    /// fetched_ms) so a dead URL can't turn every page view into a fetch.
+    pub fn put_token_image(
+        &self,
+        id: &CovenantId,
+        status: &str,
+        content_type: Option<&str>,
+        bytes: Option<&[u8]>,
+        fetched_ms: u64,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO token_image_cache (covenant_id, status, content_type, bytes, fetched_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id.0.as_slice(), status, content_type, bytes, fetched_ms],
+            )
+            .map_err(db_err)?;
+        Ok(())
     }
 
     /// Distinct KCC-1 TemplateHashes proven across this covenant's reveals

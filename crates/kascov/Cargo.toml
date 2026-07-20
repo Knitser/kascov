@@ -33,6 +33,7 @@ resvg = { workspace = true }
 # Webhook delivery. rustls only — no openssl; no default features (those would
 # pull native-tls). `json` for the POST bodies.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 # Well-formedness checks for the XML surfaces (/feed.xml, /sitemap.xml) —

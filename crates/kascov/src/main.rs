@@ -1296,6 +1296,7 @@ async fn serve(
         // (Facebook/X reject SVG og:images) + the sitemap that feeds them.
         .route("/og/{network}/{id}", get(og_card_handler))
         .route("/badge/{network}/{id}", get(badge_handler))
+        .route("/img/{network}/{id}", get(token_image_handler))
         .route("/data/{network}/index.json", get(data_index_handler))
         .route("/share/{network}/{id}", get(share_handler))
         .route("/sitemap.xml", get(sitemap_handler))
@@ -4918,6 +4919,177 @@ async fn data_index_handler(
         body.to_string(),
     )
         .into_response()
+}
+
+/// Magic-byte sniff of the formats worth serving as token art. Returns the
+/// content type, or None for anything that isn't plainly an image — we never
+/// serve bytes we can't identify, even hash-verified ones.
+fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() < 12 {
+        return None;
+    }
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+const TOKEN_IMAGE_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// Failed fetches retry after an hour; hash mismatches after a day (the URL
+/// would have to start serving the committed bytes — possible, rare).
+const IMAGE_RETRY_FAIL_MS: u64 = 3_600_000;
+const IMAGE_RETRY_MISMATCH_MS: u64 = 86_400_000;
+
+/// GET /img/{network}/{id} — the token's art, served ONLY when the bytes at
+/// the deployer's claimed URL hash to the sha256 committed in the genesis
+/// payload. Fetch-on-first-request with SSRF guarding, then cached in the
+/// store: chain-pinned art can never be swapped, so a verified row is
+/// immutable in practice.
+async fn token_image_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let id_hex = id.strip_suffix(".png").unwrap_or(&id);
+    let Ok(covenant_id) = id_hex.parse::<kascov_core::CovenantId>() else {
+        return (StatusCode::BAD_REQUEST, "bad covenant id").into_response();
+    };
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    // 1. cache + claim lookup (blocking store work off the runtime workers)
+    let db2 = db.clone();
+    let lookup = tokio::task::spawn_blocking(move || -> Result<_> {
+        let store = kascov_core::store::Store::open(&db2, network)?;
+        let cached = store.token_image(&covenant_id)?;
+        let claim = store.claimed_token_meta(&covenant_id)?;
+        Ok((cached, claim))
+    })
+    .await;
+    let (cached, claim) = match lookup {
+        Ok(Ok(v)) => v,
+        _ => return (StatusCode::SERVICE_UNAVAILABLE, "store unavailable").into_response(),
+    };
+
+    let serve = |ct: String, bytes: Vec<u8>| {
+        (
+            [
+                (header::CONTENT_TYPE, ct),
+                (header::CACHE_CONTROL, "public, max-age=86400, immutable".to_string()),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            ],
+            bytes,
+        )
+            .into_response()
+    };
+
+    let now = now_ms();
+    if let Some((status, ct, bytes, fetched)) = &cached {
+        match status.as_str() {
+            "verified" => {
+                if let (Some(ct), Some(b)) = (ct, bytes) {
+                    return serve(ct.clone(), b.clone());
+                }
+            }
+            "mismatch" if now.saturating_sub(*fetched) < IMAGE_RETRY_MISMATCH_MS => {
+                return (StatusCode::NOT_FOUND, "image does not match its on-chain hash").into_response();
+            }
+            _ if now.saturating_sub(*fetched) < IMAGE_RETRY_FAIL_MS => {
+                return (StatusCode::NOT_FOUND, "image unavailable").into_response();
+            }
+            _ => {} // stale negative cache — retry below
+        }
+    }
+
+    // 2. no verified row: need a claim with BOTH url and hash
+    let Some((_, _, Some(url), Some(want_hash))) = claim else {
+        return (StatusCode::NOT_FOUND, "token has no hash-committed image").into_response();
+    };
+
+    // 3. SSRF preflight (blocking DNS off the workers), then bounded fetch
+    let check_url = url.clone();
+    let allowed = tokio::task::spawn_blocking(move || webhook_target_allowed(&check_url))
+        .await
+        .unwrap_or(Err("ssrf guard panicked"));
+    let record = |status: &'static str, ct: Option<String>, body: Option<Vec<u8>>| {
+        let db = db.clone();
+        async move {
+            let _ = tokio::task::spawn_blocking(move || -> Result<()> {
+                let store = kascov_core::store::Store::open(&db, network)?;
+                store.put_token_image(
+                    &covenant_id,
+                    status,
+                    ct.as_deref(),
+                    body.as_deref(),
+                    now_ms(),
+                )?;
+                Ok(())
+            })
+            .await;
+        }
+    };
+    if allowed.is_err() {
+        record("fetch_failed", None, None).await;
+        return (StatusCode::NOT_FOUND, "image url rejected").into_response();
+    }
+    // One client per fetch: a token's art is fetched once per lifetime (the
+    // verified row is immutable), so connection reuse buys nothing.
+    let fetched = async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .build()
+            .ok()?;
+        let resp = client.get(&url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let mut body: Vec<u8> = Vec::new();
+        let mut stream = resp;
+        while let Ok(Some(chunk)) = stream.chunk().await {
+            if body.len() + chunk.len() > TOKEN_IMAGE_MAX_BYTES {
+                return Some((true, Vec::new())); // over cap
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Some((false, body))
+    }
+    .await;
+    let Some((over_cap, body)) = fetched else {
+        record("fetch_failed", None, None).await;
+        return (StatusCode::NOT_FOUND, "image fetch failed").into_response();
+    };
+    if over_cap {
+        record("too_large", None, None).await;
+        return (StatusCode::NOT_FOUND, "image exceeds the 2MB cap").into_response();
+    }
+
+    // 4. the whole point: sha256(bytes) must equal the genesis commitment
+    use sha2::Digest;
+    let got_hash = hex::encode(sha2::Sha256::digest(&body));
+    if got_hash != want_hash {
+        record("mismatch", None, None).await;
+        return (StatusCode::NOT_FOUND, "image does not match its on-chain hash").into_response();
+    }
+    let Some(ct) = sniff_image(&body) else {
+        record("not_image", None, None).await;
+        return (StatusCode::NOT_FOUND, "committed bytes are not a recognized image format").into_response();
+    };
+
+    record("verified", Some(ct.to_string()), Some(body.clone())).await;
+    serve(ct.to_string(), body)
 }
 
 /// GET /badge/{network}/{id}.svg — a shields-style README badge: live

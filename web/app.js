@@ -4189,7 +4189,11 @@ function renderTokenPage(route) {
     : (t.claimed_ticker ? `$${t.claimed_ticker}` : null);
   const header =
     `<header class="detail-head">` +
-    `<span role="img" aria-label="avatar of ${esc(name)}">${avatarSvg(id, 88)}</span>` +
+    `<span class="token-art-wrap" role="img" aria-label="avatar of ${esc(name)}">${avatarSvg(id, 88)}` +
+    (t.claimed_image_hash
+      ? `<img class="token-art" src="img/${esc(network)}/${esc(id)}" alt="" title="art served from bytes proven against the sha256 committed in this token’s genesis" onerror="this.remove()">`
+      : '') +
+    `</span>` +
     `<div class="detail-id"><h1>${esc(claimedTitle || name)}</h1>` +
     `<p class="detail-tags">` +
     tokenStatusBadge(t) +

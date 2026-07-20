@@ -1,5 +1,10 @@
 [
   {
+    "date": "2026-07-20",
+    "title": "the art is real: hash-verified token images",
+    "body": "a launchpad adopted the on-chain naming recipe within a day — real tokens now launch with their name, ticker, and image hash committed in the genesis payload. so kascov now renders the art itself: the worker fetches the deployer's image, proves the bytes against the sha256 committed on chain, and serves them from kascov's own origin at /img/{network}/{id}. match: the art appears over the coin's avatar. mismatch: it doesn't, and the page says why. nobody can swap a token's face after launch, and kascov never hotlinks a byte it hasn't proven. verified, not asserted — now in pictures."
+  },
+  {
     "date": "2026-07-19",
     "title": "real token names, read from the chain itself",
     "body": "a launchpad shipped with a verify-on-kascov button and asked the obvious question: why no real names? because kascov only shows what the chain proves — and until now, nobody's token name lived on chain. now there's a way: put {\"name\": …, \"ticker\": …} in the genesis transaction's payload at launch, and kascov reads it, shows it first, and badges it 'named on chain' — honestly labeled as a deployer claim, with the canonical name always alongside. the recipe is in the guide. names from private databases still don't appear here, and never will: verified, not asserted."
