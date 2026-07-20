@@ -1422,6 +1422,8 @@ a.btn:hover { text-decoration: none; }
    or unverified fetch removes itself and the avatar stays — art is a bonus,
    never a broken-image icon */
 .token-art-wrap { position: relative; display: inline-block; }
+.token-art-wrap-sm { width: 26px; height: 26px; vertical-align: middle; }
+.token-art-sm { width: 26px; height: 26px; border-radius: 8px; }
 .token-art {
   position: absolute; inset: 0;
   width: 88px; height: 88px;
