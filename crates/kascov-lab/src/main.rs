@@ -38,6 +38,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Ask the connected node for one block by hash: DAA score, tx count,
+    /// and whether virtual_chain_from(hash) walks. The donor-archive litmus
+    /// test — proves whether a below-pruning-point block is actually
+    /// servable before pointing a recovery at it.
+    ProbeBlock {
+        /// Block hash (hex) to fetch with transactions
+        #[arg(long)]
+        hash: String,
+    },
     /// Generate a keypair (if none exists) and print the TN10 address.
     Keygen,
     /// Show the address and its current UTXO balance.
@@ -202,6 +211,31 @@ async fn main() -> Result<()> {
         }
         Command::RecoverGap { ref db_dir, ref network, from_daa, to_daa, min_gap_daa } => {
             recover_gap(cli.rpc.as_deref(), db_dir, network, from_daa, to_daa, min_gap_daa).await
+        }
+        Command::ProbeBlock { ref hash } => {
+            let block_hash: kascov_core::BlockHash =
+                hash.parse().map_err(|_| anyhow::anyhow!("bad block hash: {hash}"))?;
+            let network = "testnet-10".parse().expect("network");
+            let node = kascov_core::node::NodeHandle::connect(network, cli.rpc.as_deref()).await?;
+            match node.block_with_txs(block_hash).await {
+                Ok(block) => {
+                    println!(
+                        "BLOCK OK — daa={} txs={} accepted-ids-known",
+                        block.daa_score,
+                        block.transactions.len()
+                    );
+                }
+                Err(e) => println!("BLOCK MISS — {e}"),
+            }
+            match node.virtual_chain_from(block_hash).await {
+                Ok(step) => println!(
+                    "WALK OK — virtual_chain_from returned added={} removed={}",
+                    step.added.len(),
+                    step.removed.len()
+                ),
+                Err(e) => println!("WALK MISS — {e}"),
+            }
+            Ok(())
         }
     }
 }
