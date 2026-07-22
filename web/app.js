@@ -4001,18 +4001,32 @@ function renderTokens() {
     }
     return entry ? daaToMs(daa, entry.data) : null;
   };
-  /* verified first (the ones kascov can vouch for), then by last activity;
-     an unvalidated directory keeps the worker's order untouched */
-  const list = tokens.slice();
+  /* Triaged explorer: hide nothing, but collapse the flood of empty/test
+     deploys (no holders, no supply, no value, unverified) behind a toggle so
+     real coins lead. Verified first, then holders, value, recency. An
+     unvalidated directory (old worker) has none of these signals, so it keeps
+     the worker's order untouched. */
+  const num = (v) => (typeof v === 'number' && isFinite(v) ? v : 0);
+  const hasSubstance = (t) =>
+    tokenVstatus(t) === 'verified' || num(t.holders) > 0 ||
+    num(t.supply) > 0 || num(t.live_value) > 0 || t.alive === true;
+  const byActivity = (a, b) => (b.last_activity_daa || 0) - (a.last_activity_daa || 0);
+  let shown = tokens.slice();
+  let empty = [];
   if (validated) {
-    list.sort((a, b) =>
+    shown = [];
+    tokens.forEach((t) => (hasSubstance(t) ? shown : empty).push(t));
+    shown.sort((a, b) =>
       ((tokenVstatus(b) === 'verified' ? 1 : 0) - (tokenVstatus(a) === 'verified' ? 1 : 0)) ||
-      ((b.last_activity_daa || 0) - (a.last_activity_daa || 0)));
+      (num(b.holders) - num(a.holders)) ||
+      (num(b.live_value) - num(a.live_value)) ||
+      byActivity(a, b));
+    empty.sort(byActivity);
   }
-  const rows = list.map((t) => {
+  const rowHtml = (t) => {
     const cid = String(t.covenant_id || '');
     const name = t.name || friendlyName(cid);
-    const alive = t.status === 'active';
+    const alive = t.alive === true || t.status === 'active';
     const ms = toMs(t.last_activity_daa);
     const when = ms != null ? `<span title="${esc(utcTitle(ms))}">${esc(relTimeShort(ms))}</span>`
       : t.last_activity_daa != null ? `<span class="mono dim">DAA ${esc(fmtInt(t.last_activity_daa))}</span>`
@@ -4045,15 +4059,25 @@ function renderTokens() {
         `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>`}</td>` +
       `<td class="tokens-when">${when}</td>` +
       `</tr>`;
-  }).join('');
-  view.innerHTML = head(d, validated) +
-    `<p class="dim tokens-count">${esc(fmtInt(tokens.length))} token coin${tokens.length === 1 ? '' : 's'} — ` +
-    `${validated ? 'tap any row’s name for its token page' : 'tap any row’s name for its full life story'}</p>` +
+  };
+  const tableHtml = (list) =>
     `<div class="tokens-tablewrap"><table class="tokens-table">` +
     `<thead><tr><th>token</th><th>template</th><th>decoded fields</th>` +
     (validated ? `<th>supply</th><th>holders</th>` : '') +
     `<th>holds</th><th>status</th><th>last activity</th></tr></thead>` +
-    `<tbody>${rows}</tbody></table></div>`;
+    `<tbody>${list.map(rowHtml).join('')}</tbody></table></div>`;
+  const countLine = validated
+    ? `${fmtInt(shown.length)} token coin${shown.length === 1 ? '' : 's'}` +
+      (empty.length ? ` with holders, supply or value · ${fmtInt(empty.length)} empty deploy${empty.length === 1 ? '' : 's'} tucked below` : '') +
+      ' — tap any row’s name for its token page'
+    : `${fmtInt(tokens.length)} token coin${tokens.length === 1 ? '' : 's'} — tap any row’s name for its full life story`;
+  const emptyBlock = validated && empty.length
+    ? `<details class="tokens-empty"><summary>${fmtInt(empty.length)} deploy${empty.length === 1 ? '' : 's'} with no holders, supply or value — mostly test &amp; placeholder coins</summary>` +
+      tableHtml(empty) + `</details>`
+    : '';
+  view.innerHTML = head(d, validated) +
+    `<p class="dim tokens-count">${esc(countLine)}</p>` +
+    tableHtml(shown) + emptyBlock;
 }
 
 /* -------------------------------------------------------------- token page */
@@ -4944,12 +4968,12 @@ function flashLiveBadge() {
   });
 }
 
-/* Firebase Hosting rewrites BUFFER responses, so SSE never gets through the
-   CDN path — streams must connect straight to the worker, which sends
-   Access-Control-Allow-Origin: * on the stream route. Everything else keeps
-   the same-origin /data/** rewrite (that path is what the CDN caches). */
-const STREAM_ORIGIN = /(^|\.)kascov\.io$|(^|\.)kascov-explorer\.web\.app$|\.firebaseapp\.com$/.test(location.hostname)
-  ? 'https://kascov-worker-12056584181.europe-west4.run.app/'
+/* kascov.io is served by our own Caddy now, which streams SSE unbuffered, so
+   the stream connects same-origin there. Only the legacy Firebase hosts still
+   buffer through the CDN, so those connect cross-origin to the VPS, which sends
+   Access-Control-Allow-Origin: * on the stream route. */
+const STREAM_ORIGIN = /(^|\.)kascov-explorer\.web\.app$|\.firebaseapp\.com$/.test(location.hostname)
+  ? 'https://kascov.io/'
   : '';
 
 /* Open/close/retarget the stream to match the current view + network.

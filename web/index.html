@@ -730,12 +730,12 @@
 
           <article class="api-endpoint" id="ep-stream">
             <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/stream</code><span class="ep-q">?covenant=</span></div>
-            <p class="ep-desc">Server-sent events — one JSON message the moment the indexer sees each life event. <strong>Connect to the worker origin directly</strong>: the <code class="mono">kascov.io</code> CDN (Firebase) buffers streams, so an SSE connection opened there never delivers. The stream opens with a <code class="mono">: connected</code> hello and sends a <code class="mono">: ka</code> keep-alive comment every 25s. Treat messages as hints and confirm through the polled feeds.</p>
+            <p class="ep-desc">Server-sent events — one JSON message the moment the indexer sees each life event. The stream opens with a <code class="mono">: connected</code> hello and sends a <code class="mono">: ka</code> keep-alive comment every 25s. Treat messages as hints and confirm through the polled feeds.</p>
             <table class="ep-params"><thead><tr><th>Query</th><th>Type</th><th>Notes</th></tr></thead><tbody>
               <tr><td class="mono">covenant</td><td>hex</td><td>optional — exactly 64 hex characters narrows the stream to one coin's events; anything else is a <code class="mono">400</code>, never a silent wildcard</td></tr>
             </tbody></table>
             <div class="ep-cols">
-              <div class="ep-example"><div class="ep-ex-head">Request — note the worker origin</div><pre class="codeblock"><code>curl -N 'https://kascov-worker-12056584181.europe-west4.run.app/data/testnet-10/stream'</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -N 'https://kascov.io/data/testnet-10/stream'</code></pre></div>
               <div class="ep-example"><div class="ep-ex-head">The stream</div><pre class="codeblock"><code>: connected
 
 data: {"covenant_id":"2ab7dcd2…","kind":"transition",
