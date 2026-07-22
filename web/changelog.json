@@ -5,6 +5,21 @@
     "body": "kascov followed only confirmed history. now it watches the mempool too. a per-network poller reads the node's pending transactions a few times a second, classifies the covenant ones with the exact rules the confirmed follower uses, and surfaces them in a live pending lane in explore. a genesis, transition, or burn shows up the instant the node sees it, then clears the moment a block confirms it, or fades if the mempool drops it. on a ten-block-per-second chain a covenant tx lingers only a heartbeat, so this is the closest kascov gets to real time. read from your own node's mempool, no third-party feed. GET /data/{network}/pending serves the current set, and the live stream carries pending and pending_resolved events."
   },
   {
+    "date": "2026-07-22",
+    "title": "kascov now runs on its own Kaspa node",
+    "body": "the whole stack moved onto hardware I run and watch: a mainnet node, a testnet node, the indexer, and the site, all on one machine, off the cloud. it matters for what kascov is. every covenant you see is decoded from a node I run myself, not a public resolver that prunes deep history and abandons the cursor under load. it also unlocked the pending lane, because a live mempool feed needs a node you control. verify from chain, now from my own chain view."
+  },
+  {
+    "date": "2026-07-21",
+    "title": "trade buttons, from where a token launched",
+    "body": "tokens launched on a supported launchpad now show a trade button on their kascov page. kascov works out where a token launched from an on-chain fact, the art host committed in the token's own genesis payload, not a handshake or a maintained list. KaspaRocket is the first supported launchpad, and adding the next one is a few lines. the verified art got tidier too: once proven against the sha256 committed at launch, the real image now fully replaces the generated icon instead of peeking out behind it."
+  },
+  {
+    "date": "2026-07-21",
+    "title": "a window that read 3 events, brought back to nearly 70,000",
+    "body": "an outage weeks ago left a slice of testnet-10 history that every reachable node had pruned. a community node operator had been running an archival node through exactly that window and shared it. kascov walked their archive from inside the gap and merged what it found: close to 70,000 covenant events, back in the timeline, verified as canonical chain history rather than asserted. it is a big partial recovery, not a complete one, because even that archive had pruned some block bodies, and the recovery tool says so honestly. history you can check, not history you take on faith."
+  },
+  {
     "date": "2026-07-20",
     "title": "the art is real: hash-verified token images",
     "body": "a launchpad adopted the on-chain naming recipe within a day — real tokens now launch with their name, ticker, and image hash committed in the genesis payload. so kascov now renders the art itself: the worker fetches the deployer's image, proves the bytes against the sha256 committed on chain, and serves them from kascov's own origin at /img/{network}/{id}. match: the art appears over the coin's avatar. mismatch: it doesn't, and the page says why. nobody can swap a token's face after launch, and kascov never hotlinks a byte it hasn't proven. verified, not asserted — now in pictures."
