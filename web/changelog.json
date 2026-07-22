@@ -1,5 +1,10 @@
 [
   {
+    "date": "2026-07-22",
+    "title": "watch covenants before they land: the pending lane",
+    "body": "kascov followed only confirmed history. now it watches the mempool too. a per-network poller reads the node's pending transactions a few times a second, classifies the covenant ones with the exact rules the confirmed follower uses, and surfaces them in a live pending lane in explore. a genesis, transition, or burn shows up the instant the node sees it, then clears the moment a block confirms it, or fades if the mempool drops it. on a ten-block-per-second chain a covenant tx lingers only a heartbeat, so this is the closest kascov gets to real time. read from your own node's mempool, no third-party feed. GET /data/{network}/pending serves the current set, and the live stream carries pending and pending_resolved events."
+  },
+  {
     "date": "2026-07-20",
     "title": "the art is real: hash-verified token images",
     "body": "a launchpad adopted the on-chain naming recipe within a day — real tokens now launch with their name, ticker, and image hash committed in the genesis payload. so kascov now renders the art itself: the worker fetches the deployer's image, proves the bytes against the sha256 committed on chain, and serves them from kascov's own origin at /img/{network}/{id}. match: the art appears over the coin's avatar. mismatch: it doesn't, and the page says why. nobody can swap a token's face after launch, and kascov never hotlinks a byte it hasn't proven. verified, not asserted — now in pictures."

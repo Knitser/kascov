@@ -1768,7 +1768,11 @@ async fn poll_mempool_forever(
         Ok(url) if !url.trim().is_empty() => Some(url),
         _ => rpc,
     };
-    let poll = std::time::Duration::from_millis(env_ms("KASCOV_MEMPOOL_POLL_MS", 1500));
+    // Kaspa runs ~10 blocks/sec, so a covenant tx sits in the mempool only a
+    // few hundred ms to ~2s before it confirms. A coarse poll steps right over
+    // them; 300ms catches the vast majority while keeping the full-mempool
+    // fetch to ~3/sec against the local node.
+    let poll = std::time::Duration::from_millis(env_ms("KASCOV_MEMPOOL_POLL_MS", 300));
     let grace = std::time::Duration::from_millis(env_ms("KASCOV_MEMPOOL_DROP_GRACE_MS", 8000));
     let max_age = std::time::Duration::from_millis(env_ms("KASCOV_MEMPOOL_MAX_AGE_MS", 600_000));
 
