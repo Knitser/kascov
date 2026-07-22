@@ -36,7 +36,9 @@ kascov.io, www.kascov.io {
 	handle {
 		root * /srv/kascov/web
 		# guide.html etc. served directly; unknown paths fall back to the SPA shell
-		try_files {path} {path}/ /index.html
+		# clean URLs: /guide serves guide.html (Firebase used to do this); the
+		# SPA shell is the final fallback for unknown paths
+		try_files {path} {path}.html {path}/ /index.html
 		file_server
 	}
 
