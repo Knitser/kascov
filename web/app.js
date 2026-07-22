@@ -147,8 +147,9 @@ function renderPending(network) {
     host.innerHTML = '<div class="pending-empty dim">nothing pending right now, covenant transactions appear here the moment the node sees them</div>';
     return;
   }
-  /* newest first — a live ticker reads top-down */
-  host.innerHTML = rows.slice().reverse().slice(0, PENDING_ROWS_MAX).map(([txid, p]) => {
+  /* newest at the bottom: as fresh txs arrive the window scrolls up and the
+     oldest slides off the top, so the locked-height box never grows the page. */
+  host.innerHTML = rows.slice(-PENDING_ROWS_MAX).map(([txid, p]) => {
     const meta = KIND_META[p.tx_kind] || KIND_META.transition;
     const name = p.covenant_id ? friendlyName(p.covenant_id) : shortHex(txid, 8, 6);
     const res = p.resolution === 'confirmed' ? ' pending-confirmed'

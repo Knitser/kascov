@@ -2682,9 +2682,21 @@ a.lane-ns-link:hover, a.lane-ns-link:focus-visible { color: var(--accent); text-
 
 /* live pending (mempool) feed — a ticker of covenant txs awaiting a block */
 .pending { margin-bottom: 2.4rem; }
-/* the section stays put whether quiet or busy; a min-height on the row host
-   keeps the empty state and a single row the same size so nothing jumps. */
-#pending-row { min-height: 60px; }
+/* locked window: the box grows to at most ~3 rows then stops. fresh txs enter
+   at the bottom and the stack scrolls up, the oldest sliding off the top, so a
+   burst of pending txs never shoves the page below it down. max-height (not a
+   fixed height) keeps the empty or single-row state flush under the header with
+   no reserved gap, and justify-content flex-end clips the top, not the newest. */
+#pending-row {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  max-height: 7.2rem;
+  overflow: hidden;
+}
+/* the empty placeholder is not a row to clip, so let it show in full (it wraps
+   to a couple of lines on narrow screens) instead of being cut by the row cap. */
+#pending-row:has(.pending-empty) { max-height: none; }
 .pending-empty { padding: 1.1rem 0.25rem; font-size: 0.92rem; }
 .pending h2 { display: flex; align-items: center; gap: 0.5rem; }
 .pending-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 var(--accent-soft); animation: pending-pulse 2s ease-out infinite; }
@@ -2696,6 +2708,7 @@ a.lane-ns-link:hover, a.lane-ns-link:focus-visible { color: var(--accent); text-
 .pending-row {
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.85rem;
   padding: 0.5rem 0; border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
   animation: pending-in 0.35s ease-out;
 }
 @keyframes pending-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
