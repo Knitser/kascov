@@ -2799,12 +2799,17 @@ impl Store {
     }
 
     /// One lane's headline numbers: (event count, distinct covenants).
-    /// Walks the ev_by_lane partial index.
+    /// Matches BOTH strict KIP-21 lanes (ev_by_lane) and generic tag lanes,
+    /// which live in payload_tag as 'tag:<hex>' with lane_namespace NULL
+    /// (ev_tag_stats) — the same rows lanes.json counts, so a tag lane's
+    /// detail page no longer reads 0 while lanes.json advertises thousands.
     pub fn lane_stats(&self, namespace: &str) -> Result<(u64, u64)> {
         self.conn
             .query_row(
                 "SELECT COUNT(*), COUNT(DISTINCT covenant_id)
-                 FROM covenant_events WHERE lane_namespace = ?1",
+                 FROM covenant_events
+                 WHERE lane_namespace = ?1
+                    OR (lane_namespace IS NULL AND payload_tag = 'tag:' || ?1)",
                 params![namespace],
                 |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
             )
@@ -2817,7 +2822,9 @@ impl Store {
             .conn
             .prepare(
                 "SELECT covenant_id, seq, kind, txid, accepting_daa, tx_index
-                 FROM covenant_events WHERE lane_namespace = ?1
+                 FROM covenant_events
+                 WHERE lane_namespace = ?1
+                    OR (lane_namespace IS NULL AND payload_tag = 'tag:' || ?1)
                  ORDER BY accepting_daa DESC, rowid DESC LIMIT ?2",
             )
             .map_err(db_err)?;
@@ -2846,7 +2853,9 @@ impl Store {
             .conn
             .prepare(
                 "SELECT accepting_daa / ?2 AS bucket, COUNT(*)
-                 FROM covenant_events WHERE lane_namespace = ?1
+                 FROM covenant_events
+                 WHERE lane_namespace = ?1
+                    OR (lane_namespace IS NULL AND payload_tag = 'tag:' || ?1)
                  GROUP BY bucket ORDER BY bucket",
             )
             .map_err(db_err)?;
@@ -3751,6 +3760,35 @@ mod tests {
             created_utxos: vec![],
             spent_utxos: vec![],
         }
+    }
+
+    /// Regression: a tag lane's detail queries (lane_stats / lane_recent /
+    /// lane_activity) must count the SAME rows lanes.json advertises. Generic
+    /// based-app tag lanes live in payload_tag as 'tag:<hex>' with
+    /// lane_namespace NULL, so the old `WHERE lane_namespace = ?1` filter read
+    /// 0 for every tag lane while lanes.json reported thousands.
+    #[test]
+    fn lane_detail_includes_payload_tag_lanes() {
+        let mut store = test_store("lane-tag");
+        // Two covenants whose payloads lead with the ASCII tag "GZ4M"
+        // (0x47 0x5a 0x34 0x4d) => payload_tag "tag:475a344d", lane_namespace
+        // NULL — a generic tag lane, not a strict KIP-21 namespace.
+        let mut blk = block_with_events(
+            1,
+            100,
+            vec![(0xC1, EventKind::Genesis, 0x0A), (0xC2, EventKind::Genesis, 0x0B)],
+        );
+        blk.events[0].payload = Some(b"GZ4M-hello".to_vec());
+        blk.events[1].payload = Some(b"GZ4M-world".to_vec());
+        store.apply(&blk, BlockHash([1; 32])).unwrap();
+
+        let ns = "475a344d";
+        assert_eq!(store.lane_stats(ns).unwrap(), (2, 2), "tag-lane events must be counted");
+        assert_eq!(store.lane_recent(ns, 50).unwrap().len(), 2, "recent must include tag-lane events");
+        let total: u64 = store.lane_activity(ns, 36_000).unwrap().iter().map(|(_, c)| c).sum();
+        assert_eq!(total, 2, "activity buckets must include tag-lane events");
+        // An unrelated namespace stays empty — no cross-lane leakage.
+        assert_eq!(store.lane_stats("deadbeef").unwrap(), (0, 0));
     }
 
     /// A sink-reset gap is the widest discontinuity in the DAA distribution;

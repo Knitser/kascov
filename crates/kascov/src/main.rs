@@ -5223,7 +5223,7 @@ async fn data_index_handler(
             "templates": format!("/data/{n}/templates.json"),
             "template_by_kcc1_hash": format!("/data/{n}/template/{{hash}}.json"),
             "search": format!("/data/{n}/search?q="),
-            "stream_sse": format!("/data/{n}/stream (connect to the run.app origin — hosting buffers SSE)"),
+            "stream_sse": format!("/data/{n}/stream (same-origin SSE on kascov.io, unbuffered)"),
             "badge_svg": format!("/badge/{n}/{{covenant_id}}.svg"),
             "og_card_png": format!("/og/{n}/{{covenant_id}}.png"),
             "share_page": format!("/share/{n}/{{covenant_id}}"),
