@@ -2682,6 +2682,10 @@ a.lane-ns-link:hover, a.lane-ns-link:focus-visible { color: var(--accent); text-
 
 /* live pending (mempool) feed — a ticker of covenant txs awaiting a block */
 .pending { margin-bottom: 2.4rem; }
+/* the section stays put whether quiet or busy; a min-height on the row host
+   keeps the empty state and a single row the same size so nothing jumps. */
+#pending-row { min-height: 60px; }
+.pending-empty { padding: 1.1rem 0.25rem; font-size: 0.92rem; }
 .pending h2 { display: flex; align-items: center; gap: 0.5rem; }
 .pending-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 var(--accent-soft); animation: pending-pulse 2s ease-out infinite; }
 @keyframes pending-pulse {

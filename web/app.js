@@ -133,11 +133,20 @@ function renderPending(network) {
     section.hidden = true;
     return;
   }
-  const rows = [...map.entries()];
-  if (!rows.length) { section.hidden = true; return; }
+  /* feature detection: hide the whole section ONLY when the worker doesn't
+     serve /pending (404 leaves state.pending[network].data null). Once the
+     feature is supported the section STAYS in place, so a tx arriving or
+     clearing fills or empties it without ever shoving the page up or down. */
+  const probed = state.pending[network];
+  if (probed && probed.data === null) { section.hidden = true; return; }
   section.hidden = false;
+  const rows = [...map.entries()];
   const cnt = $('#pending-count');
-  if (cnt) cnt.textContent = `${rows.length} in the mempool`;
+  if (cnt) cnt.textContent = rows.length ? String(rows.length) : '';
+  if (!rows.length) {
+    host.innerHTML = '<div class="pending-empty dim">nothing pending right now, covenant transactions appear here the moment the node sees them</div>';
+    return;
+  }
   /* newest first — a live ticker reads top-down */
   host.innerHTML = rows.slice().reverse().slice(0, PENDING_ROWS_MAX).map(([txid, p]) => {
     const meta = KIND_META[p.tx_kind] || KIND_META.transition;
