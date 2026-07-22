@@ -1,0 +1,50 @@
+# kascov.io single-origin serving on the VPS (replaces Firebase Hosting +
+# Cloud Run). Static SPA from disk, worker reverse-proxied under the SAME
+# origin — which fixes SSE buffering, share-page crawling, and CORS for good.
+#
+# Run in WSL on the VPS (worker listens on 127.0.0.1:8080 there). On Windows,
+# port-forward 80/443 -> WSL, OR run Caddy on Windows and proxy to the WSL IP.
+# TLS: Cloudflare sits in front (proxied/orange-cloud), so Caddy uses an
+# internal/origin cert and Cloudflare terminates public TLS. If you ever go
+# grey-cloud, switch `tls internal` to real ACME.
+
+kascov.io, www.kascov.io {
+	encode zstd gzip
+
+	# --- API + dynamic worker routes (mirror firebase.json rewrites) ---
+	# SSE must NOT be buffered — flush_interval -1 streams it.
+	@stream path /data/*/stream
+	handle @stream {
+		reverse_proxy 127.0.0.1:8080 {
+			flush_interval -1
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	@worker {
+		path /data/* /share/* /og/* /badge/* /img/* /sitemap.xml /feed.xml /health /healthz
+	}
+	handle @worker {
+		reverse_proxy 127.0.0.1:8080 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	# --- static SPA (the web/ build) ---
+	handle {
+		root * /srv/kascov/web
+		# guide.html etc. served directly; unknown paths fall back to the SPA shell
+		try_files {path} {path}/ /index.html
+		file_server
+	}
+
+	# behind Cloudflare: origin cert, public TLS terminated at the edge
+	tls internal
+
+	log {
+		output file /var/log/caddy/kascov.log
+		format console
+	}
+}
