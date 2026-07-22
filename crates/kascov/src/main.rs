@@ -1076,6 +1076,12 @@ struct ServeState {
     /// Per-network live event broadcast (SSE). A Vec, not a HashMap:
     /// `Network` has no `Hash` impl and there are at most a couple entries.
     live: Vec<(Network, LiveChannel)>,
+    /// Per-network live pending (mempool) covenant set — filled by the poller,
+    /// snapshotted by /pending. Same Vec-not-HashMap shape as `live`. A tokio
+    /// Mutex: the poller holds it across its classify loop, the handler across
+    /// one snapshot. A network whose poller disabled itself (no-mempool node)
+    /// simply has no entry here, so /pending 404s and the section hides.
+    pending: Vec<(Network, std::sync::Arc<tokio::sync::Mutex<PendingSet>>)>,
     /// Latest cross-indexer consistency report per network (None until the
     /// day's first run lands). Same Vec-not-HashMap shape as `live`; a std
     /// Mutex because it's held only to store or clone, never across awaits.
@@ -1130,6 +1136,7 @@ async fn serve(
 
     let mut live = Vec::with_capacity(networks.len());
     let mut sync_health = Vec::with_capacity(networks.len());
+    let mut pending = Vec::with_capacity(networks.len());
     for &network in &networks {
         let channel = LiveChannel::new();
         let health = std::sync::Arc::new(SyncHealth {
@@ -1137,6 +1144,9 @@ async fn serve(
             last_progress_ms: std::sync::atomic::AtomicI64::new(now_ms() as i64),
         });
         let db = base_dir.join(format!("{network}.db"));
+        // The pending poller opens its OWN read-only handle on the same file,
+        // so hand it a separate path (the follower moves `db` below).
+        let db_for_poller = db.clone();
         // Webhook delivery rides the same event callback as SSE: the follower
         // try_sends into this queue and a per-network task does the POSTs.
         let (hook_tx, hook_rx) = tokio::sync::mpsc::channel::<HookEvent>(HOOK_QUEUE);
@@ -1149,8 +1159,21 @@ async fn serve(
             hook_tx,
             health.clone(),
         ));
+        // Live pending (mempool) covenant feed: an additive, isolated poller
+        // that reads the same node the follower confirms against, keeps a
+        // read-only store handle (never the follower's &mut), and fans pending
+        // events out on the SAME broadcast channel the confirmed events use.
+        let pending_set = std::sync::Arc::new(tokio::sync::Mutex::new(PendingSet::new()));
+        tokio::spawn(poll_mempool_forever(
+            network,
+            cli.rpc.clone(),
+            db_for_poller,
+            channel.tx.clone(),
+            pending_set.clone(),
+        ));
         live.push((network, channel));
         sync_health.push((network, health));
+        pending.push((network, pending_set));
     }
 
     let consistency =
@@ -1165,6 +1188,7 @@ async fn serve(
         sync_health,
         deploy_inflight: tokio::sync::Mutex::new(()),
         live,
+        pending,
         consistency,
         cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         build_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
@@ -1291,6 +1315,7 @@ async fn serve(
         .route("/data/{network}/addr/{address}", get(addr_handler))
         .route("/data/{network}/search", get(search_handler))
         .route("/data/{network}/stream", get(stream_handler))
+        .route("/data/{network}/pending", get(pending_handler))
         // share surface: crawler-visible per-coin pages (the SPA is
         // hash-routed, so scrapers never see #/… urls) + PNG OG cards
         // (Facebook/X reject SVG og:images) + the sitemap that feeds them.
@@ -1633,6 +1658,297 @@ async fn follow_forever(
             }
         }
     }
+}
+
+/* --------------------------------------------- live pending (mempool) feed */
+
+/// A millisecond tunable read from the environment, mirroring KASCOV_RPC_*:
+/// a plain integer, falling back to `default` on absent or garbage input.
+fn env_ms(key: &str, default: u64) -> u64 {
+    std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
+
+/// The most a network's pending set may hold. A safety cap only — a healthy
+/// covenant mempool is tiny; past this we stop tracking new entries until the
+/// pool drains. The confirmed pipeline is never affected.
+const MAX_PENDING: usize = 512;
+
+/// One pending covenant tx we're tracking between "seen in mempool" and
+/// "resolved" (confirmed or dropped).
+struct PendingEntry {
+    covenant_id: CovenantId,
+    kind: kascov_core::store::EventKind,
+    first_seen: std::time::Instant,
+    /// Set the first poll a tracked txid is gone from the pool; the drop-grace
+    /// timer runs from here. A mined tx leaves the pool before the follower has
+    /// indexed its events, so we hold briefly before declaring it dropped.
+    leaving_since: Option<std::time::Instant>,
+}
+
+/// A network's live pending covenant txs, keyed by txid, with an insertion
+/// order so the snapshot reads oldest-first. Guarded by a tokio Mutex shared
+/// between the poller (writer) and the /pending handler (reader). One tx maps
+/// to one entry: a tx touching several covenants still broadcasts one `pending`
+/// event per covenant, but the in-memory preview keeps the first (the common
+/// case is exactly one covenant per tx).
+#[derive(Default)]
+struct PendingSet {
+    entries: std::collections::HashMap<TxId, PendingEntry>,
+    order: VecDeque<TxId>,
+}
+
+impl PendingSet {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Track a newly-seen pending covenant tx. A no-op if the txid is already
+    /// tracked or the cap is reached.
+    fn insert(&mut self, txid: TxId, covenant_id: CovenantId, kind: kascov_core::store::EventKind) {
+        if self.entries.contains_key(&txid) || self.entries.len() >= MAX_PENDING {
+            return;
+        }
+        self.entries.insert(
+            txid,
+            PendingEntry {
+                covenant_id,
+                kind,
+                first_seen: std::time::Instant::now(),
+                leaving_since: None,
+            },
+        );
+        self.order.push_back(txid);
+    }
+
+    fn remove(&mut self, txid: &TxId) {
+        if self.entries.remove(txid).is_some() {
+            self.order.retain(|t| t != txid);
+        }
+    }
+}
+
+/// A node without mempool RPC answers get_mempool_entries as an unsupported
+/// method — a permanent condition (disable the feed), distinct from a
+/// transient transport drop (reconnect). The wRPC layer surfaces both as error
+/// strings, so match on the method-level signals; anything else is treated as
+/// transient (retrying costs only a log line, and get_mempool_entries is a
+/// standard method, so this branch is a defensive guard).
+fn mempool_unsupported(err: &kascov_core::Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("method not found")
+        || msg.contains("not implemented")
+        || msg.contains("unimplemented")
+        || msg.contains("unsupported")
+        || msg.contains("not supported")
+        || msg.contains("no such method")
+}
+
+/// Poll a network's mempool forever, diff it against the last poll, and fan
+/// pending covenant events out on the shared broadcast channel. Reconnects on
+/// transient failure; disables itself (returns) if the node has no mempool RPC.
+async fn poll_mempool_forever(
+    network: Network,
+    rpc: Option<String>,
+    db: std::path::PathBuf,
+    live_tx: tokio::sync::broadcast::Sender<std::sync::Arc<str>>,
+    pending: std::sync::Arc<tokio::sync::Mutex<PendingSet>>,
+) {
+    // Kill-switch: KASCOV_MEMPOOL=off disables the feed for every network.
+    if std::env::var("KASCOV_MEMPOOL")
+        .map(|v| v.trim().eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+    {
+        tracing::info!("{network}: pending mempool feed disabled (KASCOV_MEMPOOL=off)");
+        return;
+    }
+    // Same per-network node override the follower honors, so the poller reads
+    // the very node that will confirm these txs.
+    let env_key = format!("KASCOV_RPC_{}", network.to_string().to_uppercase().replace('-', "_"));
+    let rpc = match std::env::var(&env_key) {
+        Ok(url) if !url.trim().is_empty() => Some(url),
+        _ => rpc,
+    };
+    let poll = std::time::Duration::from_millis(env_ms("KASCOV_MEMPOOL_POLL_MS", 1500));
+    let grace = std::time::Duration::from_millis(env_ms("KASCOV_MEMPOOL_DROP_GRACE_MS", 8000));
+    let max_age = std::time::Duration::from_millis(env_ms("KASCOV_MEMPOOL_MAX_AGE_MS", 600_000));
+
+    let mut prev_ids: HashSet<TxId> = HashSet::new();
+    loop {
+        // Our OWN read-only store handle — a concurrent WAL reader, never the
+        // follower's &mut. Open failure is transient (disk/bootstrap): retry.
+        let store = match Store::open(&db, network) {
+            Ok(store) => store,
+            Err(err) => {
+                tracing::warn!("{network}: pending poller cannot open store ({err}), retrying in 30s");
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                continue;
+            }
+        };
+        let node = match NodeHandle::connect(network, rpc.as_deref()).await {
+            Ok(node) => node,
+            Err(err) => {
+                tracing::warn!("{network}: pending poller connect failed ({err}), retrying in 10s");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                continue;
+            }
+        };
+        tracing::info!("{network}: pending mempool feed live");
+        loop {
+            let txs = match node.mempool_txs().await {
+                Ok(txs) => txs,
+                Err(err) => {
+                    if mempool_unsupported(&err) {
+                        tracing::warn!(
+                            "{network}: node has no get_mempool_entries ({err}) — pending feed disabled"
+                        );
+                        return;
+                    }
+                    tracing::warn!("{network}: pending poll failed ({err}), reconnecting");
+                    break;
+                }
+            };
+            let cur_ids: HashSet<TxId> = txs.iter().map(|tx| tx.txid).collect();
+            let now = std::time::Instant::now();
+
+            // NEW txids only: classify each and surface any covenant events.
+            // Diffing keeps the work bound to churn, not pool size.
+            for tx in &txs {
+                if prev_ids.contains(&tx.txid) {
+                    continue;
+                }
+                let events = match kascov_core::sync::classify_pending(&store, tx) {
+                    Ok(events) => events,
+                    Err(err) => {
+                        tracing::debug!("{network}: pending classify failed for {}: {err}", tx.txid);
+                        continue;
+                    }
+                };
+                for ev in events {
+                    {
+                        let mut set = pending.lock().await;
+                        set.insert(tx.txid, ev.covenant_id, ev.kind);
+                    }
+                    if live_tx.receiver_count() > 0 {
+                        let msg = serde_json::json!({
+                            "kind": "pending",
+                            "covenant_id": ev.covenant_id,
+                            "tx_kind": ev.kind.as_str(),
+                            "txid": tx.txid,
+                        })
+                        .to_string();
+                        let _ = live_tx.send(msg.into());
+                    }
+                }
+            }
+
+            // Resolve tracked txids that LEFT the pool, and age out stale ones.
+            // Collect broadcasts under the lock; send after releasing it.
+            let mut resolved: Vec<(TxId, CovenantId, &'static str)> = vec![];
+            {
+                let mut set = pending.lock().await;
+                let tracked: Vec<TxId> = set.order.iter().copied().collect();
+                for txid in tracked {
+                    let gone = !cur_ids.contains(&txid);
+                    let (cov, first_seen, leaving_since) = match set.entries.get(&txid) {
+                        Some(e) => (e.covenant_id, e.first_seen, e.leaving_since),
+                        None => continue,
+                    };
+                    // Age-out: a stuck entry the pool keeps re-serving (or a
+                    // resolution we somehow missed) is dropped after max_age.
+                    if now.duration_since(first_seen) >= max_age {
+                        set.remove(&txid);
+                        resolved.push((txid, cov, "dropped"));
+                        continue;
+                    }
+                    if !gone {
+                        // Still in the pool: clear any leaving timer (a tx that
+                        // re-entered on a reorg simply keeps waiting).
+                        if let Some(e) = set.entries.get_mut(&txid) {
+                            e.leaving_since = None;
+                        }
+                        continue;
+                    }
+                    // Gone from the pool: did the follower index its events?
+                    let confirmed =
+                        store.events_by_txid(&txid).map(|r| !r.is_empty()).unwrap_or(false);
+                    if confirmed {
+                        set.remove(&txid);
+                        resolved.push((txid, cov, "confirmed"));
+                        continue;
+                    }
+                    // Not yet indexed: hold for the grace window (mined-but-
+                    // follower-behind race) before calling it dropped.
+                    let since = match leaving_since {
+                        Some(t) => t,
+                        None => {
+                            if let Some(e) = set.entries.get_mut(&txid) {
+                                e.leaving_since = Some(now);
+                            }
+                            now
+                        }
+                    };
+                    if now.duration_since(since) >= grace {
+                        set.remove(&txid);
+                        resolved.push((txid, cov, "dropped"));
+                    }
+                }
+            }
+            for (txid, covenant_id, resolution) in resolved {
+                if live_tx.receiver_count() > 0 {
+                    let msg = serde_json::json!({
+                        "kind": "pending_resolved",
+                        "covenant_id": covenant_id,
+                        "txid": txid,
+                        "resolution": resolution,
+                    })
+                    .to_string();
+                    let _ = live_tx.send(msg.into());
+                }
+            }
+
+            prev_ids = cur_ids;
+            tokio::time::sleep(poll).await;
+        }
+        // Reconnect: reset the diff so the fresh session re-surfaces the pool.
+        prev_ids.clear();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+/// Snapshot of a network's live pending covenant txs (in-memory, lock-guarded).
+/// `no-store` — memory-derived and changing every poll, so it must never be
+/// cached. A network whose poller disabled itself has no entry => 404 => the
+/// frontend hides the pending section.
+async fn pending_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let Some((_, set)) = state.pending.iter().find(|(n, _)| *n == network) else {
+        return (StatusCode::NOT_FOUND, "pending feed unavailable").into_response();
+    };
+    let now = std::time::Instant::now();
+    let rows: Vec<serde_json::Value> = {
+        let set = set.lock().await;
+        set.order
+            .iter()
+            .filter_map(|txid| set.entries.get(txid).map(|e| (txid, e)))
+            .map(|(txid, e)| {
+                serde_json::json!({
+                    "covenant_id": e.covenant_id,
+                    "tx_kind": e.kind.as_str(),
+                    "txid": txid,
+                    "age_ms": now.duration_since(e.first_seen).as_millis() as u64,
+                })
+            })
+            .collect()
+    };
+    json_resp(serde_json::json!({ "pending": rows }))
 }
 
 /// Webhook delivery queue depth per network. Full queue = events dropped

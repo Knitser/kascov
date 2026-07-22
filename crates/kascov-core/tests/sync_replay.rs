@@ -96,6 +96,9 @@ impl ChainSource for FakeChain {
             Ok(steps.remove(0))
         }
     }
+    async fn mempool_txs(&self) -> Result<Vec<Transaction>> {
+        Ok(vec![])
+    }
 }
 
 fn accepted(block: BlockHash, txs: &[TxId]) -> AcceptedBlock {

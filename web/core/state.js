@@ -118,6 +118,7 @@ const state = {
   templates: {},      // network -> { data, at } (contract-type analytics)
   families: {},       // network -> { data, at } (multi-contract apps)
   lanes: {},          // network -> { data, at } (based-app namespaces)
+  pending: {},        // network -> { data, at } (live mempool snapshot; data null = 404 miss)
   inscriptions: {},   // network -> { data, at } (decoded JSON inscriptions)
   lifespans: {},      // network -> { data, at } (retired-coin lifespans)
   reorgs: {},         // network -> { data, at } (virtual-chain reorg log; data null = 404 miss)

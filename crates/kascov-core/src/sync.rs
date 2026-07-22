@@ -961,6 +961,58 @@ fn is_valid_genesis(tx: &Transaction, id: &CovenantId) -> bool {
     crate::node::compute_covenant_id(&input.previous_outpoint, &fields) == *id
 }
 
+/// A covenant event inferred from a single mempool (pending) transaction — the
+/// confirmed classifier's per-tx verdict, minus block context (no accepting
+/// DAA, no tx_index). Used only for the live pending feed; it never touches the
+/// store's write path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingTxEvent {
+    pub covenant_id: CovenantId,
+    pub kind: EventKind,
+}
+
+/// Classify the covenant activity of one mempool transaction, mirroring
+/// [`classify`]'s per-tx predicates against the confirmed store. A pending tx
+/// can only chain off already-confirmed covenant UTXOs (the mempool is not a
+/// DAG we index), so there is no intra-block created/known overlay here. A
+/// non-covenant tx returns an empty vec after the cheap input scan, so the
+/// poller pays almost nothing for ordinary chain noise.
+pub fn classify_pending(store: &Store, tx: &Transaction) -> Result<Vec<PendingTxEvent>> {
+    // covenant_id -> (spent utxos, created outputs)
+    let mut touched: HashMap<CovenantId, (u32, u32)> = HashMap::new();
+    for input in &tx.inputs {
+        if let Some(id) = store.live_covenant_utxo(&input.previous_outpoint)? {
+            touched.entry(id).or_default().0 += 1;
+        }
+    }
+    for output in &tx.outputs {
+        if let Some(binding) = output.covenant {
+            touched.entry(binding.covenant_id).or_default().1 += 1;
+        }
+    }
+
+    let mut events = Vec::with_capacity(touched.len());
+    for (covenant_id, (spent, created)) in touched {
+        let kind = if spent > 0 && created > 0 {
+            EventKind::Transition
+        } else if spent > 0 {
+            EventKind::Burn
+        } else if store.known_covenant(&covenant_id)? {
+            // An output claims an existing id without spending its UTXO here —
+            // a transition, not a second genesis (mirrors classify).
+            EventKind::Transition
+        } else if is_valid_genesis(tx, &covenant_id) {
+            EventKind::Genesis
+        } else {
+            // First sighting that doesn't prove genesis: a covenant born before
+            // we started watching. Same fallback as the confirmed path.
+            EventKind::Transition
+        };
+        events.push(PendingTxEvent { covenant_id, kind });
+    }
+    Ok(events)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1000,6 +1052,9 @@ mod tests {
                 .get(&cursor)
                 .cloned()
                 .ok_or(crate::Error::Rpc(format!("unknown cursor {cursor}")))
+        }
+        async fn mempool_txs(&self) -> crate::Result<Vec<Transaction>> {
+            Ok(vec![])
         }
     }
 
@@ -1374,5 +1429,86 @@ mod tests {
         assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index, None);
         assert_eq!(store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index, Some(1));
         assert!(store.tx_index_backfill_done().unwrap());
+    }
+
+    /// The mempool classifier reproduces classify()'s per-tx verdict against
+    /// the confirmed store: a spend+create is a transition, a spend-only is a
+    /// burn, a fresh valid-id output is a genesis, and a tx touching no covenant
+    /// state returns nothing (the cheap exit for ordinary chain noise).
+    #[test]
+    fn classify_pending_covers_genesis_transition_burn_and_noop() {
+        let db = std::env::temp_dir()
+            .join(format!("kascov-classify-pending-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
+
+        // Seed a confirmed, live covenant UTXO for id 0xB2 at (tx 0xB0, out 0).
+        let mut b = block_events(h(1), 100, vec![event(0xB2, tx_id(0xB0), 1)]);
+        b.created_utxos.push(utxo(0xB2, tx_id(0xB0), 0));
+        store.apply(&b, h(1)).unwrap();
+        let live = Outpoint { txid: tx_id(0xB0), index: 0 };
+
+        // A one-input, one-output pending-tx builder.
+        let mk = |txid: TxId, spend: Option<Outpoint>, out: Output| Transaction {
+            txid,
+            version: 1,
+            inputs: spend
+                .map(|previous_outpoint| Input {
+                    previous_outpoint,
+                    signature_script: vec![0x99],
+                    compute_budget: 7,
+                })
+                .into_iter()
+                .collect(),
+            outputs: vec![out],
+            payload: vec![],
+        };
+        let covenant_out = |id: CovenantId| Output {
+            value: 1_000,
+            spk_version: 0,
+            spk_script: vec![0x51],
+            covenant: Some(CovenantBinding { covenant_id: id, authorizing_input: 0 }),
+        };
+        let plain_out =
+            || Output { value: 1_000, spk_version: 0, spk_script: vec![0x51], covenant: None };
+
+        // Transition: spends the live UTXO and re-creates state under the same id.
+        let tx_transition = mk(tx_id(0x11), Some(live), covenant_out(CovenantId([0xB2; 32])));
+        assert_eq!(
+            classify_pending(&store, &tx_transition).unwrap(),
+            vec![PendingTxEvent {
+                covenant_id: CovenantId([0xB2; 32]),
+                kind: EventKind::Transition
+            }]
+        );
+
+        // Burn: spends the live UTXO but creates no covenant output.
+        let tx_burn = mk(tx_id(0x22), Some(live), plain_out());
+        assert_eq!(
+            classify_pending(&store, &tx_burn).unwrap(),
+            vec![PendingTxEvent { covenant_id: CovenantId([0xB2; 32]), kind: EventKind::Burn }]
+        );
+
+        // Genesis: an output bound to an id that recomputes from its authorizing
+        // input's previous outpoint — a fresh KIP-20 birth the store hasn't seen.
+        let gp = Outpoint { txid: tx_id(0x77), index: 3 };
+        let (val, spk) = (5_000u64, vec![0xaa, 0xbb]);
+        let gid = crate::node::compute_covenant_id(&gp, &[(0, val, 0, spk.as_slice())]);
+        let genesis_out = Output {
+            value: val,
+            spk_version: 0,
+            spk_script: spk,
+            covenant: Some(CovenantBinding { covenant_id: gid, authorizing_input: 0 }),
+        };
+        let tx_genesis = mk(tx_id(0x33), Some(gp), genesis_out);
+        assert_eq!(
+            classify_pending(&store, &tx_genesis).unwrap(),
+            vec![PendingTxEvent { covenant_id: gid, kind: EventKind::Genesis }]
+        );
+
+        // Non-covenant: touches no covenant UTXO and binds no id — empty vec.
+        let tx_noop =
+            mk(tx_id(0x44), Some(Outpoint { txid: tx_id(0xFE), index: 9 }), plain_out());
+        assert!(classify_pending(&store, &tx_noop).unwrap().is_empty());
     }
 }

@@ -11,6 +11,7 @@ pub trait ChainSource {
     fn dag_info(&self) -> impl std::future::Future<Output = Result<DagInfo>>;
     fn block_with_txs(&self, hash: BlockHash) -> impl std::future::Future<Output = Result<Block>>;
     fn virtual_chain_from(&self, cursor: BlockHash) -> impl std::future::Future<Output = Result<ChainStep>>;
+    fn mempool_txs(&self) -> impl std::future::Future<Output = Result<Vec<Transaction>>>;
 }
 
 impl ChainSource for NodeHandle {
@@ -22,5 +23,8 @@ impl ChainSource for NodeHandle {
     }
     async fn virtual_chain_from(&self, cursor: BlockHash) -> Result<ChainStep> {
         NodeHandle::virtual_chain_from(self, cursor).await
+    }
+    async fn mempool_txs(&self) -> Result<Vec<Transaction>> {
+        NodeHandle::mempool_txs(self).await
     }
 }

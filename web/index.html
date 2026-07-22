@@ -207,6 +207,12 @@
         <div id="pulse-chart" class="pulse-chart"></div>
       </section>
 
+      <section class="pending" id="section-pending" aria-label="Pending covenant activity" aria-live="polite" hidden>
+        <h2>in the mempool <span class="pending-live-dot" aria-hidden="true"></span> <span class="collapse-count dim" id="pending-count"></span></h2>
+        <p class="dim families-sub">covenant transactions the node has seen but no block has confirmed yet — each clears the moment it lands on-chain.</p>
+        <div id="pending-row"></div>
+      </section>
+
       <section class="records" id="section-records" aria-label="Record holders" hidden>
         <h2>record holders</h2>
         <div id="records-row" class="mini-grid"></div>

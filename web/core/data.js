@@ -248,6 +248,9 @@ async function loadLite(network) {
    from an older worker is remembered (data: null) and reprobed after the
    ttl, so the section hides instead of pinning a dead panel. */
 const TEMPLATES_TTL_MS = 60_000;
+/* the pending feed is real-time — a short TTL so the seed snapshot is fresh,
+   though the SSE stream is what actually keeps it live between polls. */
+const PENDING_TTL_MS = 5_000;
 
 async function loadTemplates(network) {
   const t = state.templates[network];
@@ -274,6 +277,23 @@ async function loadLanes(network) {
     if (!res.ok) { state.lanes[network] = { data: null, at: Date.now() }; return null; }
     const data = await res.json();
     state.lanes[network] = { data, at: Date.now() };
+    return data;
+  } catch (e) {
+    return t ? t.data : null;
+  }
+}
+
+/* Live pending (mempool) covenant snapshot. Short TTL — this is a real-time
+   feed. A 404 (poller disabled for a no-mempool node, or an old worker) caches
+   a null so renderPending feature-hides the section instead of retrying hard. */
+async function loadPending(network) {
+  const t = state.pending[network];
+  if (t && Date.now() - t.at < PENDING_TTL_MS) return t.data;
+  try {
+    const res = await fetch(`data/${network}/pending`, { cache: 'no-cache' });
+    if (!res.ok) { state.pending[network] = { data: null, at: Date.now() }; return null; }
+    const data = await res.json();
+    state.pending[network] = { data, at: Date.now() };
     return data;
   } catch (e) {
     return t ? t.data : null;
@@ -555,7 +575,7 @@ export {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
   loadDetail, loadAddress, loadLite,
-  loadTemplates, loadLanes, loadInscriptions, loadLifespans, loadFamilies,
+  loadTemplates, loadLanes, loadPending, loadInscriptions, loadLifespans, loadFamilies,
   loadActivity, loadReorgs, loadDigest,
   galaxyCache, loadGalaxy,
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,

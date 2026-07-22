@@ -122,6 +122,9 @@ impl ChainSource for FakeGapChain {
     async fn virtual_chain_from(&self, cursor: BlockHash) -> Result<ChainStep> {
         Ok(self.steps.get(&cursor).cloned().unwrap_or(ChainStep { removed: vec![], added: vec![] }))
     }
+    async fn mempool_txs(&self) -> Result<Vec<Transaction>> {
+        Ok(vec![])
+    }
 }
 
 fn accepted(block: BlockHash, txs: &[TxId]) -> AcceptedBlock {

@@ -103,6 +103,22 @@ impl NodeHandle {
                 .collect(),
         })
     }
+
+    /// Current mempool transactions, mapped into the stable model. wRPC has no
+    /// mempool push notification, so the pending feed polls this and diffs.
+    /// `map_tx` needs verbose_data for the txid; the node fills it here, but a
+    /// tx missing it maps to an all-zero txid the poller could never key on
+    /// (its outpoint would be unknowable), so drop those rather than track a
+    /// phantom.
+    pub async fn mempool_txs(&self) -> Result<Vec<Transaction>> {
+        let entries =
+            self.client.get_mempool_entries(false, false).await.map_err(rpc_err)?;
+        Ok(entries
+            .into_iter()
+            .map(|e| map_tx(e.transaction))
+            .filter(|tx| tx.txid != TxId([0; 32]))
+            .collect())
+    }
 }
 
 fn rpc_err(e: kaspa_rpc_core::RpcError) -> Error {

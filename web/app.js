@@ -23,7 +23,7 @@ import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
   loadDetail, loadAddress, loadLite,
-  loadTemplates, loadLanes, loadInscriptions, loadLifespans, loadFamilies,
+  loadTemplates, loadLanes, loadPending, loadInscriptions, loadLifespans, loadFamilies,
   loadActivity, loadReorgs, loadDigest,
   galaxyCache, loadGalaxy,
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,
@@ -98,6 +98,82 @@ function renderLanes(network) {
       `<span class="lane-track"><span class="lane-fill" style="width:${w}%"></span></span>` +
       `<span class="lane-counts dim">${fmtInt(l.events)} tx${l.events === 1 ? '' : 's'} · ${fmtInt(l.covenants)} coin${l.covenants === 1 ? '' : 's'}</span></div>`;
   }).join('') + hexRow;
+}
+
+/* live pending (mempool) covenant feed — rows appear as covenant txs enter the
+   node's mempool and clear as a block confirms them (or the pool drops them).
+   pendingLive[network] is a Map<txid, { covenant_id, tx_kind, ts, resolution? }>
+   in insertion order, seeded once from the /pending snapshot and kept live by
+   the SSE stream. Kept separate from state.pending (the fetch cache) so the
+   stream can mutate it between snapshot reloads. */
+const pendingLive = {};
+const PENDING_ROWS_MAX = 24;   // DOM cap — mempool is a ticker, not an archive
+const PENDING_LIVE_MAX = 128;  // client-side entry cap (server caps its snapshot)
+
+function renderPending(network) {
+  if (state.network !== network || parseRoute().view !== 'explore') return;
+  const section = $('#section-pending');
+  const host = $('#pending-row');
+  if (!section || !host) return;
+  const map = pendingLive[network];
+  if (!map) {
+    /* lazy seed from the snapshot; a 404 (no-mempool node / old worker) seeds
+       an empty map so the section simply stays hidden — feature-detected. */
+    loadPending(network).then((d) => {
+      if (!pendingLive[network]) pendingLive[network] = new Map();
+      if (d && Array.isArray(d.pending)) {
+        for (const p of d.pending) {
+          if (p && p.txid) {
+            pendingLive[network].set(p.txid, { covenant_id: p.covenant_id, tx_kind: p.tx_kind, ts: Date.now() });
+          }
+        }
+      }
+      if (state.network === network && parseRoute().view === 'explore') renderPending(network);
+    });
+    section.hidden = true;
+    return;
+  }
+  const rows = [...map.entries()];
+  if (!rows.length) { section.hidden = true; return; }
+  section.hidden = false;
+  const cnt = $('#pending-count');
+  if (cnt) cnt.textContent = `${rows.length} in the mempool`;
+  /* newest first — a live ticker reads top-down */
+  host.innerHTML = rows.slice().reverse().slice(0, PENDING_ROWS_MAX).map(([txid, p]) => {
+    const meta = KIND_META[p.tx_kind] || KIND_META.transition;
+    const name = p.covenant_id ? friendlyName(p.covenant_id) : shortHex(txid, 8, 6);
+    const res = p.resolution === 'confirmed' ? ' pending-confirmed'
+      : (p.resolution === 'dropped' ? ' pending-dropped' : '');
+    return `<div class="pending-row ${esc(meta.cls)}${res}" data-txid="${esc(txid)}">` +
+      `<span class="pending-kind">${esc(p.tx_kind || 'pending')}</span>` +
+      `<span class="lane-ns pending-name">${esc(name)}</span>` +
+      `<span class="lane-counts dim mono pending-tx">${esc(shortHex(txid, 8, 6))}` +
+      `<span class="pending-spin" aria-hidden="true">⏳</span></span></div>`;
+  }).join('');
+}
+
+/* record a freshly-seen pending covenant tx from the stream, evicting the
+   oldest if the client map is over its cap. */
+function notePending(network, txid, covenant_id, tx_kind) {
+  if (!pendingLive[network]) pendingLive[network] = new Map();
+  const map = pendingLive[network];
+  map.delete(txid); // re-insert moves it to newest
+  map.set(txid, { covenant_id, tx_kind, ts: Date.now() });
+  while (map.size > PENDING_LIVE_MAX) map.delete(map.keys().next().value);
+}
+
+/* resolve a tracked pending tx: mark it (confirmed flash / dropped fade), then
+   evict it after the animation and re-render. */
+function resolvePending(network, txid, resolution) {
+  const map = pendingLive[network];
+  if (!map || !map.has(txid)) return;
+  map.get(txid).resolution = resolution;
+  renderPending(network);
+  setTimeout(() => {
+    const m = pendingLive[network];
+    if (m) m.delete(txid);
+    renderPending(network);
+  }, resolution === 'confirmed' ? 900 : 700);
 }
 
 function renderInscriptions(network) {
@@ -453,6 +529,7 @@ function renderLiteExplore(live, network) {
   /* these fetch their own small endpoints — render even before the big
      snapshot lands so the analytics show immediately */
   renderFamilies(network);
+  renderPending(network);
   renderLanes(network);
   renderInscriptions(network);
   renderLifespans(network);
@@ -1933,6 +2010,7 @@ function renderExplore(entry) {
   renderRecords(entry, network);
   renderTemplates(network);
   renderFamilies(network);
+  renderPending(network);
   renderLanes(network);
   renderInscriptions(network);
   renderLifespans(network);
@@ -4993,8 +5071,21 @@ function syncStream() {
       if (stream.es === es) stream.retryMs = STREAM_RETRY_BASE_MS;
     }, STREAM_SETTLE_MS);
   };
-  es.onmessage = () => {
+  es.onmessage = (e) => {
     stream.retryMs = STREAM_RETRY_BASE_MS;
+    /* pending (mempool) frames drive their own section and must not poke the
+       confirmed feed; parse defensively so a keepalive can never throw. */
+    let msg = null;
+    try { msg = JSON.parse(e.data); } catch (_) { /* keepalive / non-JSON */ }
+    if (msg && msg.kind === 'pending') {
+      notePending(network, msg.txid, msg.covenant_id, msg.tx_kind);
+      renderPending(network);
+      return;
+    }
+    if (msg && msg.kind === 'pending_resolved') {
+      resolvePending(network, msg.txid, msg.resolution);
+      return;
+    }
     flashLiveBadge();
     clearTimeout(stream.pokeTimer);
     stream.pokeTimer = setTimeout(pollLive, STREAM_POKE_MS);
