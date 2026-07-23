@@ -3024,7 +3024,10 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
 .token-page-fields { margin: -0.6rem 0 1.4rem; }
 .token-stats { grid-template-columns: repeat(4, minmax(0, 200px)); }
 @media (max-width: 640px) { .token-stats { grid-template-columns: repeat(2, 1fr); } }
-.token-stats .stat-n { font-size: clamp(1.1rem, 2.6vw, 1.6rem); }
+.token-stats .stat-n { font-size: clamp(1.1rem, 2.6vw, 1.6rem); overflow-wrap: anywhere; }
+/* let the cell shrink; the value is compacted (2.1T) but this contains any
+   un-compactable huge string instead of letting it spill into the next card */
+.token-stats .stat { min-width: 0; }
 
 .token-validation {
   border: 1px solid var(--border);

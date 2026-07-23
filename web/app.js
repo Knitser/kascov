@@ -4004,6 +4004,25 @@ function fmtTokenAmount(a) {
   return a == null ? '—' : String(a);
 }
 
+/* Compact form for the token stat tiles: a supply in raw base units can run to
+   trillions and overflow the fixed-width card. Returns { short, full } — short
+   is a magnitude-suffixed value (2.1T) that fits, full is the exact grouped
+   number kept in the tile's tooltip so the precise value stays one hover away. */
+function fmtTokenAmountShort(a) {
+  const full = fmtTokenAmount(a);
+  const n = typeof a === 'number' ? a : Number(a);
+  if (!Number.isFinite(n) || Math.abs(n) < 1e6) return { short: full, full };
+  for (const [base, suf] of [[1e15, 'Q'], [1e12, 'T'], [1e9, 'B'], [1e6, 'M']]) {
+    if (Math.abs(n) >= base) {
+      const x = n / base;
+      const s = x < 10 ? x.toFixed(2) : x < 100 ? x.toFixed(1) : x.toFixed(0);
+      const clean = s.indexOf('.') >= 0 ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
+      return { short: clean + suf, full };
+    }
+  }
+  return { short: full, full };
+}
+
 /* the decoded fields object as compact label/value chips — long hex values
    shortened for display, the full value in the tooltip. The state amount is
    8 little-endian bytes: decode it to the human number (same decode the
@@ -4342,9 +4361,10 @@ function renderTokenPage(route) {
     ['supply', t.supply], ['minted', t.minted], ['burned', t.burned], ['holders', t.holders],
   ].filter(([, v]) => v != null);
   const stats = tiles.length
-    ? `<div class="lane-stats token-stats">` + tiles.map(([label, v]) =>
-        `<div class="stat"><span class="stat-n">${esc(fmtTokenAmount(v))}</span><span class="stat-label">${esc(label)}</span></div>`
-      ).join('') + `</div>`
+    ? `<div class="lane-stats token-stats">` + tiles.map(([label, v]) => {
+        const f = fmtTokenAmountShort(v);
+        return `<div class="stat"><span class="stat-n" title="${esc(f.full)}">${esc(f.short)}</span><span class="stat-label">${esc(label)}</span></div>`;
+      }).join('') + `</div>`
     : '';
 
   /* top holders: balance share against the live supply when the worker gave
