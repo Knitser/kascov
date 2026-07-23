@@ -4922,7 +4922,17 @@ async function refreshSnapshot(force) {
        (yanking the open coin's story mid-read would collapse its sections) */
     const dm = state.details[network];
     if (dm) for (const k of [...dm.keys()]) { if (k !== state.detailId) dm.delete(k); }
-    if (network === state.network && parseRoute().view !== 'detail') render();
+    /* A background snapshot refresh only drives the explore view. The
+       self-fetching / user-input views (build, decode, preflight, address,
+       lane, token/tx pages, …) must NOT be rebuilt from under the user: doing
+       so wipes typed input and, right after a one-click deploy, erases the
+       success + coin link before it can settle. Detail is likewise left alone
+       (a rebuild would collapse the open coin's story mid-read). */
+    const rv = parseRoute().view;
+    const selfRendered = rv === 'detail' || rv === 'decode' || rv === 'dev'
+      || rv === 'build' || rv === 'preflight' || rv === 'address' || rv === 'lane'
+      || rv === 'tokens' || rv === 'token' || rv === 'tx' || rv === 'changelog';
+    if (network === state.network && !selfRendered) render();
   } catch (e) {
     /* transient — the next tick retries */
   }
