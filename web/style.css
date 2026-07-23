@@ -410,6 +410,13 @@ h2::after {
   color: var(--muted);
   font-size: 0.86rem;
   font-variant-numeric: tabular-nums;
+  /* one ellipsized line so the live-badge/count text (rewritten every ~12s)
+     can't re-wrap the strip or bump the howto-link to a second line and shift
+     everything below it, including the mempool. mobile lets it wrap (below). */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .howto-link { font-size: 0.82rem; color: var(--faint); white-space: nowrap; }
@@ -1680,10 +1687,12 @@ a.btn:hover { text-decoration: none; }
 /* (the legacy .pulse-* SVG rules above still serve the 404 fallback chart) */
 
 .pulse-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; margin-bottom: 0.7rem; }
-.pulse-head .pulse-caption { margin: 0; flex: 1 1 240px; }
+.pulse-head .pulse-caption { margin: 0; flex: 1 1 240px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pulse-ranges { display: inline-flex; gap: 0.3rem; margin-left: auto; }
 
-.pulse-plot { position: relative; outline-offset: 4px; }
+/* reserve the plot's tallest (with-data) height so the shorter empty state
+   (.pulse-none) can't shrink the chart and shove the mempool section below it. */
+.pulse-plot { position: relative; outline-offset: 4px; min-height: 196px; }
 .pulse-bars {
   display: flex;
   align-items: stretch;
@@ -1812,6 +1821,9 @@ a.btn:hover { text-decoration: none; }
   /* the mobile contract asks for ~220px of chart at 1:1 pixels — 194px
      of bars + the ~26px tick row lands there (overrides the 150px above) */
   .pulse-bars { height: 194px; }
+  /* match the plot's reserved height to the taller mobile bars so the empty
+     state never shrinks the chart and shifts the mempool */
+  .pulse-plot { min-height: 220px; }
   /* the pointer tooltip may never poke past the chart card on a phone */
   .pulse-tip { max-width: calc(100% - 8px); white-space: normal; }
   /* range pills scroll instead of wrapping so the chart keeps its height
@@ -2827,13 +2839,19 @@ details.collapse-sec > summary:hover h2 { color: var(--accent); }
 .collapse-count { font-size: 0.85rem; font-family: var(--mono); }
 
 /* analytics board — a small dashboard of charts drawn from the explore feeds */
-.analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem; margin-top: 0.3rem; }
+.analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem; margin-top: 0.3rem; align-items: start; }
 .analytics-card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); box-shadow: var(--hairline); padding: 0.9rem 1rem 1rem; min-width: 0; }
 .analytics-card[hidden] { display: none; }
 .analytics-card h3 { margin: 0 0 0.6rem; font-size: 0.92rem; font-weight: 600; color: var(--text); }
 .analytics-card h3::before { content: "\25AE "; color: var(--accent); font-size: 0.55rem; }
 .analytics-card .an-svg { width: 100%; height: auto; display: block; }
 .analytics-card .an-spark { width: 100%; height: 34px; display: block; margin-top: 0.4rem; }
+/* every card body gets a stable floor so a loading card is the same height as a
+   loaded one (kills the async jump), and the contract-type list scrolls inside
+   its own card instead of stretching its grid row-partner (recent reorgs) tall.
+   align-items:start above stops equal-row-height stretch; this caps the growth. */
+.analytics-card > div { min-height: 9rem; }
+#analytics-templates { max-height: 13rem; overflow-y: auto; }
 .an-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.8rem; color: var(--faint); margin-bottom: 0.4rem; }
 .an-legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
 .an-note { font-size: 0.82rem; margin: 0 0 0.5rem; }
