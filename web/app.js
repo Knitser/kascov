@@ -144,7 +144,7 @@ function renderPending(network) {
   const cnt = $('#pending-count');
   if (cnt) cnt.textContent = rows.length ? String(rows.length) : '';
   if (!rows.length) {
-    host.innerHTML = '<div class="pending-empty dim">nothing pending right now, covenant transactions appear here the moment the node sees them</div>';
+    host.innerHTML = '<div class="pending-empty dim">nothing pending right now</div>';
     return;
   }
   /* newest at the bottom: as fresh txs arrive the window scrolls up and the

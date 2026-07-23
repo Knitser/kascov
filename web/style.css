@@ -2682,21 +2682,22 @@ a.lane-ns-link:hover, a.lane-ns-link:focus-visible { color: var(--accent); text-
 
 /* live pending (mempool) feed — a ticker of covenant txs awaiting a block */
 .pending { margin-bottom: 2.4rem; }
-/* locked window: the box grows to at most ~3 rows then stops. fresh txs enter
-   at the bottom and the stack scrolls up, the oldest sliding off the top, so a
-   burst of pending txs never shoves the page below it down. max-height (not a
-   fixed height) keeps the empty or single-row state flush under the header with
-   no reserved gap, and justify-content flex-end clips the top, not the newest. */
+/* locked strip: a FIXED height so the box never grows or shrinks as pending txs
+   come and go. empty, one row, or a burst all occupy the same height, so nothing
+   below it ever jumps. fresh txs enter at the bottom and the stack scrolls up,
+   the oldest sliding off the top (justify-content flex-end clips the top, not the
+   newest). ~2 rows: tall enough to show a burst, short enough to sit quietly when
+   idle, which on Kaspa is most of the time. */
 #pending-row {
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  max-height: 7.2rem;
+  height: 5.4rem;
   overflow: hidden;
 }
-/* the empty placeholder is not a row to clip, so let it show in full (it wraps
-   to a couple of lines on narrow screens) instead of being cut by the row cap. */
-#pending-row:has(.pending-empty) { max-height: none; }
+/* the empty placeholder centers in the fixed strip (a short single line that
+   fits at every width) rather than bottom-anchoring. */
+#pending-row:has(.pending-empty) { justify-content: center; }
 .pending-empty { padding: 1.1rem 0.25rem; font-size: 0.92rem; }
 .pending h2 { display: flex; align-items: center; gap: 0.5rem; }
 .pending-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 var(--accent-soft); animation: pending-pulse 2s ease-out infinite; }
@@ -2720,7 +2721,7 @@ a.lane-ns-link:hover, a.lane-ns-link:focus-visible { color: var(--accent); text-
 .pending-row.kind-born .pending-kind { color: var(--born); background: var(--born-soft); border-color: transparent; }
 .pending-row.kind-move .pending-kind { color: var(--move); background: var(--move-soft); border-color: transparent; }
 .pending-row.kind-burn .pending-kind { color: var(--burn); background: var(--burn-soft); border-color: transparent; }
-.pending-name { font-size: 0.9rem; }
+.pending-name { font-size: 0.9rem; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pending-tx { display: inline-flex; align-items: center; gap: 0.4rem; white-space: nowrap; font-size: 0.8rem; }
 .pending-spin { display: inline-block; animation: pending-spin 1.6s linear infinite; }
 @keyframes pending-spin { to { transform: rotate(360deg); } }
