@@ -7,7 +7,7 @@ const source = readFileSync(new URL('./galaxy.js', import.meta.url), 'utf8');
 const sandbox = { window: {} };
 vm.runInNewContext(source, sandbox);
 
-const { _appFocusScale, _hasIdentity } = sandbox.window.kascovGalaxy;
+const { _appFocusScale, _hasIdentity, _visualIds } = sandbox.window.kascovGalaxy;
 
 test('a small edge cluster keeps surrounding aggregates during first focus', () => {
   const fitScale = 0.1;
@@ -35,4 +35,8 @@ test('visual-tier placeholder nodes are not treated as clickable identities', ()
   assert.equal(_hasIdentity(''), false);
   assert.equal(_hasIdentity(null), false);
   assert.equal(_hasIdentity('001122'), true);
+});
+
+test('visual tier preserves the core identity prefix and pads outer nodes', () => {
+  assert.deepEqual(Array.from(_visualIds(['aa', 'bb'], 5)), ['aa', 'bb', '', '', '']);
 });

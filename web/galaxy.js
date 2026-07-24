@@ -94,6 +94,11 @@
     return Math.max(currentScale, desired);
   }
   const hasIdentity = (id) => typeof id === 'string' && id.length > 0;
+  function visualIds(coreIds, total) {
+    const out = new Array(total).fill('');
+    for (let i = 0; i < Math.min(coreIds.length, total); i++) out[i] = coreIds[i];
+    return out;
+  }
 
   // geometric radius buckets (~±6% quantization) so sprite cache stays small
   const ORB_BUCKETS = [];
@@ -200,6 +205,41 @@
       } else {
         resize(); // sizes the backing store, computes fit, draws
       }
+    }
+
+    function loadVisual(d) {
+      if (!d || !d.nx || !d.ny || !d.nr || !d.nt || !d.ns || !d.na) return false;
+      const nextN = d.nx.length;
+      if (!nextN) return false;
+
+      // Core identities are a stable prefix because apps are sorted largest
+      // first. Extend that prefix with identity-free visual nodes; the later
+      // full hot-swap replaces every placeholder without moving the camera.
+      const coreIds = ids || [];
+      N = nextN;
+      ids = visualIds(coreIds, nextN);
+      nx = Float32Array.from(d.nx);
+      ny = Float32Array.from(d.ny);
+      nr = Float32Array.from(d.nr);
+      nt = Int16Array.from(d.nt);
+      ns = Uint8Array.from(d.ns);
+      na = Int32Array.from(d.na);
+
+      const es = d.edges || [];
+      edges = new Int32Array(es.length * 3);
+      for (let k = 0; k < es.length; k++) {
+        edges[k * 3] = es[k][0];
+        edges[k * 3 + 1] = es[k][1];
+        edges[k * 3 + 2] = es[k][2] || 1;
+      }
+      nodeGrid = buildSpatialGrid(N, (i) => nx[i], (i) => ny[i]);
+      applyFilter();
+      hoverNode = -1;
+      hoverApp = -1;
+      focusNode = -1;
+      hideTip();
+      requestDraw();
+      return true;
     }
 
     function data_reset(d) {
@@ -1510,10 +1550,15 @@
 
     const colorForTemplate = (i) => (i >= 0 && i < tplColors.length ? tplColors[i] : UNKNOWN_COLOR);
     return {
-      load, setFilter, setColorMode, search, focus, zoom, resize, destroy,
+      load, loadVisual, setFilter, setColorMode, search, focus, zoom, resize, destroy,
       templates: () => templates, colorForTemplate, _bench, _debug,
     };
   }
 
-  window.kascovGalaxy = { create, _appFocusScale: appFocusScale, _hasIdentity: hasIdentity };
+  window.kascovGalaxy = {
+    create,
+    _appFocusScale: appFocusScale,
+    _hasIdentity: hasIdentity,
+    _visualIds: visualIds,
+  };
 })();

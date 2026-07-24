@@ -1215,13 +1215,17 @@ async fn serve(
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
-                for core_only in [true, false] {
+                for tier in ["core", "visual", "full"] {
                     for &network in &state.networks {
                         let db = state.base_dir.join(format!("{network}.db"));
                         if !db.exists() {
                             continue;
                         }
-                        let fmt = GalaxyFmt { columnar: true, core_only };
+                        let fmt = GalaxyFmt {
+                            columnar: true,
+                            core_only: tier == "core",
+                            visual_only: tier == "visual",
+                        };
                         let built = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
                             let store = kascov_core::store::Store::open(&db, network)?;
                             Ok(serde_json::to_string(&build_galaxy_fmt(&store, network, fmt)?)?)
@@ -1229,7 +1233,7 @@ async fn serve(
                         .await;
                         match built {
                             Ok(Ok(json)) => {
-                                let key = format!("{network}/galaxy?fmt=1&tier={}", core_only as u8);
+                                let key = format!("{network}/galaxy?fmt=1&tier={tier}");
                                 state.cache.lock().await.insert(
                                     key,
                                     (std::time::Instant::now(), std::sync::Arc::new(CachedBody::new(json))),
@@ -3742,18 +3746,18 @@ fn build_families(store: &Store, network: kascov_core::Network) -> Result<serde_
 ///                 `acx`/`acy`/`ar`/`asz`/`at`/`aalive` (index-aligned with
 ///                 the legacy `apps[]`, mirroring cx/cy/r/size/t/alive).
 ///                 `edges`, `bounds`, … are unchanged.
-///   `?tier=core`→ `core_only`: legacy `nodes[]`/edges include only clusters
-///                 of size >= GALAXY_CORE_MIN_SIZE. With `fmt=2`, lightweight
-///                 geometry and edges cover every cluster while expensive
-///                 covenant ids remain core-only (empty string otherwise).
-///                 This lets detail LOD render outer coins immediately; the
-///                 client hot-swaps real identities from the full tier later.
-///                 Apps, layout and bounds are always complete and stable.
+///   `?tier=core`→ nodes/edges only for clusters of size >=
+///                 GALAXY_CORE_MIN_SIZE; apps/layout/bounds remain complete.
+///   `?tier=visual` (fmt=2 only) → numeric geometry + edges for every node,
+///                 without covenant ids or repeated app arrays. The client
+///                 merges this small delta over core so outer details render
+///                 while the expensive full identity tier downloads.
 /// The two compose; `edges_total` always counts the full pre-cap edge set.
 #[derive(Clone, Copy, Default)]
 struct GalaxyFmt {
     columnar: bool,
     core_only: bool,
+    visual_only: bool,
 }
 
 /// `?tier=core` keeps only clusters at least this big.
@@ -4003,19 +4007,11 @@ fn build_galaxy_fmt(
             kept += 1;
         }
     }
-    let visual_core = fmt.columnar && fmt.core_only;
-    let edges_json: Vec<serde_json::Value> = if visual_core {
-        edges
-            .iter()
-            .map(|(a, b, w)| serde_json::json!([a, b, w]))
-            .collect()
-    } else {
-        edges
-            .iter()
-            .filter(|(a, b, _)| keep[*a] && keep[*b])
-            .map(|(a, b, w)| serde_json::json!([remap[*a], remap[*b], w]))
-            .collect()
-    };
+    let edges_json: Vec<serde_json::Value> = edges
+        .iter()
+        .filter(|(a, b, _)| keep[*a] && keep[*b])
+        .map(|(a, b, w)| serde_json::json!([remap[*a], remap[*b], w]))
+        .collect();
 
     if !min_x.is_finite() {
         min_x = 0.0;
@@ -4042,33 +4038,22 @@ fn build_galaxy_fmt(
     let obj = out.as_object_mut().expect("galaxy payload is an object");
     let sel = || recs.iter().zip(&keep).filter(|(_, k)| **k).map(|(r, _)| r);
     if fmt.columnar {
-        // The frontend's core tier carries every node's cheap numeric fields
-        // so aggregate dots can always resolve into detailed coins. Random
-        // 64-hex ids dominate transfer size, so identities outside large apps
-        // remain empty until the full-tier background request arrives.
-        let emitted: Vec<usize> = if visual_core {
-            (0..recs.len()).collect()
-        } else {
-            keep.iter()
-                .enumerate()
-                .filter_map(|(i, k)| k.then_some(i))
-                .collect()
-        };
+        let emitted: Vec<usize> = keep
+            .iter()
+            .enumerate()
+            .filter_map(|(i, k)| k.then_some(i))
+            .collect();
         // ?fmt=2 — parallel arrays; index-aligned with the legacy nodes[]
-        obj.insert(
-            "ids".into(),
-            emitted
-                .iter()
-                .map(|&i| {
-                    if visual_core && !keep[i] {
-                        serde_json::json!("")
-                    } else {
-                        serde_json::json!(recs[i].id)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .into(),
-        );
+        if !fmt.visual_only {
+            obj.insert(
+                "ids".into(),
+                emitted
+                    .iter()
+                    .map(|&i| serde_json::json!(recs[i].id))
+                    .collect::<Vec<_>>()
+                    .into(),
+            );
+        }
         obj.insert(
             "nx".into(),
             emitted
@@ -4117,17 +4102,19 @@ fn build_galaxy_fmt(
                 .collect::<Vec<serde_json::Value>>()
                 .into(),
         );
-        // …and the apps, index-aligned with the legacy apps[] (still ALL
-        // clusters, in both tiers — the far-zoom LOD must look complete)
-        obj.insert("acx".into(), apps.iter().map(|a| a.cx.into()).collect::<Vec<serde_json::Value>>().into());
-        obj.insert("acy".into(), apps.iter().map(|a| a.cy.into()).collect::<Vec<serde_json::Value>>().into());
-        obj.insert("ar".into(), apps.iter().map(|a| a.r.into()).collect::<Vec<serde_json::Value>>().into());
-        obj.insert("asz".into(), apps.iter().map(|a| a.size.into()).collect::<Vec<serde_json::Value>>().into());
-        obj.insert("at".into(), apps.iter().map(|a| a.t.into()).collect::<Vec<serde_json::Value>>().into());
-        obj.insert(
-            "aalive".into(),
-            apps.iter().map(|a| a.alive.into()).collect::<Vec<serde_json::Value>>().into(),
-        );
+        if !fmt.visual_only {
+            // Apps stay complete in core and full; the visual delta reuses
+            // the controller's already-loaded app arrays.
+            obj.insert("acx".into(), apps.iter().map(|a| a.cx.into()).collect::<Vec<serde_json::Value>>().into());
+            obj.insert("acy".into(), apps.iter().map(|a| a.cy.into()).collect::<Vec<serde_json::Value>>().into());
+            obj.insert("ar".into(), apps.iter().map(|a| a.r.into()).collect::<Vec<serde_json::Value>>().into());
+            obj.insert("asz".into(), apps.iter().map(|a| a.size.into()).collect::<Vec<serde_json::Value>>().into());
+            obj.insert("at".into(), apps.iter().map(|a| a.t.into()).collect::<Vec<serde_json::Value>>().into());
+            obj.insert(
+                "aalive".into(),
+                apps.iter().map(|a| a.alive.into()).collect::<Vec<serde_json::Value>>().into(),
+            );
+        }
     } else {
         let nodes: Vec<serde_json::Value> = sel()
             .map(|r| {
@@ -4161,9 +4148,9 @@ fn build_galaxy_fmt(
     if fmt.core_only {
         obj.insert("tier".into(), "core".into());
         obj.insert("nodes_total".into(), (recs.len() as u64).into());
-        if fmt.columnar {
-            obj.insert("identities_loaded".into(), (kept as u64).into());
-        }
+    } else if fmt.visual_only {
+        obj.insert("tier".into(), "visual".into());
+        obj.insert("nodes_total".into(), (recs.len() as u64).into());
     }
     Ok(out)
 }
@@ -5139,16 +5126,25 @@ async fn galaxy_handler(
     };
     // Opt-in payload variants (see GalaxyFmt). Unknown params and unknown
     // values degrade to the legacy shape, so old and new clients both work.
+    let columnar = q.get("fmt").is_some_and(|v| v == "2");
     let fmt = GalaxyFmt {
-        columnar: q.get("fmt").is_some_and(|v| v == "2"),
+        columnar,
         core_only: q.get("tier").is_some_and(|v| v == "core"),
+        visual_only: columnar && q.get("tier").is_some_and(|v| v == "visual"),
     };
     let db = state.base_dir.join(format!("{network}.db"));
     let cc = "public, max-age=30, s-maxage=120, stale-while-revalidate=600";
     // fold the (parsed, hence bounded: 4 combos) variant into the cache key;
     // the bare request keeps its historical key.
-    let key = if fmt.columnar || fmt.core_only {
-        format!("{network}/galaxy?fmt={}&tier={}", fmt.columnar as u8, fmt.core_only as u8)
+    let tier = if fmt.core_only {
+        "core"
+    } else if fmt.visual_only {
+        "visual"
+    } else {
+        "full"
+    };
+    let key = if fmt.columnar || fmt.core_only || fmt.visual_only {
+        format!("{network}/galaxy?fmt={}&tier={tier}", fmt.columnar as u8)
     } else {
         format!("{network}/galaxy")
     };
@@ -6843,8 +6839,12 @@ mod galaxy_tests {
         let store = galaxy_store("fmt2", vec![]);
         let net = Network::Testnet(10);
         let legacy = build_galaxy(&store, net).unwrap();
-        let col =
-            build_galaxy_fmt(&store, net, GalaxyFmt { columnar: true, core_only: false }).unwrap();
+        let col = build_galaxy_fmt(
+            &store,
+            net,
+            GalaxyFmt { columnar: true, core_only: false, visual_only: false },
+        )
+        .unwrap();
 
         assert!(col.get("nodes").is_none(), "fmt=2 must not carry nodes[]");
         assert!(col.get("tier").is_none(), "full tier must not be tagged");
@@ -6924,8 +6924,12 @@ mod galaxy_tests {
         let store = galaxy_store("core", extra);
         let net = Network::Testnet(10);
         let full = build_galaxy(&store, net).unwrap();
-        let core =
-            build_galaxy_fmt(&store, net, GalaxyFmt { columnar: false, core_only: true }).unwrap();
+        let core = build_galaxy_fmt(
+            &store,
+            net,
+            GalaxyFmt { columnar: false, core_only: true, visual_only: false },
+        )
+        .unwrap();
 
         assert_eq!(core["tier"], "core");
         let full_nodes = full["nodes"].as_array().unwrap();
@@ -6977,29 +6981,42 @@ mod galaxy_tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(core_pairs, expected);
 
-        // Composed frontend tier: geometry + edges cover the whole galaxy so
-        // outer apps do not disappear when detail LOD begins. Only the costly
-        // random covenant ids stay core-only; missing identities are empty
-        // strings until the background full-tier hot-swap.
-        let both =
-            build_galaxy_fmt(&store, net, GalaxyFmt { columnar: true, core_only: true }).unwrap();
+        // Composed core remains compact: large-cluster identities + geometry,
+        // with complete app aggregates for the overview.
+        let both = build_galaxy_fmt(
+            &store,
+            net,
+            GalaxyFmt { columnar: true, core_only: true, visual_only: false },
+        )
+        .unwrap();
         assert_eq!(both["tier"], "core");
-        assert_eq!(both["ids"].as_array().unwrap().len(), full_nodes.len());
-        assert_eq!(both["nx"].as_array().unwrap().len(), full_nodes.len());
-        for (i, n) in full_nodes.iter().enumerate() {
-            let is_core = core_nodes.iter().any(|c| c["id"] == n["id"]);
-            assert_eq!(
-                both["ids"][i],
-                if is_core { n["id"].clone() } else { "".into() }
-            );
+        assert_eq!(both["ids"].as_array().unwrap().len(), core_nodes.len());
+        assert_eq!(both["nx"].as_array().unwrap().len(), core_nodes.len());
+        for (i, n) in core_nodes.iter().enumerate() {
+            assert_eq!(both["ids"][i], n["id"]);
             assert_eq!(both["nx"][i], n["x"]);
             assert_eq!(both["ny"][i], n["y"]);
         }
-        assert_eq!(both["edges"], full["edges"]);
-        assert_eq!(
-            both["identities_loaded"].as_u64(),
-            Some(core_nodes.len() as u64)
-        );
+        assert_eq!(both["edges"], core["edges"]);
+
+        // The visual delta contains full numeric geometry + topology, but no
+        // heavyweight identities or duplicated app arrays.
+        let visual = build_galaxy_fmt(
+            &store,
+            net,
+            GalaxyFmt { columnar: true, core_only: false, visual_only: true },
+        )
+        .unwrap();
+        assert_eq!(visual["tier"], "visual");
+        assert!(visual.get("ids").is_none());
+        assert!(visual.get("acx").is_none());
+        assert_eq!(visual["nx"].as_array().unwrap().len(), full_nodes.len());
+        assert_eq!(visual["edges"], full["edges"]);
+        for (i, n) in full_nodes.iter().enumerate() {
+            assert_eq!(visual["nx"][i], n["x"]);
+            assert_eq!(visual["ny"][i], n["y"]);
+            assert_eq!(visual["na"][i], n["a"]);
+        }
     }
 }
 

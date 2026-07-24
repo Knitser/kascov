@@ -287,7 +287,19 @@ const galaxyUpgrading = {};
 function upgradeGalaxy(network) {
   if (galaxyUpgrading[network]) return;
   galaxyUpgrading[network] = true;
-  fetch(`data/${network}/galaxy.json?fmt=2`, { cache: 'no-cache' })
+  // First merge the small identity-free geometry delta so every outer app
+  // resolves into real nodes/edges quickly. The much larger id-bearing tier
+  // follows in the background and enables labels, search and coin clicks.
+  fetch(`data/${network}/galaxy.json?fmt=2&tier=visual`, { cache: 'no-cache' })
+    .then((res) => (res.ok ? res.json() : null))
+    .then((visual) => {
+      const count = visual && visual.nx && visual.nx.length;
+      if (count && galaxyCtrl && galaxyMounted === network) {
+        galaxyCtrl.loadVisual(visual);
+      }
+    })
+    .catch(() => null)
+    .then(() => fetch(`data/${network}/galaxy.json?fmt=2`, { cache: 'no-cache' }))
     .then((res) => (res.ok ? res.json() : null))
     .then((full) => {
       delete galaxyUpgrading[network];
