@@ -2839,7 +2839,7 @@ details.collapse-sec > summary:hover h2 { color: var(--accent); }
 .collapse-count { font-size: 0.85rem; font-family: var(--mono); }
 
 /* analytics board — a small dashboard of charts drawn from the explore feeds */
-.analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem; margin-top: 0.3rem; align-items: start; }
+.analytics-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem; margin-top: 0.3rem; align-items: stretch; }
 .analytics-card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); box-shadow: var(--hairline); padding: 0.9rem 1rem 1rem; min-width: 0; }
 .analytics-card[hidden] { display: none; }
 .analytics-card h3 { margin: 0 0 0.6rem; font-size: 0.92rem; font-weight: 600; color: var(--text); }
@@ -2849,7 +2849,8 @@ details.collapse-sec > summary:hover h2 { color: var(--accent); }
 /* every card body gets a stable floor so a loading card is the same height as a
    loaded one (kills the async jump), and the contract-type list scrolls inside
    its own card instead of stretching its grid row-partner (recent reorgs) tall.
-   align-items:start above stops equal-row-height stretch; this caps the growth. */
+   The 13rem cap keeps that list bounded, so align-items:stretch equalizes the row
+   (reorgs matches contract-type) without the list running away. */
 .analytics-card > div { min-height: 9rem; }
 #analytics-templates { max-height: 13rem; overflow-y: auto; }
 .an-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; font-size: 0.8rem; color: var(--faint); margin-bottom: 0.4rem; }
