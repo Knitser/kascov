@@ -2972,7 +2972,7 @@ function renderDetail(entry, covId, flashTx, program) {
   }
   const togetherSection = togetherCounts.size
     ? `<section class="together" aria-label="Coins moved together"><h2>moved together</h2>` +
-      `<p class="dim together-sub">other smart coins that shared a transaction with this one — tap any dot to open it</p>` +
+      `<p class="dim together-sub">other smart coins that shared a transaction with this one — hover a dot to name it; click or tap the dot to open it</p>` +
       `<canvas id="together-graph" class="together-graph" width="600" height="360" role="img"` +
       ` aria-label="graph of ${esc(fmtInt(togetherCounts.size))} coins that moved with this one"></canvas></section>`
     : '';
@@ -6367,5 +6367,4 @@ networkFilterReset(); /* testnet-10 boots with the traffic generator hidden */
 render();
 pollLive();
 setTimeout(maybeStartTour, 900);
-
 

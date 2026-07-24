@@ -13,18 +13,37 @@
     return COLORS[h % COLORS.length];
   }
 
+  function hitNode(nodes, mx, my, pointerType) {
+    let best = null, bd = Infinity;
+    for (const n of nodes) {
+      if (n.hub) continue;
+      const dx = n.x - mx, dy = n.y - my, d2 = dx * dx + dy * dy;
+      // Mouse interaction should closely match the painted dot. Touch keeps a
+      // larger accessible target, but it is still local to the dot rather than
+      // turning the surrounding graph card into an invisible link.
+      const hitRadius = pointerType === 'touch'
+        ? Math.max(18, n.r + 8)
+        : n.r + 4;
+      if (d2 <= hitRadius * hitRadius && d2 < bd) { bd = d2; best = n; }
+    }
+    return best;
+  }
+
   /* nodes: [{id, label, hub?}], edges: [[i,j]]. Returns a controller with
      .stop() and a click handler wired to onPick(node). */
   function render(canvas, family, opts) {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const W = canvas.clientWidth || 600;
-    const H = canvas.clientHeight || 380;
+    const members = family.members.slice(0, 40);
+    canvas.classList.toggle('together-graph-compact', members.length <= 4);
+    canvas.classList.toggle('together-graph-medium', members.length > 4 && members.length <= 12);
+
+    let dpr = Math.min(window.devicePixelRatio || 1, 2);
+    let W = canvas.clientWidth || 600;
+    let H = canvas.clientHeight || 380;
     canvas.width = W * dpr;
     canvas.height = H * dpr;
     const ctx = canvas.getContext('2d');
-    ctx.scale(dpr, dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    const members = family.members.slice(0, 40);
     // hub node + one node per member, spokes hub->member
     const nodes = [{ id: '__hub__', label: family.label || 'app', hub: true, x: W / 2, y: H / 2, vx: 0, vy: 0 }];
     members.forEach((m, i) => {
@@ -43,6 +62,8 @@
     const REST = Math.min(150, 60 + members.length * 2);
     let running = true;
     let alpha = 1;
+    let hoverNode = null;
+    let lastPointerType = 'mouse';
 
     function tick() {
       // repulsion (all pairs)
@@ -84,9 +105,12 @@
     function draw() {
       ctx.clearRect(0, 0, W, H);
       // edges
-      ctx.strokeStyle = 'rgba(120,200,180,0.16)';
       ctx.lineWidth = 1;
       for (const [i, j] of edges) {
+        const edge = ctx.createLinearGradient(nodes[i].x, nodes[i].y, nodes[j].x, nodes[j].y);
+        edge.addColorStop(0, 'rgba(73,234,203,0.34)');
+        edge.addColorStop(1, `${colorFor(nodes[j].id)}88`);
+        ctx.strokeStyle = edge;
         ctx.beginPath();
         ctx.moveTo(nodes[i].x, nodes[i].y);
         ctx.lineTo(nodes[j].x, nodes[j].y);
@@ -95,37 +119,139 @@
       // nodes
       for (const n of nodes) {
         if (n.hub) {
-          ctx.fillStyle = 'rgba(73,234,203,0.14)';
-          ctx.strokeStyle = '#49eacb';
+          ctx.save();
+          ctx.shadowColor = 'rgba(73,234,203,0.42)';
+          ctx.shadowBlur = 16;
+          const hubGlow = ctx.createRadialGradient(n.x - 4, n.y - 5, 1, n.x, n.y, 17);
+          hubGlow.addColorStop(0, 'rgba(123,255,229,0.34)');
+          hubGlow.addColorStop(1, 'rgba(73,234,203,0.07)');
+          ctx.fillStyle = hubGlow;
+          ctx.strokeStyle = 'rgba(73,234,203,0.94)';
           ctx.lineWidth = 1.5;
-          ctx.beginPath(); ctx.arc(n.x, n.y, 15, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          ctx.beginPath(); ctx.arc(n.x, n.y, 16, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          ctx.shadowBlur = 0;
+          ctx.strokeStyle = 'rgba(73,234,203,0.14)';
+          ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.arc(n.x, n.y, 22, 0, Math.PI * 2); ctx.stroke();
+          ctx.fillStyle = '#8ff5df';
+          ctx.beginPath(); ctx.arc(n.x, n.y, 2.5, 0, Math.PI * 2); ctx.fill();
+          ctx.font = '600 10px ui-monospace, monospace';
+          ctx.textAlign = 'center';
+          ctx.fillStyle = 'rgba(177,207,198,0.72)';
+          ctx.fillText('THIS COIN', n.x, n.y + 38);
+          ctx.restore();
           continue;
         }
-        ctx.fillStyle = colorFor(n.id);
+        const color = colorFor(n.id);
+        ctx.save();
+        ctx.fillStyle = `${color}1f`;
+        ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 6, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowColor = color;
+        ctx.shadowBlur = n === hoverNode ? 18 : 10;
+        ctx.fillStyle = color;
         ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = 'rgba(235,255,249,0.44)';
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(n.x, n.y, n.r - 0.5, 0, Math.PI * 2); ctx.stroke();
+        if (n === hoverNode) {
+          ctx.strokeStyle = 'rgba(225,255,247,0.95)';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, n.r + 4, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+      if (hoverNode) {
+        const label = hoverNode.label;
+        ctx.save();
+        ctx.font = '12px ui-monospace, monospace';
+        const tw = Math.ceil(ctx.measureText(label).width);
+        const tx = Math.max(8, Math.min(W - tw - 20, hoverNode.x - tw / 2 - 10));
+        const ty = hoverNode.y > 42 ? hoverNode.y - hoverNode.r - 31 : hoverNode.y + hoverNode.r + 12;
+        ctx.fillStyle = 'rgba(3,14,11,0.92)';
+        ctx.fillRect(tx, ty, tw + 20, 25);
+        ctx.strokeStyle = 'rgba(73,234,203,0.28)';
+        ctx.strokeRect(tx + 0.5, ty + 0.5, tw + 19, 24);
+        ctx.fillStyle = 'rgba(230,240,248,0.96)';
+        ctx.textAlign = 'left';
+        ctx.fillText(label, tx + 10, ty + 17);
+        ctx.restore();
       }
     }
 
-    // click → nearest node within radius
-    function onClick(ev) {
+    function pointerPosition(ev) {
       const rect = canvas.getBoundingClientRect();
-      const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
-      let best = null, bd = 18 * 18;
-      for (const n of nodes) {
-        if (n.hub) continue;
-        const dx = n.x - mx, dy = n.y - my, d2 = dx * dx + dy * dy;
-        if (d2 < bd) { bd = d2; best = n; }
-      }
+      return {
+        x: (ev.clientX - rect.left) * (W / Math.max(1, rect.width)),
+        y: (ev.clientY - rect.top) * (H / Math.max(1, rect.height)),
+      };
+    }
+
+    function onPointerMove(ev) {
+      lastPointerType = ev.pointerType || 'mouse';
+      const p = pointerPosition(ev);
+      const next = hitNode(nodes, p.x, p.y, lastPointerType);
+      if (next === hoverNode) return;
+      hoverNode = next;
+      canvas.style.cursor = next ? 'pointer' : 'default';
+      draw();
+    }
+    function onPointerLeave() {
+      if (!hoverNode && canvas.style.cursor === 'default') return;
+      hoverNode = null;
+      canvas.style.cursor = 'default';
+      draw();
+    }
+
+    // Clicks resolve through the same precise hit test that drives hover.
+    function onClick(ev) {
+      const p = pointerPosition(ev);
+      const best = hitNode(nodes, p.x, p.y, ev.pointerType || lastPointerType);
       if (best && opts && opts.onPick) opts.onPick(best);
     }
+    function onPointerDown(ev) { lastPointerType = ev.pointerType || 'mouse'; }
+
     canvas.addEventListener('click', onClick);
-    canvas.style.cursor = 'pointer';
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointermove', onPointerMove);
+    canvas.addEventListener('pointerleave', onPointerLeave);
+    canvas.style.cursor = 'default';
+
+    // Keep painted and hit-test coordinates aligned when the responsive detail
+    // page changes width. Shift the settled layout with the new center.
+    const resizeObserver = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(() => {
+          const nextW = canvas.clientWidth || W;
+          const nextH = canvas.clientHeight || H;
+          if (nextW === W && nextH === H) return;
+          const dx = (nextW - W) / 2;
+          const dy = (nextH - H) / 2;
+          for (const n of nodes) { n.x += dx; n.y += dy; }
+          W = nextW;
+          H = nextH;
+          dpr = Math.min(window.devicePixelRatio || 1, 2);
+          canvas.width = Math.round(W * dpr);
+          canvas.height = Math.round(H * dpr);
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          draw();
+        })
+      : null;
+    if (resizeObserver) resizeObserver.observe(canvas);
 
     tick();
     return {
-      stop() { running = false; canvas.removeEventListener('click', onClick); },
+      stop() {
+        running = false;
+        canvas.removeEventListener('click', onClick);
+        canvas.removeEventListener('pointerdown', onPointerDown);
+        canvas.removeEventListener('pointermove', onPointerMove);
+        canvas.removeEventListener('pointerleave', onPointerLeave);
+        if (resizeObserver) resizeObserver.disconnect();
+      },
     };
   }
 
-  window.kascovGraph = { render, colorFor };
+  window.kascovGraph = { render, colorFor, _hitNode: hitNode };
 })();
