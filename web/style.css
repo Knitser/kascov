@@ -471,6 +471,42 @@ h2::after {
   color: var(--accent);
   background: var(--accent-soft);
 }
+
+/* scrollIntoView({block:"start"}) otherwise puts the section heading beneath
+   both sticky bars. Keep a little breathing room below the jump rail too. */
+#view-explore > :is(section, details)[id] {
+  scroll-margin-top: 140px;
+}
+
+/* On a genuinely wide screen the page has an unused gutter beside its
+   1080px content column. Put the section shortcuts there: no content is
+   squeezed, and the controls no longer cover the section they navigate. */
+@media (min-width: 1360px) {
+  .explore-jump {
+    position: fixed;
+    top: 82px;
+    left: max(12px, calc(50vw - 676px));
+    z-index: 9;
+    flex-direction: column;
+    align-items: stretch;
+    width: 116px;
+    max-width: none;
+    gap: 0.1rem;
+    margin: 0;
+    padding: 0.4rem;
+    border-radius: 14px;
+  }
+  .explore-jump button {
+    width: 100%;
+    min-height: 38px;
+    padding: 0.4rem 0.7rem;
+    text-align: left;
+  }
+  #view-explore > :is(section, details)[id] {
+    scroll-margin-top: 82px;
+  }
+}
+
 @media (max-width: 720px) {
   .explore-jump {
     position: static;
@@ -482,9 +518,15 @@ h2::after {
   .explore-jump::-webkit-scrollbar { display: none; }
   .explore-jump button { flex: 0 0 auto; min-height: 44px; }
 }
+@media (max-width: 460px) {
+  #view-explore > :is(section, details)[id] { scroll-margin-top: 1rem; }
+}
 
 .stats-strip {
-  margin: 0;
+  /* The strip clips long counts for its ellipsis. Expand that clip box around
+     the same footprint so the live dot's 14px event ripple remains visible. */
+  padding: 14px;
+  margin: -14px;
   color: var(--muted);
   font-size: 0.86rem;
   font-variant-numeric: tabular-nums;

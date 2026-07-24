@@ -12,6 +12,21 @@ test('phone header and navigation remain reachable without page overflow', () =>
   assert.match(css, /\.nav-link\s*\{[\s\S]*?min-height:\s*44px/);
 });
 
+test('explorer section jumps clear sticky chrome and become a wide-screen side rail', () => {
+  assert.match(
+    css,
+    /#view-explore\s*>\s*:is\(section,\s*details\)\[id\]\s*\{[^}]*scroll-margin-top:\s*140px/,
+  );
+  assert.match(
+    css,
+    /@media \(min-width: 1360px\)[\s\S]*?\.explore-jump\s*\{[^}]*position:\s*fixed[^}]*flex-direction:\s*column/,
+  );
+  assert.match(
+    css,
+    /\.stats-strip\s*\{[^}]*padding:\s*14px[^}]*margin:\s*-14px/,
+  );
+});
+
 test('coarse pointers get accessible controls and a scroll-releasing galaxy', () => {
   assert.match(css, /@media \(pointer: coarse\)/);
   assert.match(css, /min-height:\s*44px/);
