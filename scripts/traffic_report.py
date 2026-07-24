@@ -62,6 +62,11 @@ BOT_MARKERS = (
 ID_SEGMENT = re.compile(r"(?<=/)[0-9a-fA-F]{32,}(?=/|$|\.json)")
 NUMBER_SEGMENT = re.compile(r"(?<=/)\d{4,}(?=/|$)")
 ADDRESS_SEGMENT = re.compile(r"(?<=/addr/)[^/]+(?=/|$)")
+PROBE_PATH = re.compile(
+    r"(^|/)(?:wp-|xmlrpc(?:\.php)?|cgi-bin|\.env|phpmyadmin|actuator|admin(?:/|$))"
+    r"|\.php(?:/|$)",
+    re.IGNORECASE,
+)
 DURATION_RE = re.compile(r"^(?P<count>\d+)(?P<unit>[mhdw])$")
 DURATION_SECONDS = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
 LATENCY_BUCKETS = (
@@ -159,7 +164,7 @@ def is_asset(path: str) -> bool:
 def is_page_view(method: str, status: int, path: str, user_agent: str) -> bool:
     if method not in ("GET", "HEAD") or not (200 <= status < 400):
         return False
-    if not is_browser(user_agent) or is_asset(path):
+    if not is_browser(user_agent) or is_asset(path) or PROBE_PATH.search(path):
         return False
     if path in NON_PAGE_EXACT or path in INTERNAL_PATHS:
         return False
@@ -247,11 +252,14 @@ class TrafficReport:
 
         self.total_requests += 1
         self.bytes_out += max(0, size)
-        self.latency.add(max(0.0, duration))
+        # An SSE connection's duration is its healthy lifetime, not endpoint
+        # latency. Keep stream opens in API totals but out of response p50/p95.
+        if not path.endswith("/stream"):
+            self.latency.add(max(0.0, duration))
         self.statuses[f"{status // 100}xx" if status else "unknown"] += 1
         if status >= 400:
             self.errors += 1
-        if is_bot(user_agent):
+        if is_bot(user_agent) or PROBE_PATH.search(path):
             self.bot_requests += 1
         if path in INTERNAL_PATHS:
             self.health_checks += 1

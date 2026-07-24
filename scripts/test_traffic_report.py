@@ -66,6 +66,7 @@ class TrafficReportTests(unittest.TestCase):
         )
         report.add(row(base + 150, "/style.css", ip="visitor-b"))
         report.add(row(base + 160, "/health", ua="monitoring-probe/1.0"))
+        report.add(row(base + 170, "/wp-login.php", ip="scanner"))
         data = report.as_dict(10)
 
         self.assertEqual(data["visitors"]["unique_browsers_approx"], 2)
@@ -75,7 +76,8 @@ class TrafficReportTests(unittest.TestCase):
         self.assertEqual(data["requests"]["first_party_api_calls"], 1)
         self.assertEqual(data["requests"]["external_api_calls_approx"], 1)
         self.assertEqual(data["requests"]["health_checks"], 1)
-        self.assertEqual(data["requests"]["bot_requests"], 1)
+        self.assertEqual(data["requests"]["bot_requests"], 2)
+        self.assertNotIn("/wp-login.php", data["top_pages"])
         self.assertIn("/data/testnet-10/coin/:id", data["top_api_endpoints"])
 
     def test_analyze_filters_old_and_malformed_rows(self):
