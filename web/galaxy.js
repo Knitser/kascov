@@ -39,6 +39,8 @@
   const DETAIL_END = 17;
   const EDGE_DETAIL = 22;
   const LABEL_DETAIL = 24;
+  const APP_FOCUS_MIN = 6;
+  const APP_FOCUS_MAX = 15;
   // far-mode batched dot tints: three dim palette-adjacent hues (teal / blue
   // / warm) so the tiny-app starfield has depth without per-dot styles
   const DOT_TINTS = ['rgba(128,190,172,0.55)', 'rgba(138,166,205,0.55)', 'rgba(196,176,150,0.5)'];
@@ -80,6 +82,17 @@
     h ^= h >>> 13;
     return Math.imul(h, 0xc2b2ae35) >>> 0;
   };
+
+  // A cluster click is a first-stage focus, not a teleport into maximum
+  // detail. Keeping it inside the aggregate/detail cross-fade preserves the
+  // surrounding galaxy (especially when the cluster sits near an outer edge);
+  // the wheel/pinch gesture can then continue naturally into coin-level LOD.
+  function appFocusScale(appRadius, fitScale, viewportW, viewportH, currentScale) {
+    const extent = Math.max(appRadius, 8);
+    const fit = (Math.min(viewportW, viewportH) * 0.4) / extent;
+    const desired = clamp(fit, fitScale * APP_FOCUS_MIN, fitScale * APP_FOCUS_MAX);
+    return Math.max(currentScale, desired);
+  }
 
   // geometric radius buckets (~±6% quantization) so sprite cache stays small
   const ORB_BUCKETS = [];
@@ -1280,13 +1293,12 @@
 
     function zoomToApp(a) {
       const app = apps[a];
-      // The worker's app radius encloses its member packing. Land well into
-      // detail LOD so clicking a cluster never strands the camera between
-      // aggregate and node representations.
-      let extent = Math.max(app.r, 8);
-      const fit = (Math.min(W, H) * 0.4) / extent;
-      const floor = N > 200 ? fitScale * 19 : fitScale * 1.15;
-      const target = Math.min(fitScale * 36, Math.max(floor, fit));
+      // Keep this first focus step inside the aggregate/detail blend. The old
+      // 19x floor / 36x cap made small edge clusters erase all surrounding
+      // context in a single click.
+      const target = N > 200
+        ? appFocusScale(app.r, fitScale, W, H, scale)
+        : Math.max(scale, fitScale * 1.15);
       animateTo(target, app.cx, app.cy);
     }
     function animateTo(toScale, worldCx, worldCy, duration) {
@@ -1488,5 +1500,5 @@
     };
   }
 
-  window.kascovGalaxy = { create };
+  window.kascovGalaxy = { create, _appFocusScale: appFocusScale };
 })();
