@@ -59,8 +59,9 @@ BOT_MARKERS = (
     "monitoring",
     "probe",
 )
-ID_SEGMENT = re.compile(r"(?<=/)[0-9a-fA-F]{32,}(?=/|$)")
+ID_SEGMENT = re.compile(r"(?<=/)[0-9a-fA-F]{32,}(?=/|$|\.json)")
 NUMBER_SEGMENT = re.compile(r"(?<=/)\d{4,}(?=/|$)")
+ADDRESS_SEGMENT = re.compile(r"(?<=/addr/)[^/]+(?=/|$)")
 DURATION_RE = re.compile(r"^(?P<count>\d+)(?P<unit>[mhdw])$")
 DURATION_SECONDS = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
 LATENCY_BUCKETS = (
@@ -167,6 +168,7 @@ def is_page_view(method: str, status: int, path: str, user_agent: str) -> bool:
 
 def normalize_path(path: str) -> str:
     path = ID_SEGMENT.sub(":id", path)
+    path = ADDRESS_SEGMENT.sub(":address", path)
     return NUMBER_SEGMENT.sub(":n", path)
 
 

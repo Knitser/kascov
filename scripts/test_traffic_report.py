@@ -104,6 +104,16 @@ class TrafficReportTests(unittest.TestCase):
         )
         self.assertIsNone(traffic_report.parse_since("all", now))
 
+    def test_endpoint_normalization_bounds_public_identifiers(self):
+        self.assertEqual(
+            traffic_report.normalize_path("/data/mainnet/c/" + "a" * 64 + ".json"),
+            "/data/mainnet/c/:id.json",
+        )
+        self.assertEqual(
+            traffic_report.normalize_path("/data/mainnet/addr/kaspa%3Along-address.json"),
+            "/data/mainnet/addr/:address",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
