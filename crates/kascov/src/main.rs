@@ -4019,6 +4019,15 @@ fn build_galaxy_fmt(
         max_x = 0.0;
         max_y = 0.0;
     }
+    // Core identities are merged over a separately-built visual snapshot.
+    // Fingerprint their exact stable prefix so the client can reject the
+    // merge if a live network update reordered a large cluster between tiers.
+    let core_id_bytes: Vec<u8> = recs
+        .iter()
+        .filter(|r| cluster_list[r.app].len() >= GALAXY_CORE_MIN_SIZE)
+        .flat_map(|r| r.id.0)
+        .collect();
+    let core_layout_id = hex::encode(&blake2b32(&core_id_bytes)[..8]);
     let tip = store.tip()?;
     let mut out = serde_json::json!({
         "network": network.to_string(),
@@ -4032,6 +4041,7 @@ fn build_galaxy_fmt(
             "h": (max_y - min_y).ceil() as i64,
         },
         "templates": tpl_names,
+        "core_layout_id": core_layout_id,
         "edges": edges_json,
         "edges_total": edge_total,
     });
@@ -7008,6 +7018,7 @@ mod galaxy_tests {
         )
         .unwrap();
         assert_eq!(visual["tier"], "visual");
+        assert_eq!(visual["core_layout_id"], both["core_layout_id"]);
         assert!(visual.get("ids").is_none());
         assert!(visual.get("acx").is_none());
         assert_eq!(visual["nx"].as_array().unwrap().len(), full_nodes.len());

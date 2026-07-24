@@ -38,5 +38,9 @@ test('visual-tier placeholder nodes are not treated as clickable identities', ()
 });
 
 test('visual tier preserves the core identity prefix and pads outer nodes', () => {
-  assert.deepEqual(Array.from(_visualIds(['aa', 'bb'], 5)), ['aa', 'bb', '', '', '']);
+  assert.deepEqual(Array.from(_visualIds(['aa', 'bb'], 5, true)), ['aa', 'bb', '', '', '']);
+});
+
+test('visual tier drops core identities when its layout fingerprint changed', () => {
+  assert.deepEqual(Array.from(_visualIds(['aa', 'bb'], 4, false)), ['', '', '', '']);
 });

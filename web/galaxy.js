@@ -94,8 +94,9 @@
     return Math.max(currentScale, desired);
   }
   const hasIdentity = (id) => typeof id === 'string' && id.length > 0;
-  function visualIds(coreIds, total) {
+  function visualIds(coreIds, total, preserveCore) {
     const out = new Array(total).fill('');
+    if (!preserveCore) return out;
     for (let i = 0; i < Math.min(coreIds.length, total); i++) out[i] = coreIds[i];
     return out;
   }
@@ -134,6 +135,7 @@
     let N = 0;
     let nx, ny, nr, nt, ns, na, ids; // typed arrays + id string list
     let identitiesLoaded = 0;
+    let coreLayoutId = '';
     let apps = [];
     let edges = null; // flat Int32Array [i,j,w, i,j,w, …]
     let tplColors = [];
@@ -216,8 +218,11 @@
       // first. Extend that prefix with identity-free visual nodes; the later
       // full hot-swap replaces every placeholder without moving the camera.
       const coreIds = ids || [];
+      const preserveCore = !!d.core_layout_id && d.core_layout_id === coreLayoutId;
       N = nextN;
-      ids = visualIds(coreIds, nextN);
+      ids = visualIds(coreIds, nextN, preserveCore);
+      if (!preserveCore) identitiesLoaded = 0;
+      coreLayoutId = d.core_layout_id || '';
       nx = Float32Array.from(d.nx);
       ny = Float32Array.from(d.ny);
       nr = Float32Array.from(d.nr);
@@ -244,6 +249,7 @@
 
     function data_reset(d) {
       templates = d.templates || [];
+      coreLayoutId = d.core_layout_id || '';
       bounds = d.bounds || { minx: 0, miny: 0, w: 1, h: 1 };
       const newNet = d.network || '';
       if (newNet !== netName) { netName = newNet; if (W > 0) buildBackground(); }
