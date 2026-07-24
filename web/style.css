@@ -2220,13 +2220,7 @@ a.holder-id:hover .holder-name { color: var(--accent); }
 
 /* ================================ first-visit story tour =============== */
 #tour-root .tour-spot {
-  position: absolute;
-  z-index: 60;
-  border-radius: 12px;
-  border: 2px solid var(--accent);
-  box-shadow: 0 0 0 9999px rgba(5, 10, 9, 0.62), 0 0 24px rgba(112, 199, 186, 0.35);
-  pointer-events: none;
-  transition: all 0.25s ease;
+  display: none;
 }
 #tour-root .tour-card {
   position: absolute;
