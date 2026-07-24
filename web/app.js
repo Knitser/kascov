@@ -14,7 +14,7 @@ import {
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
-  ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
+  ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
 } from './core/state.js';
@@ -36,6 +36,7 @@ import {
   loadLaunchpads,
 } from './core/data.js';
 import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js';
+import { createRefreshGate } from './core/refresh.js';
 import { networkRouteHash } from './core/routing.js';
 import { selectTokens, tokenLifecycle } from './core/token-directory.js';
 
@@ -1038,19 +1039,26 @@ function renderPulse(entry, network) {
   updatePulse(network);
 }
 
-/* pollLive-detected changes refetch the chart, debounced — pollLive's 12s
-   cadence (SSE pokes fold into it) is the natural rate limit */
+/* Busy SSE bursts used to invalidate the chart on every short pause, easily
+   producing dozens of overlapping requests. Throttle the burst and let the
+   trailing gate retain one final update per server-TTL window. */
 let pulseRefreshTimer = 0;
+const pulseRefreshGate = createRefreshGate(ACTIVITY_TTL_MS);
 function schedulePulseRefresh() {
-  clearTimeout(pulseRefreshTimer);
+  if (pulseRefreshTimer) return;
   pulseRefreshTimer = setTimeout(() => {
-    const byRange = state.activity[state.network];
-    if (byRange && byRange[state.pulseRange] && byRange[state.pulseRange].data !== null) {
-      byRange[state.pulseRange].at = 0; /* stamp stale; keep known 404s quiet */
-    }
-    if (parseRoute().view === 'explore' && document.visibilityState === 'visible') {
-      updatePulse(state.network);
-    }
+    pulseRefreshTimer = 0;
+    const network = state.network;
+    pulseRefreshGate.run(network, async () => {
+      const byRange = state.activity[network];
+      if (byRange && byRange[state.pulseRange] && byRange[state.pulseRange].data !== null) {
+        byRange[state.pulseRange].at = 0; /* stamp stale; keep known 404s quiet */
+      }
+      if (network === state.network && parseRoute().view === 'explore' &&
+          document.visibilityState === 'visible') {
+        await updatePulse(network);
+      }
+    });
   }, 1500);
 }
 
@@ -5239,12 +5247,11 @@ async function render() {
    open sections don't collapse; its cache still updates for the next
    navigation.
 
-   The 45s timer is a FALLBACK, not the driver: when the tiny -live.json feed
-   works, pollLive's stats-delta triggers the (forced) refetch — so the timer
-   only downloads the multi-MB snapshot itself when the live feed is
-   unsupported (old worker) or stale. On a quiet chain, per-tab steady-state
-   traffic is the 12s live poll alone. */
+   The tiny -live.json feed can change several times per second on TN10. Its
+   stats delta still requests a refresh, but one keyed gate shares the current
+   transfer and allows at most one trailing grid refresh every 45 seconds. */
 const REFRESH_MS = 45_000;
+const snapshotRefreshGate = createRefreshGate(REFRESH_MS);
 function liveFeedCoversRefresh(network) {
   const ls = state.live[network];
   if (!ls || ls.supported === false) return false;
@@ -5254,39 +5261,42 @@ async function refreshSnapshot(force) {
   if (document.visibilityState !== 'visible') return;
   const network = state.network;
   if (!force && liveFeedCoversRefresh(network)) return;
-  try {
-    const old = state.cache[network];
-    /* re-request a window at least as wide as what's already loaded so a
-       paginated net doesn't shrink back to one page on refresh; a full-snapshot
-       worker ignores the limit and returns everything as before */
-    const limit = old ? Math.max(GRID_PAGE, old.data.covenants.length) : GRID_PAGE;
-    const data = await fetchGridPage(network, null, null, limit);
-    if (old && data.generated_at_ms === old.data.generated_at_ms) return;
-    data.__anchor = makeAnchor(data, network);
-    const cursor = data.next_after_daa != null ? data.next_after_daa : null;
-    state.cache[network] = {
-      data, index: buildIndex(data), nextAfterDaa: cursor,
-      nextAfterId: data.next_after_id != null ? data.next_after_id : null,
-      loadingMore: false,
-    };
-    /* cached coin details are now stale — drop all but the one on screen
-       (yanking the open coin's story mid-read would collapse its sections) */
-    const dm = state.details[network];
-    if (dm) for (const k of [...dm.keys()]) { if (k !== state.detailId) dm.delete(k); }
-    /* A background snapshot refresh only drives the explore view. The
-       self-fetching / user-input views (build, decode, preflight, address,
-       lane, token/tx pages, …) must NOT be rebuilt from under the user: doing
-       so wipes typed input and, right after a one-click deploy, erases the
-       success + coin link before it can settle. Detail is likewise left alone
-       (a rebuild would collapse the open coin's story mid-read). */
-    const rv = parseRoute().view;
-    const selfRendered = rv === 'detail' || rv === 'decode' || rv === 'dev'
-      || rv === 'build' || rv === 'preflight' || rv === 'address' || rv === 'lane'
-      || rv === 'tokens' || rv === 'token' || rv === 'tx' || rv === 'changelog';
-    if (network === state.network && !selfRendered) render();
-  } catch (e) {
-    /* transient — the next tick retries */
-  }
+  return snapshotRefreshGate.run(network, async () => {
+    if (document.visibilityState !== 'visible' || network !== state.network) return;
+    try {
+      const old = state.cache[network];
+      /* re-request a window at least as wide as what's already loaded so a
+         paginated net doesn't shrink back to one page on refresh; a full-snapshot
+         worker ignores the limit and returns everything as before */
+      const limit = old ? Math.max(GRID_PAGE, old.data.covenants.length) : GRID_PAGE;
+      const data = await fetchGridPage(network, null, null, limit);
+      if (old && data.generated_at_ms === old.data.generated_at_ms) return;
+      data.__anchor = makeAnchor(data, network);
+      const cursor = data.next_after_daa != null ? data.next_after_daa : null;
+      state.cache[network] = {
+        data, index: buildIndex(data), nextAfterDaa: cursor,
+        nextAfterId: data.next_after_id != null ? data.next_after_id : null,
+        loadingMore: false,
+      };
+      /* cached coin details are now stale — drop all but the one on screen
+         (yanking the open coin's story mid-read would collapse its sections) */
+      const dm = state.details[network];
+      if (dm) for (const k of [...dm.keys()]) { if (k !== state.detailId) dm.delete(k); }
+      /* A background snapshot refresh only drives the explore view. The
+         self-fetching / user-input views (build, decode, preflight, address,
+         lane, token/tx pages, …) must NOT be rebuilt from under the user: doing
+         so wipes typed input and, right after a one-click deploy, erases the
+         success + coin link before it can settle. Detail is likewise left alone
+         (a rebuild would collapse the open coin's story mid-read). */
+      const rv = parseRoute().view;
+      const selfRendered = rv === 'detail' || rv === 'decode' || rv === 'dev'
+        || rv === 'build' || rv === 'preflight' || rv === 'address' || rv === 'lane'
+        || rv === 'tokens' || rv === 'token' || rv === 'tx' || rv === 'changelog';
+      if (network === state.network && !selfRendered) render();
+    } catch (e) {
+      /* transient — the next gated refresh retries */
+    }
+  });
 }
 setInterval(refreshSnapshot, REFRESH_MS);
 

@@ -127,29 +127,43 @@ async function fetchGridPage(network, afterDaa, afterId, limit) {
   return res.json();
 }
 
+const networkInflight = {};
+
 async function loadNetwork(network) {
   if (state.cache[network]) return state.cache[network];
-  /* one silent retry: a single dropped request must not paint the
-     "couldn't load" card — that card should mean the worker is actually
-     unreachable, not that one packet died */
-  let data;
+  if (networkInflight[network]) return networkInflight[network];
+  /* Every render shares the same cold request. On a busy SSE stream render()
+     can be called again while this multi-MB page is still downloading; without
+     this guard each call starts another identical snapshot. */
+  const request = (async () => {
+    /* one silent retry: a single dropped request must not paint the
+       "couldn't load" card — that card should mean the worker is actually
+       unreachable, not that one packet died */
+    let data;
+    try {
+      data = await fetchGridPage(network, null, null, GRID_PAGE);
+    } catch (_) {
+      await new Promise((r) => setTimeout(r, 1200));
+      data = await fetchGridPage(network, null, null, GRID_PAGE);
+    }
+    data.__anchor = makeAnchor(data, network);
+    /* a cursor means the worker paginated and older rows remain; its absence
+       means we already hold the full snapshot (older worker or a small net) */
+    const cursor = data.next_after_daa != null ? data.next_after_daa : null;
+    const entry = {
+      data, index: buildIndex(data), nextAfterDaa: cursor,
+      nextAfterId: data.next_after_id != null ? data.next_after_id : null,
+      loadingMore: false,
+    };
+    state.cache[network] = entry;
+    return entry;
+  })();
+  networkInflight[network] = request;
   try {
-    data = await fetchGridPage(network, null, null, GRID_PAGE);
-  } catch (_) {
-    await new Promise((r) => setTimeout(r, 1200));
-    data = await fetchGridPage(network, null, null, GRID_PAGE);
+    return await request;
+  } finally {
+    if (networkInflight[network] === request) delete networkInflight[network];
   }
-  data.__anchor = makeAnchor(data, network);
-  /* a cursor means the worker paginated and older rows remain; its absence
-     means we already hold the full snapshot (older worker or a small net) */
-  const cursor = data.next_after_daa != null ? data.next_after_daa : null;
-  const entry = {
-    data, index: buildIndex(data), nextAfterDaa: cursor,
-    nextAfterId: data.next_after_id != null ? data.next_after_id : null,
-    loadingMore: false,
-  };
-  state.cache[network] = entry;
-  return entry;
 }
 
 /* Pull the next older grid page and merge it into the cached entry: append the
@@ -255,21 +269,32 @@ const TEMPLATES_TTL_MS = 60_000;
 /* the pending feed is real-time — a short TTL so the seed snapshot is fresh,
    though the SSE stream is what actually keeps it live between polls. */
 const PENDING_TTL_MS = 5_000;
+const templatesInflight = {};
+const activityInflight = {};
 
 async function loadTemplates(network) {
   const t = state.templates[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/templates.json`, { cache: 'no-cache' });
-    if (!res.ok) {
-      state.templates[network] = { data: null, at: Date.now() };
-      return null;
+  if (templatesInflight[network]) return templatesInflight[network];
+  const request = (async () => {
+    try {
+      const res = await fetch(`data/${network}/templates.json`, { cache: 'no-cache' });
+      if (!res.ok) {
+        state.templates[network] = { data: null, at: Date.now() };
+        return null;
+      }
+      const data = await res.json();
+      state.templates[network] = { data, at: Date.now() };
+      return data;
+    } catch (e) {
+      return t ? t.data : null;
     }
-    const data = await res.json();
-    state.templates[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
+  })();
+  templatesInflight[network] = request;
+  try {
+    return await request;
+  } finally {
+    if (templatesInflight[network] === request) delete templatesInflight[network];
   }
 }
 
@@ -354,17 +379,27 @@ async function loadActivity(network, range) {
   const hit = byRange[range];
   const ttl = hit && hit.data === null ? ACTIVITY_MISS_TTL_MS : ACTIVITY_TTL_MS;
   if (hit && Date.now() - hit.at < ttl) return hit.data;
-  try {
-    const res = await fetch(`data/${network}/activity.json?range=${range}`, { cache: 'no-cache' });
-    if (!res.ok) {
-      if (res.status === 404) byRange[range] = { data: null, at: Date.now() };
-      return hit ? hit.data : null;
+  const key = `${network}/${range}`;
+  if (activityInflight[key]) return activityInflight[key];
+  const request = (async () => {
+    try {
+      const res = await fetch(`data/${network}/activity.json?range=${range}`, { cache: 'no-cache' });
+      if (!res.ok) {
+        if (res.status === 404) byRange[range] = { data: null, at: Date.now() };
+        return hit ? hit.data : null;
+      }
+      const data = await res.json();
+      byRange[range] = { data, at: Date.now() };
+      return data;
+    } catch (e) {
+      return hit ? hit.data : null;   /* stale-ok; fallback only on a real 404 */
     }
-    const data = await res.json();
-    byRange[range] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return hit ? hit.data : null;   /* stale-ok; fallback only on a real 404 */
+  })();
+  activityInflight[key] = request;
+  try {
+    return await request;
+  } finally {
+    if (activityInflight[key] === request) delete activityInflight[key];
   }
 }
 
