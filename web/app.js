@@ -36,6 +36,7 @@ import {
   loadLaunchpads,
 } from './core/data.js';
 import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js';
+import { networkRouteHash } from './core/routing.js';
 import { selectTokens, tokenLifecycle } from './core/token-directory.js';
 
 
@@ -358,6 +359,30 @@ function ensureScript(src) {
 let galaxyCtrl = null;
 let galaxyMounted = null;      // which network the live controller shows
 let galaxyLinkDone = false;    // '?galaxy=1' deep link honored once per load
+
+/* A controller owns pointer listeners, cached labels and the pixels already
+   painted into its canvas. Tear all of that down at the network boundary so
+   testnet dots/search results cannot flash inside a mainnet Explorer (or the
+   reverse) while the new payload is arriving. */
+function resetGalaxyNetworkState() {
+  if (galaxyCtrl) galaxyCtrl.destroy();
+  galaxyCtrl = null;
+  galaxyMounted = null;
+
+  const search = $('#galaxy-search');
+  if (search) search.value = '';
+  const accessible = $('#galaxy-accessible');
+  if (accessible) {
+    accessible.textContent = 'Search centers one coin in the map and exposes a precise link here.';
+  }
+  const legend = $('#galaxy-legend');
+  if (legend) legend.innerHTML = '';
+  const canvas = $('#galaxy-canvas');
+  if (canvas) {
+    const context = canvas.getContext('2d');
+    if (context) context.clearRect(0, 0, canvas.width, canvas.height);
+  }
+}
 
 /* Collapsible-section promotion: default-open ONCE per user, then respect
    whatever they last chose (the toggle listener persists open/closed under
@@ -4991,13 +5016,17 @@ function parseRoute() {
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
   if (m) return { view: 'explore', network: m[1] || null, galaxy: params.get('galaxy') === '1' };
   if (/^#\/changelog\/?$/.test(path)) return { view: 'changelog', network: null };
-  if (/^#\/decode\/?$/.test(path)) return { view: 'decode', network: null, s: params.get('s') || '' };
-  if (/^#\/playground\/?$/.test(path)) return { view: 'decode', network: null, s: params.get('s') || '' };
-  if (/^#\/build\/?$/.test(path)) return { view: 'build', network: null };
-  /* '#/preflight' — the playground's third mode; network-independent like
-     #/decode (the POST's network segment only picks the mass limits) */
-  if (/^#\/preflight\/?$/.test(path)) return { view: 'preflight', network: null };
-  if (/^#\/dev\/?$/.test(path)) return { view: 'dev', network: null };
+  /* Tool/reference pages render the same shell on both networks, but their
+     examples and POST endpoints use the selected network. Accept a scoped
+     form so that choice survives navigation, reloads and shared links. */
+  m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?(decode|playground|build|preflight|dev)\/?$/);
+  if (m) {
+    return {
+      view: m[2] === 'playground' ? 'decode' : m[2],
+      network: m[1] || null,
+      s: m[2] === 'decode' || m[2] === 'playground' ? params.get('s') || '' : undefined,
+    };
+  }
   if (/^#\/?$/.test(path)) return { view: 'landing', network: null };
   /* old home links '#/<network>' were data views — send them to the explorer */
   m = path.match(/^#\/(testnet-10|mainnet)\/?$/);
@@ -5005,22 +5034,20 @@ function parseRoute() {
   return { view: 'notfound', network: null, path: path.replace(/^#/, '') || '/' };
 }
 
-function routeHash(view, id) {
-  if (view === 'detail') return `#/${state.network}/c/${id}`;
-  /* pubkeys are network-independent — an address page survives a network switch */
-  if (view === 'address') return `#/${state.network}/addr/${id}`;
-  /* a lane namespace exists on any network — keep the page, switch the data */
-  if (view === 'lane') return `#/${state.network}/lane/${id}`;
-  /* the token directory exists on any network — keep the page, switch the data */
-  if (view === 'tokens') return `#/${state.network}/tokens`;
-  if (view === 'token') return `#/${state.network}/token/${id}`;
-  /* a txid lives on one network only, but the page says so honestly —
-     keep it across a switch, like lane pages */
-  if (view === 'tx') return `#/${state.network}/tx/${id}`;
-  if (view === 'explore') return `#/${state.network}/explore`;
-  /* decode/dev/changelog are network-free — switching networks keeps the page (and its query) */
-  if (view === 'decode' || view === 'dev' || view === 'build' || view === 'preflight' || view === 'changelog') return location.hash || `#/${view}`;
-  return '#/';
+function selectNetwork(network) {
+  if (!NETWORKS[network] || network === state.network) return false;
+  state.network = network;
+  state.shown = PAGE_SIZE;
+  networkFilterReset();
+  closeSuggest();
+  resetGalaxyNetworkState();
+  return true;
+}
+
+function syncNetworkRoutes(network) {
+  document.querySelectorAll('[data-network-route]').forEach((link) => {
+    link.setAttribute('href', `#/${network}/${link.dataset.networkRoute}`);
+  });
 }
 
 function renderNotFound(route) {
@@ -5080,12 +5107,7 @@ function enterView(view, viewName) {
 async function render() {
   const token = ++renderToken;
   const route = parseRoute();
-  if (route.network && NETWORKS[route.network] && route.network !== state.network) {
-    state.network = route.network;
-    state.shown = PAGE_SIZE;
-    networkFilterReset();
-    closeSuggest();
-  }
+  if (route.network) selectNetwork(route.network);
   if (state.watchNet !== state.network) {
     state.watch = loadWatch(state.network);
     state.watchNet = state.network;
@@ -5124,6 +5146,7 @@ async function render() {
   document.querySelectorAll('.network-tab').forEach((b) => {
     b.setAttribute('aria-pressed', String(b.dataset.network === state.network));
   });
+  syncNetworkRoutes(state.network);
   /* decode + build + preflight are the modes of the unified "playground" nav
      entry; a token page lives under the "tokens" nav entry */
   const navFor = route.view === 'decode' || route.view === 'build' || route.view === 'preflight' ? 'playground'
@@ -5595,19 +5618,13 @@ const ACTIONS = {
   'network'(el) {
     const net = el.dataset.network;
     if (!NETWORKS[net] || net === state.network) return;
-    state.network = net;
-    state.shown = PAGE_SIZE;
-    networkFilterReset();
+    const route = parseRoute();
+    selectNetwork(net);
     /* encode the network in the hash so the choice survives reloads and
        shared links land on the right network. A specific coin can't exist on
        the other network, so switching from a detail page lands on that
        network's explorer overview rather than a guaranteed "not found". */
-    const route = parseRoute();
-    /* a specific coin (or token) can't exist on the other network — land on
-       that network's overview instead of a guaranteed "not found" */
-    const view = route.view === 'detail' ? 'explore'
-      : route.view === 'token' ? 'tokens' : route.view;
-    const target = routeHash(view, route.id);
+    const target = networkRouteHash(route, net);
     if (location.hash === target) render();
     else location.hash = target;
   },

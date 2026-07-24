@@ -74,10 +74,10 @@
       </div>
       <div class="header-right">
         <nav class="site-nav" aria-label="Pages">
-          <a class="nav-link" href="#/explore" data-nav="explore">explore</a>
-          <a class="nav-link" href="#/tokens" data-nav="tokens">tokens</a>
-          <a class="nav-link" href="#/decode" data-nav="playground">playground</a>
-          <a class="nav-link" href="#/dev" data-nav="dev">API</a>
+          <a class="nav-link" href="#/explore" data-nav="explore" data-network-route="explore">explore</a>
+          <a class="nav-link" href="#/tokens" data-nav="tokens" data-network-route="tokens">tokens</a>
+          <a class="nav-link" href="#/decode" data-nav="playground" data-network-route="decode">playground</a>
+          <a class="nav-link" href="#/dev" data-nav="dev" data-network-route="dev">API</a>
           <a class="nav-link" href="/guide.html">guide</a>
         </nav>
         <nav class="network-tabs" aria-label="Network">
@@ -101,8 +101,8 @@
         <div class="hero-stats" id="hero-stats"></div>
         <p class="freshness" id="freshness"></p>
         <div class="hero-actions" aria-label="Start exploring">
-          <a class="btn btn-accent" href="#/explore">explore live</a>
-          <a class="btn" href="#/explore?galaxy=1">open the galaxy</a>
+          <a class="btn btn-accent" href="#/explore" data-network-route="explore">explore live</a>
+          <a class="btn" href="#/explore?galaxy=1" data-network-route="explore?galaxy=1">open the galaxy</a>
         </div>
       </section>
 
@@ -128,7 +128,7 @@
             <div><strong>Retired</strong><span>its story ends, recorded forever here</span></div>
           </li>
         </ol>
-        <p class="guide-tourline"><a href="#/explore?tour=1" class="howto-link">new here? take the 30-second tour →</a></p>
+        <p class="guide-tourline"><a href="#/explore?tour=1" class="howto-link" data-network-route="explore?tour=1">new here? take the 30-second tour →</a></p>
         <details class="guide-more">
           <summary>wait — what <em>is</em> a smart coin, really?</summary>
           <div class="guide-more-body">
@@ -159,23 +159,23 @@
       </section>
 
       <div class="cta-row">
-        <a class="btn btn-accent btn-cta" href="#/explore">open the explorer →</a>
+        <a class="btn btn-accent btn-cta" href="#/explore" data-network-route="explore">open the explorer →</a>
       </div>
 
       <section class="devcards" aria-label="Developer tools">
-        <a class="devcard" href="#/explore?galaxy=1">
+        <a class="devcard" href="#/explore?galaxy=1" data-network-route="explore?galaxy=1">
           <h3>the galaxy</h3>
           <p>every app at once, live — one zoomable map of the whole network. each dot is a smart coin, each link a shared transaction.</p>
         </a>
-        <a class="devcard" href="#/decode">
+        <a class="devcard" href="#/decode" data-network-route="decode">
           <h3>script decoder</h3>
           <p>paste any Kaspa script, read its post-Toccata opcodes — covenant ops highlighted. runs in your browser, nothing leaves the page.</p>
         </a>
-        <a class="devcard" href="#/dev">
+        <a class="devcard" href="#/dev" data-network-route="dev">
           <h3>JSON API</h3>
           <p>everything kascov sees, as plain JSON with CORS on. build a bot, a chart, a better explorer.</p>
         </a>
-        <a class="devcard" href="#/build">
+        <a class="devcard" href="#/build" data-network-route="build">
           <h3>make a smart coin</h3>
           <p>build a covenant without writing code and deploy it on testnet in one click — it reveals itself here, named forever.</p>
         </a>
@@ -256,7 +256,7 @@
       <details class="lanes collapse-sec" id="section-galaxy" aria-label="Galaxy" hidden>
         <summary><h2>the galaxy · the whole network</h2><span class="collapse-count dim" id="galaxy-count"></span></summary>
         <p class="dim families-sub">every app at once — each dot is a smart coin, each link a shared transaction. <span class="galaxy-hint-desktop">scroll to zoom, drag to pan, click a dot to open the coin.</span><span class="galaxy-hint-mobile">pinch to zoom · tap a dot</span></p>
-        <a class="galaxy-exit btn" href="#/explore" data-action="exit-galaxy">← explorer overview</a>
+        <a class="galaxy-exit btn" href="#/explore" data-action="exit-galaxy" data-network-route="explore">← explorer overview</a>
         <div class="galaxy-toolbar">
           <input type="search" id="galaxy-search" class="galaxy-search" placeholder="find a coin…" autocomplete="off" spellcheck="false" aria-label="Find a coin in the graph">
           <span class="galaxy-chips" role="group" aria-label="Filter">
@@ -369,9 +369,9 @@
     <!-- ============ DECODER ============ -->
     <section id="view-decode" class="view-fade" aria-label="Playground — read" hidden>
       <nav class="pg-modes" aria-label="Playground mode">
-        <a class="pg-mode pg-active" href="#/decode">📄 read a script</a>
-        <a class="pg-mode" href="#/build">✎ write a covenant</a>
-        <a class="pg-mode" href="#/preflight">🛫 check a transaction</a>
+        <a class="pg-mode pg-active" href="#/decode" data-network-route="decode">📄 read a script</a>
+        <a class="pg-mode" href="#/build" data-network-route="build">✎ write a covenant</a>
+        <a class="pg-mode" href="#/preflight" data-network-route="preflight">🛫 check a transaction</a>
       </nav>
       <header class="page-head">
         <h1>read a script</h1>
@@ -415,9 +415,9 @@
     <!-- ============ BUILD — MAKE YOUR OWN SMART COIN ============ -->
     <section id="view-build" class="view-fade" aria-label="Playground — write" hidden>
       <nav class="pg-modes" aria-label="Playground mode">
-        <a class="pg-mode" href="#/decode">📄 read a script</a>
-        <a class="pg-mode pg-active" href="#/build">✎ write a covenant</a>
-        <a class="pg-mode" href="#/preflight">🛫 check a transaction</a>
+        <a class="pg-mode" href="#/decode" data-network-route="decode">📄 read a script</a>
+        <a class="pg-mode pg-active" href="#/build" data-network-route="build">✎ write a covenant</a>
+        <a class="pg-mode" href="#/preflight" data-network-route="preflight">🛫 check a transaction</a>
       </nav>
       <header class="page-head build-head">
         <p class="page-eyebrow">the lab</p>
@@ -567,9 +567,9 @@
     <!-- ============ PREFLIGHT — CHECK A TRANSACTION ============ -->
     <section id="view-preflight" class="view-fade" aria-label="Playground — preflight" hidden>
       <nav class="pg-modes" aria-label="Playground mode">
-        <a class="pg-mode" href="#/decode">📄 read a script</a>
-        <a class="pg-mode" href="#/build">✎ write a covenant</a>
-        <a class="pg-mode pg-active" href="#/preflight">🛫 check a transaction</a>
+        <a class="pg-mode" href="#/decode" data-network-route="decode">📄 read a script</a>
+        <a class="pg-mode" href="#/build" data-network-route="build">✎ write a covenant</a>
+        <a class="pg-mode pg-active" href="#/preflight" data-network-route="preflight">🛫 check a transaction</a>
       </nav>
       <header class="page-head">
         <h1>will this transaction pass?</h1>
@@ -1061,7 +1061,7 @@ data: {"kind":"pending","tx_kind":"transition",
 
           <article class="api-endpoint" id="ep-tokens">
             <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/tokens.json</code></div>
-            <p class="ep-desc">The covenant-token directory behind the <a href="#/tokens">tokens</a> page — every KCC20-shaped coin the indexer decoded, its ticker and fields read straight from the chain's bytes, plus a <strong>conservative validation verdict</strong> per token: <code class="mono">status</code> is <code class="mono">verified</code> only when every event in the token's history matched a known KCC20 rule and supply is conserved; anything unknown or ambiguous stays <code class="mono">unvalidated</code> with a reason — never a false "valid". The response explains itself in <code class="mono">note</code> — surface it to your users too. Older workers answer the pre-validation shape (<code class="mono">status</code> is the coin's <code class="mono">active</code>/<code class="mono">burned</code> liveness, no supply fields) — treat those tokens as unvalidated.</p>
+            <p class="ep-desc">The covenant-token directory behind the <a href="#/tokens" data-network-route="tokens">tokens</a> page — every KCC20-shaped coin the indexer decoded, its ticker and fields read straight from the chain's bytes, plus a <strong>conservative validation verdict</strong> per token: <code class="mono">status</code> is <code class="mono">verified</code> only when every event in the token's history matched a known KCC20 rule and supply is conserved; anything unknown or ambiguous stays <code class="mono">unvalidated</code> with a reason — never a false "valid". The response explains itself in <code class="mono">note</code> — surface it to your users too. Older workers answer the pre-validation shape (<code class="mono">status</code> is the coin's <code class="mono">active</code>/<code class="mono">burned</code> liveness, no supply fields) — treat those tokens as unvalidated.</p>
             <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
   "note": "validated from chain — verified means every event matched …",
   "tip_daa": 513875491, "tip_at_ms": 1783746272524,
@@ -1089,7 +1089,7 @@ data: {"kind":"pending","tx_kind":"transition",
 
           <article class="api-endpoint" id="ep-token">
             <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/token/{covenant_id}</code></div>
-            <p class="ep-desc">One token's whole story behind its <a href="#/tokens">token page</a> — the directory row, the top 100 balances, every event classified as <code class="mono">mint</code> / <code class="mono">transfer</code> / <code class="mono">burn</code> with amounts and owners, and the validation verdict. Same conservative contract as the directory: a token is verified only when every checked event matched a known KCC20 rule. <code class="mono">404</code> when the id isn't a token this worker knows (or the worker predates token pages).</p>
+            <p class="ep-desc">One token's whole story behind its <a href="#/tokens" data-network-route="tokens">token page</a> — the directory row, the top 100 balances, every event classified as <code class="mono">mint</code> / <code class="mono">transfer</code> / <code class="mono">burn</code> with amounts and owners, and the validation verdict. Same conservative contract as the directory: a token is verified only when every checked event matched a known KCC20 rule. <code class="mono">404</code> when the id isn't a token this worker knows (or the worker predates token pages).</p>
             <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
   "token": { "covenant_id": "9cc4fb51…68f50",
              "name": "humble-crimson-magpie", "template": "KCC20 token",
@@ -1230,7 +1230,7 @@ data: {"kind":"pending","tx_kind":"transition",
 
           <article class="api-endpoint" id="ep-preflight">
             <div class="ep-head"><span class="method post">POST</span><code class="ep-path">/data/{network}/preflight</code></div>
-            <p class="ep-desc">Will this transaction pass? Post a transaction as JSON (the SDK / RPC shape — <code class="mono">{version, inputs, outputs, lockTime, …}</code>) and get a verdict <em>before you broadcast</em>: per-input compute-budget checks (the classic <a href="/guide.html#trap" target="_blank" rel="noopener">&ldquo;script units exceeded&rdquo; trap</a>), compute/storage mass against the block limit, an honest fee estimate — and for inputs that carry both their <code class="mono">signatureScript</code> and their <code class="mono">utxo.scriptPublicKey</code>, a real run through the script engine with the budget the transaction declares. Nothing is broadcast, nothing is stored: responses are <code class="mono">no-store</code> and the transaction goes into the call and nowhere else. The network segment picks the mass limits. Served by newer workers; older ones answer <code class="mono">404</code>. Also behind the playground&rsquo;s <a href="#/preflight">check-a-transaction mode</a>.</p>
+            <p class="ep-desc">Will this transaction pass? Post a transaction as JSON (the SDK / RPC shape — <code class="mono">{version, inputs, outputs, lockTime, …}</code>) and get a verdict <em>before you broadcast</em>: per-input compute-budget checks (the classic <a href="/guide.html#trap" target="_blank" rel="noopener">&ldquo;script units exceeded&rdquo; trap</a>), compute/storage mass against the block limit, an honest fee estimate — and for inputs that carry both their <code class="mono">signatureScript</code> and their <code class="mono">utxo.scriptPublicKey</code>, a real run through the script engine with the budget the transaction declares. Nothing is broadcast, nothing is stored: responses are <code class="mono">no-store</code> and the transaction goes into the call and nowhere else. The network segment picks the mass limits. Served by newer workers; older ones answer <code class="mono">404</code>. Also behind the playground&rsquo;s <a href="#/preflight" data-network-route="preflight">check-a-transaction mode</a>.</p>
             <div class="ep-cols">
               <div class="ep-example"><div class="ep-ex-head">Request body — the transaction itself</div><pre class="codeblock"><code>{
   "version": 1,
@@ -1366,7 +1366,7 @@ X-Kascov-Signature: 3f9c41…  (keyed with your subscription's secret)
   <footer class="site-footer">
     <div class="container footer-inner">
       <p class="footer-motto">Kaspa nodes forget after roughly 30 hours. <strong>kascov remembers.</strong></p>
-      <p class="footer-nav"><a class="footer-link" href="#/explore">explorer</a> · <a class="footer-link" href="#/decode">playground</a> · <a class="footer-link" href="#/dev">JSON API &amp; docs</a> · <a class="footer-link" href="/guide.html">the 15-minute guide</a> · <a class="footer-link" href="#/changelog">what&rsquo;s new</a> · <a class="footer-link" href="/feed.xml">feed</a></p>
+      <p class="footer-nav"><a class="footer-link" href="#/explore" data-network-route="explore">explorer</a> · <a class="footer-link" href="#/decode" data-network-route="decode">playground</a> · <a class="footer-link" href="#/dev" data-network-route="dev">JSON API &amp; docs</a> · <a class="footer-link" href="/guide.html">the 15-minute guide</a> · <a class="footer-link" href="#/changelog">what&rsquo;s new</a> · <a class="footer-link" href="/feed.xml">feed</a></p>
       <p><a class="footer-link" href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov</a></p>
       <p class="footer-dim">data streams live from the kascov indexer — it never stops watching</p>
       <p class="footer-dim">not affiliated with the Kaspa Foundation</p>
