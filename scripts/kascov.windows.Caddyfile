@@ -1,0 +1,84 @@
+# Production Caddyfile for the Windows VPS.
+# Validate: C:\tools\caddy.exe validate --config C:\caddy\Caddyfile --adapter caddyfile
+# Reload:   C:\tools\caddy.exe reload   --config C:\caddy\Caddyfile --adapter caddyfile
+
+ironwood.live {
+	reverse_proxy 127.0.0.1:8095
+}
+www.ironwood.live {
+	redir https://ironwood.live{uri} permanent
+}
+157-90-7-39.sslip.io {
+	redir https://ironwood.live{uri} permanent
+}
+
+fees.kascov.io {
+	reverse_proxy 127.0.0.1:8094
+}
+
+kascov.io {
+	encode zstd gzip
+
+	# Local, privacy-conscious access analytics. IP fields are hashed before
+	# disk; high-cardinality query values are not retained. Caddy also redacts
+	# Cookie/Authorization headers by default.
+	log {
+		output file C:/caddy/logs/kascov-access.json {
+			roll_at 00:00
+			roll_size 50MiB
+			roll_keep 35
+			roll_keep_for 720h
+		}
+		format filter {
+			request>remote_ip hash
+			request>client_ip hash
+			request>headers>Cf-Connecting-Ip hash
+			request>headers>Cf-Connecting-Ipv6 hash
+			request>headers>True-Client-Ip hash
+			request>headers>X-Forwarded-For hash
+			request>headers>X-Real-Ip hash
+			request>uri query {
+				delete q
+				delete ids
+				delete program
+				delete after
+				delete after_seq
+				delete cursor
+			}
+			wrap json
+		}
+	}
+
+	@stream path /data/*/stream
+	handle @stream {
+		reverse_proxy 127.0.0.1:8080 {
+			flush_interval -1
+		}
+	}
+	@worker path /data/* /share/* /og/* /badge/* /img/* /sitemap.xml /feed.xml /health /healthz
+	handle @worker {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle {
+		root * C:/kascov/web
+		try_files {path} {path}.html {path}/ /index.html
+		file_server
+	}
+}
+www.kascov.io {
+	redir https://kascov.io{uri} permanent
+}
+
+rewind.kascov.io {
+	encode gzip
+	reverse_proxy 127.0.0.1:8097
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+	}
+}
+
+pulse.kascov.io {
+	encode gzip
+	reverse_proxy 127.0.0.1:8093
+}

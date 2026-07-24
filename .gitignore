@@ -10,6 +10,8 @@ web/data/
 web/.claude/
 node_modules/
 .firebase/
+__pycache__/
+*.py[cod]
 
 # local editor/agent config and internal audit notes — not for the public repo
 .claude/
