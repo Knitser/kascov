@@ -93,6 +93,7 @@
     const desired = clamp(fit, fitScale * APP_FOCUS_MIN, fitScale * APP_FOCUS_MAX);
     return Math.max(currentScale, desired);
   }
+  const hasIdentity = (id) => typeof id === 'string' && id.length > 0;
 
   // geometric radius buckets (~±6% quantization) so sprite cache stays small
   const ORB_BUCKETS = [];
@@ -127,6 +128,7 @@
     // ---- state ----
     let N = 0;
     let nx, ny, nr, nt, ns, na, ids; // typed arrays + id string list
+    let identitiesLoaded = 0;
     let apps = [];
     let edges = null; // flat Int32Array [i,j,w, i,j,w, …]
     let tplColors = [];
@@ -229,6 +231,9 @@
         nt = Int16Array.from(d.nt || []);
         ns = Uint8Array.from(d.ns || []);
         na = Int32Array.from(d.na || []);
+        identitiesLoaded = d.identities_loaded == null
+          ? ids.reduce((sum, id) => sum + (hasIdentity(id) ? 1 : 0), 0)
+          : d.identities_loaded;
       } else {
         const nodes = d.nodes || [];
         N = nodes.length;
@@ -247,6 +252,7 @@
           na[i] = n.a == null ? -1 : n.a;
           ids[i] = n.id;
         }
+        identitiesLoaded = N;
       }
       const es = d.edges || [];
       edges = new Int32Array(es.length * 3);
@@ -772,6 +778,7 @@
       ctx.lineWidth = 3.5;
       for (let n = 0; n < ranked.length && boxes.length < 18; n++) {
         const i = ranked[n];
+        if (!hasIdentity(ids[i])) continue;
         const text = friendlyName(ids[i]);
         const width = Math.ceil(ctx.measureText(text).width);
         const px = sx(nx[i]), py = sy(ny[i]);
@@ -1254,8 +1261,14 @@
         } else if (i < 0 && prevApp >= 0) { hoverApp = -1; requestDraw(); }
         if (i >= 0) {
           const tname = nt[i] >= 0 ? templates[nt[i]] : 'unrecognized';
-          showTip(px, py, friendlyName(ids[i]), `${tname} · ${ns[i] ? 'active' : 'burned'}`);
-          canvas.style.cursor = 'pointer';
+          const identified = hasIdentity(ids[i]);
+          showTip(
+            px,
+            py,
+            identified ? friendlyName(ids[i]) : 'coin identity loading…',
+            `${tname} · ${ns[i] ? 'active' : 'burned'}`,
+          );
+          canvas.style.cursor = identified ? 'pointer' : 'default';
         } else { hideTip(); canvas.style.cursor = 'grab'; }
       }
     }
@@ -1288,7 +1301,7 @@
         return;
       }
       const i = nodeAt(px, py);
-      if (i >= 0) onPickCoin(ids[i]);
+      if (i >= 0 && hasIdentity(ids[i])) onPickCoin(ids[i]);
     }
 
     function zoomToApp(a) {
@@ -1361,7 +1374,8 @@
         return null;
       }
       for (let i = 0; i < N; i++) {
-        if (ids[i].toLowerCase().startsWith(q) || friendlyName(ids[i]).toLowerCase().includes(q)) {
+        if (hasIdentity(ids[i]) &&
+            (ids[i].toLowerCase().startsWith(q) || friendlyName(ids[i]).toLowerCase().includes(q))) {
           filter = Object.assign(filter, {}); // no filter change
           focusNode = i;
           hoverNode = i;
@@ -1484,6 +1498,7 @@
     function _debug() {
       return {
         nodes: N,
+        identities: identitiesLoaded,
         apps: apps.length,
         zoom: zoomFactor(),
         frame: Object.assign({}, frameStats),
@@ -1500,5 +1515,5 @@
     };
   }
 
-  window.kascovGalaxy = { create, _appFocusScale: appFocusScale };
+  window.kascovGalaxy = { create, _appFocusScale: appFocusScale, _hasIdentity: hasIdentity };
 })();

@@ -7,7 +7,7 @@ const source = readFileSync(new URL('./galaxy.js', import.meta.url), 'utf8');
 const sandbox = { window: {} };
 vm.runInNewContext(source, sandbox);
 
-const { _appFocusScale } = sandbox.window.kascovGalaxy;
+const { _appFocusScale, _hasIdentity } = sandbox.window.kascovGalaxy;
 
 test('a small edge cluster keeps surrounding aggregates during first focus', () => {
   const fitScale = 0.1;
@@ -29,4 +29,10 @@ test('large clusters still receive a useful first zoom step', () => {
 
   assert.ok(target / fitScale >= 6);
   assert.ok(target / fitScale <= 15);
+});
+
+test('visual-tier placeholder nodes are not treated as clickable identities', () => {
+  assert.equal(_hasIdentity(''), false);
+  assert.equal(_hasIdentity(null), false);
+  assert.equal(_hasIdentity('001122'), true);
 });
