@@ -204,7 +204,11 @@ async function loadDetail(network, covId) {
     for (const u of c.utxos) if (u.created_daa === c.genesis_daa) v += u.value;
     if (v > 0) birthValue = v;
   }
-  const rec = { c, name, moves, bornMs, lastMs, birthValue, balances: balancesByEventDaa(c) };
+  const rec = {
+    c, name, moves, bornMs, lastMs, birthValue,
+    balances: balancesByEventDaa(c),
+    dataAnchor: data,
+  };
   map.set(covId, rec);
   return rec;
 }

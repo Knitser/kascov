@@ -64,7 +64,7 @@ Open the `kascov.io/…` link it prints and flip on *nerd mode*. To choose the p
 
 ## The JSON API
 
-An always-on worker (Cloud Run) follows the chain and serves the index as JSON, CORS `*`, no keys:
+An always-on worker on kascov's dedicated VPS follows its own archival Kaspa nodes and serves the index through the same Caddy origin as the website — CORS `*`, no keys:
 
 ```sh
 # small fast feed: stats + chain tip + newest ~150 events (poll this)
@@ -83,8 +83,8 @@ Field-by-field docs live on the [for developers page](https://kascov.io/#/dev).
 - Rust workspace: `kascov-core` (node client, detection, sync, storage), `kascov` (CLI + serve worker), `kascov-decode` (post-Toccata disassembler; `web/disasm.js` is its verified JS port), `kascov-lab` (make real covenants on TN10 — `deploy`/`spend`/`settle-escrow` plus one-command `contract-demo`/`escrow-demo`), `kascov-labkit` (the transaction-building library `kascov-lab` and the worker's custodial one-click deploy share), `kascov-sim` (off-chain script-engine harness behind simulate/debug/zk-verify).
 - Kaspa RPC types never leave one module (`node/wrpc.rs`) — the rest of the code uses kascov's own stable model.
 - Kaspa crates on crates.io are frozen pre-Toccata; deps are pinned to a single [rusty-kaspa](https://github.com/kaspanet/rusty-kaspa) git rev in the workspace manifest. The pin must be wire-compatible (borsh) with the node you connect to.
-- Index storage is SQLite — single file per network, disposable and rebuildable. The hosted worker restores/backs up its DBs via GCS so history survives restarts; `sync` records the chain tip so exports can date events exactly, and prefetches accepting blocks concurrently to outrun busy testnets.
-- Deployment: Firebase Hosting serves `web/`; `/data/**` rewrites to the Cloud Run worker (`scripts/deploy-worker.sh`). The old laptop publish loop (`scripts/kascov-live.sh`) is no longer needed for production data.
+- Index storage is SQLite — one file per network, disposable and rebuildable. The hosted worker keeps the live DBs on the VPS and ships verified offsite backups to GCS; `sync` records the chain tip so exports can date events exactly, and prefetches accepting blocks concurrently to outrun busy testnets.
+- Deployment: Windows Caddy serves `web/` and streams `/data/**` to the Rust worker in WSL2. The worker talks over the host bridge to the same machine's archival mainnet and testnet-10 nodes. The former Firebase/Cloud Run scripts remain only as migration history.
 
 ## License
 

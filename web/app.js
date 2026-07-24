@@ -19,6 +19,7 @@ import {
   state, loadWatch, saveWatch,
 } from './core/state.js';
 import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js';
+import { createPendingModel } from './core/pending.js';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -34,6 +35,8 @@ import {
   loadCommunity,
   loadLaunchpads,
 } from './core/data.js';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js';
 
 
 
@@ -41,6 +44,12 @@ import {
 /* ----------------------------------------------------------------- utils */
 
 const $ = (sel) => document.querySelector(sel);
+
+function routeLoading(label) {
+  return `<div class="route-loading" role="status">` +
+    `<p><span class="radar" aria-hidden="true"></span>${esc(label)}</p>` +
+    `<div class="route-skeleton" aria-hidden="true"><i></i><i></i><i></i></div></div>`;
+}
 
 
 
@@ -100,36 +109,119 @@ function renderLanes(network) {
   }).join('') + hexRow;
 }
 
-/* live pending (mempool) covenant feed — rows appear as covenant txs enter the
-   node's mempool and clear as a block confirms them (or the pool drops them).
-   pendingLive[network] is a Map<txid, { covenant_id, tx_kind, ts, resolution? }>
-   in insertion order, seeded once from the /pending snapshot and kept live by
-   the SSE stream. Kept separate from state.pending (the fetch cache) so the
-   stream can mutate it between snapshot reloads. */
-const pendingLive = {};
+/* Live pending (mempool) feed. A small deterministic model merges snapshot
+   reconciliation with SSE mutations: a response that started before a live
+   frame cannot erase it, and a stale snapshot cannot resurrect a resolved tx. */
+const pendingModels = {};
+const pendingReady = {};
+const pendingLoads = {};
 const PENDING_ROWS_MAX = 24;   // DOM cap — mempool is a ticker, not an archive
 const PENDING_LIVE_MAX = 128;  // client-side entry cap (server caps its snapshot)
+
+function pendingModel(network) {
+  if (!pendingModels[network]) {
+    pendingModels[network] = createPendingModel({
+      rowCap: PENDING_ROWS_MAX,
+      liveCap: PENDING_LIVE_MAX,
+      onChange: () => {
+        if (state.network === network && parseRoute().view === 'explore') renderPending(network);
+      },
+    });
+  }
+  return pendingModels[network];
+}
+
+function setPendingConnection(network, connection) {
+  pendingModel(network).setConnection(connection);
+}
+
+/* Force invalidates core/data's five-second snapshot cache. Reconnect and
+   visibility-return calls need the node's current set, not the page's previous
+   answer. Multiple fetches may overlap; reconciliation tickets make only the
+   newest response authoritative while preserving later SSE mutations. */
+function reconcilePending(network, force = false) {
+  const model = pendingModel(network);
+  const ticket = model.beginReconcile();
+  if (force && state.pending[network]) state.pending[network].at = 0;
+  pendingLoads[network] = (pendingLoads[network] || 0) + 1;
+  return loadPending(network)
+    .then((data) => {
+      pendingReady[network] = true;
+      if (data) model.applySnapshot(ticket, data);
+      else if (state.pending[network] && state.pending[network].data !== null) {
+        model.applySnapshot(ticket, { pending: [] });
+      }
+      return data;
+    })
+    .catch(() => null)
+    .finally(() => {
+      pendingLoads[network] = Math.max(0, (pendingLoads[network] || 1) - 1);
+      if (state.network === network && parseRoute().view === 'explore') renderPending(network);
+    });
+}
+
+function pendingEmptyCopy(connection) {
+  if (connection === 'connecting') return 'checking the mempool…';
+  if (connection === 'retrying') return 'live stream reconnecting — showing the latest snapshot';
+  if (connection === 'paused') return 'live updates paused while this tab is away';
+  if (connection === 'offline') return 'live stream unavailable — showing the latest snapshot';
+  return 'nothing pending right now';
+}
+
+function updatePendingRow(row, data, network) {
+  const events = data.events.length ? data.events : [{
+    covenantId: data.covenantIds[0] || '',
+    txKind: data.txKind,
+  }];
+  const primary = events[0];
+  const meta = KIND_META[primary.txKind] || KIND_META.transition;
+  const extra = Math.max(0, events.length - 1);
+  const name = primary.covenantId ? friendlyName(primary.covenantId) : shortHex(data.txid, 8, 6);
+  const kind = events.length > 1 ? `${events.length} events` : (primary.txKind || 'pending');
+  const resolution = data.resolution === 'confirmed' ? 'confirmed'
+    : data.resolution === 'dropped' ? 'dropped' : '';
+
+  row.className = `pending-row ${meta.cls}` +
+    (resolution ? ` pending-${resolution}` : '');
+  row.href = `#/${network}/tx/${data.txid}`;
+  row.dataset.txid = data.txid;
+  row.dataset.generation = String(data.generation);
+  row.setAttribute('aria-label',
+    `${kind}: ${name}${extra ? ` and ${extra} more smart coin${extra === 1 ? '' : 's'}` : ''}; open transaction`);
+  row.title = `${events.length} covenant event${events.length === 1 ? '' : 's'} in ${data.txid}`;
+
+  let kindEl = row.querySelector('.pending-kind');
+  let nameEl = row.querySelector('.pending-name');
+  let txEl = row.querySelector('.pending-tx');
+  if (!kindEl) {
+    kindEl = document.createElement('span');
+    kindEl.className = 'pending-kind';
+    nameEl = document.createElement('span');
+    nameEl.className = 'lane-ns pending-name';
+    txEl = document.createElement('span');
+    txEl.className = 'lane-counts dim mono pending-tx';
+    const spin = document.createElement('span');
+    spin.className = 'pending-spin';
+    spin.setAttribute('aria-hidden', 'true');
+    spin.textContent = '⏳';
+    txEl.append(document.createTextNode(''), spin);
+    row.append(kindEl, nameEl, txEl);
+  }
+  kindEl.textContent = kind;
+  nameEl.textContent = `${name}${extra ? ` +${extra} more` : ''}`;
+  const spin = txEl.querySelector('.pending-spin');
+  txEl.firstChild.textContent = resolution || shortHex(data.txid, 8, 6);
+  if (spin) spin.hidden = Boolean(resolution);
+}
 
 function renderPending(network) {
   if (state.network !== network || parseRoute().view !== 'explore') return;
   const section = $('#section-pending');
   const host = $('#pending-row');
   if (!section || !host) return;
-  const map = pendingLive[network];
-  if (!map) {
-    /* lazy seed from the snapshot; a 404 (no-mempool node / old worker) seeds
-       an empty map so the section simply stays hidden — feature-detected. */
-    loadPending(network).then((d) => {
-      if (!pendingLive[network]) pendingLive[network] = new Map();
-      if (d && Array.isArray(d.pending)) {
-        for (const p of d.pending) {
-          if (p && p.txid) {
-            pendingLive[network].set(p.txid, { covenant_id: p.covenant_id, tx_kind: p.tx_kind, ts: Date.now() });
-          }
-        }
-      }
-      if (state.network === network && parseRoute().view === 'explore') renderPending(network);
-    });
+  const model = pendingModel(network);
+  if (!pendingReady[network] && !pendingLoads[network]) {
+    reconcilePending(network);
     section.hidden = true;
     return;
   }
@@ -140,50 +232,50 @@ function renderPending(network) {
   const probed = state.pending[network];
   if (probed && probed.data === null) { section.hidden = true; return; }
   section.hidden = false;
-  const rows = [...map.entries()];
+  const view = model.view();
+  section.dataset.connection = view.connection;
+  const dot = section.querySelector('.pending-live-dot');
+  if (dot) {
+    dot.title = {
+      live: 'mempool stream connected',
+      connecting: 'connecting to the mempool stream',
+      retrying: 'mempool stream reconnecting',
+      paused: 'mempool stream paused',
+      offline: 'mempool stream unavailable',
+    }[view.connection];
+  }
   const cnt = $('#pending-count');
-  if (cnt) cnt.textContent = rows.length ? String(rows.length) : '';
-  if (!rows.length) {
-    host.innerHTML = '<div class="pending-empty dim">nothing pending right now</div>';
+  if (cnt) {
+    const stateLabel = view.connection === 'live' ? 'live'
+      : view.connection === 'connecting' ? 'connecting'
+        : view.connection === 'retrying' ? 'reconnecting' : view.connection;
+    cnt.textContent = view.total ? `${view.total} · ${stateLabel}` : stateLabel;
+  }
+  if (!view.rows.length) {
+    const existing = host.querySelector('.pending-empty');
+    host.replaceChildren(existing || Object.assign(document.createElement('div'), { className: 'pending-empty dim' }));
+    host.firstElementChild.textContent = pendingEmptyCopy(view.connection);
     return;
   }
-  /* newest at the bottom: as fresh txs arrive the window scrolls up and the
-     oldest slides off the top, so the locked-height box never grows the page. */
-  host.innerHTML = rows.slice(-PENDING_ROWS_MAX).map(([txid, p]) => {
-    const meta = KIND_META[p.tx_kind] || KIND_META.transition;
-    const name = p.covenant_id ? friendlyName(p.covenant_id) : shortHex(txid, 8, 6);
-    const res = p.resolution === 'confirmed' ? ' pending-confirmed'
-      : (p.resolution === 'dropped' ? ' pending-dropped' : '');
-    return `<div class="pending-row ${esc(meta.cls)}${res}" data-txid="${esc(txid)}">` +
-      `<span class="pending-kind">${esc(p.tx_kind || 'pending')}</span>` +
-      `<span class="lane-ns pending-name">${esc(name)}</span>` +
-      `<span class="lane-counts dim mono pending-tx">${esc(shortHex(txid, 8, 6))}` +
-      `<span class="pending-spin" aria-hidden="true">⏳</span></span></div>`;
-  }).join('');
+  const keyed = new Map([...host.querySelectorAll('.pending-row')]
+    .map((row) => [row.dataset.txid, row]));
+  const fragment = document.createDocumentFragment();
+  for (const data of view.rows) {
+    const row = keyed.get(data.txid) || document.createElement('a');
+    keyed.delete(data.txid);
+    updatePendingRow(row, data, network);
+    fragment.append(row);
+  }
+  host.replaceChildren(fragment);
+  host.scrollTop = host.scrollHeight;
 }
 
-/* record a freshly-seen pending covenant tx from the stream, evicting the
-   oldest if the client map is over its cap. */
-function notePending(network, txid, covenant_id, tx_kind) {
-  if (!pendingLive[network]) pendingLive[network] = new Map();
-  const map = pendingLive[network];
-  map.delete(txid); // re-insert moves it to newest
-  map.set(txid, { covenant_id, tx_kind, ts: Date.now() });
-  while (map.size > PENDING_LIVE_MAX) map.delete(map.keys().next().value);
+function notePending(network, message) {
+  pendingModel(network).pending(message);
 }
 
-/* resolve a tracked pending tx: mark it (confirmed flash / dropped fade), then
-   evict it after the animation and re-render. */
-function resolvePending(network, txid, resolution) {
-  const map = pendingLive[network];
-  if (!map || !map.has(txid)) return;
-  map.get(txid).resolution = resolution;
-  renderPending(network);
-  setTimeout(() => {
-    const m = pendingLive[network];
-    if (m) m.delete(txid);
-    renderPending(network);
-  }, resolution === 'confirmed' ? 900 : 700);
+function resolvePending(network, message) {
+  pendingModel(network).resolve(message);
 }
 
 function renderInscriptions(network) {
@@ -396,18 +488,32 @@ function renderGalaxy() {
    keep that preference and do not spend the bandwidth. */
 const galaxyPreloads = {};
 
-function wantsGalaxyPreload() {
-  if (parseRoute().galaxy) return true;
+function galaxyPreloadMode() {
+  const explicit = Boolean(parseRoute().galaxy);
+  let preference = null;
   try {
-    return localStorage.getItem('kascov-galaxy-seen') !== 'closed';
+    preference = localStorage.getItem('kascov-galaxy-seen');
   } catch (e) {
-    return true;
+    preference = null;
   }
+  const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection || null;
+  const coarsePointer = Boolean(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  return galaxyPreloadPolicy({ explicit, preference, connection, coarsePointer });
 }
 
 function preloadGalaxySection(network) {
   const gsec = $('#section-galaxy');
-  if (!gsec || !wantsGalaxyPreload()) return null;
+  if (!gsec) return null;
+  /* Keep discovery cheap: the section is visible, but first-time and
+     constrained visitors do not download the multi-tier map until they open
+     it. Explicit deep links always win. */
+  gsec.hidden = false;
+  const mode = galaxyPreloadMode();
+  if (mode === 'none') {
+    const gcnt = $('#galaxy-count');
+    if (gcnt && !gcnt.textContent) gcnt.textContent = 'open to load';
+    return null;
+  }
   if (galaxyPreloads[network]) return galaxyPreloads[network];
 
   const request = loadGalaxy(network)
@@ -446,10 +552,16 @@ function renderFamilies(network) {
   if (!section || !host) return;
   const cached = state.families[network];
   if (!cached) {
-    loadFamilies(network).then((d) => {
-      if (d && state.network === network && parseRoute().view === 'explore') renderFamilies(network);
-    });
-    section.hidden = true;
+    /* families.json is one of the largest explorer payloads. Advertise the
+       section immediately, but fetch it only after the user opens it. */
+    section.hidden = false;
+    const cnt = $('#families-count');
+    if (cnt) cnt.textContent = section.open ? 'loading…' : 'open to load';
+    if (section.open) {
+      loadFamilies(network).then((d) => {
+        if (d && state.network === network && parseRoute().view === 'explore') renderFamilies(network);
+      });
+    }
     return;
   }
   const fams = (cached.data && cached.data.families) || [];
@@ -476,7 +588,6 @@ function renderFamilies(network) {
       gsec.hidden = false;
       const gcnt = $('#galaxy-count');
       if (gcnt) gcnt.textContent = `${fmtInt(graphable)} app${graphable === 1 ? '' : 's'}`;
-      promoteSection(gsec, 'kascov-galaxy-seen');
       /* '#/explore?galaxy=1' deep link (landing teaser card) — open the
          galaxy and bring it into view, once per page load */
       if (!galaxyLinkDone && parseRoute().galaxy) {
@@ -582,7 +693,9 @@ function renderLiteLanding(live, network) {
 
 function renderLiteExplore(live, network) {
   const net = NETWORKS[network];
-  document.title = `kascov — exploring ${net.label}`;
+  const galaxyMode = Boolean(parseRoute().galaxy);
+  $('#view-explore').classList.toggle('galaxy-focus-mode', galaxyMode);
+  document.title = galaxyMode ? `the galaxy on ${net.label} — kascov` : `kascov — exploring ${net.label}`;
   const s = live.stats;
   const bits = [
     `${fmtInt(s.covenants)} smart coin${s.covenants === 1 ? '' : 's'}`,
@@ -2045,7 +2158,9 @@ function renderExplore(entry) {
   const { data } = entry;
   const net = NETWORKS[network];
 
-  document.title = `kascov — exploring ${net.label}`;
+  const galaxyMode = Boolean(parseRoute().galaxy);
+  $('#view-explore').classList.toggle('galaxy-focus-mode', galaxyMode);
+  document.title = galaxyMode ? `the galaxy on ${net.label} — kascov` : `kascov — exploring ${net.label}`;
 
   const s = data.stats;
   const bits = [
@@ -2829,19 +2944,24 @@ let detailGraph = null;
 
 function renderDetail(entry, covId, flashTx, program) {
   const network = state.network;
-  const { data, index } = entry;
+  const detMap = state.details[network];
+  const rec = detMap && detMap.get(covId);
+  /* Direct detail routes deliberately do not wait for the grid snapshot.
+     The detail response carries its own DAA/time anchor; a loaded grid still
+     enriches the header name and summary when navigation came from Explore. */
+  const data = (entry && entry.data) || (rec && rec.dataAnchor) ||
+    (state.live[network] && state.live[network].data) || {};
+  const index = (entry && entry.index) || { byId: new Map() };
   const view = $('#view-detail');
   const gridRec = index.byId.get(covId);
   if (state.detailId !== covId) {
     state.detailId = covId;
     state.storyAll = false;
     state.utxoAll = false;
+    state.togetherShown = 40;
     state.tlKind = 'all';   /* per-coin timeline chips reset with the coin */
     state.tlLabel = 'all';
   }
-
-  const detMap = state.details[network];
-  const rec = detMap && detMap.get(covId);
 
   if (!gridRec && !rec) {
     /* Not in the loaded grid window — which no longer means unknown: the grid
@@ -2859,7 +2979,7 @@ function renderDetail(entry, covId, flashTx, program) {
       `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(covId)}" aria-label="copy this coin’s full id">copy id</button></p>` +
       `</div></header>` +
       `<section aria-label="Life story"><h2>life story</h2>` +
-      `<p class="dim">reading this coin’s full story…</p></section>`;
+      routeLoading('reading this coin’s full story…') + `</section>`;
     loadDetail(network, covId)
       .then(() => {
         if (state.network === network && state.detailId === covId && parseRoute().view === 'detail') {
@@ -2926,7 +3046,7 @@ function renderDetail(entry, covId, flashTx, program) {
       `</div></header>` +
       `<p class="detail-summary">${esc(bits.join(' · '))}.</p>` +
       `<section aria-label="Life story"><h2>life story</h2>` +
-      `<p class="dim">reading this coin’s full story…</p></section>`;
+      routeLoading('reading this coin’s full story…') + `</section>`;
     loadDetail(network, covId)
       .then(() => {
         if (state.network === network && state.detailId === covId && parseRoute().view === 'detail') {
@@ -3032,11 +3152,28 @@ function renderDetail(entry, covId, flashTx, program) {
       }
     }
   }
+  const togetherMembers = [...togetherCounts.entries()]
+    .map(([id, sharedTxs]) => ({
+      covenant_id: id,
+      name: friendlyName(id),
+      shared_txs: sharedTxs,
+    }))
+    .sort((a, b) => b.shared_txs - a.shared_txs || a.name.localeCompare(b.name));
+  const togetherGraphMembers = togetherMembers.slice(0, 40);
+  const togetherListShown = Math.min(state.togetherShown || 40, togetherMembers.length);
   const togetherSection = togetherCounts.size
     ? `<section class="together" aria-label="Coins moved together"><h2>moved together</h2>` +
-      `<p class="dim together-sub">other smart coins that shared a transaction with this one — hover a dot to name it; click or tap the dot to open it</p>` +
+      `<p class="dim together-sub">other smart coins that shared a transaction with this one. the graph shows the top ${fmtInt(togetherGraphMembers.length)} of ${fmtInt(togetherMembers.length)} by shared transactions; the linked list is the reliable way to browse every coin.</p>` +
       `<canvas id="together-graph" class="together-graph" width="600" height="360" role="img"` +
-      ` aria-label="graph of ${esc(fmtInt(togetherCounts.size))} coins that moved with this one"></canvas></section>`
+      ` aria-label="graph of the top ${esc(fmtInt(togetherGraphMembers.length))} of ${esc(fmtInt(togetherMembers.length))} coins that moved with this one"></canvas>` +
+      `<ol class="together-list" aria-label="Coins that moved together">${togetherMembers.slice(0, togetherListShown).map((member) =>
+        `<li><a href="#/${esc(network)}/c/${esc(member.covenant_id)}">${avatarSvg(member.covenant_id, 24)}<span>${esc(member.name)}</span>` +
+        `<span class="dim">${fmtInt(member.shared_txs)} shared tx${member.shared_txs === 1 ? '' : 's'}</span></a></li>`
+      ).join('')}</ol>` +
+      (togetherListShown < togetherMembers.length
+        ? `<button type="button" class="btn btn-expand" data-action="together-more">show ${fmtInt(Math.min(40, togetherMembers.length - togetherListShown))} more</button>`
+        : '') +
+      `</section>`
     : '';
 
   /* holders panel: keys that have controlled a piece of this coin's state.
@@ -3110,10 +3247,7 @@ function renderDetail(entry, covId, flashTx, program) {
   if (togetherCounts.size && window.kascovGraph) {
     const canvas = view.querySelector('#together-graph');
     if (canvas) {
-      const members = [...togetherCounts.entries()].map(([id, n]) => ({
-        covenant_id: id, name: friendlyName(id), shared_txs: n,
-      }));
-      detailGraph = window.kascovGraph.render(canvas, { members, label: rec.name }, {
+      detailGraph = window.kascovGraph.render(canvas, { members: togetherGraphMembers, label: rec.name }, {
         onPick: (node) => { location.hash = `#/${network}/c/${node.id}`; },
       });
     }
@@ -3371,6 +3505,7 @@ function renderDecode(route) {
 function renderDev() {
   document.title = 'API — kascov';
   wireApiSidebar();
+  wireApiTools();
 }
 
 /* ---- guided visual builder (#/build) — the codeless path ----
@@ -3831,6 +3966,51 @@ function wireApiSidebar() {
   document.querySelectorAll('.api-endpoint[id], .api-block[id]').forEach((el) => spy.observe(el));
 }
 
+/* API docs are a working reference, not a static wall: endpoint search and
+   copy/open actions are added from the existing semantic markup so examples
+   cannot drift into a second hand-maintained registry. */
+function wireApiTools() {
+  const search = $('#api-search');
+  const count = $('#api-search-count');
+  const articles = [...document.querySelectorAll('.api-endpoint')];
+  const navLinks = [...document.querySelectorAll('.api-nav a[href^="#ep-"]')];
+
+  for (const article of articles) {
+    const head = article.querySelector('.ep-head');
+    const path = article.querySelector('.ep-path');
+    const method = article.querySelector('.method');
+    if (!head || !path) continue;
+    const oldActions = head.querySelector('.ep-actions');
+    if (oldActions) oldActions.remove();
+    const raw = path.textContent.trim();
+    const concrete = raw.replace('{network}', state.network);
+    const canOpen = method && method.textContent.trim() === 'GET' && !/[{}]/.test(concrete);
+    const actions = document.createElement('span');
+    actions.className = 'ep-actions';
+    actions.innerHTML =
+      `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(`https://kascov.io${concrete}`)}">copy URL</button>` +
+      (canOpen ? `<a class="copy-btn" href="${esc(concrete)}" target="_blank" rel="noopener noreferrer">open ↗</a>` : '');
+    head.append(actions);
+  }
+
+  if (!search || search.dataset.wired) return;
+  search.dataset.wired = '1';
+  const apply = () => {
+    const q = search.value.trim().toLowerCase();
+    let shown = 0;
+    for (const article of articles) {
+      const match = !q || article.textContent.toLowerCase().includes(q);
+      article.hidden = !match;
+      if (match) shown++;
+      const link = navLinks.find((a) => a.getAttribute('href') === `#${article.id}`);
+      if (link) link.hidden = !match;
+    }
+    if (count) count.textContent = q ? `${shown} endpoint${shown === 1 ? '' : 's'}` : `${articles.length} endpoints`;
+  };
+  search.addEventListener('input', apply);
+  apply();
+}
+
 /* ---------------------------------------------------------------- address */
 
 /* which smart coins has this address/pubkey touched — renders from its own
@@ -3971,7 +4151,7 @@ function renderLane(route) {
       });
   }
   if (!cached) {
-    view.innerHTML = head('reading this lane’s traffic…');
+    view.innerHTML = head('') + routeLoading('reading this lane’s traffic…');
     return;
   }
   if (cached.missing) {
@@ -4026,6 +4206,15 @@ const TOKEN_NOTE_FALLBACK = 'decoded from chain — not validated: kascov shows 
   'wrote in their own bytes; it does not (yet) check KCC20 balance rules';
 const TOKEN_NOTE_VALIDATED = 'validated from chain — “verified” means every event in the token’s ' +
   'history matched the KCC20 rules and supply is conserved; anything kascov could not prove stays unvalidated';
+const TOKEN_DIRECTORY_PAGE = 100;
+const tokenDirectoryUi = {
+  network: null,
+  query: '',
+  validation: 'all',
+  lifecycle: 'all',
+  sort: 'holders',
+  limit: TOKEN_DIRECTORY_PAGE,
+};
 
 /* The conservative per-token validation verdict, feature-detected: rows from
    a newer worker carry status verified|invalid|unvalidated (plus supply,
@@ -4144,7 +4333,7 @@ function renderTokens() {
       });
   }
   if (!cached) {
-    view.innerHTML = head(null) + `<p class="dim">reading this network’s tokens…</p>`;
+    view.innerHTML = head(null) + routeLoading('reading this network’s tokens…');
     return;
   }
   if (cached.missing) {
@@ -4155,6 +4344,14 @@ function renderTokens() {
   const d = cached.data || {};
   const tokens = Array.isArray(d.tokens) ? d.tokens : [];
   const validated = tokens.some((t) => tokenVstatus(t));
+  if (tokenDirectoryUi.network !== network) {
+    tokenDirectoryUi.network = network;
+    tokenDirectoryUi.query = '';
+    tokenDirectoryUi.validation = 'all';
+    tokenDirectoryUi.lifecycle = 'all';
+    tokenDirectoryUi.sort = validated ? 'holders' : 'activity';
+    tokenDirectoryUi.limit = TOKEN_DIRECTORY_PAGE;
+  }
   if (!tokens.length) {
     view.innerHTML = head(d, validated) + `<div class="empty-card"><h2>no covenant tokens found on this network yet.</h2>` +
       `<p class="dim">they’re coming — the first KCC20-shaped coins will show up here on their own.</p></div>`;
@@ -4195,7 +4392,7 @@ function renderTokens() {
   const rowHtml = (t) => {
     const cid = String(t.covenant_id || '');
     const name = t.name || friendlyName(cid);
-    const alive = t.alive === true || t.status === 'active';
+    const alive = tokenLifecycle(t) === 'alive';
     const ms = toMs(t.last_activity_daa);
     const when = ms != null ? `<span title="${esc(utcTitle(ms))}">${esc(relTimeShort(ms))}</span>`
       : t.last_activity_daa != null ? `<span class="mono dim">DAA ${esc(fmtInt(t.last_activity_daa))}</span>`
@@ -4218,35 +4415,59 @@ function renderTokens() {
     return `<tr>` +
       `<td><a class="token-coin" href="${href}">${rowArt} ${nameHtml}</a></td>` +
       `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}</td>` +
-      `<td><div class="tokens-fields">${tokenFieldChips(t.fields)}</div></td>` +
       (validated
         ? `<td class="tokens-supply">${t.supply != null ? esc(fmtTokenAmount(t.supply)) : '<span class="dim">—</span>'}</td>` +
           `<td class="tokens-holders">${t.holders != null ? esc(fmtInt(t.holders)) : '<span class="dim">—</span>'}</td>`
         : '') +
       `<td class="tokens-value">${t.live_value != null ? esc(amountWithUsd(t.live_value, network)) : '<span class="dim">—</span>'}</td>` +
-      `<td>${tokenStatusBadge(t) ||
-        `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>`}</td>` +
+      `<td><span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span></td>` +
+      (validated ? `<td>${tokenStatusBadge(t) || '<span class="pill pill-unvalidated">unknown</span>'}</td>` : '') +
       `<td class="tokens-when">${when}</td>` +
+      `<td><details class="token-tech"><summary>inspect</summary><div class="tokens-fields">${tokenFieldChips(t.fields)}</div></details></td>` +
       `</tr>`;
   };
   const tableHtml = (list) =>
     `<div class="tokens-tablewrap"><table class="tokens-table">` +
-    `<thead><tr><th>token</th><th>template</th><th>decoded fields</th>` +
+    `<thead><tr><th>token</th><th>template</th>` +
     (validated ? `<th>supply</th><th>holders</th>` : '') +
-    `<th>holds</th><th>status</th><th>last activity</th></tr></thead>` +
+    `<th>holds</th><th>state</th>${validated ? '<th>validation</th>' : ''}<th>last activity</th><th>technical</th></tr></thead>` +
     `<tbody>${list.map(rowHtml).join('')}</tbody></table></div>`;
+  const selected = selectTokens(shown, tokenDirectoryUi);
+  const visibleTokens = selected.slice(0, tokenDirectoryUi.limit);
   const countLine = validated
-    ? `${fmtInt(shown.length)} token coin${shown.length === 1 ? '' : 's'}` +
+    ? `${fmtInt(selected.length)} matching token coin${selected.length === 1 ? '' : 's'}` +
       (empty.length ? ` with holders, supply or value · ${fmtInt(empty.length)} empty deploy${empty.length === 1 ? '' : 's'} tucked below` : '') +
-      ' — tap any row’s name for its token page'
-    : `${fmtInt(tokens.length)} token coin${tokens.length === 1 ? '' : 's'} — tap any row’s name for its full life story`;
+      ' — open a token name for its full page'
+    : `${fmtInt(selected.length)} matching token coin${selected.length === 1 ? '' : 's'} — open a name for its full life story`;
+  const controls =
+    `<div class="token-directory-controls" role="search" aria-label="Filter token directory">` +
+    `<label class="token-dir-search"><span class="sr-only">Find a token</span><input type="search" data-token-query placeholder="find ticker, name, id or template…" value="${esc(tokenDirectoryUi.query)}"></label>` +
+    (validated
+      ? `<label><span>validation</span><select data-token-control="validation">` +
+        ['all', 'verified', 'invalid', 'unvalidated'].map((v) => `<option value="${v}"${tokenDirectoryUi.validation === v ? ' selected' : ''}>${v}</option>`).join('') +
+        `</select></label>`
+      : '') +
+    `<label><span>state</span><select data-token-control="lifecycle">` +
+      ['all', 'alive', 'retired'].map((v) => `<option value="${v}"${tokenDirectoryUi.lifecycle === v ? ' selected' : ''}>${v}</option>`).join('') +
+      `</select></label>` +
+    `<label><span>sort</span><select data-token-control="sort">` +
+      [['holders', 'holders'], ['activity', 'activity'], ['supply', 'supply'], ['value', 'value'], ['name', 'name']].map(([v, label]) =>
+        `<option value="${v}"${tokenDirectoryUi.sort === v ? ' selected' : ''}>${label}</option>`).join('') +
+      `</select></label></div>`;
   const emptyBlock = validated && empty.length
     ? `<details class="tokens-empty"><summary>${fmtInt(empty.length)} deploy${empty.length === 1 ? '' : 's'} with no holders, supply or value — mostly test &amp; placeholder coins</summary>` +
-      tableHtml(empty) + `</details>`
+      tableHtml(empty.slice(0, TOKEN_DIRECTORY_PAGE)) +
+      (empty.length > TOKEN_DIRECTORY_PAGE ? `<p class="dim">showing the newest ${TOKEN_DIRECTORY_PAGE}; use search above for meaningful tokens.</p>` : '') +
+      `</details>`
     : '';
   view.innerHTML = head(d, validated) +
+    controls +
     `<p class="dim tokens-count">${esc(countLine)}</p>` +
-    tableHtml(shown) + emptyBlock;
+    (visibleTokens.length ? tableHtml(visibleTokens) : `<div class="empty-card token-filter-empty"><h2>no tokens match those filters.</h2><p class="dim">try a broader name, state or validation.</p></div>`) +
+    (selected.length > visibleTokens.length
+      ? `<p class="token-more"><button type="button" class="btn" data-action="tokens-more">show ${fmtInt(Math.min(TOKEN_DIRECTORY_PAGE, selected.length - visibleTokens.length))} more</button></p>`
+      : '') +
+    emptyBlock;
 }
 
 /* -------------------------------------------------------------- token page */
@@ -4353,7 +4574,7 @@ function renderTokenPage(route) {
   }
   if (!cached) {
     document.title = `token ${friendlyName(id)} — kascov`;
-    view.innerHTML = back + `<p class="dim">reading this token’s story…</p>`;
+    view.innerHTML = back + routeLoading('reading this token’s story…');
     return;
   }
   if (cached.missing) {
@@ -4576,7 +4797,7 @@ function renderTxPage(route) {
       });
   }
   if (!cached) {
-    view.innerHTML = back + `<p class="dim">reading this transaction…</p>`;
+    view.innerHTML = back + routeLoading('reading this transaction…');
     return;
   }
   if (cached.missing) {
@@ -4717,7 +4938,14 @@ function renderTxPage(route) {
       `<p class="dim">kascov knows this transaction, but its answer named no smart coins — that shouldn’t happen; please report it.</p>`;
     return;
   }
-  view.innerHTML = back + header + story + eventsSection + tokenSection + cellsSection;
+  const flow = created.length || spent.length
+    ? `<div class="tx-flow" role="img" aria-label="${fmtInt(spent.length)} spent cells flow through this transaction into ${fmtInt(created.length)} created cells">` +
+      `<span><strong>${fmtInt(spent.length)}</strong><small>spent cell${spent.length === 1 ? '' : 's'}</small></span>` +
+      `<i aria-hidden="true">→</i><span class="tx-flow-core"><strong>tx</strong><small>${esc(shortHex(txid, 6, 4))}</small></span>` +
+      `<i aria-hidden="true">→</i><span><strong>${fmtInt(created.length)}</strong><small>created cell${created.length === 1 ? '' : 's'}</small></span>` +
+      `</div>`
+    : '';
+  view.innerHTML = back + header + story + flow + eventsSection + tokenSection + cellsSection;
 }
 
 /* ---------------------------------------------------------------- routing */
@@ -4770,10 +4998,11 @@ function parseRoute() {
      #/decode (the POST's network segment only picks the mass limits) */
   if (/^#\/preflight\/?$/.test(path)) return { view: 'preflight', network: null };
   if (/^#\/dev\/?$/.test(path)) return { view: 'dev', network: null };
+  if (/^#\/?$/.test(path)) return { view: 'landing', network: null };
   /* old home links '#/<network>' were data views — send them to the explorer */
   m = path.match(/^#\/(testnet-10|mainnet)\/?$/);
   if (m) return { view: 'explore', network: m[1] };
-  return { view: 'landing', network: null };
+  return { view: 'notfound', network: null, path: path.replace(/^#/, '') || '/' };
 }
 
 function routeHash(view, id) {
@@ -4794,6 +5023,18 @@ function routeHash(view, id) {
   return '#/';
 }
 
+function renderNotFound(route) {
+  document.title = 'page not found — kascov';
+  const view = $('#view-notfound');
+  if (!view) return;
+  view.innerHTML =
+    `<div class="empty-card notfound-card"><p class="page-eyebrow">lost signal</p>` +
+    `<h1>That page isn’t in this galaxy.</h1>` +
+    `<p class="dim">Nothing matches <span class="mono">${esc(route.path || '/')}</span>. The link may be old or mistyped.</p>` +
+    `<div class="empty-actions"><a class="btn btn-accent" href="#/${esc(state.network)}/explore">open the explorer</a>` +
+    `<button type="button" class="btn" data-action="focus-search">search kascov</button></div></div>`;
+}
+
 /* Fade a view in without ever risking it staying invisible: the resting
    state is opacity 1; the transient .is-entering class (opacity 0) is
    removed on the next frame so the CSS transition carries it to 1, with a
@@ -4811,6 +5052,19 @@ function fadeIn(el) {
 
 let renderToken = 0;
 let lastView = null;
+
+function finishViewNavigation(view, viewName) {
+  if (!view || viewName === lastView) return;
+  window.scrollTo({ top: 0, behavior: 'instant' });
+  lastView = viewName;
+  requestAnimationFrame(() => {
+    const target = view.querySelector('h1') || view.querySelector('h2') || view;
+    if (!target) return;
+    target.setAttribute('tabindex', '-1');
+    target.focus({ preventScroll: true });
+    target.addEventListener('blur', () => target.removeAttribute('tabindex'), { once: true });
+  });
+}
 
 async function render() {
   const token = ++renderToken;
@@ -4850,6 +5104,7 @@ async function render() {
     preflight: $('#view-preflight'),
     dev: $('#view-dev'),
     changelog: $('#view-changelog'),
+    notfound: $('#view-notfound'),
   };
   /* a stale cached index.html may predate newer views — never crash on them */
   for (const k of Object.keys(views)) if (!views[k]) delete views[k];
@@ -4870,13 +5125,14 @@ async function render() {
      endpoint), so it stays reachable on every view; ⌘K focuses it anywhere */
   $('#header-search').hidden = false;
 
-  /* the decoder, dev docs, changelog, address, lane, token and tx pages never
-     need a snapshot — don't block them on data (they fetch their own) */
-  if ((route.view === 'decode' || route.view === 'dev' || route.view === 'build' || route.view === 'preflight' || route.view === 'address' || route.view === 'lane' || route.view === 'tokens' || route.view === 'token' || route.view === 'tx' || route.view === 'changelog') && views[route.view]) {
+  /* Only landing and Explore need the paginated network grid. Every other
+     route owns a small dedicated endpoint and must render independently. */
+  if (!routeNeedsSnapshot(route.view) && views[route.view]) {
     panel.hidden = true;
     for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
     views.detail.innerHTML = '';
-    if (route.view === 'decode') renderDecode(route);
+    if (route.view === 'detail') renderDetail(state.cache[state.network] || null, route.id, route.tx, route.program);
+    else if (route.view === 'decode') renderDecode(route);
     else if (route.view === 'address') renderAddress(route);
     else if (route.view === 'lane') renderLane(route);
     else if (route.view === 'tokens') renderTokens();
@@ -4885,12 +5141,10 @@ async function render() {
     else if (route.view === 'build') renderBuild();
     else if (route.view === 'preflight') renderPreflight();
     else if (route.view === 'changelog') renderChangelog();
+    else if (route.view === 'notfound') renderNotFound(route);
     else renderDev();
     fadeIn(views[route.view]);
-    if (route.view !== lastView) {
-      window.scrollTo({ top: 0, behavior: 'instant' });
-      lastView = route.view;
-    }
+    finishViewNavigation(views[route.view], route.view);
     return;
   }
 
@@ -4905,29 +5159,18 @@ async function render() {
       })
       .catch(() => null);
 
-    /* deep links straight to a coin: warm its detail while the grid loads */
-    if (route.view === 'detail' && route.id) {
-      loadDetail(network, route.id).catch(() => { /* handled on render */ });
-    }
-
-    /* instant first paint from the tiny live feed (landing/explorer only —
-       a coin page needs the full snapshot) */
-    if (route.view !== 'detail') {
-      const live = (state.live[network] && state.live[network].data) || (await loadLite(network));
-      if (token !== renderToken) return;
-      if (live) {
-        panel.hidden = true;
-        for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
-        views.detail.innerHTML = '';
-        if (route.view === 'explore') renderLiteExplore(live, network);
-        else renderLiteLanding(live, network);
-        fadeIn(views[route.view]);
-        if (route.view !== lastView) {
-          window.scrollTo({ top: 0, behavior: 'instant' });
-          lastView = route.view;
-        }
-        return; /* the fullPromise re-render completes the page */
-      }
+    /* instant first paint from the tiny live feed while the grid lands */
+    const live = (state.live[network] && state.live[network].data) || (await loadLite(network));
+    if (token !== renderToken) return;
+    if (live) {
+      panel.hidden = true;
+      for (const [name, el] of Object.entries(views)) el.hidden = name !== route.view;
+      views.detail.innerHTML = '';
+      if (route.view === 'explore') renderLiteExplore(live, network);
+      else renderLiteLanding(live, network);
+      fadeIn(views[route.view]);
+      finishViewNavigation(views[route.view], route.view);
+      return; /* the fullPromise re-render completes the page */
     }
 
     panel.hidden = false;
@@ -4957,12 +5200,7 @@ async function render() {
     else renderLanding(entry);
   }
   fadeIn(views[route.view]);
-
-  if (route.view !== lastView) {
-    /* jump like a page navigation — CSS smooth-scroll is for anchors only */
-    window.scrollTo({ top: 0, behavior: 'instant' });
-    lastView = route.view;
-  }
+  finishViewNavigation(views[route.view], route.view);
 }
 
 /* Live refresh: refetch the current network's snapshot and re-render in
@@ -5159,15 +5397,33 @@ const STREAM_ORIGIN = /(^|\.)kascov-explorer\.web\.app$|\.firebaseapp\.com$/.tes
 /* Open/close/retarget the stream to match the current view + network.
    Idempotent — called from render() and visibilitychange. */
 function syncStream() {
-  if (typeof EventSource === 'undefined') return;
-  if (!streamWanted()) { closeStream(); return; }
+  if (typeof EventSource === 'undefined') {
+    setPendingConnection(state.network, 'offline');
+    return;
+  }
+  if (!streamWanted()) {
+    if (stream.network) setPendingConnection(stream.network, 'paused');
+    closeStream();
+    return;
+  }
   if (stream.es && stream.network === state.network) return;
   closeStream();
   const network = state.network;
-  const es = new EventSource(`${STREAM_ORIGIN}data/${network}/stream`);
+  setPendingConnection(network, 'connecting');
+  let es;
+  try {
+    es = new EventSource(`${STREAM_ORIGIN}data/${network}/stream`);
+  } catch (_) {
+    setPendingConnection(network, 'retrying');
+    stream.retryTimer = setTimeout(syncStream, stream.retryMs);
+    stream.retryMs = Math.min(stream.retryMs * 2, STREAM_RETRY_MAX_MS);
+    return;
+  }
   stream.es = es;
   stream.network = network;
   es.onopen = () => {
+    setPendingConnection(network, 'live');
+    reconcilePending(network, true);
     clearTimeout(stream.settleTimer);
     stream.settleTimer = setTimeout(() => {
       if (stream.es === es) stream.retryMs = STREAM_RETRY_BASE_MS;
@@ -5175,17 +5431,17 @@ function syncStream() {
   };
   es.onmessage = (e) => {
     stream.retryMs = STREAM_RETRY_BASE_MS;
+    setPendingConnection(network, 'live');
     /* pending (mempool) frames drive their own section and must not poke the
        confirmed feed; parse defensively so a keepalive can never throw. */
     let msg = null;
     try { msg = JSON.parse(e.data); } catch (_) { /* keepalive / non-JSON */ }
     if (msg && msg.kind === 'pending') {
-      notePending(network, msg.txid, msg.covenant_id, msg.tx_kind);
-      renderPending(network);
+      notePending(network, msg);
       return;
     }
     if (msg && msg.kind === 'pending_resolved') {
-      resolvePending(network, msg.txid, msg.resolution);
+      resolvePending(network, msg);
       return;
     }
     flashLiveBadge();
@@ -5194,6 +5450,7 @@ function syncStream() {
   };
   es.onerror = () => {
     if (stream.es !== es) return;
+    setPendingConnection(network, 'retrying');
     closeStream();
     stream.retryTimer = setTimeout(syncStream, stream.retryMs);
     stream.retryMs = Math.min(stream.retryMs * 2, STREAM_RETRY_MAX_MS);
@@ -5243,6 +5500,10 @@ function syncDetailStream() {
     let msg = null;
     try { msg = JSON.parse(ev.data); } catch (err) { return; }
     if (!msg || msg.covenant_id !== covId) return;
+    /* Pending frames have not changed the confirmed coin story. The network
+       stream owns their lightweight status; only chain events refetch this
+       page. */
+    if (msg.kind === 'pending' || msg.kind === 'pending_resolved') return;
     flashLiveBadge();
     /* the coin moved — refetch its story (debounced: one tx can emit
        several events, and testnet bursts shouldn't hammer the endpoint) */
@@ -5266,8 +5527,7 @@ function refetchDetail(network, covId) {
     .then(() => {
       const route = parseRoute();
       if (state.network !== network || route.view !== 'detail' || route.id !== covId) return;
-      const entry = state.cache[network];
-      if (!entry) return;
+      const entry = state.cache[network] || null;
       const y = window.scrollY;
       renderDetail(entry, covId, route.tx, route.program);
       window.scrollTo({ top: y, behavior: 'instant' });
@@ -5279,6 +5539,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     refreshSnapshot();
     pollLive();
+    if (parseRoute().view === 'explore') reconcilePending(state.network, true);
   }
   syncStream();
   syncDetailStream();
@@ -5922,6 +6183,37 @@ const ACTIONS = {
     render(); /* failed token loads are never cached — this refetches */
   },
 
+  'tokens-more'(el) {
+    tokenDirectoryUi.limit += TOKEN_DIRECTORY_PAGE;
+    renderTokens();
+  },
+
+  'jump-section'(el) {
+    const target = document.getElementById(el.dataset.target || '');
+    if (!target) return;
+    if (target.tagName === 'DETAILS' && !target.open) target.open = true;
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  },
+
+  'together-more'(el) {
+    state.togetherShown = (state.togetherShown || 40) + 40;
+    const route = parseRoute();
+    if (route.view === 'detail') {
+      renderDetail(state.cache[state.network] || null, route.id, route.tx, route.program);
+      const list = document.querySelector('.together-list');
+      if (list) list.scrollIntoView({ block: 'nearest' });
+    }
+  },
+
+  'focus-search'(el) {
+    const input = $('#search');
+    if (input) input.focus();
+  },
+
+  'exit-galaxy'(el) {
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  },
+
   'retry-token'(el) {
     render(); /* failed token-page loads are never cached — this refetches */
   },
@@ -5942,6 +6234,30 @@ document.addEventListener('click', (e) => {
 document.addEventListener('input', (e) => {
   const el = e.target.closest('[data-action="dbg-slider"]');
   if (el) dbgStep(0, parseInt(el.value, 10));
+  const tokenQuery = e.target.closest('[data-token-query]');
+  if (tokenQuery) {
+    tokenDirectoryUi.query = tokenQuery.value;
+    tokenDirectoryUi.limit = TOKEN_DIRECTORY_PAGE;
+    const caret = tokenQuery.selectionStart;
+    renderTokens();
+    requestAnimationFrame(() => {
+      const next = document.querySelector('[data-token-query]');
+      if (!next) return;
+      next.focus({ preventScroll: true });
+      if (caret != null) next.setSelectionRange(caret, caret);
+    });
+  }
+});
+
+document.addEventListener('change', (e) => {
+  const control = e.target.closest('[data-token-control]');
+  if (!control) return;
+  const key = control.dataset.tokenControl;
+  if (key === 'validation' || key === 'lifecycle' || key === 'sort') {
+    tokenDirectoryUi[key] = control.value;
+    tokenDirectoryUi.limit = TOKEN_DIRECTORY_PAGE;
+    renderTokens();
+  }
 });
 
 /* render the galaxy lazily when its section is expanded (toggle doesn’t
@@ -5950,6 +6266,7 @@ document.addEventListener('toggle', (e) => {
   const t = e.target;
   if (!t || !t.id) return;
   if (t.id === 'section-galaxy' && t.open) renderGalaxy();
+  if (t.id === 'section-families' && t.open) renderFamilies(state.network);
   /* promoted sections: remember the user's last choice (promoteSection
      replays it on later visits) */
   const seenKey = t.id === 'section-galaxy' ? 'kascov-galaxy-seen'
@@ -6150,12 +6467,25 @@ if (decodeInput) {
 
 /* galaxy search — center + highlight the matching coin */
 const galaxySearch = $('#galaxy-search');
+const galaxyAccessible = $('#galaxy-accessible');
 let galaxySearchTimer = 0;
 if (galaxySearch) {
   galaxySearch.addEventListener('input', () => {
     clearTimeout(galaxySearchTimer);
     galaxySearchTimer = setTimeout(() => {
-      if (galaxyCtrl) galaxyCtrl.search(galaxySearch.value);
+      const query = galaxySearch.value.trim();
+      const id = galaxyCtrl ? galaxyCtrl.search(query) : null;
+      if (!galaxyAccessible) return;
+      if (!query) {
+        galaxyAccessible.textContent = 'Search centers one coin in the map and exposes a precise link here.';
+      } else if (id) {
+        galaxyAccessible.innerHTML = `focused: <a href="#/${esc(state.network)}/c/${esc(id)}">` +
+          `${esc(friendlyName(id))}</a> <span class="mono">${esc(shortHex(id, 8, 6))}</span>`;
+      } else {
+        galaxyAccessible.textContent = galaxyCtrl
+          ? `No loaded coin matches “${query}”.`
+          : 'The map is still loading. Search will work when its dots appear.';
+      }
     }, 200);
   });
 }

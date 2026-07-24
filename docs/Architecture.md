@@ -32,17 +32,22 @@ web/                 vanilla-JS explorer (no build step) + disasm.js (verified
 
 **Rule 4 — decoding never blocks shipping.** Lineage tracing is format-agnostic; the [[Decoding]] fallback (full disassembly) is always correct. Template-specific decoders are additive.
 
-## Deployment topology (live since July 2)
+## Deployment topology (live since July 22)
 
 ```
-Firebase Hosting  ──  static web/ (SPA, no build step; HTML no-cache, js/css 5 min)
-      │
-      └── /data/**, /share/**, /og/**, /sitemap.xml rewrite
-                            ──► Cloud Run: kascov-worker (`kascov serve`)
-                                 ├─ follows mainnet + TN10 (concurrent prefetch)
+Dedicated Windows Server
+├─ Caddy  ──  static C:\kascov\web (SPA, no build step)
+│    ├─ /data/**, /share/**, /og/**, /badge/**, /img/**,
+│    │  /sitemap.xml, /feed.xml, /health*
+│    │                    ──► 127.0.0.1:8080
+│    └─ /data/*/stream    ──► 127.0.0.1:8080 (flush immediately; no buffering)
+├─ WSL2 Ubuntu: kascov-worker systemd service (`kascov serve`)
+│                                ├─ follows mainnet + TN10 (concurrent prefetch)
                                  ├─ /data/<net>.json        grid snapshot — 20k-row first page,
                                  │                          next_after_daa/next_after_id cursors
                                  ├─ /data/<net>-live.json   stats+tip+150 events (5/10s cache)
+                                 ├─ /data/<net>/pending     authoritative mempool snapshot +
+                                 │                          explicit feed health/revision
                                  ├─ /data/<net>/…           coin/tx/addr detail, analytics
                                  │                          (galaxy, lanes, reorgs, lifespans,
                                  │                          inscriptions), search, debug, SSE,
@@ -57,11 +62,13 @@ Firebase Hosting  ──  static web/ (SPA, no build step; HTML no-cache, js/css
                                  ├─ galaxy keep-warm task — rebuilds the frontend's two
                                  │    payload variants every ~240s so no request pays a
                                  │    cold multi-second build
-                                 └─ SQLite DBs ⟷ gs://kascov-explorer-index (5-min backups,
-                                    restore on boot — history survives redeploys)
+                                 └─ local SQLite DBs → verified local + GCS offsite backups
+└─ archival kaspad Windows services
+     ├─ mainnet wRPC ──► WSL worker over the private host bridge
+     └─ testnet-10 wRPC ──► WSL worker over the private host bridge
 ```
 
-Redeploy: `gcloud run deploy kascov-worker --source .` (or `scripts/deploy-worker.sh`). Hosting: `firebase deploy --only hosting` after `web/` changes. The old laptop loop (`scripts/kascov-live.sh`) is obsolete for production. Health probe: `/data/mainnet-live.json` (`/healthz` is swallowed by Google's frontend on the deterministic URL).
+Redeploy: fast-forward `/home/kascov/kascov` to the tested `main` revision, build `kascov --release` as the service user, restart `kascov-worker`, and mirror that same revision's `web/` into `C:\kascov\web`. Caddy does not need a reload for ordinary web or worker releases. Verify `/health`, both pending snapshots, the live feed, and the SPA after every release. The old laptop, Firebase, and Cloud Run deploy paths are obsolete.
 
 ## Networks
 

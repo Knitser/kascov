@@ -97,9 +97,13 @@
         <canvas id="dag-canvas" class="dag-canvas" aria-hidden="true"></canvas>
         <p class="page-eyebrow">the covenant explorer for Kaspa L1</p>
         <h1 class="hero-title">Kaspa coins just learned to <em>carry rules</em>.</h1>
-        <p class="hero-sub">like a token explorer, but for coins that carry their own rules: kascov watches every smart coin on the Kaspa <span data-net-word>testnet</span> — born, moving, retiring — and saves the history the network deletes after 3&nbsp;days.</p>
+        <p class="hero-sub">like a token explorer, but for coins that carry their own rules: kascov watches every smart coin on the Kaspa <span data-net-word>testnet</span> — born, moving, retiring — and saves the history ordinary nodes prune after roughly 30&nbsp;hours.</p>
         <div class="hero-stats" id="hero-stats"></div>
         <p class="freshness" id="freshness"></p>
+        <div class="hero-actions" aria-label="Start exploring">
+          <a class="btn btn-accent" href="#/explore">explore live</a>
+          <a class="btn" href="#/explore?galaxy=1">open the galaxy</a>
+        </div>
       </section>
 
       <section class="digest" id="section-digest" aria-label="The last 24 hours" hidden>
@@ -138,8 +142,8 @@
             outputs, that's a <strong>move</strong>: same coin, new state — maybe a new owner, maybe split
             into pieces, maybe merged back. The name travels with it, however many hands it passes through.</p>
             <p>And when it's spent <em>without</em> passing the identity on, the KAS inside flows back out
-            as ordinary cash and the identity ends — <strong>retired</strong>. The network forgets the whole
-            story within days. kascov doesn't.</p>
+            as ordinary cash and the identity ends — <strong>retired</strong>. Ordinary nodes prune the
+            story after roughly 30 hours. kascov doesn't.</p>
             <p class="dim">Why bother? Because the program travels with the identity: a coin can refuse to
             move more than 10% a week, demand two signatures, wait for a delivery confirmation, or verify a
             zero-knowledge proof — the coin itself enforces its rules, no middleman.</p>
@@ -195,6 +199,14 @@
         <a class="howto-link" href="#/">new here? how to read this →</a>
       </div>
 
+      <nav class="explore-jump" aria-label="Explore sections">
+        <button type="button" data-action="jump-section" data-target="section-pulse">live</button>
+        <button type="button" data-action="jump-section" data-target="section-stories">discover</button>
+        <button type="button" data-action="jump-section" data-target="section-galaxy">galaxy</button>
+        <button type="button" data-action="jump-section" data-target="section-coins">coins</button>
+        <button type="button" data-action="jump-section" data-target="section-analytics">analytics</button>
+      </nav>
+
       <section class="empty-net" id="empty-net" hidden></section>
 
       <section class="watch-strip" id="watch-strip" aria-label="Your coins" hidden>
@@ -244,6 +256,7 @@
       <details class="lanes collapse-sec" id="section-galaxy" aria-label="Galaxy" hidden>
         <summary><h2>the galaxy · the whole network</h2><span class="collapse-count dim" id="galaxy-count"></span></summary>
         <p class="dim families-sub">every app at once — each dot is a smart coin, each link a shared transaction. <span class="galaxy-hint-desktop">scroll to zoom, drag to pan, click a dot to open the coin.</span><span class="galaxy-hint-mobile">pinch to zoom · tap a dot</span></p>
+        <a class="galaxy-exit btn" href="#/explore" data-action="exit-galaxy">← explorer overview</a>
         <div class="galaxy-toolbar">
           <input type="search" id="galaxy-search" class="galaxy-search" placeholder="find a coin…" autocomplete="off" spellcheck="false" aria-label="Find a coin in the graph">
           <span class="galaxy-chips" role="group" aria-label="Filter">
@@ -255,6 +268,9 @@
             <button type="button" class="chip chip-on" data-action="galaxy-color" data-val="template" aria-pressed="true">by type</button>
             <button type="button" class="chip" data-action="galaxy-color" data-val="status" aria-pressed="false">by status</button>
           </span>
+        </div>
+        <div class="galaxy-accessible dim" id="galaxy-accessible" aria-live="polite">
+          Search centers one coin in the map and exposes a precise link here.
         </div>
         <div class="galaxy-wrap">
           <canvas id="galaxy-canvas" class="galaxy-canvas" role="img" aria-label="The galaxy — a zoomable map of every covenant app on the network; each dot is a smart coin, each link a shared transaction"></canvas>
@@ -352,16 +368,17 @@
 
     <!-- ============ DECODER ============ -->
     <section id="view-decode" class="view-fade" aria-label="Playground — read" hidden>
-      <div class="pg-modes" aria-label="Playground mode">
+      <nav class="pg-modes" aria-label="Playground mode">
         <a class="pg-mode pg-active" href="#/decode">📄 read a script</a>
         <a class="pg-mode" href="#/build">✎ write a covenant</a>
         <a class="pg-mode" href="#/preflight">🛫 check a transaction</a>
-      </div>
+      </nav>
       <header class="page-head">
         <h1>read a script</h1>
         <p class="page-sub">paste any Kaspa script as hex and read it as opcodes — including the post-Toccata set: transaction introspection (KIP-17), covenant ops (KIP-20), zk verification (KIP-16). recognizing, disassembling &amp; linting run in your browser; <strong>simulate</strong>, <strong>verify-proof</strong> &amp; <strong>compile</strong> call the kascov node. recognized contracts can be <strong>re-made with your own parameters</strong>.</p>
       </header>
       <div class="decode-box">
+        <label class="sr-only" for="decode-input">Kaspa script hex</label>
         <textarea id="decode-input" rows="4" spellcheck="false" autocomplete="off" placeholder="script hex — e.g. 20a39404…82faac · whitespace and 0x prefixes are fine"></textarea>
         <div class="decode-actions">
           <button type="button" class="btn btn-accent" data-action="decode">decode</button>
@@ -397,11 +414,11 @@
 
     <!-- ============ BUILD — MAKE YOUR OWN SMART COIN ============ -->
     <section id="view-build" class="view-fade" aria-label="Playground — write" hidden>
-      <div class="pg-modes" aria-label="Playground mode">
+      <nav class="pg-modes" aria-label="Playground mode">
         <a class="pg-mode" href="#/decode">📄 read a script</a>
         <a class="pg-mode pg-active" href="#/build">✎ write a covenant</a>
         <a class="pg-mode" href="#/preflight">🛫 check a transaction</a>
-      </div>
+      </nav>
       <header class="page-head build-head">
         <p class="page-eyebrow">the lab</p>
         <h1>Make your own <span class="grad">smart coin</span>.</h1>
@@ -431,11 +448,11 @@
         </div>
         <div class="compiler-grid">
           <div class="compiler-col">
-            <label class="compiler-label">contract source</label>
+            <label class="compiler-label" for="compiler-src">contract source</label>
             <textarea id="compiler-src" class="compiler-src" spellcheck="false" autocapitalize="off"></textarea>
           </div>
           <div class="compiler-col compiler-side">
-            <label class="compiler-label">constructor args <span class="dim">— one per line (hex or int)</span></label>
+            <label class="compiler-label" for="compiler-args">constructor args <span class="dim">— one per line (hex or int)</span></label>
             <textarea id="compiler-args" class="compiler-argsbox" spellcheck="false" autocapitalize="off"></textarea>
             <div class="compiler-controls">
               <button type="button" class="btn" data-action="compile-run">⚙ compile</button>
@@ -549,16 +566,17 @@
 
     <!-- ============ PREFLIGHT — CHECK A TRANSACTION ============ -->
     <section id="view-preflight" class="view-fade" aria-label="Playground — preflight" hidden>
-      <div class="pg-modes" aria-label="Playground mode">
+      <nav class="pg-modes" aria-label="Playground mode">
         <a class="pg-mode" href="#/decode">📄 read a script</a>
         <a class="pg-mode" href="#/build">✎ write a covenant</a>
         <a class="pg-mode pg-active" href="#/preflight">🛫 check a transaction</a>
-      </div>
+      </nav>
       <header class="page-head">
         <h1>will this transaction pass?</h1>
         <p class="page-sub">paste a transaction as JSON (the SDK / RPC shape) and find out <strong>before you broadcast</strong>: every input&rsquo;s compute budget checked against the classic <a href="/guide.html#trap" target="_blank" rel="noopener">&ldquo;script units exceeded&rdquo; trap</a>, masses measured against the block limit, an honest fee estimate — and for inputs that carry both their witness and their UTXO&rsquo;s script, a real run through Kaspa&rsquo;s script engine.</p>
       </header>
       <div class="decode-box">
+        <label class="sr-only" for="preflight-input">Transaction JSON</label>
         <textarea id="preflight-input" rows="10" spellcheck="false" autocomplete="off" placeholder='{"version": 1, "inputs": [ … ], "outputs": [ … ], "lockTime": 0}'></textarea>
         <div class="decode-actions">
           <button type="button" class="btn btn-accent" data-action="preflight-run">🛫 preflight</button>
@@ -580,6 +598,12 @@
         <p class="page-sub">Every covenant on Kaspa, indexed live and kept long after nodes prune it — as plain JSON. No keys, no rate cards, CORS open to everyone. Build a bot, a chart, a better explorer.</p>
       </header>
 
+      <label class="api-search">
+        <span class="sr-only">Find an API endpoint</span>
+        <input type="search" id="api-search" placeholder="find an endpoint, field or capability…" autocomplete="off">
+        <span class="dim" id="api-search-count" aria-live="polite"></span>
+      </label>
+
       <div class="api-layout">
         <nav class="api-nav" aria-label="API endpoints">
           <div class="api-nav-group">Start</div>
@@ -588,6 +612,7 @@
           <a href="#api-clients">Client libraries</a>
           <div class="api-nav-group">Feeds</div>
           <a href="#ep-live">Live feed</a>
+          <a href="#ep-pending">Pending mempool</a>
           <a href="#ep-snapshot">Full snapshot</a>
           <a href="#ep-events">Event feed</a>
           <a href="#ep-stream">Event stream</a>
@@ -630,14 +655,14 @@
         <div class="api-main">
           <div class="api-block" id="api-intro">
             <h2>Overview</h2>
-            <p>The indexer follows Kaspa's chain tip live, classifies every covenant event (born / moved / retired), decodes spend-time script reveals, and serves the whole index as static JSON from a CDN. Reads are cheap and cacheable — poll as often as you like.</p>
+            <p>The indexer follows Kaspa's chain tip live, classifies every covenant event (born / moved / retired), decodes spend-time script reveals, and serves same-origin JSON through the production Caddy proxy. Reads are cheap and cacheable — poll as often as you like.</p>
             <table class="api-meta">
               <tbody>
                 <tr><th>Base URL</th><td><code class="mono">https://kascov.io</code></td></tr>
                 <tr><th>Format</th><td>JSON · <code class="mono">application/json</code></td></tr>
                 <tr><th>Auth</th><td>None — public</td></tr>
                 <tr><th>CORS</th><td>CORS enabled incl. preflight — call any route, GET or POST, straight from a browser page</td></tr>
-                <tr><th>Caching</th><td>CDN <code class="mono">s-maxage</code> + <code class="mono">stale-while-revalidate</code>; responses carry <code class="mono">tip_daa</code> + <code class="mono">tip_at_ms</code> so you always know how fresh they are</td></tr>
+                <tr><th>Caching</th><td>responses carry explicit <code class="mono">Cache-Control</code>, <code class="mono">tip_daa</code> + <code class="mono">tip_at_ms</code>; the live stream is never buffered or cached</td></tr>
               </tbody>
             </table>
           </div>
@@ -649,7 +674,7 @@
 
           <div class="api-block" id="api-clients">
             <h3>Client libraries</h3>
-            <p>Two tiny zero-dependency clients ship in the repo — <a href="https://github.com/Knitser/kascov/tree/main/clients" target="_blank" rel="noopener noreferrer"><code class="mono">clients/js/kascov.mjs</code></a> (Node 18+ and browsers) and <code class="mono">clients/py/kascov.py</code>. Each is a single file wrapping the endpoints below. One sharp edge: for the <a href="#ep-stream">event stream</a>, construct the client with the worker origin as its base — <code class="mono">new Kascov('testnet-10', 'https://kascov-worker-12056584181.europe-west4.run.app')</code> — because the default <code class="mono">kascov.io</code> base sits behind a CDN that buffers SSE. Everything else works fine through the default.</p>
+            <p>Two tiny zero-dependency clients ship in the repo — <a href="https://github.com/Knitser/kascov/tree/main/clients" target="_blank" rel="noopener noreferrer"><code class="mono">clients/js/kascov.mjs</code></a> (Node 18+ and browsers) and <code class="mono">clients/py/kascov.py</code>. Each is a single file wrapping the endpoints below. The <a href="#ep-stream">event stream</a> works through the normal same-origin base — <code class="mono">new Kascov('testnet-10', 'https://kascov.io')</code> — because the production Caddy proxy streams SSE without buffering.</p>
           </div>
 
           <article class="api-endpoint" id="ep-live">
@@ -680,6 +705,36 @@
               <tr><td class="mono">recent_events[].kind</td><td>string</td><td><code class="mono">genesis</code> · <code class="mono">transition</code> · <code class="mono">burn</code></td></tr>
               <tr><td class="mono">recent_events[].seq</td><td>int</td><td>the event's 0-based position in its own coin's timeline</td></tr>
               <tr><td class="mono">recent_events[].tx_index</td><td>int?</td><td>0-based index in the accepting block's accepted-tx list (consensus acceptance order); omitted on rows indexed before capture</td></tr>
+            </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-pending">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/pending</code></div>
+            <p class="ep-desc">The node&rsquo;s current unconfirmed covenant transactions. Reconcile this snapshot after opening or reconnecting the <a href="#ep-stream">event stream</a>: stream messages are fast hints; this response is the authoritative current set.</p>
+            <div class="ep-cols">
+              <div class="ep-example"><div class="ep-ex-head">Request</div><pre class="codeblock"><code>curl -s https://kascov.io/data/testnet-10/pending</code></pre></div>
+              <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
+  "status": "live",
+  "last_poll_ms": 1784875200123,
+  "generated_at_ms": 1784875200200,
+  "revision": 421,
+  "pending": [{
+    "txid": "f9bbca…f2ba",
+    "covenant_id": "2ab7dcd2…35115",
+    "tx_kind": "transition",
+    "age_ms": 77,
+    "events": [
+      { "covenant_id": "2ab7dcd2…35115",
+        "tx_kind": "transition" }
+    ]
+  }]
+}</code></pre></div>
+            </div>
+            <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+              <tr><td class="mono">status</td><td>string</td><td><code class="mono">starting</code> · <code class="mono">live</code> · <code class="mono">stale</code> · <code class="mono">reconnecting</code> · <code class="mono">disabled</code></td></tr>
+              <tr><td class="mono">last_poll_ms</td><td>int?</td><td>unix ms of the latest successful node mempool poll; remains visible while reconnecting</td></tr>
+              <tr><td class="mono">revision</td><td>int</td><td>changes whenever feed state or tracked rows change; useful for observability, not as a durable cursor</td></tr>
+              <tr><td class="mono">pending[].events</td><td>array</td><td>every covenant touched by the transaction; the scalar covenant fields remain as a backward-compatible preview</td></tr>
             </tbody></table>
           </article>
 
@@ -741,7 +796,7 @@
 
           <article class="api-endpoint" id="ep-stream">
             <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/stream</code><span class="ep-q">?covenant=</span></div>
-            <p class="ep-desc">Server-sent events — one JSON message the moment the indexer sees each life event. The stream opens with a <code class="mono">: connected</code> hello and sends a <code class="mono">: ka</code> keep-alive comment every 25s. Treat messages as hints and confirm through the polled feeds.</p>
+            <p class="ep-desc">Server-sent events — one JSON message the moment the indexer sees each confirmed life event or mempool change. The stream opens with a <code class="mono">: connected</code> hello and sends a <code class="mono">: ka</code> keep-alive comment every 25s. Treat messages as hints and reconcile the matching snapshot after every connection.</p>
             <table class="ep-params"><thead><tr><th>Query</th><th>Type</th><th>Notes</th></tr></thead><tbody>
               <tr><td class="mono">covenant</td><td>hex</td><td>optional — exactly 64 hex characters narrows the stream to one coin's events; anything else is a <code class="mono">400</code>, never a silent wildcard</td></tr>
             </tbody></table>
@@ -751,10 +806,16 @@
 
 data: {"covenant_id":"2ab7dcd2…","kind":"transition",
        "txid":"f9bbca…","accepting_daa":513875477,
-       "tx_index":50}</code></pre></div>
+       "tx_index":50}
+
+data: {"kind":"pending","tx_kind":"transition",
+       "txid":"a15d4e…","covenant_id":"8c91d2…",
+       "events":[…],"revision":421}</code></pre></div>
             </div>
             <table class="ep-fields"><thead><tr><th>Field</th><th>Type</th><th>Notes</th></tr></thead><tbody>
-              <tr><td class="mono">kind</td><td>string</td><td><code class="mono">genesis</code> · <code class="mono">transition</code> · <code class="mono">burn</code> — plus <code class="mono">reorg</code> notices <code class="mono">{"kind":"reorg","rolled_back":N}</code> (filtered streams never see them)</td></tr>
+              <tr><td class="mono">kind</td><td>string</td><td><code class="mono">genesis</code> · <code class="mono">transition</code> · <code class="mono">burn</code> · <code class="mono">pending</code> · <code class="mono">pending_resolved</code> — plus <code class="mono">reorg</code> notices <code class="mono">{"kind":"reorg","rolled_back":N}</code> (filtered streams never see them)</td></tr>
+              <tr><td class="mono">tx_kind</td><td>string?</td><td>the predicted covenant event kind on <code class="mono">pending</code> messages</td></tr>
+              <tr><td class="mono">resolution</td><td>string?</td><td><code class="mono">confirmed</code> or <code class="mono">dropped</code> on <code class="mono">pending_resolved</code></td></tr>
             </tbody></table>
           </article>
 
@@ -1297,6 +1358,8 @@ X-Kascov-Signature: 3f9c41…  (keyed with your subscription's secret)
       </header>
       <ol class="changelog-list" id="changelog-list"></ol>
     </section>
+
+    <section id="view-notfound" class="view-fade" aria-label="Page not found" hidden></section>
 
   </main>
 
