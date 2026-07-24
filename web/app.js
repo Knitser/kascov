@@ -372,7 +372,7 @@ function renderGalaxy() {
   data.edges = null;
   data.apps = null;
   data.ids = data.nx = data.ny = data.nr = data.nt = data.ns = data.na = null;
-  data.acx = data.acy = data.ar = data.asz = data.at = null;
+  data.acx = data.acy = data.ar = data.asz = data.at = data.aalive = null;
   renderGalaxyLegend(data);
   // core tier on screen → pull the full set in behind it and hot-swap
   if (isCoreTier) upgradeGalaxy(network);
@@ -5768,6 +5768,10 @@ const ACTIONS = {
       c.setAttribute('aria-pressed', String(c === el));
     });
     if (galaxyCtrl) galaxyCtrl.setColorMode(el.dataset.val);
+  },
+
+  'galaxy-view'(el) {
+    if (galaxyCtrl) galaxyCtrl.zoom(el.dataset.val);
   },
 
   'sim-run'(el) {

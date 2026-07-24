@@ -258,6 +258,11 @@
         </div>
         <div class="galaxy-wrap">
           <canvas id="galaxy-canvas" class="galaxy-canvas" role="img" aria-label="The galaxy — a zoomable map of every covenant app on the network; each dot is a smart coin, each link a shared transaction"></canvas>
+          <div class="galaxy-camera" role="group" aria-label="Galaxy view controls">
+            <button type="button" data-action="galaxy-view" data-val="out" aria-label="Zoom out">−</button>
+            <button type="button" data-action="galaxy-view" data-val="reset" aria-label="Fit the whole galaxy">fit</button>
+            <button type="button" data-action="galaxy-view" data-val="in" aria-label="Zoom in">+</button>
+          </div>
           <div class="galaxy-legend" id="galaxy-legend" aria-hidden="true"></div>
         </div>
       </details>

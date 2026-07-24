@@ -3727,17 +3727,20 @@ fn build_families(store: &Store, network: kascov_core::Network) -> Result<serde_
 /// runs a force sim), weighted pairwise edges (how many txs each pair shared),
 /// and per-node template + alive/burned status. Positions come from a
 /// cumulative-area sunflower packing: big apps near the galactic core, size-2
-/// dust at the rim. Coordinates are centered on the origin and quantized to
-/// integers to keep the payload small. See docs plan Wave 1.
+/// dust at the rim. Each app's members use a centered Vogel-disc packing
+/// instead of a perfect ring, so zooming reveals an organic constellation
+/// rather than thousands of concentric circles. Coordinates are centered on
+/// the origin and quantized to integers to keep the payload small.
 /// Payload variants for `galaxy.json`, selected by query params (the bare
 /// request is the legacy shape forever):
 ///   `?fmt=2`    → `columnar`: the per-node objects are replaced by parallel
 ///                 arrays `ids`/`nx`/`ny`/`nr`/`nt`/`ns`/`na` (same order and
 ///                 index-aligned with the legacy `nodes[]`; `ids[i]` is the
 ///                 64-hex covenant id, the rest mirror node fields x/y/r/t/s/a),
-///                 and the per-app objects by `acx`/`acy`/`ar`/`asz`/`at`
-///                 (index-aligned with the legacy `apps[]`, mirroring
-///                 cx/cy/r/size/t). `edges`, `bounds`, … are unchanged.
+///                 and the per-app objects by
+///                 `acx`/`acy`/`ar`/`asz`/`at`/`aalive` (index-aligned with
+///                 the legacy `apps[]`, mirroring cx/cy/r/size/t/alive).
+///                 `edges`, `bounds`, … are unchanged.
 ///   `?tier=core`→ `core_only`: `apps[]` in full, but nodes/edges only for
 ///                 clusters of size >= GALAXY_CORE_MIN_SIZE. The layout always
 ///                 runs over the FULL cluster set first, so node positions and
@@ -3841,7 +3844,7 @@ fn build_galaxy_fmt(
     const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653; // 137.5° in radians
     const TAU: f64 = std::f64::consts::TAU;
     const SPACING: f64 = 0.62; // ~ disk area == total cluster area
-    let ring_radius = |size: usize| -> f64 { 14.0 + 10.0 * (size as f64).sqrt() };
+    let cluster_radius = |size: usize| -> f64 { 16.0 + 11.0 * (size as f64).sqrt() };
 
     // intermediate node records — layout ALWAYS covers the full cluster set;
     // tier filtering happens at emission time only (position stability).
@@ -3860,6 +3863,7 @@ fn build_galaxy_fmt(
         r: i64,
         size: usize,
         t: i64,
+        alive: usize,
     }
     let mut recs: Vec<NodeRec> = Vec::new();
     let mut apps: Vec<AppRec> = Vec::new();
@@ -3870,7 +3874,7 @@ fn build_galaxy_fmt(
     let mut cum_area = 0.0_f64;
     for (i, cluster) in cluster_list.iter().enumerate() {
         let size = cluster.len();
-        let cr = ring_radius(size);
+        let cr = cluster_radius(size);
         cum_area += std::f64::consts::PI * (cr + 6.0) * (cr + 6.0);
         let spiral_r = SPACING * cum_area.sqrt();
         let theta = i as f64 * GOLDEN_ANGLE;
@@ -3887,6 +3891,10 @@ fn build_galaxy_fmt(
             .max_by_key(|(_, c)| **c)
             .map(|(t, _)| *t)
             .unwrap_or(-1);
+        let alive_count = cluster
+            .iter()
+            .filter(|m| *active.get(m).unwrap_or(&false))
+            .count();
 
         apps.push(AppRec {
             cx: cx.round() as i64,
@@ -3894,11 +3902,34 @@ fn build_galaxy_fmt(
             r: cr.round() as i64,
             size,
             t: dom_t,
+            alive: alive_count,
         });
 
+        // A centered Vogel disc keeps members separated without putting every
+        // one on the same circumference. The per-cluster phase and gentle
+        // per-member radial jitter are derived from covenant ids, so the
+        // layout is deterministic across processes and payload tiers.
+        let phase_seed = cluster[0].0[..4]
+            .iter()
+            .fold(0_u32, |acc, b| (acc << 8) | *b as u32);
+        let phase = (phase_seed as f64 / u32::MAX as f64) * TAU;
+        let mut offsets = Vec::with_capacity(size);
+        let mut mean_x = 0.0_f64;
+        let mut mean_y = 0.0_f64;
         for (mi, m) in cluster.iter().enumerate() {
-            let a = (mi as f64 / size as f64) * TAU;
-            let (x, y) = (cx + cr * a.cos(), cy + cr * a.sin());
+            let jitter_seed = u16::from_be_bytes([m.0[4], m.0[5]]) as f64 / u16::MAX as f64;
+            let radius = 10.0 * (mi as f64 + 0.55).sqrt() * (0.9 + jitter_seed * 0.2);
+            let angle = phase + mi as f64 * GOLDEN_ANGLE;
+            let offset = (radius * angle.cos(), radius * angle.sin());
+            mean_x += offset.0;
+            mean_y += offset.1;
+            offsets.push(offset);
+        }
+        mean_x /= size as f64;
+        mean_y /= size as f64;
+
+        for (m, (ox, oy)) in cluster.iter().zip(offsets) {
+            let (x, y) = (cx + ox - mean_x, cy + oy - mean_y);
             min_x = min_x.min(x);
             min_y = min_y.min(y);
             max_x = max_x.max(x);
@@ -4016,6 +4047,10 @@ fn build_galaxy_fmt(
         obj.insert("ar".into(), apps.iter().map(|a| a.r.into()).collect::<Vec<serde_json::Value>>().into());
         obj.insert("asz".into(), apps.iter().map(|a| a.size.into()).collect::<Vec<serde_json::Value>>().into());
         obj.insert("at".into(), apps.iter().map(|a| a.t.into()).collect::<Vec<serde_json::Value>>().into());
+        obj.insert(
+            "aalive".into(),
+            apps.iter().map(|a| a.alive.into()).collect::<Vec<serde_json::Value>>().into(),
+        );
     } else {
         let nodes: Vec<serde_json::Value> = sel()
             .map(|r| {
@@ -4040,6 +4075,7 @@ fn build_galaxy_fmt(
                     "r": a.r,
                     "size": a.size,
                     "t": a.t,
+                    "alive": a.alive,
                 })
             })
             .collect();
@@ -6756,7 +6792,45 @@ mod galaxy_tests {
             assert_eq!(col["ar"][i], a["r"], "ar[{i}]");
             assert_eq!(col["asz"][i], a["size"], "asz[{i}]");
             assert_eq!(col["at"][i], a["t"], "at[{i}]");
+            assert_eq!(col["aalive"][i], a["alive"], "aalive[{i}]");
         }
+    }
+
+    #[test]
+    fn galaxy_members_form_an_organic_disc_not_a_single_ring() {
+        let extra: Vec<NewEvent> =
+            (0x60..0x69).map(|c| ev(c, EventKind::Genesis, 0x40)).collect();
+        let store = galaxy_store("organic", extra);
+        let g = build_galaxy(&store, Network::Testnet(10)).unwrap();
+        let app = &g["apps"][0]; // the added 9-member cluster sorts first
+        assert_eq!(app["size"].as_u64(), Some(9));
+        assert_eq!(app["alive"].as_u64(), Some(0));
+        let cx = app["cx"].as_i64().unwrap();
+        let cy = app["cy"].as_i64().unwrap();
+        let members: Vec<&serde_json::Value> = g["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["a"].as_u64() == Some(0))
+            .collect();
+        let radii = members
+            .iter()
+            .map(|n| {
+                let dx = n["x"].as_i64().unwrap() - cx;
+                let dy = n["y"].as_i64().unwrap() - cy;
+                dx * dx + dy * dy
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            radii.len() >= 4,
+            "members should occupy several radii instead of one circular outline"
+        );
+        let mean_x = members.iter().map(|n| n["x"].as_i64().unwrap()).sum::<i64>() as f64
+            / members.len() as f64;
+        let mean_y = members.iter().map(|n| n["y"].as_i64().unwrap()).sum::<i64>() as f64
+            / members.len() as f64;
+        assert!((mean_x - cx as f64).abs() <= 1.0);
+        assert!((mean_y - cy as f64).abs() <= 1.0);
     }
 
     // ?tier=core — layout runs over the full set, so every core node's

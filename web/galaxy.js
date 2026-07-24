@@ -7,27 +7,25 @@
 
    Data shape (index-addressed, integer world coords):
      { bounds:{minx,miny,w,h}, templates:[name…],
-       apps:[{cx,cy,r,size,t}…],                  // one super-node per cluster
+       apps:[{cx,cy,r,size,t,alive}…],            // one super-node per cluster
        nodes:[{id,t,s,x,y,r,a}…],                 // t=template idx (-1=none), s=1 active
        edges:[[i,j,w]…] }                          // pairwise, weighted
    Columnar shape (?fmt=2, feature-detected by `ids`): nodes[] is replaced by
    parallel arrays ids/nx/ny/nr/nt/ns/na that map 1:1 onto our typed arrays,
-   and apps[] by acx/acy/ar/asz/at (mirroring cx/cy/r/size/t).
+   and apps[] by acx/acy/ar/asz/at/aalive.
    Either shape may be the reduced core tier (tier:'core', big clusters only);
    load(full, {preserveView:true}) hot-swaps the full set without moving the
    camera (the worker keeps positions + bounds identical across tiers).
 
-   Rendering ("deep space, alive"): a pre-rendered vignette + two parallax
-   starfield layers ground the scene as css background layers on the canvas
-   element (compositor-blended: zero per-frame raster cost); sparse views
-   draw nodes as pre-rendered glowing orb sprites (offscreen canvases keyed
-   by color × size-bucket × status, halo extent tiered by screen size, no
-   per-node shadowBlur, ever) while dense views (>2.5k culled-in orbs) fall
-   back to flat discs on the canvas oval fast path; far-mode app aggregates
-   are cached nebula-cloud sprites for the few big clusters and batched dim
-   tinted dots for the thousands of small ones; edges are subtly bowed
-   quadratics with a two-pass fake gradient. A gentle twinkle loop runs ONLY
-   while the pointer is over the canvas (and never under
+   Rendering ("deep space, alive"): overview, constellation and detail LODs
+   cross-fade instead of dumping the full coin set onto the first zoom step.
+   A pre-rendered vignette + two parallax starfield layers ground the scene as
+   css background layers on the canvas element (compositor-blended: zero
+   per-frame raster cost). Overview/constellation views render a deterministic
+   sparse sample of app aggregates; detail views query a compact spatial index
+   and draw only visible nodes as cached orbs (flat discs for dense frames).
+   Labels are collision-checked and viewport-contained. A gentle twinkle loop
+   runs ONLY while the pointer is over the canvas (and never under
    prefers-reduced-motion) — the default idle state stays event-driven with
    zero CPU. */
 (() => {
@@ -37,6 +35,10 @@
   const UNKNOWN_COLOR = 'rgba(150,160,180,0.85)';
   const ACTIVE_COLOR = '#5be49b';
   const BURNED_COLOR = 'rgba(130,140,160,0.5)';
+  const DETAIL_START = 13;
+  const DETAIL_END = 17;
+  const EDGE_DETAIL = 22;
+  const LABEL_DETAIL = 24;
   // far-mode batched dot tints: three dim palette-adjacent hues (teal / blue
   // / warm) so the tiny-app starfield has depth without per-dot styles
   const DOT_TINTS = ['rgba(128,190,172,0.55)', 'rgba(138,166,205,0.55)', 'rgba(196,176,150,0.5)'];
@@ -68,6 +70,16 @@
   }
   const mixTo = (a, b, f) => Math.round(a + (b - a) * f);
   function rgba(r, g, b, a) { return `rgba(${r},${g},${b},${a})`; }
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const smoothstep = (lo, hi, v) => {
+    const t = clamp((v - lo) / (hi - lo), 0, 1);
+    return t * t * (3 - 2 * t);
+  };
+  const hashIndex = (i) => {
+    let h = Math.imul((i + 1) ^ 0x9e3779b9, 0x85ebca6b);
+    h ^= h >>> 13;
+    return Math.imul(h, 0xc2b2ae35) >>> 0;
+  };
 
   // geometric radius buckets (~±6% quantization) so sprite cache stays small
   const ORB_BUCKETS = [];
@@ -115,13 +127,28 @@
     let dpr = Math.min(window.devicePixelRatio || 1, 2);
     let W = 0, H = 0;
     let scale = 1, fitScale = 1, panX = 0, panY = 0;
-    let hoverNode = -1, hoverApp = -1;
+    let hoverNode = -1, hoverApp = -1, focusNode = -1;
     let dragging = false, dragMoved = false, lastX = 0, lastY = 0;
+    const activePointers = new Map();
+    let pinch = null;
+    let gestureWasPinch = false;
     let rafPending = false;
     let destroyed = false; // a destroyed controller must never paint again
                            // (a queued rAF draw would smear its stale view
                            // over whatever now owns the canvas)
     let anim = null; // {t0, dur, from:{scale,panX,panY}, to:{…}}
+    let animRaf = 0;
+    let wheelTarget = null;
+    let wheelRaf = 0;
+    let wheelLast = 0;
+    let wheelTickAt = 0;
+    let nodeGrid = null, appGrid = null;
+    let maxAppRadius = 0;
+    const viewNodes = [];
+    const viewApps = [];
+    const hitNodes = [];
+    const hitApps = [];
+    let frameStats = { lod: 'empty', nodes: 0, apps: 0, labels: 0 };
 
     // ---- atmosphere + sprite caches ----
     // The vignette + parallax starfields live on the canvas ELEMENT as css
@@ -152,6 +179,8 @@
       if (keepView) {
         hoverNode = -1;
         hoverApp = -1;
+        focusNode = -1;
+        hideTip();
         requestDraw();
       } else {
         resize(); // sizes the backing store, computes fit, draws
@@ -168,10 +197,13 @@
         const M = d.acx.length;
         apps = new Array(M);
         for (let i = 0; i < M; i++) {
-          apps[i] = { cx: d.acx[i], cy: d.acy[i], r: d.ar[i], size: d.asz[i], t: d.at[i] };
+          apps[i] = {
+            cx: d.acx[i], cy: d.acy[i], r: d.ar[i], size: d.asz[i], t: d.at[i],
+            alive: d.aalive ? d.aalive[i] : null,
+          };
         }
       } else {
-        apps = d.apps || [];
+        apps = (d.apps || []).map((app) => Object.assign({ alive: null }, app));
       }
       if (d.ids) {
         // columnar payload (?fmt=2) — the parallel arrays map straight onto
@@ -219,6 +251,10 @@
       orbCache.clear();
       nebCache.clear();
       flatCache = [];
+      maxAppRadius = 0;
+      for (let a = 0; a < apps.length; a++) maxAppRadius = Math.max(maxAppRadius, apps[a].r || 0);
+      nodeGrid = buildSpatialGrid(N, (i) => nx[i], (i) => ny[i]);
+      appGrid = buildSpatialGrid(apps.length, (i) => apps[i].cx, (i) => apps[i].cy);
       applyFilter();
     }
 
@@ -234,6 +270,64 @@
         }
         visible[i] = 1;
       }
+      if (hoverNode >= 0 && !visible[hoverNode]) {
+        hoverNode = -1;
+        hoverApp = -1;
+        hideTip();
+      }
+      if (focusNode >= 0 && !visible[focusNode]) focusNode = -1;
+    }
+
+    function appPassesFilter(app) {
+      if (filter.minSize > 2 && app.size < filter.minSize) return false;
+      // Older cached payloads do not have per-app alive counts. Keep their
+      // overview honest by showing the app instead of pretending its status.
+      if (app.alive == null || filter.status === 'all') return true;
+      if (filter.status === 'active') return app.alive > 0;
+      if (filter.status === 'burned') return app.alive < app.size;
+      return true;
+    }
+
+    // Compact CSR spatial grid: two typed-array passes build it once per data
+    // load, then pan/zoom/hover only touch cells intersecting the viewport.
+    // This replaces O(all-coins) pointer scans on production-sized networks.
+    function buildSpatialGrid(count, getX, getY) {
+      if (!count) return null;
+      const cell = 192;
+      const minx = Math.floor((bounds.minx - cell) / cell) * cell;
+      const miny = Math.floor((bounds.miny - cell) / cell) * cell;
+      const cols = Math.max(1, Math.ceil((Math.max(1, bounds.w) + cell * 2) / cell));
+      const rows = Math.max(1, Math.ceil((Math.max(1, bounds.h) + cell * 2) / cell));
+      const counts = new Uint32Array(cols * rows);
+      const bucketOf = (x, y) => {
+        const gx = clamp(Math.floor((x - minx) / cell), 0, cols - 1);
+        const gy = clamp(Math.floor((y - miny) / cell), 0, rows - 1);
+        return gy * cols + gx;
+      };
+      for (let i = 0; i < count; i++) counts[bucketOf(getX(i), getY(i))]++;
+      const offsets = new Uint32Array(counts.length + 1);
+      for (let i = 0; i < counts.length; i++) offsets[i + 1] = offsets[i] + counts[i];
+      const cursor = offsets.slice(0, counts.length);
+      const items = new Uint32Array(count);
+      for (let i = 0; i < count; i++) items[cursor[bucketOf(getX(i), getY(i))]++] = i;
+      return { cell, minx, miny, cols, rows, offsets, items };
+    }
+
+    function collectGrid(grid, x0, y0, x1, y1, out) {
+      out.length = 0;
+      if (!grid) return out;
+      const gx0 = clamp(Math.floor((x0 - grid.minx) / grid.cell), 0, grid.cols - 1);
+      const gy0 = clamp(Math.floor((y0 - grid.miny) / grid.cell), 0, grid.rows - 1);
+      const gx1 = clamp(Math.floor((x1 - grid.minx) / grid.cell), 0, grid.cols - 1);
+      const gy1 = clamp(Math.floor((y1 - grid.miny) / grid.cell), 0, grid.rows - 1);
+      if (gx0 > gx1 || gy0 > gy1) return out;
+      for (let gy = gy0; gy <= gy1; gy++) {
+        for (let gx = gx0; gx <= gx1; gx++) {
+          const b = gy * grid.cols + gx;
+          for (let p = grid.offsets[b]; p < grid.offsets[b + 1]; p++) out.push(grid.items[p]);
+        }
+      }
+      return out;
     }
 
     // ---- transforms ----
@@ -266,7 +360,7 @@
     // Aggregate "app" bubbles exist to summarize tens of thousands of dots.
     // On a small network (mainnet today: a handful of covenants) they hide
     // everything behind giant circles — draw the real nodes at every zoom.
-    const isFar = () => N > 200 && zoomFactor() < 2.2;
+    const isOverview = () => N > 200 && zoomFactor() < 2.4;
 
     // ---- atmosphere (pre-rendered once per resize / network change) ----
     function buildBackground() {
@@ -470,12 +564,16 @@
       return c;
     }
     function nebSpriteFor(app, a, bi) {
-      const ci = colorMode === 'status' ? 0 : (app.t >= 0 ? app.t + 3 : 2);
+      const statusClass = app.alive == null ? 2
+        : app.alive <= 0 ? 1 : app.alive >= app.size ? 0 : 2;
+      const ci = colorMode === 'status' ? statusClass : (app.t >= 0 ? app.t + 3 : 2);
       const variant = a & 3;
       const key = ci * 1024 + bi * 4 + variant;
       let spr = nebCache.get(key);
       if (!spr) {
-        const color = colorMode === 'status' ? 'rgba(120,180,150,0.9)'
+        const color = colorMode === 'status'
+          ? (statusClass === 0 ? ACTIVE_COLOR
+            : statusClass === 1 ? BURNED_COLOR : 'rgba(105,190,176,0.82)')
           : (app.t >= 0 ? tplColors[app.t] : 'rgba(150,160,180,0.7)');
         spr = makeNebulaSprite(color, NEB_BUCKETS[bi], variant);
         nebCache.set(key, spr);
@@ -494,65 +592,103 @@
       if (destroyed) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       drawBackground();
-      if (!N && !apps.length) return;
-
-      const zf = zoomFactor();
-      const far = isFar();
-      const near = zf >= 6 || (N <= 200 && N > 0);
-      // visible world rect (for culling)
-      const vx0 = wx(-20), vy0 = wy(-20), vx1 = wx(W + 20), vy1 = wy(H + 20);
-
-      if (far) {
-        drawApps(vx0, vy0, vx1, vy1);
-        drawHud();
+      if (!N && !apps.length) {
+        frameStats = { lod: 'empty', nodes: 0, apps: 0, labels: 0 };
         return;
       }
 
-      // edges: the hovered app's connections always; all in-view edges when near
-      if (edges && (near || hoverApp >= 0)) drawEdges(vx0, vy0, vx1, vy1, near);
+      const zf = zoomFactor();
+      const detailMix = N <= 200 ? 1 : smoothstep(DETAIL_START, DETAIL_END, zf);
+      const near = zf >= EDGE_DETAIL || (N <= 200 && N > 0);
+      // visible world rect (for culling)
+      const vx0 = wx(-20), vy0 = wy(-20), vx1 = wx(W + 20), vy1 = wy(H + 20);
+      frameStats = {
+        lod: detailMix <= 0 ? (isOverview() ? 'overview' : 'constellation')
+          : detailMix >= 1 ? 'detail' : 'transition',
+        nodes: 0, apps: 0, labels: 0,
+      };
 
-      // coin nodes (culled) as pre-rendered glowing orbs. Labels only render
-      // deep-zoom AND spaced out — in dense mega-clusters hundreds of
-      // adjacent names smear into noise, so each label reserves a
-      // screen-space cell and neighbors stay quiet (hover still names any
-      // dot at any zoom).
-      const labels = zf >= 10;
-      const labelCells = labels ? new Set() : null;
-      let drawnLabels = 0;
-      const mBase = Math.min(1.4, scale / fitScale * 0.6 + 0.4);
+      // Overview and constellation layers remain present into the first part
+      // of the detail transition. That cross-fade removes the old hard cut
+      // from a quiet starfield to a wall of full-size circles.
+      if (detailMix < 1) {
+        if (isOverview()) drawGalaxyHaze();
+        ctx.save();
+        ctx.globalAlpha = 1 - detailMix * 0.92;
+        drawApps(vx0, vy0, vx1, vy1, zf);
+        ctx.restore();
+      }
+
+      if (detailMix > 0) {
+        const padWorld = 28 / scale;
+        collectGrid(nodeGrid, vx0 - padWorld, vy0 - padWorld, vx1 + padWorld, vy1 + padWorld, viewNodes);
+        let visibleNodeCount = 0;
+        for (let n = 0; n < viewNodes.length; n++) {
+          const i = viewNodes[n];
+          if (visible[i] && nx[i] >= vx0 && nx[i] <= vx1 && ny[i] >= vy0 && ny[i] <= vy1) visibleNodeCount++;
+        }
+        // edges: a hovered app's connections always; all in-view edges only
+        // once individual nodes have enough screen-space to read. Dense views
+        // suppress the global web entirely; otherwise it becomes an opaque
+        // fan long before individual relationships can be understood.
+        const showAllEdges = near && N <= 200 && visibleNodeCount <= 700;
+        if (edges && (showAllEdges || hoverNode >= 0)) drawEdges(vx0, vy0, vx1, vy1, showAllEdges);
+        drawNodes(viewNodes, vx0, vy0, vx1, vy1, zf, detailMix);
+      }
+
+      drawHud();
+    }
+
+    function drawGalaxyHaze() {
+      const cx = sx(bounds.minx + bounds.w / 2);
+      const cy = sy(bounds.miny + bounds.h / 2);
+      const rx = Math.max(80, Math.abs(bounds.w * scale) * 0.48);
+      const ry = Math.max(60, Math.abs(bounds.h * scale) * 0.48);
+      const radius = Math.max(rx, ry);
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.scale(rx / radius, ry / radius);
+      const haze = ctx.createRadialGradient(0, 0, radius * 0.02, 0, 0, radius);
+      haze.addColorStop(0, 'rgba(97,220,194,0.10)');
+      haze.addColorStop(0.38, 'rgba(79,170,154,0.055)');
+      haze.addColorStop(0.72, 'rgba(64,125,116,0.026)');
+      haze.addColorStop(1, 'rgba(25,75,68,0)');
+      ctx.fillStyle = haze;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius, 0, TAU);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawNodes(candidates, vx0, vy0, vx1, vy1, zf, layerAlpha) {
+      const mBase = 0.72 + 0.28 * smoothstep(DETAIL_START, 30, zf);
       // small networks: scale sprites up so a handful of coins reads as
       // intentional celestial bodies, not lost pixels
-      const boost = N <= 200 ? 1.6 : 1;
+      const boost = N <= 200 ? 1.55 : 1;
       const twinkle = ambientOn && !reduceMotion.matches;
       const tNow = twinkle ? performance.now() : 0;
-      // Pre-count the culled set (cheap: compares only). Past ~2.5k visible
-      // orbs a frame, halo sprites lose on every renderer — the padded
-      // quads blow the fill-rate budget and their stacked low-alpha halos
-      // fuse dense rings into milky lace. Dense frames therefore draw flat
-      // discs through the canvas single-arc "oval" fast path (per-node
-      // beginPath/arc/fill — measured ~2x FASTER to rasterize than one big
-      // batched Path2D, which drops off the fast path); sparse frames (deep
-      // zoom, small networks, tight filters) keep the full glow sprites,
-      // where they're already cheap and visibly worth it.
       let visCount = 0;
-      for (let i = 0; i < N; i++) {
+      for (let n = 0; n < candidates.length; n++) {
+        const i = candidates[n];
         if (!visible[i]) continue;
         const x = nx[i], y = ny[i];
         if (x < vx0 || x > vx1 || y < vy0 || y > vy1) continue;
         visCount++;
       }
-      const denseMode = visCount > 2500;
-      for (let i = 0; i < N; i++) {
+      frameStats.nodes = visCount;
+      const denseMode = visCount > 1800;
+      for (let n = 0; n < candidates.length; n++) {
+        const i = candidates[n];
         if (!visible[i]) continue;
         const x = nx[i], y = ny[i];
         if (x < vx0 || x > vx1 || y < vy0 || y > vy1) continue;
         const px = sx(x), py = sy(y);
-        const rr = Math.max(1.5, nr[i] * mBase) * boost;
+        const rr = (1.8 + Math.max(0, nr[i] - 4) * 0.55) * mBase * boost;
         const dimmed = hoverApp >= 0 && na[i] !== hoverApp;
         // slow sinusoidal twinkle on ~2% of nodes, seeded by index — only
         // while the ambient (pointer-over) loop is running
         const shimmer = twinkle && ((i * 2654435761 >>> 0) % 47) === 3;
-        let alpha = dimmed ? 0.25 : 1;
+        let alpha = layerAlpha * (dimmed ? 0.22 : 1);
         if (shimmer) alpha *= 0.68 + 0.32 * Math.sin(tNow * 0.0026 + i * 1.7);
         let r; // final screen radius (labels key off it below)
         if (denseMode && rr <= 13) {
@@ -596,25 +732,60 @@
           ctx.stroke();
           ctx.restore();
         }
-        if (labels && drawnLabels < 24 && r >= 3) {
-          /* one label per cell WIDER than a worst-case name (~26 chars at
-             12px mono ≈ 190px) so neighbors can't overlap, and a dark halo
-             so text stays readable over dense ring clusters */
-          const cell = `${Math.floor(px / 240)},${Math.floor(py / 30)}`;
-          if (!labelCells.has(cell)) {
-            labelCells.add(cell);
-            ctx.font = '12px ui-monospace, monospace';
-            ctx.lineWidth = 3.5;
-            ctx.strokeStyle = 'rgba(4,12,10,0.9)';
-            ctx.strokeText(friendlyName(ids[i]), px + r + 4, py + 4);
-            ctx.fillStyle = 'rgba(230,240,248,0.95)';
-            ctx.fillText(friendlyName(ids[i]), px + r + 4, py + 4);
-            drawnLabels++;
-          }
-        }
       }
       ctx.globalAlpha = 1;
-      drawHud();
+      if (zf >= LABEL_DETAIL && visCount <= 900) {
+        frameStats.labels = drawLabels(candidates, vx0, vy0, vx1, vy1, mBase * boost);
+      }
+    }
+
+    function drawLabels(candidates, vx0, vy0, vx1, vy1, radiusMul) {
+      const ranked = [];
+      for (let n = 0; n < candidates.length; n++) {
+        const i = candidates[n];
+        if (!visible[i]) continue;
+        if (nx[i] < vx0 || nx[i] > vx1 || ny[i] < vy0 || ny[i] > vy1) continue;
+        if (i !== focusNode && ns[i] !== 1 && nr[i] < 6) continue;
+        ranked.push(i);
+      }
+      ranked.sort((a, b) => {
+        const sa = (a === focusNode ? 1e9 : 0) + ns[a] * 10000 + nr[a] * 100 - (hashIndex(a) & 255);
+        const sb = (b === focusNode ? 1e9 : 0) + ns[b] * 10000 + nr[b] * 100 - (hashIndex(b) & 255);
+        return sb - sa;
+      });
+
+      const boxes = [];
+      ctx.font = '12px ui-monospace, monospace';
+      ctx.lineWidth = 3.5;
+      for (let n = 0; n < ranked.length && boxes.length < 18; n++) {
+        const i = ranked[n];
+        const text = friendlyName(ids[i]);
+        const width = Math.ceil(ctx.measureText(text).width);
+        const px = sx(nx[i]), py = sy(ny[i]);
+        const r = Math.max(2, (1.8 + Math.max(0, nr[i] - 4) * 0.55) * radiusMul);
+        let tx = px + r + 6;
+        if (tx + width > W - 12) tx = px - r - width - 6;
+        const ty = py + 4;
+        const box = { x0: tx - 4, y0: ty - 15, x1: tx + width + 4, y1: ty + 6 };
+        // Do not draw partial names along the border. This is the concrete fix
+        // for the stray right-edge labels visible in the old detail view.
+        if (box.x0 < 10 || box.x1 > W - 10 || box.y0 < 10 || box.y1 > H - 10) continue;
+        let collides = false;
+        for (let b = 0; b < boxes.length; b++) {
+          const q = boxes[b];
+          if (box.x0 < q.x1 && box.x1 > q.x0 && box.y0 < q.y1 && box.y1 > q.y0) {
+            collides = true;
+            break;
+          }
+        }
+        if (collides) continue;
+        boxes.push(box);
+        ctx.strokeStyle = 'rgba(4,12,10,0.92)';
+        ctx.strokeText(text, tx, ty);
+        ctx.fillStyle = 'rgba(230,240,248,0.94)';
+        ctx.fillText(text, tx, ty);
+      }
+      return boxes.length;
     }
 
     // dense-frame flat disc color, cached per color × status (mirrors the
@@ -640,32 +811,46 @@
       return s;
     }
 
-    function drawApps(vx0, vy0, vx1, vy1) {
+    function drawApps(vx0, vy0, vx1, vy1, zf) {
       const twinkle = ambientOn && !reduceMotion.matches;
-      // Tiny aggregates (screen radius < 4px) don't rate a nebula sprite —
-      // at TN10 scale that would be thousands of overlapping 30–60px quads
-      // fusing into a moiré fabric while the blits eat the frame budget.
-      // They batch into three Path2D passes of plain dim dots (slight tint
-      // variation per template group, no per-dot styles); only the few big
-      // clusters get the cloud treatment. A hovered tiny app still takes the
-      // sprite path so the hover ring/tooltip behavior is unchanged.
-      let dotPaths = null;
-      for (let a = 0; a < apps.length; a++) {
-        const app = apps[a];
-        if (filter.minSize > 2 && app.size < filter.minSize) continue;
+      const extra = maxAppRadius + 16 / scale;
+      collectGrid(appGrid, vx0 - extra, vy0 - extra, vx1 + extra, vy1 + extra, viewApps);
+      let inView = 0;
+      for (let n = 0; n < viewApps.length; n++) {
+        const app = apps[viewApps[n]];
+        if (!appPassesFilter(app)) continue;
         if (app.cx < vx0 - app.r || app.cx > vx1 + app.r || app.cy < vy0 - app.r || app.cy > vy1 + app.r) continue;
+        inView++;
+      }
+      // A stable deterministic sample keeps the 30k+ app overview airy. The
+      // old renderer painted every tiny square, turning the sunflower layout
+      // into a solid moiré disc. More points appear naturally as zoom culls
+      // the world down; the first 72 largest apps are always retained.
+      const budget = isOverview()
+        ? clamp(Math.round(W * H / 300), 900, 2200)
+        : clamp(Math.round(W * H / 180), 1500, 3600);
+      const stride = Math.max(1, Math.ceil(inView / budget));
+      let dotPaths = null;
+      for (let n = 0; n < viewApps.length; n++) {
+        const a = viewApps[n];
+        const app = apps[a];
+        if (!appPassesFilter(app)) continue;
+        if (app.cx < vx0 - app.r || app.cx > vx1 + app.r || app.cy < vy0 - app.r || app.cy > vy1 + app.r) continue;
+        if (a >= 72 && a !== hoverApp && stride > 1 && hashIndex(a) % stride !== 0) continue;
         const px = sx(app.cx), py = sy(app.cy);
         const rs = app.r * scale * 0.5;
-        if (rs < 4 && a !== hoverApp) {
+        frameStats.apps++;
+        if (rs < 9 && a !== hoverApp) {
           if (!dotPaths) dotPaths = [new Path2D(), new Path2D(), new Path2D()];
-          // tint group: template hue + a deterministic per-app scatter —
-          // on dominant-template networks (TN10: 96% one template) a pure
-          // template split would collapse the whole field to one flat color
-          const p = dotPaths[((app.t >= 0 ? app.t : 2) + (((a * 2654435761) >>> 8) % 3)) % 3];
-          // single rect per dot (an arc costs 2 path calls and reads the
-          // same at <=4px); dim + tiny = starlike
-          const dr = 0.7 + Math.min(1.5, rs * 0.35);
-          p.rect(px - dr, py - dr, dr * 2, dr * 2);
+          const statusGroup = app.alive == null ? -1
+            : app.alive <= 0 ? 1 : app.alive >= app.size ? 0 : 2;
+          const group = colorMode === 'status' && statusGroup >= 0
+            ? statusGroup
+            : ((app.t >= 0 ? app.t : 2) + (hashIndex(a) % 3)) % 3;
+          const p = dotPaths[group % 3];
+          const dr = 0.65 + Math.min(1.05, rs * 0.22) + Math.min(0.4, Math.log2(app.size + 1) * 0.08);
+          p.moveTo(px + dr, py);
+          p.arc(px, py, dr, 0, TAU);
           continue;
         }
         const r = Math.max(2, rs);
@@ -722,7 +907,7 @@
       // mid-segment pass — at that density it reads as mush anyway — so
       // heavy frames pay a single cheap stroke per edge.
       const M = edges.length / 3;
-      const hots = hoverApp >= 0 ? [] : null;
+      const hots = hoverNode >= 0 ? [] : null;
       if (near) {
         let inView = 0;
         for (let k = 0; k < M; k++) {
@@ -747,7 +932,7 @@
           if (!visible[i] || !visible[j]) continue;
           const ax = nx[i], ay = ny[i], bx = nx[j], by = ny[j];
           if ((ax < vx0 && bx < vx0) || (ax > vx1 && bx > vx1) || (ay < vy0 && by < vy0) || (ay > vy1 && by > vy1)) continue;
-          if (hots && (na[i] === hoverApp || na[j] === hoverApp)) { hots.push(k); continue; }
+          if (hots && (i === hoverNode || j === hoverNode)) { hots.push(k); continue; }
           const x0 = sx(ax), y0 = sy(ay), x1 = sx(bx), y1 = sy(by);
           ctx.beginPath();
           ctx.moveTo(x0, y0);
@@ -767,7 +952,7 @@
           for (let k = 0; k < M; k++) {
             const i = edges[k * 3], j = edges[k * 3 + 1];
             if (!visible[i] || !visible[j]) continue;
-            if (hots && (na[i] === hoverApp || na[j] === hoverApp)) continue;
+            if (hots && (i === hoverNode || j === hoverNode)) continue;
             const ax = nx[i], ay = ny[i], bx = nx[j], by = ny[j];
             if ((ax < vx0 && bx < vx0) || (ax > vx1 && bx > vx1) || (ay < vy0 && by < vy0) || (ay > vy1 && by > vy1)) continue;
             const x0 = sx(ax), y0 = sy(ay), x1 = sx(bx), y1 = sy(by);
@@ -789,7 +974,7 @@
         // not near: only the hovered app's edges are drawn
         for (let k = 0; k < M; k++) {
           const i = edges[k * 3], j = edges[k * 3 + 1];
-          if (na[i] !== hoverApp && na[j] !== hoverApp) continue;
+          if (i !== hoverNode && j !== hoverNode) continue;
           if (!visible[i] || !visible[j]) continue;
           const ax = nx[i], ay = ny[i], bx = nx[j], by = ny[j];
           if ((ax < vx0 && bx < vx0) || (ax > vx1 && bx > vx1) || (ay < vy0 && by < vy0) || (ay > vy1 && by > vy1)) continue;
@@ -797,11 +982,13 @@
         }
       }
       if (hots && hots.length) {
-        // hot (hovered app) edges glow teal: wide dim underlay + bright
-        // core on the full curve + brighter mid-segment. Few edges (one
-        // app's connections), so per-edge style switches are fine.
+      // hot (hovered coin) edges glow teal: wide dim underlay + bright
+        // core on the full curve + brighter mid-segment. Very large apps can
+        // still own tens of thousands of links, so keep a stable sample; a
+        // solid fan communicates less than a few hundred representative ties.
         const t0 = 0.28, t1 = 0.72, u0 = 1 - t0, u1 = 1 - t1;
-        for (let n = 0; n < hots.length; n++) {
+        const hotStride = Math.max(1, Math.ceil(hots.length / 96));
+        for (let n = 0; n < hots.length; n += hotStride) {
           const k = hots[n];
           const i = edges[k * 3], j = edges[k * 3 + 1];
           const x0 = sx(nx[i]), y0 = sy(ny[i]), x1 = sx(nx[j]), y1 = sy(ny[j]);
@@ -835,12 +1022,12 @@
 
     function drawHud() {
       // subtle "zoom to explore" hint at far zoom
-      if (zoomFactor() < 2.2 && apps.length) {
+      if (isOverview() && apps.length) {
         ctx.fillStyle = 'rgba(150,165,185,0.38)';
         ctx.font = '11px ui-monospace, monospace';
         const prevLs = ctx.letterSpacing;
         if (prevLs !== undefined) ctx.letterSpacing = '0.08em';
-        ctx.fillText('scroll to zoom · drag to pan · click a dot to open a coin', 14, H - 14);
+        ctx.fillText('scroll to explore · drag to pan · click a cluster to focus', 14, H - 14);
         if (prevLs !== undefined) ctx.letterSpacing = prevLs;
       }
     }
@@ -870,30 +1057,40 @@
       if (t - lastAmbient < 33) return; // ~30fps is plenty for a shimmer
       if (anim) return; // zoom animation already drives frames
       // only redraw when something can actually shimmer
-      if (isFar() && hoverApp < 0) return;
+      if (isOverview() && hoverApp < 0) return;
       if (!N && !apps.length) return;
       lastAmbient = t;
       requestDraw();
     }
 
-    // ---- hit testing (linear; redraw/hover are event-driven) ----
+    // ---- hit testing (spatially indexed; redraw/hover are event-driven) ----
     function nodeAt(px, py) {
       let best = -1, bd = 16 * 16;
-      for (let i = 0; i < N; i++) {
+      const cx = wx(px), cy = wy(py);
+      const reach = 20 / scale;
+      collectGrid(nodeGrid, cx - reach, cy - reach, cx + reach, cy + reach, hitNodes);
+      for (let n = 0; n < hitNodes.length; n++) {
+        const i = hitNodes[n];
         if (!visible[i]) continue;
         const dx = sx(nx[i]) - px, dy = sy(ny[i]) - py, d2 = dx * dx + dy * dy;
-        const rr = Math.max(6, nr[i]) ** 2;
-        if (d2 < Math.max(bd, rr)) { bd = d2; best = i; }
+        const rr = Math.max(7, Math.min(16, nr[i] * 1.15)) ** 2;
+        if (d2 <= Math.max(16 * 16, rr) && d2 < bd) { bd = d2; best = i; }
       }
       return best;
     }
     function appAt(px, py) {
-      let best = -1, bd = Infinity;
-      for (let a = 0; a < apps.length; a++) {
+      let best = -1, bd = 28 * 28;
+      const cx = wx(px), cy = wy(py);
+      const reach = 32 / scale;
+      collectGrid(appGrid, cx - reach, cy - reach, cx + reach, cy + reach, hitApps);
+      for (let n = 0; n < hitApps.length; n++) {
+        const a = hitApps[n];
         const app = apps[a];
-        if (filter.minSize > 2 && app.size < filter.minSize) continue;
+        if (!appPassesFilter(app)) continue;
         const dx = sx(app.cx) - px, dy = sy(app.cy) - py, d2 = dx * dx + dy * dy;
-        const r = Math.max(6, app.r * scale * 0.5);
+        // Hit the readable center, not an enormous invisible app-radius disc.
+        // Overlapping large aggregates otherwise make nearby clicks ambiguous.
+        const r = clamp(app.r * scale * 0.5, 7, 28);
         if (d2 < r * r && d2 < bd) { bd = d2; best = a; }
       }
       return best;
@@ -904,12 +1101,56 @@
       ev.preventDefault();
       const rect = canvas.getBoundingClientRect();
       const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
-      const wpx = wx(px), wpy = wy(py);
-      const factor = Math.exp(-ev.deltaY * 0.0016);
-      scale = Math.min(fitScale * 60, Math.max(fitScale * 0.6, scale * factor));
-      panX = px - wpx * scale;
-      panY = py - wpy * scale;
-      requestDraw();
+      stopProgrammaticAnim();
+      hoverNode = -1;
+      hoverApp = -1;
+      hideTip();
+      canvas.style.cursor = 'grab';
+      if (!wheelTarget) wheelTarget = { scale, panX, panY };
+      const modeMul = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? H : 1;
+      const delta = clamp(ev.deltaY * modeMul, -120, 120);
+      const wpx = (px - wheelTarget.panX) / wheelTarget.scale;
+      const wpy = (py - wheelTarget.panY) / wheelTarget.scale;
+      const nextScale = clamp(wheelTarget.scale * Math.exp(-delta * 0.00185), fitScale * 0.75, fitScale * 60);
+      wheelTarget = {
+        scale: nextScale,
+        panX: px - wpx * nextScale,
+        panY: py - wpy * nextScale,
+      };
+      wheelLast = performance.now();
+      if (!wheelRaf) {
+        wheelTickAt = wheelLast;
+        wheelRaf = requestAnimationFrame(stepWheel);
+      }
+    }
+    function stepWheel(now) {
+      wheelRaf = 0;
+      if (!wheelTarget || destroyed) return;
+      const dt = clamp(now - wheelTickAt, 1, 34);
+      wheelTickAt = now;
+      const ease = 1 - Math.exp(-dt / 58);
+      scale += (wheelTarget.scale - scale) * ease;
+      panX += (wheelTarget.panX - panX) * ease;
+      panY += (wheelTarget.panY - panY) * ease;
+      draw();
+      const settled = Math.abs(wheelTarget.scale - scale) < fitScale * 0.001
+        && Math.abs(wheelTarget.panX - panX) < 0.15
+        && Math.abs(wheelTarget.panY - panY) < 0.15
+        && now - wheelLast > 70;
+      if (settled) {
+        scale = wheelTarget.scale;
+        panX = wheelTarget.panX;
+        panY = wheelTarget.panY;
+        wheelTarget = null;
+        draw();
+      } else {
+        wheelRaf = requestAnimationFrame(stepWheel);
+      }
+    }
+    function stopWheel() {
+      if (wheelRaf) cancelAnimationFrame(wheelRaf);
+      wheelRaf = 0;
+      wheelTarget = null;
     }
     // onUp lives on WINDOW (so drags can release outside the canvas), which
     // means it hears every pointerup on the whole page for as long as the
@@ -920,18 +1161,53 @@
     let pointerFromCanvas = false;
     function onDown(ev) {
       pointerFromCanvas = true;
-      dragging = true; dragMoved = false;
-      lastX = ev.clientX; lastY = ev.clientY;
+      activePointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      dragMoved = false;
+      stopWheel();
+      stopProgrammaticAnim();
       canvas.setPointerCapture && canvas.setPointerCapture(ev.pointerId);
+      if (activePointers.size === 1) {
+        dragging = true;
+        lastX = ev.clientX;
+        lastY = ev.clientY;
+      } else if (activePointers.size === 2) {
+        const points = Array.from(activePointers.values());
+        const rect = canvas.getBoundingClientRect();
+        const centerX = (points[0].x + points[1].x) / 2 - rect.left;
+        const centerY = (points[0].y + points[1].y) / 2 - rect.top;
+        pinch = {
+          distance: Math.max(1, Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y)),
+          scale,
+          worldX: wx(centerX),
+          worldY: wy(centerY),
+        };
+        gestureWasPinch = true;
+        dragging = false;
+        dragMoved = true;
+        hideTip();
+      }
     }
-    // Hover hit-testing is O(N) over every node; at tens of thousands of
-    // coins an unthrottled pointermove burns a linear scan per event. Queue
-    // the latest position and resolve it at most once per frame.
+    // Hover hit-testing is spatially indexed, but pointer hardware can still
+    // emit faster than paint. Queue the latest position at most once per frame.
     let hoverQueued = false;
     let hoverPx = 0, hoverPy = 0;
     function onMove(ev) {
       const rect = canvas.getBoundingClientRect();
       const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
+      if (activePointers.has(ev.pointerId)) {
+        activePointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      }
+      if (pinch && activePointers.size >= 2) {
+        const points = Array.from(activePointers.values()).slice(0, 2);
+        const distance = Math.max(1, Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y));
+        const centerX = (points[0].x + points[1].x) / 2 - rect.left;
+        const centerY = (points[0].y + points[1].y) / 2 - rect.top;
+        scale = clamp(pinch.scale * distance / pinch.distance, fitScale * 0.75, fitScale * 60);
+        panX = centerX - pinch.worldX * scale;
+        panY = centerY - pinch.worldY * scale;
+        requestDraw();
+        return;
+      }
       if (dragging) {
         const ddx = ev.clientX - lastX, ddy = ev.clientY - lastY;
         if (Math.abs(ddx) + Math.abs(ddy) > 2) dragMoved = true;
@@ -947,12 +1223,13 @@
       requestAnimationFrame(() => { hoverQueued = false; resolveHover(hoverPx, hoverPy); });
     }
     function resolveHover(px, py) {
-      const far = isFar();
-      if (far) {
+      const aggregates = N > 200 && zoomFactor() < DETAIL_END;
+      if (aggregates) {
         const a = appAt(px, py);
         if (a !== hoverApp) { hoverApp = a; requestDraw(); }
         if (a >= 0) showTip(px, py, `app · ${apps[a].size} coins`, 'click to zoom in');
         else hideTip();
+        canvas.style.cursor = a >= 0 ? 'pointer' : 'grab';
         hoverNode = -1;
       } else {
         const i = nodeAt(px, py);
@@ -971,6 +1248,16 @@
     }
     function onUp(ev) {
       const fromCanvas = pointerFromCanvas;
+      activePointers.delete(ev.pointerId);
+      if (gestureWasPinch) {
+        dragging = false;
+        if (activePointers.size === 0) {
+          gestureWasPinch = false;
+          pinch = null;
+          pointerFromCanvas = false;
+        }
+        return;
+      }
       pointerFromCanvas = false;
       dragging = false;
       // ignore pointerups that didn't start on the canvas, and anything that
@@ -980,9 +1267,12 @@
       const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
       if (dragMoved) return;
       // a real click
-      if (isFar()) {
+      if (N > 200 && zoomFactor() < DETAIL_END) {
         const a = appAt(px, py);
         if (a >= 0) { zoomToApp(a); return; }
+        // Nodes are not painted in aggregate LOD, so an empty-space click
+        // must stay empty instead of opening a hidden coin underneath it.
+        return;
       }
       const i = nodeAt(px, py);
       if (i >= 0) onPickCoin(ids[i]);
@@ -990,71 +1280,114 @@
 
     function zoomToApp(a) {
       const app = apps[a];
-      // Fit the app's ACTUAL member spread, not the layout radius — on tiny
-      // networks (mainnet today) ar understates the extent and the old
-      // fitScale*5 floor zoomed past both members into empty space.
+      // The worker's app radius encloses its member packing. Land well into
+      // detail LOD so clicking a cluster never strands the camera between
+      // aggregate and node representations.
       let extent = Math.max(app.r, 8);
-      for (let i = 0; i < N; i++) {
-        if (na[i] !== a) continue;
-        const d = Math.hypot(nx[i] - app.cx, ny[i] - app.cy) + nr[i];
-        if (d > extent) extent = d;
-      }
       const fit = (Math.min(W, H) * 0.4) / extent;
-      // big worlds must land past the far->near threshold (2.2) or the zoom
-      // strands the user between LODs; small worlds draw nodes at every zoom
-      // so the extent fit wins as-is
-      const floor = N > 200 ? fitScale * 2.5 : fitScale * 1.15;
-      const target = Math.min(fitScale * 12, Math.max(floor, fit));
+      const floor = N > 200 ? fitScale * 19 : fitScale * 1.15;
+      const target = Math.min(fitScale * 36, Math.max(floor, fit));
       animateTo(target, app.cx, app.cy);
     }
-    function animateTo(toScale, worldCx, worldCy) {
+    function animateTo(toScale, worldCx, worldCy, duration) {
+      stopWheel();
+      stopProgrammaticAnim();
       const from = { scale, panX, panY };
+      toScale = clamp(toScale, fitScale * 0.75, fitScale * 60);
       const toPanX = W / 2 - worldCx * toScale;
       const toPanY = H / 2 - worldCy * toScale;
-      anim = { t0: performance.now(), dur: 480, from, to: { scale: toScale, panX: toPanX, panY: toPanY } };
-      stepAnim();
+      anim = { t0: performance.now(), dur: duration || 520, from, to: { scale: toScale, panX: toPanX, panY: toPanY } };
+      animRaf = requestAnimationFrame(stepAnim);
     }
-    function stepAnim() {
+    function stepAnim(now) {
+      animRaf = 0;
       if (!anim) return;
-      const t = Math.min(1, (performance.now() - anim.t0) / anim.dur);
-      const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // easeInOutQuad
+      const t = Math.min(1, (now - anim.t0) / anim.dur);
+      const e = 1 - Math.pow(1 - t, 3); // smooth, responsive ease-out cubic
       scale = anim.from.scale + (anim.to.scale - anim.from.scale) * e;
       panX = anim.from.panX + (anim.to.panX - anim.from.panX) * e;
       panY = anim.from.panY + (anim.to.panY - anim.from.panY) * e;
       draw();
-      if (t < 1) requestAnimationFrame(stepAnim); else anim = null;
+      if (t < 1) animRaf = requestAnimationFrame(stepAnim); else anim = null;
+    }
+    function stopProgrammaticAnim() {
+      if (animRaf) cancelAnimationFrame(animRaf);
+      animRaf = 0;
+      anim = null;
     }
 
     function showTip(px, py, title, sub) {
       tip.innerHTML = `<strong>${escapeHtml(title)}</strong>${sub ? `<span>${escapeHtml(sub)}</span>` : ''}`;
       tip.style.display = 'block';
-      tip.style.left = px + 14 + 'px';
-      tip.style.top = py + 14 + 'px';
+      const left = clamp(px + 14, 8, Math.max(8, W - tip.offsetWidth - 8));
+      const top = clamp(py + 14, 8, Math.max(8, H - tip.offsetHeight - 8));
+      tip.style.left = left + 'px';
+      tip.style.top = top + 'px';
     }
     function hideTip() { tip.style.display = 'none'; }
     function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
     // ---- public controls ----
     function setFilter(f) { filter = Object.assign(filter, f); applyFilter(); requestDraw(); }
-    function setColorMode(m) { colorMode = m; requestDraw(); }
+    function setColorMode(m) {
+      if (m === colorMode) return;
+      colorMode = m;
+      // Cache keys are compact integers and overlap across color modes.
+      orbCache.clear();
+      nebCache.clear();
+      flatCache = [];
+      requestDraw();
+    }
     function search(query) {
       const q = (query || '').trim().toLowerCase();
-      if (!q) return null;
+      if (!q) {
+        focusNode = -1;
+        hoverNode = -1;
+        hoverApp = -1;
+        hideTip();
+        requestDraw();
+        return null;
+      }
       for (let i = 0; i < N; i++) {
         if (ids[i].toLowerCase().startsWith(q) || friendlyName(ids[i]).toLowerCase().includes(q)) {
           filter = Object.assign(filter, {}); // no filter change
-          hoverNode = i; hoverApp = na[i];
-          animateTo(Math.max(scale, fitScale * 6), nx[i], ny[i]);
+          focusNode = i;
+          hoverNode = i;
+          hoverApp = na[i];
+          animateTo(Math.max(scale, fitScale * LABEL_DETAIL), nx[i], ny[i]);
           return ids[i];
         }
       }
       return null;
     }
     function focus(id) {
-      for (let i = 0; i < N; i++) if (ids[i] === id) { animateTo(Math.max(scale, fitScale * 6), nx[i], ny[i]); return true; }
+      for (let i = 0; i < N; i++) if (ids[i] === id) {
+        focusNode = i;
+        animateTo(Math.max(scale, fitScale * LABEL_DETAIL), nx[i], ny[i]);
+        return true;
+      }
       return false;
     }
+    function zoom(command) {
+      const centerX = wx(W / 2), centerY = wy(H / 2);
+      hoverNode = -1;
+      hoverApp = -1;
+      hideTip();
+      canvas.style.cursor = 'grab';
+      if (command === 'reset') {
+        focusNode = -1;
+        const cx = bounds.minx + Math.max(1, bounds.w) / 2;
+        const cy = bounds.miny + Math.max(1, bounds.h) / 2;
+        animateTo(fitScale, cx, cy, 460);
+      } else {
+        animateTo(scale * (command === 'in' ? 1.65 : 1 / 1.65), centerX, centerY, 260);
+      }
+    }
     function resize() {
+      const hadSize = W > 0 && H > 0;
+      const oldCenterX = hadSize ? wx(W / 2) : 0;
+      const oldCenterY = hadSize ? wy(H / 2) : 0;
+      const oldZoom = hadSize && fitScale > 0 ? scale / fitScale : 1;
       W = canvas.clientWidth || 600;
       H = canvas.clientHeight || 420;
       dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1065,6 +1398,11 @@
       nebCache.clear();
       buildBackground();
       computeFit();
+      if (hadSize) {
+        scale = fitScale * clamp(oldZoom, 0.75, 60);
+        panX = W / 2 - oldCenterX * scale;
+        panY = H / 2 - oldCenterY * scale;
+      }
       draw();
     }
 
@@ -1074,9 +1412,29 @@
     canvas.addEventListener('pointerdown', onDown);
     canvas.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
     canvas.addEventListener('pointerenter', startAmbient);
     canvas.addEventListener('pointerleave', onLeave);
-    function onLeave() { hideTip(); stopAmbient(); }
+    function onLeave() {
+      hoverNode = -1;
+      hoverApp = -1;
+      hideTip();
+      canvas.style.cursor = 'grab';
+      stopAmbient();
+    }
+    function onCancel() {
+      pointerFromCanvas = false;
+      dragging = false;
+      dragMoved = false;
+      activePointers.clear();
+      pinch = null;
+      gestureWasPinch = false;
+      hoverNode = -1;
+      hoverApp = -1;
+      hideTip();
+      canvas.style.cursor = 'grab';
+      requestDraw();
+    }
 
     function destroy() {
       destroyed = true;
@@ -1084,9 +1442,11 @@
       canvas.removeEventListener('pointerdown', onDown);
       canvas.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
       canvas.removeEventListener('pointerenter', startAmbient);
       canvas.removeEventListener('pointerleave', onLeave);
-      anim = null;
+      stopProgrammaticAnim();
+      stopWheel();
       ambientOn = false;
       if (ambientRaf) cancelAnimationFrame(ambientRaf);
       ambientRaf = 0;
@@ -1109,9 +1469,23 @@
       for (let i = 0; i < count; i++) draw();
       return (performance.now() - t0) / count;
     }
+    function _debug() {
+      return {
+        nodes: N,
+        apps: apps.length,
+        zoom: zoomFactor(),
+        frame: Object.assign({}, frameStats),
+        hoverNode,
+        hoverApp,
+        focusNode,
+      };
+    }
 
     const colorForTemplate = (i) => (i >= 0 && i < tplColors.length ? tplColors[i] : UNKNOWN_COLOR);
-    return { load, setFilter, setColorMode, search, focus, resize, destroy, templates: () => templates, colorForTemplate, _bench };
+    return {
+      load, setFilter, setColorMode, search, focus, zoom, resize, destroy,
+      templates: () => templates, colorForTemplate, _bench, _debug,
+    };
   }
 
   window.kascovGalaxy = { create };

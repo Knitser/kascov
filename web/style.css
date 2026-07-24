@@ -2875,17 +2875,21 @@ details.collapse-sec > summary:hover h2 { color: var(--accent); }
 .contract-intel .zk-panel { margin-top: 0.7rem; }
 
 /* the galaxy — the whole-network map */
-.galaxy-wrap { margin-top: 0.5rem; position: relative; }
-.galaxy-canvas { width: 100%; height: 520px; display: block; border: 1px solid var(--border); border-radius: var(--radius); background: radial-gradient(120% 120% at 50% 45%, #071a15 0%, #05100d 70%); touch-action: none; cursor: grab; }
+.galaxy-wrap { margin-top: 0.5rem; position: relative; isolation: isolate; }
+.galaxy-canvas { width: 100%; height: 520px; display: block; border: 1px solid var(--border); border-radius: var(--radius); background: radial-gradient(120% 120% at 50% 45%, #071a15 0%, #05100d 70%); touch-action: none; cursor: grab; contain: strict; }
 .galaxy-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem 0.9rem; margin-top: 0.6rem; }
 .galaxy-search { flex: 1 1 220px; min-width: 160px; max-width: 320px; padding: 0.45rem 0.7rem; font: inherit; font-size: 0.86rem; color: var(--text); background: var(--surface, #0c1a16); border: 1px solid var(--border); border-radius: 9px; }
 .galaxy-search:focus { outline: none; border-color: var(--accent); }
 .galaxy-chips { display: inline-flex; gap: 0.35rem; }
 .chip-on { color: var(--text); border-color: var(--accent); background: rgba(112, 199, 186, 0.12); }
-.galaxy-legend { position: absolute; left: 10px; bottom: 10px; display: flex; flex-wrap: wrap; gap: 0.4rem 0.75rem; max-width: calc(100% - 20px); padding: 0.4rem 0.55rem; background: rgba(6, 18, 15, 0.72); border: 1px solid var(--border); border-radius: 9px; pointer-events: none; }
+.galaxy-camera { position: absolute; z-index: 5; top: 12px; right: 12px; display: inline-flex; overflow: hidden; border: 1px solid rgba(91,228,155,0.22); border-radius: 10px; background: rgba(3,13,11,0.78); box-shadow: 0 8px 24px rgba(0,0,0,0.22); backdrop-filter: blur(8px); }
+.galaxy-camera button { min-width: 34px; height: 34px; padding: 0 0.55rem; border: 0; border-right: 1px solid rgba(91,228,155,0.14); color: var(--muted); background: transparent; font: 600 0.78rem var(--mono); cursor: pointer; transition: color 0.15s, background 0.15s; }
+.galaxy-camera button:last-child { border-right: 0; }
+.galaxy-camera button:hover, .galaxy-camera button:focus-visible { color: var(--accent); background: rgba(91,228,155,0.09); outline: none; }
+.galaxy-legend { position: absolute; left: 10px; bottom: 10px; display: flex; flex-wrap: wrap; gap: 0.4rem 0.75rem; max-width: calc(100% - 20px); padding: 0.4rem 0.55rem; background: rgba(3, 14, 11, 0.76); border: 1px solid var(--border); border-radius: 9px; pointer-events: none; backdrop-filter: blur(7px); }
 .lg-item { display: inline-flex; align-items: center; gap: 0.32rem; font-size: 0.74rem; color: var(--muted); }
 .lg-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-.galaxy-tip { position: absolute; pointer-events: none; z-index: 6; display: none; padding: 0.3rem 0.5rem; font-size: 0.78rem; line-height: 1.25; color: var(--text); background: rgba(6, 18, 15, 0.92); border: 1px solid var(--border-strong, var(--border)); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
+.galaxy-tip { position: absolute; pointer-events: none; z-index: 6; display: none; max-width: min(250px, calc(100% - 16px)); overflow-wrap: anywhere; padding: 0.3rem 0.5rem; font-size: 0.78rem; line-height: 1.25; color: var(--text); background: rgba(6, 18, 15, 0.94); border: 1px solid var(--border-strong, var(--border)); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.4); backdrop-filter: blur(8px); }
 .galaxy-tip strong { display: block; font-weight: 600; }
 .galaxy-tip span { display: block; color: var(--muted); font-size: 0.72rem; }
 @media (max-width: 640px) { .galaxy-canvas { height: 400px; } }
