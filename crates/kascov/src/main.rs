@@ -1076,12 +1076,10 @@ struct ServeState {
     /// Per-network live event broadcast (SSE). A Vec, not a HashMap:
     /// `Network` has no `Hash` impl and there are at most a couple entries.
     live: Vec<(Network, LiveChannel)>,
-    /// Per-network live pending (mempool) covenant set — filled by the poller,
-    /// snapshotted by /pending. Same Vec-not-HashMap shape as `live`. A tokio
-    /// Mutex: the poller holds it across its classify loop, the handler across
-    /// one snapshot. A network whose poller disabled itself (no-mempool node)
-    /// simply has no entry here, so /pending 404s and the section hides.
-    pending: Vec<(Network, std::sync::Arc<tokio::sync::Mutex<PendingSet>>)>,
+    /// Per-network live pending (mempool) feed — rows plus explicit poller
+    /// health, snapshotted atomically by /pending and reported by /health.
+    /// Same Vec-not-HashMap shape as `live`; there are only two networks.
+    pending: Vec<(Network, std::sync::Arc<tokio::sync::Mutex<PendingFeed>>)>,
     /// Latest cross-indexer consistency report per network (None until the
     /// day's first run lands). Same Vec-not-HashMap shape as `live`; a std
     /// Mutex because it's held only to store or clone, never across awaits.
@@ -1160,10 +1158,10 @@ async fn serve(
             health.clone(),
         ));
         // Live pending (mempool) covenant feed: an additive, isolated poller
-        // that reads the same node the follower confirms against, keeps a
-        // read-only store handle (never the follower's &mut), and fans pending
+        // that reads the same node the follower confirms against, keeps its
+        // own Store connection (never the follower's &mut), and fans pending
         // events out on the SAME broadcast channel the confirmed events use.
-        let pending_set = std::sync::Arc::new(tokio::sync::Mutex::new(PendingSet::new()));
+        let pending_set = std::sync::Arc::new(tokio::sync::Mutex::new(PendingFeed::new()));
         tokio::spawn(poll_mempool_forever(
             network,
             cli.rpc.clone(),
@@ -1411,6 +1409,18 @@ async fn healthz_handler(
             || (lag.is_some_and(|l| l > kascov_core::sync::WEDGE_LAG_DAA)
                 && now.saturating_sub(last_progress) > HEALTHZ_STALL_MS);
         stalled |= network_stalled;
+        // Mempool is an additive product feed, not part of the confirmed
+        // indexer's restart contract. Report it honestly without turning a
+        // disabled/reconnecting poller into a worker-wide 503.
+        let mempool = match state.pending.iter().find(|(n, _)| *n == network) {
+            Some((_, feed)) => feed.lock().await.health_json_at(now as u64),
+            None => serde_json::json!({
+                "status": "disabled",
+                "last_poll_ms": null,
+                "revision": 0,
+                "pending": 0,
+            }),
+        };
         networks.insert(
             network.to_string(),
             serde_json::json!({
@@ -1421,6 +1431,7 @@ async fn healthz_handler(
                 "last_sync_ok_ms": last_ok,
                 "last_progress_ms": last_progress,
                 "tx_index_backfill_done": backfill_done,
+                "mempool": mempool,
             }),
         );
     }
@@ -1677,59 +1688,331 @@ fn env_ms(key: &str, default: u64) -> u64 {
 /// covenant mempool is tiny; past this we stop tracking new entries until the
 /// pool drains. The confirmed pipeline is never affected.
 const MAX_PENDING: usize = 512;
+/// A 250ms poller that has not succeeded for this long is stale even if the
+/// task is hung before it can explicitly transition to reconnecting.
+const PENDING_HEALTH_STALE_MS: u64 = 5_000;
 
-/// One pending covenant tx we're tracking between "seen in mempool" and
-/// "resolved" (confirmed or dropped).
-struct PendingEntry {
+/// One covenant event touched by a pending transaction. Kept sorted by
+/// covenant id inside [`PendingEntry`] so both the legacy scalar fields and
+/// the additive `events` array have a stable meaning across processes.
+#[derive(Clone, Copy)]
+struct PendingEvent {
     covenant_id: CovenantId,
     kind: kascov_core::store::EventKind,
+}
+
+/// One pending transaction we're tracking between "seen in mempool" and
+/// "resolved" (confirmed or dropped).
+struct PendingEntry {
+    events: Vec<PendingEvent>,
     first_seen: std::time::Instant,
+    first_seen_ms: u64,
     /// Set the first poll a tracked txid is gone from the pool; the drop-grace
     /// timer runs from here. A mined tx leaves the pool before the follower has
     /// indexed its events, so we hold briefly before declaring it dropped.
     leaving_since: Option<std::time::Instant>,
 }
 
-/// A network's live pending covenant txs, keyed by txid, with an insertion
-/// order so the snapshot reads oldest-first. Guarded by a tokio Mutex shared
-/// between the poller (writer) and the /pending handler (reader). One tx maps
-/// to one entry: a tx touching several covenants still broadcasts one `pending`
-/// event per covenant, but the in-memory preview keeps the first (the common
-/// case is exactly one covenant per tx).
-#[derive(Default)]
-struct PendingSet {
-    entries: std::collections::HashMap<TxId, PendingEntry>,
-    order: VecDeque<TxId>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingFeedStatus {
+    Starting,
+    Live,
+    Reconnecting,
+    Disabled,
 }
 
-impl PendingSet {
+impl PendingFeedStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Live => "live",
+            Self::Reconnecting => "reconnecting",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingInsert {
+    Added,
+    AlreadyTracked,
+    Overflow,
+}
+
+impl PendingInsert {
+    fn tracked(self) -> bool {
+        !matches!(self, Self::Overflow)
+    }
+}
+
+/// A network's authoritative pending feed: tx rows, insertion order, and
+/// poller liveness metadata share one lock so `/pending` can never combine
+/// rows from one revision with health from another.
+struct PendingFeed {
+    entries: std::collections::HashMap<TxId, PendingEntry>,
+    order: VecDeque<TxId>,
+    status: PendingFeedStatus,
+    last_poll_ms: Option<u64>,
+    revision: u64,
+}
+
+impl PendingFeed {
     fn new() -> Self {
-        Self::default()
+        Self {
+            entries: Default::default(),
+            order: Default::default(),
+            status: PendingFeedStatus::Starting,
+            last_poll_ms: None,
+            revision: 0,
+        }
     }
 
-    /// Track a newly-seen pending covenant tx. A no-op if the txid is already
-    /// tracked or the cap is reached.
-    fn insert(&mut self, txid: TxId, covenant_id: CovenantId, kind: kascov_core::store::EventKind) {
-        if self.entries.contains_key(&txid) || self.entries.len() >= MAX_PENDING {
-            return;
+    fn set_status(&mut self, status: PendingFeedStatus) {
+        if self.status != status {
+            self.status = status;
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    fn mark_live_at(&mut self, at_ms: u64) {
+        self.last_poll_ms = Some(at_ms);
+        self.set_status(PendingFeedStatus::Live);
+    }
+
+    fn mark_reconnecting(&mut self) {
+        self.set_status(PendingFeedStatus::Reconnecting);
+    }
+
+    fn mark_disabled(&mut self) {
+        self.set_status(PendingFeedStatus::Disabled);
+        if !self.entries.is_empty() {
+            self.entries.clear();
+            self.order.clear();
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    fn status_at(&self, at_ms: u64) -> &'static str {
+        if self.status == PendingFeedStatus::Live
+            && self
+                .last_poll_ms
+                .is_some_and(|last| at_ms.saturating_sub(last) > PENDING_HEALTH_STALE_MS)
+        {
+            "stale"
+        } else {
+            self.status.as_str()
+        }
+    }
+
+    #[cfg(test)]
+    fn insert_at_ms(
+        &mut self,
+        txid: TxId,
+        covenant_id: CovenantId,
+        kind: kascov_core::store::EventKind,
+        at_ms: u64,
+    ) -> PendingInsert {
+        self.insert_at(txid, covenant_id, kind, at_ms, std::time::Instant::now())
+    }
+
+    fn insert_at(
+        &mut self,
+        txid: TxId,
+        covenant_id: CovenantId,
+        kind: kascov_core::store::EventKind,
+        at_ms: u64,
+        at: std::time::Instant,
+    ) -> PendingInsert {
+        if let Some(entry) = self.entries.get_mut(&txid) {
+            if let Some(existing) =
+                entry.events.iter_mut().find(|event| event.covenant_id == covenant_id)
+            {
+                if existing.kind == kind {
+                    return PendingInsert::AlreadyTracked;
+                }
+                existing.kind = kind;
+            } else {
+                entry.events.push(PendingEvent { covenant_id, kind });
+            }
+            entry.events.sort_by_key(|event| event.covenant_id.0);
+            self.revision = self.revision.wrapping_add(1);
+            return PendingInsert::Added;
+        }
+        if self.entries.len() >= MAX_PENDING {
+            return PendingInsert::Overflow;
         }
         self.entries.insert(
             txid,
             PendingEntry {
-                covenant_id,
-                kind,
-                first_seen: std::time::Instant::now(),
+                events: vec![PendingEvent { covenant_id, kind }],
+                first_seen: at,
+                first_seen_ms: at_ms,
                 leaving_since: None,
             },
         );
         self.order.push_back(txid);
+        self.revision = self.revision.wrapping_add(1);
+        PendingInsert::Added
     }
 
-    fn remove(&mut self, txid: &TxId) {
-        if self.entries.remove(txid).is_some() {
+    fn remove(&mut self, txid: &TxId) -> Option<PendingEntry> {
+        let removed = self.entries.remove(txid);
+        if removed.is_some() {
             self.order.retain(|t| t != txid);
+            self.revision = self.revision.wrapping_add(1);
+        }
+        removed
+    }
+
+    fn snapshot_json_at(&self, generated_at_ms: u64) -> serde_json::Value {
+        let rows: Vec<_> = self
+            .order
+            .iter()
+            .filter_map(|txid| self.entries.get(txid).map(|entry| (txid, entry)))
+            .filter_map(|(txid, entry)| {
+                let primary = entry.events.first()?;
+                Some(serde_json::json!({
+                    // Backward-compatible scalar preview: the stable first
+                    // event. New clients should render the full array.
+                    "covenant_id": primary.covenant_id,
+                    "tx_kind": primary.kind.as_str(),
+                    "txid": txid,
+                    "age_ms": generated_at_ms.saturating_sub(entry.first_seen_ms),
+                    "events": pending_events_json(entry),
+                }))
+            })
+            .collect();
+        serde_json::json!({
+            "status": self.status_at(generated_at_ms),
+            "last_poll_ms": self.last_poll_ms,
+            "generated_at_ms": generated_at_ms,
+            "revision": self.revision,
+            "pending": rows,
+        })
+    }
+
+    fn health_json_at(&self, generated_at_ms: u64) -> serde_json::Value {
+        serde_json::json!({
+            "status": self.status_at(generated_at_ms),
+            "last_poll_ms": self.last_poll_ms,
+            "revision": self.revision,
+            "pending": self.entries.len(),
+        })
+    }
+}
+
+/// Atomically admit every covenant event for one mempool transaction. The
+/// capacity gate is checked once at tx granularity: callers can safely decide
+/// whether an SSE hint will have an authoritative row that can later resolve.
+fn track_pending_transaction(
+    feed: &mut PendingFeed,
+    txid: TxId,
+    events: Vec<kascov_core::sync::PendingTxEvent>,
+) -> PendingInsert {
+    track_pending_transaction_at(
+        feed,
+        txid,
+        events,
+        now_ms(),
+        std::time::Instant::now(),
+    )
+}
+
+fn track_pending_transaction_at(
+    feed: &mut PendingFeed,
+    txid: TxId,
+    mut events: Vec<kascov_core::sync::PendingTxEvent>,
+    at_ms: u64,
+    at: std::time::Instant,
+) -> PendingInsert {
+    if !feed.entries.contains_key(&txid) && feed.entries.len() >= MAX_PENDING {
+        return PendingInsert::Overflow;
+    }
+    events.sort_by_key(|event| event.covenant_id.0);
+    let mut result = PendingInsert::AlreadyTracked;
+    for event in events {
+        if feed.insert_at(txid, event.covenant_id, event.kind, at_ms, at)
+            == PendingInsert::Added
+        {
+            result = PendingInsert::Added;
         }
     }
+    result
+}
+
+#[cfg(test)]
+fn track_pending_transaction_at_ms(
+    feed: &mut PendingFeed,
+    txid: TxId,
+    events: Vec<kascov_core::sync::PendingTxEvent>,
+    at_ms: u64,
+) -> PendingInsert {
+    track_pending_transaction_at(feed, txid, events, at_ms, std::time::Instant::now())
+}
+
+/// Only successfully classified/admitted txids enter the next poll's seen set.
+/// Failed classifications and capacity overflows remain "new", so a transient
+/// error cannot hide a tx for the rest of its mempool lifetime.
+fn pending_ids_to_remember(
+    mut current: HashSet<TxId>,
+    retry: &HashSet<TxId>,
+) -> HashSet<TxId> {
+    current.retain(|txid| !retry.contains(txid));
+    current
+}
+
+fn pending_events_json(entry: &PendingEntry) -> Vec<serde_json::Value> {
+    entry
+        .events
+        .iter()
+        .map(|event| {
+            serde_json::json!({
+                "covenant_id": event.covenant_id,
+                "tx_kind": event.kind.as_str(),
+            })
+        })
+        .collect()
+}
+
+/// Deterministic pending hints. Existing consumers still receive one message
+/// per covenant; every message additionally carries the complete tx-level
+/// event set. Reverse order makes a legacy txid-keyed map finish on the same
+/// stable primary event exposed by the snapshot's scalar fields.
+fn pending_sse_jsons(feed: &PendingFeed, txid: &TxId) -> Vec<serde_json::Value> {
+    let Some(entry) = feed.entries.get(txid) else { return vec![] };
+    let events = pending_events_json(entry);
+    entry
+        .events
+        .iter()
+        .rev()
+        .map(|event| {
+            serde_json::json!({
+                "kind": "pending",
+                "covenant_id": event.covenant_id,
+                "tx_kind": event.kind.as_str(),
+                "txid": txid,
+                "events": events.clone(),
+                "revision": feed.revision,
+            })
+        })
+        .collect()
+}
+
+fn pending_resolved_sse_json(
+    txid: &TxId,
+    entry: &PendingEntry,
+    resolution: &'static str,
+    revision: u64,
+) -> Option<serde_json::Value> {
+    let primary = entry.events.first()?;
+    Some(serde_json::json!({
+        "kind": "pending_resolved",
+        "covenant_id": primary.covenant_id,
+        "txid": txid,
+        "resolution": resolution,
+        "events": pending_events_json(entry),
+        "revision": revision,
+    }))
 }
 
 /// A node without mempool RPC answers get_mempool_entries as an unsupported
@@ -1756,13 +2039,14 @@ async fn poll_mempool_forever(
     rpc: Option<String>,
     db: std::path::PathBuf,
     live_tx: tokio::sync::broadcast::Sender<std::sync::Arc<str>>,
-    pending: std::sync::Arc<tokio::sync::Mutex<PendingSet>>,
+    pending: std::sync::Arc<tokio::sync::Mutex<PendingFeed>>,
 ) {
     // Kill-switch: KASCOV_MEMPOOL=off disables the feed for every network.
     if std::env::var("KASCOV_MEMPOOL")
         .map(|v| v.trim().eq_ignore_ascii_case("off"))
         .unwrap_or(false)
     {
+        pending.lock().await.mark_disabled();
         tracing::info!("{network}: pending mempool feed disabled (KASCOV_MEMPOOL=off)");
         return;
     }
@@ -1783,11 +2067,12 @@ async fn poll_mempool_forever(
 
     let mut prev_ids: HashSet<TxId> = HashSet::new();
     loop {
-        // Our OWN read-only store handle — a concurrent WAL reader, never the
-        // follower's &mut. Open failure is transient (disk/bootstrap): retry.
+        // Our OWN Store connection — a concurrent WAL reader in this loop,
+        // never the follower's &mut. Open failure is transient: retry.
         let store = match Store::open(&db, network) {
             Ok(store) => store,
             Err(err) => {
+                pending.lock().await.mark_reconnecting();
                 tracing::warn!("{network}: pending poller cannot open store ({err}), retrying in 30s");
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 continue;
@@ -1796,6 +2081,7 @@ async fn poll_mempool_forever(
         let node = match NodeHandle::connect(network, rpc.as_deref()).await {
             Ok(node) => node,
             Err(err) => {
+                pending.lock().await.mark_reconnecting();
                 tracing::warn!("{network}: pending poller connect failed ({err}), retrying in 10s");
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 continue;
@@ -1807,17 +2093,21 @@ async fn poll_mempool_forever(
                 Ok(txs) => txs,
                 Err(err) => {
                     if mempool_unsupported(&err) {
+                        pending.lock().await.mark_disabled();
                         tracing::warn!(
                             "{network}: node has no get_mempool_entries ({err}) — pending feed disabled"
                         );
                         return;
                     }
+                    pending.lock().await.mark_reconnecting();
                     tracing::warn!("{network}: pending poll failed ({err}), reconnecting");
                     break;
                 }
             };
             let cur_ids: HashSet<TxId> = txs.iter().map(|tx| tx.txid).collect();
             let now = std::time::Instant::now();
+            pending.lock().await.mark_live_at(now_ms());
+            let mut retry_ids = HashSet::new();
 
             // NEW txids only: classify each and surface any covenant events.
             // Diffing keeps the work bound to churn, not pool size.
@@ -1828,23 +2118,37 @@ async fn poll_mempool_forever(
                 let events = match kascov_core::sync::classify_pending(&store, tx) {
                     Ok(events) => events,
                     Err(err) => {
+                        retry_ids.insert(tx.txid);
                         tracing::debug!("{network}: pending classify failed for {}: {err}", tx.txid);
                         continue;
                     }
                 };
-                for ev in events {
-                    {
-                        let mut set = pending.lock().await;
-                        set.insert(tx.txid, ev.covenant_id, ev.kind);
-                    }
-                    if live_tx.receiver_count() > 0 {
-                        let msg = serde_json::json!({
-                            "kind": "pending",
-                            "covenant_id": ev.covenant_id,
-                            "tx_kind": ev.kind.as_str(),
-                            "txid": tx.txid,
-                        })
-                        .to_string();
+                if events.is_empty() {
+                    continue;
+                }
+                let (admission, messages) = {
+                    let mut feed = pending.lock().await;
+                    let admission = track_pending_transaction(&mut feed, tx.txid, events);
+                    let messages = if admission.tracked() {
+                        pending_sse_jsons(&feed, &tx.txid)
+                            .into_iter()
+                            .map(|value| value.to_string())
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+                    (admission, messages)
+                };
+                if admission == PendingInsert::Overflow {
+                    // Do not publish a hint the authoritative snapshot cannot
+                    // track and resolve. Leaving it out of prev_ids retries it
+                    // as soon as another row frees capacity.
+                    retry_ids.insert(tx.txid);
+                    tracing::debug!("{network}: pending set full; retrying {} next poll", tx.txid);
+                    continue;
+                }
+                if live_tx.receiver_count() > 0 {
+                    for msg in messages {
                         let _ = live_tx.send(msg.into());
                     }
                 }
@@ -1852,21 +2156,22 @@ async fn poll_mempool_forever(
 
             // Resolve tracked txids that LEFT the pool, and age out stale ones.
             // Collect broadcasts under the lock; send after releasing it.
-            let mut resolved: Vec<(TxId, CovenantId, &'static str)> = vec![];
+            let mut resolved: Vec<(TxId, PendingEntry, &'static str, u64)> = vec![];
             {
                 let mut set = pending.lock().await;
                 let tracked: Vec<TxId> = set.order.iter().copied().collect();
                 for txid in tracked {
                     let gone = !cur_ids.contains(&txid);
-                    let (cov, first_seen, leaving_since) = match set.entries.get(&txid) {
-                        Some(e) => (e.covenant_id, e.first_seen, e.leaving_since),
+                    let (first_seen, leaving_since) = match set.entries.get(&txid) {
+                        Some(e) => (e.first_seen, e.leaving_since),
                         None => continue,
                     };
                     // Age-out: a stuck entry the pool keeps re-serving (or a
                     // resolution we somehow missed) is dropped after max_age.
                     if now.duration_since(first_seen) >= max_age {
-                        set.remove(&txid);
-                        resolved.push((txid, cov, "dropped"));
+                        if let Some(entry) = set.remove(&txid) {
+                            resolved.push((txid, entry, "dropped", set.revision));
+                        }
                         continue;
                     }
                     if !gone {
@@ -1881,8 +2186,9 @@ async fn poll_mempool_forever(
                     let confirmed =
                         store.events_by_txid(&txid).map(|r| !r.is_empty()).unwrap_or(false);
                     if confirmed {
-                        set.remove(&txid);
-                        resolved.push((txid, cov, "confirmed"));
+                        if let Some(entry) = set.remove(&txid) {
+                            resolved.push((txid, entry, "confirmed", set.revision));
+                        }
                         continue;
                     }
                     // Not yet indexed: hold for the grace window (mined-but-
@@ -1897,25 +2203,23 @@ async fn poll_mempool_forever(
                         }
                     };
                     if now.duration_since(since) >= grace {
-                        set.remove(&txid);
-                        resolved.push((txid, cov, "dropped"));
+                        if let Some(entry) = set.remove(&txid) {
+                            resolved.push((txid, entry, "dropped", set.revision));
+                        }
                     }
                 }
             }
-            for (txid, covenant_id, resolution) in resolved {
+            for (txid, entry, resolution, revision) in resolved {
                 if live_tx.receiver_count() > 0 {
-                    let msg = serde_json::json!({
-                        "kind": "pending_resolved",
-                        "covenant_id": covenant_id,
-                        "txid": txid,
-                        "resolution": resolution,
-                    })
-                    .to_string();
-                    let _ = live_tx.send(msg.into());
+                    if let Some(msg) =
+                        pending_resolved_sse_json(&txid, &entry, resolution, revision)
+                    {
+                        let _ = live_tx.send(msg.to_string().into());
+                    }
                 }
             }
 
-            prev_ids = cur_ids;
+            prev_ids = pending_ids_to_remember(cur_ids, &retry_ids);
             tokio::time::sleep(poll).await;
         }
         // Reconnect: reset the diff so the fresh session re-surfaces the pool.
@@ -1924,10 +2228,10 @@ async fn poll_mempool_forever(
     }
 }
 
-/// Snapshot of a network's live pending covenant txs (in-memory, lock-guarded).
-/// `no-store` — memory-derived and changing every poll, so it must never be
-/// cached. A network whose poller disabled itself has no entry => 404 => the
-/// frontend hides the pending section.
+/// Snapshot of a network's live pending covenant txs and poller health
+/// (in-memory, lock-guarded). `no-store` — memory-derived and changing every
+/// poll, so it must never be cached. Legacy `pending` rows and their scalar
+/// event fields remain; health/revision and per-tx `events` are additive.
 async fn pending_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path(net_name): axum::extract::Path<String>,
@@ -1941,23 +2245,196 @@ async fn pending_handler(
     let Some((_, set)) = state.pending.iter().find(|(n, _)| *n == network) else {
         return (StatusCode::NOT_FOUND, "pending feed unavailable").into_response();
     };
-    let now = std::time::Instant::now();
-    let rows: Vec<serde_json::Value> = {
-        let set = set.lock().await;
-        set.order
-            .iter()
-            .filter_map(|txid| set.entries.get(txid).map(|e| (txid, e)))
-            .map(|(txid, e)| {
-                serde_json::json!({
-                    "covenant_id": e.covenant_id,
-                    "tx_kind": e.kind.as_str(),
-                    "txid": txid,
-                    "age_ms": now.duration_since(e.first_seen).as_millis() as u64,
-                })
-            })
-            .collect()
-    };
-    json_resp(serde_json::json!({ "pending": rows }))
+    let body = set.lock().await.snapshot_json_at(now_ms());
+    json_resp(body)
+}
+
+#[cfg(test)]
+mod pending_feed_tests {
+    use super::*;
+    use kascov_core::store::EventKind;
+    use kascov_core::sync::PendingTxEvent;
+
+    #[test]
+    fn pending_snapshot_is_deterministic_and_backward_compatible() {
+        let mut feed = PendingFeed::new();
+        feed.mark_live_at(1_000);
+        let txid = TxId([0xaa; 32]);
+
+        // Insert out of order: the wire shape must not depend on HashMap
+        // iteration or classifier event order.
+        assert_eq!(
+            feed.insert_at_ms(txid, CovenantId([0x22; 32]), EventKind::Burn, 1_000),
+            PendingInsert::Added
+        );
+        assert_eq!(
+            feed.insert_at_ms(
+                txid,
+                CovenantId([0x11; 32]),
+                EventKind::Transition,
+                1_000,
+            ),
+            PendingInsert::Added
+        );
+
+        let body = feed.snapshot_json_at(1_250);
+        assert_eq!(body["status"], "live");
+        assert_eq!(body["last_poll_ms"], 1_000);
+        assert_eq!(body["generated_at_ms"], 1_250);
+        assert_eq!(body["revision"], 3);
+
+        let row = &body["pending"][0];
+        assert_eq!(row["txid"], txid.to_string());
+        assert_eq!(row["age_ms"], 250);
+        // Legacy clients keep reading these scalar fields.
+        assert_eq!(row["covenant_id"], CovenantId([0x11; 32]).to_string());
+        assert_eq!(row["tx_kind"], "transition");
+        // New clients get every touched covenant in stable id order.
+        assert_eq!(row["events"][0]["covenant_id"], CovenantId([0x11; 32]).to_string());
+        assert_eq!(row["events"][0]["tx_kind"], "transition");
+        assert_eq!(row["events"][1]["covenant_id"], CovenantId([0x22; 32]).to_string());
+        assert_eq!(row["events"][1]["tx_kind"], "burn");
+    }
+
+    #[test]
+    fn pending_capacity_rejects_only_new_transactions() {
+        let mut feed = PendingFeed::new();
+        let txid = |n: usize| {
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            TxId(bytes)
+        };
+        for n in 0..MAX_PENDING {
+            assert_eq!(
+                track_pending_transaction_at_ms(
+                    &mut feed,
+                    txid(n),
+                    vec![PendingTxEvent {
+                        covenant_id: CovenantId([(n % 255) as u8; 32]),
+                        kind: EventKind::Transition,
+                    }],
+                    1_000,
+                ),
+                PendingInsert::Added
+            );
+        }
+        let full_revision = feed.revision;
+
+        // An already-accepted tx may still reveal another touched covenant.
+        assert_eq!(
+            track_pending_transaction_at_ms(
+                &mut feed,
+                txid(0),
+                vec![PendingTxEvent {
+                    covenant_id: CovenantId([0xfe; 32]),
+                    kind: EventKind::Burn,
+                }],
+                1_001,
+            ),
+            PendingInsert::Added
+        );
+        assert_eq!(feed.entries[&txid(0)].events.len(), 2);
+
+        // A genuinely new tx is rejected and must not mutate the revision.
+        let before_overflow = feed.revision;
+        assert_eq!(
+            track_pending_transaction_at_ms(
+                &mut feed,
+                txid(MAX_PENDING),
+                vec![PendingTxEvent {
+                    covenant_id: CovenantId([0xff; 32]),
+                    kind: EventKind::Genesis,
+                }],
+                1_002,
+            ),
+            PendingInsert::Overflow
+        );
+        assert_eq!(feed.revision, before_overflow);
+        assert!(feed.revision > full_revision);
+    }
+
+    #[test]
+    fn pending_health_distinguishes_live_reconnecting_and_disabled() {
+        let mut feed = PendingFeed::new();
+        assert_eq!(feed.health_json_at(1_000)["status"], "starting");
+        assert_eq!(feed.health_json_at(1_000)["last_poll_ms"], serde_json::Value::Null);
+
+        feed.mark_live_at(2_000);
+        assert_eq!(
+            feed.insert_at_ms(
+                TxId([0x44; 32]),
+                CovenantId([0x55; 32]),
+                EventKind::Genesis,
+                2_000,
+            ),
+            PendingInsert::Added
+        );
+        assert_eq!(feed.health_json_at(2_100)["status"], "live");
+        assert_eq!(feed.health_json_at(2_100)["last_poll_ms"], 2_000);
+        assert_eq!(feed.health_json_at(2_100)["pending"], 1);
+        assert_eq!(
+            feed.health_json_at(2_000 + PENDING_HEALTH_STALE_MS + 1)["status"],
+            "stale"
+        );
+
+        feed.mark_reconnecting();
+        let reconnecting = feed.health_json_at(9_000);
+        assert_eq!(reconnecting["status"], "reconnecting");
+        // The last successful poll stays visible while reconnecting.
+        assert_eq!(reconnecting["last_poll_ms"], 2_000);
+
+        feed.mark_disabled();
+        assert_eq!(feed.health_json_at(9_000)["status"], "disabled");
+        assert_eq!(feed.health_json_at(9_000)["pending"], 0);
+    }
+
+    #[test]
+    fn failed_or_overflowed_transactions_are_retried_next_poll() {
+        let good = TxId([0x10; 32]);
+        let classify_failed = TxId([0x20; 32]);
+        let overflowed = TxId([0x30; 32]);
+        let current = HashSet::from([good, classify_failed, overflowed]);
+        let retry = HashSet::from([classify_failed, overflowed]);
+
+        let remembered = pending_ids_to_remember(current, &retry);
+        assert!(remembered.contains(&good));
+        assert!(!remembered.contains(&classify_failed));
+        assert!(!remembered.contains(&overflowed));
+    }
+
+    #[test]
+    fn pending_sse_keeps_legacy_fields_and_adds_all_events() {
+        let mut feed = PendingFeed::new();
+        let txid = TxId([0xab; 32]);
+        let events = vec![
+            PendingTxEvent {
+                covenant_id: CovenantId([0x90; 32]),
+                kind: EventKind::Burn,
+            },
+            PendingTxEvent {
+                covenant_id: CovenantId([0x10; 32]),
+                kind: EventKind::Transition,
+            },
+        ];
+        assert_eq!(
+            track_pending_transaction_at_ms(&mut feed, txid, events, 5_000),
+            PendingInsert::Added
+        );
+
+        let messages = pending_sse_jsons(&feed, &txid);
+        assert_eq!(messages.len(), 2, "legacy consumers still receive one hint per covenant");
+        // Reverse stable order means an old txid-keyed client finishes on the
+        // same primary event the snapshot's scalar fields expose.
+        assert_eq!(messages[0]["covenant_id"], CovenantId([0x90; 32]).to_string());
+        assert_eq!(messages[1]["covenant_id"], CovenantId([0x10; 32]).to_string());
+        for msg in messages {
+            assert_eq!(msg["kind"], "pending");
+            assert_eq!(msg["txid"], txid.to_string());
+            assert_eq!(msg["events"].as_array().unwrap().len(), 2);
+            assert_eq!(msg["events"][1]["covenant_id"], CovenantId([0x90; 32]).to_string());
+            assert_eq!(msg["revision"], feed.revision);
+        }
+    }
 }
 
 /// Webhook delivery queue depth per network. Full queue = events dropped
