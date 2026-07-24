@@ -5066,6 +5066,17 @@ function finishViewNavigation(view, viewName) {
   });
 }
 
+/* Data/SSE refreshes re-render the current view many times per second on a
+   busy network. Only a real route transition may replay the entrance fade;
+   otherwise repeatedly re-adding `is-entering` can keep the whole view
+   transparent while events continue to arrive. */
+function enterView(view, viewName) {
+  if (!view) return;
+  if (viewName !== lastView) fadeIn(view);
+  else view.classList.remove('is-entering');
+  finishViewNavigation(view, viewName);
+}
+
 async function render() {
   const token = ++renderToken;
   const route = parseRoute();
@@ -5143,8 +5154,7 @@ async function render() {
     else if (route.view === 'changelog') renderChangelog();
     else if (route.view === 'notfound') renderNotFound(route);
     else renderDev();
-    fadeIn(views[route.view]);
-    finishViewNavigation(views[route.view], route.view);
+    enterView(views[route.view], route.view);
     return;
   }
 
@@ -5168,8 +5178,7 @@ async function render() {
       views.detail.innerHTML = '';
       if (route.view === 'explore') renderLiteExplore(live, network);
       else renderLiteLanding(live, network);
-      fadeIn(views[route.view]);
-      finishViewNavigation(views[route.view], route.view);
+      enterView(views[route.view], route.view);
       return; /* the fullPromise re-render completes the page */
     }
 
@@ -5199,8 +5208,7 @@ async function render() {
     if (route.view === 'explore') renderExplore(entry);
     else renderLanding(entry);
   }
-  fadeIn(views[route.view]);
-  finishViewNavigation(views[route.view], route.view);
+  enterView(views[route.view], route.view);
 }
 
 /* Live refresh: refetch the current network's snapshot and re-render in
