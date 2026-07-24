@@ -1194,33 +1194,34 @@ async fn serve(
         build_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         search_index: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
-    // Galaxy keep-warm: a build costs ~5-8s at production scale, and the
+    // Galaxy keep-warm: a build is expensive at production scale, and the
     // section reads as "broken" when a visitor pays that at the door (the
     // user-reported 10s blank canvas). Rebuild the two variants the frontend
     // actually requests (?fmt=2&tier=core for first paint, ?fmt=2 for the
     // hot-swap) every ~4min per network so the cache never goes cold — data
-    // staleness ≤4min is fine for a network-wide visualization. Runs inside
-    // spawn_blocking; ~5% of one core on the busiest testnet.
+    // staleness ≤4min is fine for a network-wide visualization. Core variants
+    // for every network are built first, so a large full-tier build can never
+    // hold first paint hostage. Runs inside spawn_blocking.
     {
         let state = state.clone();
         tokio::spawn(async move {
-            // First tick held back 90s: a fresh instance must answer cheap
-            // requests before it pays 2×networks galaxy builds (boot storm).
+            // Give the cheap feeds a few seconds to come online, then warm
+            // first paint in the background. A 90s delay made the first real
+            // visitor after every deploy become the cache warmer.
             let mut tick = tokio::time::interval_at(
-                tokio::time::Instant::now() + std::time::Duration::from_secs(90),
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
                 std::time::Duration::from_secs(240),
             );
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
-                for &network in &state.networks {
-                    let db = state.base_dir.join(format!("{network}.db"));
-                    if !db.exists() {
-                        continue;
-                    }
-                    for core_only in [true, false] {
+                for core_only in [true, false] {
+                    for &network in &state.networks {
+                        let db = state.base_dir.join(format!("{network}.db"));
+                        if !db.exists() {
+                            continue;
+                        }
                         let fmt = GalaxyFmt { columnar: true, core_only };
-                        let db = db.clone();
                         let built = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
                             let store = kascov_core::store::Store::open(&db, network)?;
                             Ok(serde_json::to_string(&build_galaxy_fmt(&store, network, fmt)?)?)

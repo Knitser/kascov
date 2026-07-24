@@ -378,6 +378,54 @@ function renderGalaxy() {
   if (isCoreTier) upgradeGalaxy(network);
 }
 
+/* Start the compact galaxy payload as soon as the explorer appears instead
+   of waiting for the much larger families.json cards feed. First-time users
+   and explicit ?galaxy=1 links want the section open; people who closed it
+   keep that preference and do not spend the bandwidth. */
+const galaxyPreloads = {};
+
+function wantsGalaxyPreload() {
+  if (parseRoute().galaxy) return true;
+  try {
+    return localStorage.getItem('kascov-galaxy-seen') !== 'closed';
+  } catch (e) {
+    return true;
+  }
+}
+
+function preloadGalaxySection(network) {
+  const gsec = $('#section-galaxy');
+  if (!gsec || !wantsGalaxyPreload()) return null;
+  if (galaxyPreloads[network]) return galaxyPreloads[network];
+
+  const request = loadGalaxy(network)
+    .then((data) => {
+      if (!data || state.network !== network || parseRoute().view !== 'explore') return data;
+      const nodeCount = data.nodeCount || data.nodes_total ||
+        (data.nodes && data.nodes.length) || (data.ids && data.ids.length) || 0;
+      if (!nodeCount) return data;
+
+      gsec.hidden = false;
+      const appCount = (data.apps && data.apps.length) || (data.asz && data.asz.length) || 0;
+      const gcnt = $('#galaxy-count');
+      if (gcnt && appCount) gcnt.textContent = `${fmtInt(appCount)} app${appCount === 1 ? '' : 's'}`;
+      promoteSection(gsec, 'kascov-galaxy-seen');
+      if (!galaxyLinkDone && parseRoute().galaxy) {
+        galaxyLinkDone = true;
+        gsec.open = true;
+        gsec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+      if (gsec.open) renderGalaxy();
+      return data;
+    })
+    .catch(() => null);
+  galaxyPreloads[network] = request;
+  request.then(() => {
+    if (galaxyPreloads[network] === request) delete galaxyPreloads[network];
+  });
+  return request;
+}
+
 /* covenant apps: coins that moved together in a transaction. Renders the
    biggest few clusters; hidden when none (single-covenant networks). */
 function renderFamilies(network) {
@@ -538,6 +586,7 @@ function renderLiteExplore(live, network) {
   $('#section-records').hidden = true;
   /* these fetch their own small endpoints — render even before the big
      snapshot lands so the analytics show immediately */
+  preloadGalaxySection(network);
   renderFamilies(network);
   renderPending(network);
   renderLanes(network);
@@ -2019,6 +2068,7 @@ function renderExplore(entry) {
   renderPulse(entry, network);
   renderRecords(entry, network);
   renderTemplates(network);
+  preloadGalaxySection(network);
   renderFamilies(network);
   renderPending(network);
   renderLanes(network);
@@ -6367,4 +6417,3 @@ networkFilterReset(); /* testnet-10 boots with the traffic generator hidden */
 render();
 pollLive();
 setTimeout(maybeStartTour, 900);
-

@@ -414,18 +414,29 @@ async function loadDigest(network) {
    and answers with the full legacy shape — galaxy.js feature-detects
    either. app.js upgrades a core-tier reply to the full set in place. */
 const galaxyCache = {};        // network -> { data, at }
+const galaxyInflight = {};     // network -> shared first-paint request
 
 async function loadGalaxy(network) {
   const t = galaxyCache[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
+  if (galaxyInflight[network]) return galaxyInflight[network];
+
+  const request = (async () => {
+    try {
+      const res = await fetch(`data/${network}/galaxy.json?fmt=2&tier=core`, { cache: 'no-cache' });
+      if (!res.ok) { galaxyCache[network] = { data: null, at: Date.now() }; return null; }
+      const data = await res.json();
+      galaxyCache[network] = { data, at: Date.now() };
+      return data;
+    } catch (e) {
+      return t ? t.data : null;
+    }
+  })();
+  galaxyInflight[network] = request;
   try {
-    const res = await fetch(`data/${network}/galaxy.json?fmt=2&tier=core`, { cache: 'no-cache' });
-    if (!res.ok) { galaxyCache[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    galaxyCache[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
+    return await request;
+  } finally {
+    if (galaxyInflight[network] === request) delete galaxyInflight[network];
   }
 }
 
