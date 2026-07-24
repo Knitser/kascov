@@ -1012,6 +1012,24 @@ impl CachedBody {
     }
 }
 
+/// Return free glibc arena pages to the OS after a production-scale Galaxy
+/// build drops its large temporary HashMaps and Vectors. Other platforms and
+/// allocators keep their normal maintenance behavior.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_process_heap() {
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> std::ffi::c_int;
+    }
+    // SAFETY: malloc_trim(0) is a process-wide glibc maintenance operation.
+    // It neither receives nor exposes any Rust-owned pointer.
+    unsafe {
+        let _ = malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_process_heap() {}
+
 /// Cap on concurrent SSE subscribers per network — extras are rejected with
 /// 503 and stay on the polling path.
 const MAX_STREAM_SUBSCRIBERS: usize = 512;
@@ -1226,7 +1244,7 @@ async fn serve(
                         };
                         let built = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
                             let store = kascov_core::store::Store::open(&db, network)?;
-                            Ok(serde_json::to_string(&build_galaxy_fmt(&store, network, fmt)?)?)
+                            build_galaxy_json(&store, network, fmt)
                         })
                         .await;
                         match built {
@@ -1270,6 +1288,10 @@ async fn serve(
                     .lock()
                     .await
                     .retain(|_, l| std::sync::Arc::strong_count(l) > 1);
+                // Cache eviction and response construction can leave holes in
+                // several glibc arenas. Keep RSS near the live set instead of
+                // the process's historical allocation peak.
+                let _ = tokio::task::spawn_blocking(trim_process_heap).await;
             }
         });
     }
@@ -4642,6 +4664,22 @@ fn build_galaxy_fmt(
     Ok(out)
 }
 
+/// Serialize the snapshot inside a nested scope so its enormous intermediate
+/// `Value` is dropped before allocator maintenance runs. The returned JSON is
+/// still live and is installed into `CachedBody` by the caller.
+fn build_galaxy_json(
+    store: &Store,
+    network: kascov_core::Network,
+    fmt: GalaxyFmt,
+) -> Result<String> {
+    let json = {
+        let snapshot = build_galaxy_fmt(store, network, fmt)?;
+        serde_json::to_string(&snapshot)?
+    };
+    trim_process_heap();
+    Ok(json)
+}
+
 /// POST /data/{network}/compile — compile SilverScript source + constructor
 /// args to script hex by shelling out to the `silverc` binary (path in the
 /// SILVERC_BIN env var). Powers verify-and-publish and the no-code builder.
@@ -5641,7 +5679,7 @@ async fn galaxy_handler(
     // window instead of paying a cold rebuild at the door.
     serve_cached(&state, key, 300, cc, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
-        Ok(Some(serde_json::to_string(&build_galaxy_fmt(&store, network, fmt)?)?))
+        Ok(Some(build_galaxy_json(&store, network, fmt)?))
     })
     .await
 }
