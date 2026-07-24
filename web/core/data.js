@@ -127,6 +127,19 @@ async function fetchGridPage(network, afterDaa, afterId, limit) {
   return res.json();
 }
 
+const feedInflight = new Map();
+async function shareFeedRequest(key, build) {
+  const hit = feedInflight.get(key);
+  if (hit) return hit;
+  const request = Promise.resolve().then(build);
+  feedInflight.set(key, request);
+  try {
+    return await request;
+  } finally {
+    if (feedInflight.get(key) === request) feedInflight.delete(key);
+  }
+}
+
 const networkInflight = {};
 
 async function loadNetwork(network) {
@@ -244,21 +257,23 @@ async function loadAddress(network, q) {
 async function loadLite(network) {
   const ls = state.live[network] || (state.live[network] = { supported: null, missedAt: 0, data: null });
   if (ls.data) return ls.data;
-  try {
-    const res = await fetch(`data/${network}-live.json`, { cache: 'no-cache' });
-    if (!res.ok) {
-      if (res.status === 404) {
-        ls.supported = false;
-        ls.missedAt = Date.now();
+  return shareFeedRequest(`live/${network}`, async () => {
+    try {
+      const res = await fetch(`data/${network}-live.json`, { cache: 'no-cache' });
+      if (!res.ok) {
+        if (res.status === 404) {
+          ls.supported = false;
+          ls.missedAt = Date.now();
+        }
+        return null;
       }
+      ls.data = await res.json();
+      ls.supported = true;
+      return ls.data;
+    } catch (e) {
       return null;
     }
-    ls.data = await res.json();
-    ls.supported = true;
-    return ls.data;
-  } catch (e) {
-    return null;
-  }
+  });
 }
 
 /* Contract-type analytics — what runs on this network, by recognized script
@@ -301,15 +316,17 @@ async function loadTemplates(network) {
 async function loadLanes(network) {
   const t = state.lanes[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/lanes.json`, { cache: 'no-cache' });
-    if (!res.ok) { state.lanes[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    state.lanes[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
+  return shareFeedRequest(`lanes/${network}`, async () => {
+    try {
+      const res = await fetch(`data/${network}/lanes.json`, { cache: 'no-cache' });
+      if (!res.ok) { state.lanes[network] = { data: null, at: Date.now() }; return null; }
+      const data = await res.json();
+      state.lanes[network] = { data, at: Date.now() };
+      return data;
+    } catch (e) {
+      return t ? t.data : null;
+    }
+  });
 }
 
 /* Live pending (mempool) covenant snapshot. Short TTL — this is a real-time
@@ -318,57 +335,65 @@ async function loadLanes(network) {
 async function loadPending(network) {
   const t = state.pending[network];
   if (t && Date.now() - t.at < PENDING_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/pending`, { cache: 'no-cache' });
-    if (!res.ok) { state.pending[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    state.pending[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
+  return shareFeedRequest(`pending/${network}`, async () => {
+    try {
+      const res = await fetch(`data/${network}/pending`, { cache: 'no-cache' });
+      if (!res.ok) { state.pending[network] = { data: null, at: Date.now() }; return null; }
+      const data = await res.json();
+      state.pending[network] = { data, at: Date.now() };
+      return data;
+    } catch (e) {
+      return t ? t.data : null;
+    }
+  });
 }
 
 async function loadInscriptions(network) {
   const t = state.inscriptions[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/inscriptions.json`, { cache: 'no-cache' });
-    if (!res.ok) { state.inscriptions[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    state.inscriptions[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
+  return shareFeedRequest(`inscriptions/${network}`, async () => {
+    try {
+      const res = await fetch(`data/${network}/inscriptions.json`, { cache: 'no-cache' });
+      if (!res.ok) { state.inscriptions[network] = { data: null, at: Date.now() }; return null; }
+      const data = await res.json();
+      state.inscriptions[network] = { data, at: Date.now() };
+      return data;
+    } catch (e) {
+      return t ? t.data : null;
+    }
+  });
 }
 
 async function loadLifespans(network) {
   const t = state.lifespans[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/lifespans.json`, { cache: 'no-cache' });
-    if (!res.ok) { state.lifespans[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    state.lifespans[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
+  return shareFeedRequest(`lifespans/${network}`, async () => {
+    try {
+      const res = await fetch(`data/${network}/lifespans.json`, { cache: 'no-cache' });
+      if (!res.ok) { state.lifespans[network] = { data: null, at: Date.now() }; return null; }
+      const data = await res.json();
+      state.lifespans[network] = { data, at: Date.now() };
+      return data;
+    } catch (e) {
+      return t ? t.data : null;
+    }
+  });
 }
 
 async function loadFamilies(network) {
   const t = state.families[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/families.json`, { cache: 'no-cache' });
-    if (!res.ok) { state.families[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    state.families[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
+  return shareFeedRequest(`families/${network}`, async () => {
+    try {
+      const res = await fetch(`data/${network}/families.json`, { cache: 'no-cache' });
+      if (!res.ok) { state.families[network] = { data: null, at: Date.now() }; return null; }
+      const data = await res.json();
+      state.families[network] = { data, at: Date.now() };
+      return data;
+    } catch (e) {
+      return t ? t.data : null;
+    }
+  });
 }
 
 /* the activity histogram behind the pulse chart — per (network, range)
@@ -410,15 +435,17 @@ async function loadActivity(network, range) {
 async function loadReorgs(network) {
   const t = state.reorgs[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
-  try {
-    const res = await fetch(`data/${network}/reorgs.json`, { cache: 'no-cache' });
-    if (!res.ok) { state.reorgs[network] = { data: null, at: Date.now() }; return null; }
-    const data = await res.json();
-    state.reorgs[network] = { data, at: Date.now() };
-    return data;
-  } catch (e) {
-    return t ? t.data : null;
-  }
+  return shareFeedRequest(`reorgs/${network}`, async () => {
+    try {
+      const res = await fetch(`data/${network}/reorgs.json`, { cache: 'no-cache' });
+      if (!res.ok) { state.reorgs[network] = { data: null, at: Date.now() }; return null; }
+      const data = await res.json();
+      state.reorgs[network] = { data, at: Date.now() };
+      return data;
+    } catch (e) {
+      return t ? t.data : null;
+    }
+  });
 }
 
 /* "the last 24 hours" — one tiny object per network, cached for a minute
@@ -431,20 +458,22 @@ async function loadDigest(network) {
   const ds = state.digest[network] ||
     (state.digest[network] = { data: null, at: 0, animated: false });
   if (Date.now() - ds.at < DIGEST_TTL_MS) return ds.data;
-  try {
-    const res = await fetch(`data/${network}/digest.json`, { cache: 'no-cache' });
-    if (!res.ok) {
-      /* misses respect the TTL too — an old worker without the endpoint
-         shouldn't be re-asked on every landing render */
+  return shareFeedRequest(`digest/${network}`, async () => {
+    try {
+      const res = await fetch(`data/${network}/digest.json`, { cache: 'no-cache' });
+      if (!res.ok) {
+        /* misses respect the TTL too — an old worker without the endpoint
+           shouldn't be re-asked on every landing render */
+        ds.at = Date.now();
+        return ds.data; /* stale-ok */
+      }
+      ds.data = await res.json();
       ds.at = Date.now();
-      return ds.data; /* stale-ok */
+      return ds.data;
+    } catch (e) {
+      return ds.data;
     }
-    ds.data = await res.json();
-    ds.at = Date.now();
-    return ds.data;
-  } catch (e) {
-    return ds.data;
-  }
+  });
 }
 
 /* the galaxy payload — positions + weighted edges precomputed by the worker.

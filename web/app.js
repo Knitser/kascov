@@ -5307,9 +5307,11 @@ setInterval(refreshSnapshot, REFRESH_MS);
    without the endpoint 404 — the poller then backs off and the 45s full
    refresh above stays the safety net. */
 const LIVE_MS = 12_000;
+const LIVE_POKE_MIN_MS = 5_000;
 const LIVE_REPROBE_MS = 5 * 60_000;
 const LIVE_FRESH_MS = 3 * 60_000;
 const LAG_LIVE_DAA = 3000; /* < ~5 min behind the node's tip still reads as live */
+const livePollGate = createRefreshGate(LIVE_POKE_MIN_MS);
 
 function syncLag(network) {
   /* node tip DAA minus the last DAA the indexer actually applied.
@@ -5356,33 +5358,37 @@ function updateLiveBadge() {
 async function pollLive() {
   if (document.visibilityState !== 'visible') return;
   const network = state.network;
-  const ls = state.live[network] || (state.live[network] = { supported: null, missedAt: 0, data: null });
-  if (ls.supported === false && Date.now() - ls.missedAt < LIVE_REPROBE_MS) return;
-  try {
-    const res = await fetch(`data/${network}-live.json`, { cache: 'no-cache' });
-    if (res.status === 404) {
-      ls.supported = false;
-      ls.missedAt = Date.now();
+  return livePollGate.run(network, async () => {
+    if (document.visibilityState !== 'visible' || network !== state.network) return;
+    const ls = state.live[network] ||
+      (state.live[network] = { supported: null, missedAt: 0, data: null });
+    if (ls.supported === false && Date.now() - ls.missedAt < LIVE_REPROBE_MS) return;
+    try {
+      const res = await fetch(`data/${network}-live.json`, { cache: 'no-cache' });
+      if (res.status === 404) {
+        ls.supported = false;
+        ls.missedAt = Date.now();
+        updateLiveBadge();
+        return;
+      }
+      if (!res.ok) return;
+      const live = await res.json();
+      ls.supported = true;
+      ls.data = live;
+      ls.at = Date.now(); /* freshness stamp — lets the 45s fallback stand down */
       updateLiveBadge();
-      return;
+      const cached = state.cache[network];
+      if (cached && live.stats && (
+        live.stats.events !== cached.data.stats.events ||
+        live.stats.covenants !== cached.data.stats.covenants
+      )) {
+        refreshSnapshot(true);
+        schedulePulseRefresh();
+      }
+    } catch (e) {
+      /* transient — the next gated poll retries */
     }
-    if (!res.ok) return;
-    const live = await res.json();
-    ls.supported = true;
-    ls.data = live;
-    ls.at = Date.now(); /* freshness stamp — lets the 45s fallback stand down */
-    updateLiveBadge();
-    const cached = state.cache[network];
-    if (cached && live.stats && (
-      live.stats.events !== cached.data.stats.events ||
-      live.stats.covenants !== cached.data.stats.covenants
-    )) {
-      refreshSnapshot(true);
-      schedulePulseRefresh();
-    }
-  } catch (e) {
-    /* transient — the next tick retries */
-  }
+  });
 }
 setInterval(pollLive, LIVE_MS);
 
