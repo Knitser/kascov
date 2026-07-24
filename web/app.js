@@ -34,9 +34,9 @@ import {
   loadChangelog,
   loadCommunity,
   loadLaunchpads,
-} from './core/data.js';
+} from './core/data.js?v=20260725-requests';
 import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js';
-import { createRefreshGate } from './core/refresh.js';
+import { createRefreshGate } from './core/refresh.js?v=20260725-requests';
 import { networkRouteHash } from './core/routing.js';
 import { selectTokens, tokenLifecycle } from './core/token-directory.js';
 
