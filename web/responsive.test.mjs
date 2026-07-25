@@ -25,6 +25,16 @@ test('explorer section jumps clear sticky chrome and become a wide-screen side r
     css,
     /\.stats-strip\s*\{[^}]*padding:\s*14px[^}]*margin:\s*-14px/,
   );
+  assert.match(
+    css,
+    /\.explore-jump button\s*\{[^}]*border-radius:\s*7px[^}]*text-align:\s*center/,
+  );
+  assert.match(css, /\.explore-jump button:active\s*\{[^}]*border-color:\s*var\(--accent\)/);
+  const jumpNav = index.match(/<nav class="explore-jump"[\s\S]*?<\/nav>/)?.[0] || '';
+  assert.deepEqual(
+    [...jumpNav.matchAll(/data-target="([^"]+)"/g)].map((match) => match[1]),
+    ['section-pulse', 'section-galaxy', 'section-analytics', 'section-stories', 'section-coins'],
+  );
 });
 
 test('coarse pointers get accessible controls and a scroll-releasing galaxy', () => {
