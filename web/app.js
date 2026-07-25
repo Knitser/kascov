@@ -5096,8 +5096,12 @@ function finishViewNavigation(view, viewName) {
     const target = view.querySelector('h1') || view.querySelector('h2') || view;
     if (!target) return;
     target.setAttribute('tabindex', '-1');
+    target.classList.add('route-focus-target');
     target.focus({ preventScroll: true });
-    target.addEventListener('blur', () => target.removeAttribute('tabindex'), { once: true });
+    target.addEventListener('blur', () => {
+      target.removeAttribute('tabindex');
+      target.classList.remove('route-focus-target');
+    }, { once: true });
   });
 }
 

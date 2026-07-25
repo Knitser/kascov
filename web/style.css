@@ -62,6 +62,13 @@ a:hover { text-decoration: underline; }
   border-radius: 4px;
 }
 
+/* SPA route changes focus the new heading so assistive technology announces
+   it. That focus is programmatic, not a keyboard target, so don't paint the
+   global focus ring around an entire heading/card on refresh. */
+.route-focus-target:focus {
+  outline: none;
+}
+
 .skip-link {
   position: absolute;
   left: -999px;
