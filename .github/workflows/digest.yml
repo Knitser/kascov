@@ -1,10 +1,12 @@
 # Daily "today on Kaspa smart coins" digest → Telegram.
-# Needs two repo secrets (Settings → Secrets → Actions):
+# Optional repo secrets (Settings → Secrets and variables → Actions):
 #   TELEGRAM_BOT_TOKEN — from @BotFather
 #   TELEGRAM_CHAT_ID   — the channel/chat id the bot posts to
-# Until they exist, runs fail fast and post nothing. Test by hand first:
-#   workflow_dispatch with dry_run=true prints the message into the job log.
+# Without them the run still succeeds: it prints the digest into the job log
+# and adds a warning annotation instead of failing. Preview by hand with
+# workflow_dispatch (dry_run defaults to true).
 name: daily-digest
+
 on:
   schedule:
     - cron: '0 16 * * *' # 16:00 UTC daily
@@ -15,21 +17,36 @@ on:
         type: boolean
         default: true
 
+permissions:
+  contents: read
+
+# One digest at a time; never cancel a run that may already have posted.
+concurrency:
+  group: daily-digest
+  cancel-in-progress: false
+
 jobs:
   post:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # Empty on schedule (so the cron posts for real); 'true'/'false' on dispatch.
+      DRY_RUN: ${{ inputs.dry_run }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: scripts
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       - name: post digest
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+          if [ "$DRY_RUN" = "true" ]; then
+            node scripts/digest-post.mjs --dry-run
+          elif [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "::warning title=Digest not posted::TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set as repo secrets, so the digest was printed below instead of posted. Add them under Settings → Secrets and variables → Actions to enable posting."
             node scripts/digest-post.mjs --dry-run
           else
             node scripts/digest-post.mjs
