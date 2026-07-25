@@ -35,9 +35,10 @@ kascov.io, www.kascov.io {
 	# --- static SPA (the web/ build) ---
 	handle {
 		root * /srv/kascov/web
-		# guide.html etc. served directly; unknown paths fall back to the SPA shell
-		# clean URLs: /guide serves guide.html (Firebase used to do this); the
-		# SPA shell is the final fallback for unknown paths
+		# real files (style.css, app.js, og.png) are served directly; the clean-URL
+		# form {path}.html stays for any future standalone page (Firebase used to do
+		# this). Every other path — /guide, /explore, /testnet-10/c/<id> — falls back
+		# to the SPA shell, which turns the pathname into its hash route.
 		try_files {path} {path}.html {path}/ /index.html
 		file_server
 	}

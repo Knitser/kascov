@@ -3541,6 +3541,76 @@ function renderDev() {
   wireApiTools();
 }
 
+/* ---- builder guide (#/guide) ----
+   The prose is static markup in index.html — it used to be a separate
+   guide.html page — so rendering is pure wiring: copy buttons on the command
+   blocks, the sidebar scroll-spy, and the ?at=<section> deep link that old
+   /guide.html#<anchor> links now arrive as. */
+let lastGuideAt = null;
+function renderGuide(route) {
+  document.title = 'deploy → spend → replay: covenants in 15 minutes — kascov';
+  wireGuideCopy();
+  wireGuideSpy();
+  const at = (route && route.at) || '';
+  /* A background refresh (the mainnet $-rate, say) can re-render the current
+     view at any time. Only a real arrival may move the page — otherwise a
+     reader who scrolled away from '?at=trap' gets yanked back to it. */
+  const arrived = lastView !== 'guide' || at !== lastGuideAt;
+  lastGuideAt = at;
+  if (!at || !arrived) return;
+  const target = document.getElementById(at.startsWith('gd-') ? at : `gd-${at}`);
+  /* a first visit scrolls the fresh view to the top (enterView) — land on the
+     named section after that so a deep link isn't yanked back up */
+  if (target) requestAnimationFrame(() => target.scrollIntoView({ block: 'start', behavior: 'smooth' }));
+}
+
+/* Copy buttons for the guide's command blocks. Commands and their sample
+   output share one block, so a copy strips the output/error lines and the
+   blank lines they leave behind — you get something pasteable into a shell. */
+function wireGuideCopy() {
+  document.querySelectorAll('#view-guide .gd-code').forEach((box) => {
+    if (box.dataset.wired) return;
+    const pre = box.querySelector('pre');
+    if (!pre) return;
+    box.dataset.wired = '1';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'copy-btn';
+    btn.textContent = 'copy';
+    btn.addEventListener('click', () => {
+      const clone = pre.cloneNode(true);
+      clone.querySelectorAll('.o, .e').forEach((n) => n.remove());
+      const text = clone.textContent.replace(/^\s*\n/gm, '').trimEnd();
+      navigator.clipboard?.writeText(text).then(() => {
+        btn.textContent = 'copied ✓';
+        setTimeout(() => { btn.textContent = 'copy'; }, 1200);
+      }).catch(() => {});
+    });
+    box.append(btn);
+  });
+}
+
+/* Sidebar scroll-spy over the guide's sections — the API docs' contract. The
+   links here are real routes ('#/guide?at=trap'), so unlike the API nav they
+   need no click interception: they deep-link, survive a reload, and render()
+   does the scrolling. */
+function wireGuideSpy() {
+  const nav = $('.guide-toc');
+  if (!nav || nav.dataset.wired) return;
+  nav.dataset.wired = '1';
+  const byId = new Map([...nav.querySelectorAll('a')].map((a) =>
+    [`gd-${(a.getAttribute('href') || '').split('at=')[1] || ''}`, a]));
+  const spy = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      byId.forEach((a) => a.removeAttribute('aria-current'));
+      const a = byId.get(e.target.id);
+      if (a) a.setAttribute('aria-current', 'true');
+    }
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  document.querySelectorAll('#view-guide .gd-block[id]').forEach((el) => spy.observe(el));
+}
+
 /* ---- guided visual builder (#/build) — the codeless path ----
    A self-contained form per template: plain-language fields, byte-perfect hex
    via disasm.js skeleton.emit, a live readable source + a downloadable deploy
@@ -3883,7 +3953,7 @@ function preflightResultHtml(d) {
     ? `<ul class="pf-findings">${d.findings.map(preflightFindingHtml).join('')}</ul>`
     : '';
   const cards = preflightMassesHtml(d.masses) + preflightFeeHtml(d.fee);
-  const foot = `<p class="pf-foot dim">the checks are the <a href="/guide.html#trap" target="_blank" rel="noopener">guide&rsquo;s trap section</a>, automated — and once you broadcast, paste the txid into search: every transaction gets a page here.</p>`;
+  const foot = `<p class="pf-foot dim">the checks are the <a href="#/guide?at=trap">guide&rsquo;s trap section</a>, automated — and once you broadcast, paste the txid into search: every transaction gets a page here.</p>`;
   return preflightVerdictHtml(d) + findings +
     (cards ? `<div class="pf-cards">${cards}</div>` : '') +
     preflightExecutedHtml(d.executed) + foot;
@@ -5024,6 +5094,17 @@ function parseRoute() {
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
   if (m) return { view: 'explore', network: m[1] || null, galaxy: params.get('galaxy') === '1' };
   if (/^#\/changelog\/?$/.test(path)) return { view: 'changelog', network: null };
+  /* '#/guide' — the builder guide, once a standalone /guide.html page. Not
+     network-scoped: it is a testnet-10 walkthrough. '?at=<section>' deep-links
+     one section, and is where old '/guide.html#trap' links now land. */
+  m = path.match(/^#\/guide(?:\.html)?\/?$/);
+  if (m) {
+    return {
+      view: 'guide',
+      network: null,
+      at: (params.get('at') || '').replace(/[^a-z0-9-]/gi, '').slice(0, 40),
+    };
+  }
   /* Tool/reference pages render the same shell on both networks, but their
      examples and POST endpoints use the selected network. Accept a scoped
      form so that choice survives navigation, reloads and shared links. */
@@ -5148,6 +5229,7 @@ async function render() {
     build: $('#view-build'),
     preflight: $('#view-preflight'),
     dev: $('#view-dev'),
+    guide: $('#view-guide'),
     changelog: $('#view-changelog'),
     notfound: $('#view-notfound'),
   };
@@ -5186,6 +5268,7 @@ async function render() {
     else if (route.view === 'tx') renderTxPage(route);
     else if (route.view === 'build') renderBuild();
     else if (route.view === 'preflight') renderPreflight();
+    else if (route.view === 'guide') renderGuide(route);
     else if (route.view === 'changelog') renderChangelog();
     else if (route.view === 'notfound') renderNotFound(route);
     else renderDev();
@@ -5806,7 +5889,7 @@ const ACTIONS = {
       .then((r) => {
         if (r.status === 404) {
           out.innerHTML = `<div class="empty-card"><h2>preflight needs a newer worker.</h2>` +
-            `<p class="dim">this kascov worker doesn&rsquo;t answer preflight yet — the decoder and the builder still work, and the <a href="/guide.html#trap" target="_blank" rel="noopener">guide&rsquo;s trap section</a> walks the same checks by hand.</p></div>`;
+            `<p class="dim">this kascov worker doesn&rsquo;t answer preflight yet — the decoder and the builder still work, and the <a href="#/guide?at=trap">guide&rsquo;s trap section</a> walks the same checks by hand.</p></div>`;
           return undefined;
         }
         return r.json().catch(() => ({ ok: false, error: `the worker answered ${r.status} without a readable body` }));
@@ -6770,6 +6853,15 @@ window.addEventListener('resize', () => { if (tour.step >= 0) showTourStep(tour.
 window.addEventListener('hashchange', () => {
   if (tour.step < 0 && /[?&]tour=1/.test(location.hash)) setTimeout(maybeStartTour, 400);
 });
+
+/* the builder guide used to be its own page, so '/guide.html#trap' and
+   '/guide#trap' links are out in the world. Fold both onto the in-app route so
+   they land on the section they named instead of the not-found view. */
+if (/^\/guide(?:\.html)?\/?$/.test(location.pathname) && !location.hash.startsWith('#/')) {
+  const at = location.hash.replace(/^#/, '') ||
+    new URLSearchParams(location.search).get('at') || '';
+  history.replaceState(null, '', `/#/guide${at ? `?at=${encodeURIComponent(at)}` : ''}`);
+}
 
 /* pasted clean URLs (hosting rewrites everything to this page):
    /explore, /decode?s=…, /testnet-10/c/<id> → the same hash routes */

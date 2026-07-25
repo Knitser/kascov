@@ -6294,6 +6294,12 @@ fn build_sitemap_xml(store: Option<&kascov_core::store::Store>, now: u64) -> Res
         "<url><loc>https://kascov.io/</loc><lastmod>{}</lastmod></url>\n",
         og::iso_date(now)
     ));
+    // The builder guide is a route inside the SPA shell rather than a file of
+    // its own, so nothing else advertises it. Its prose ships in index.html,
+    // which makes the URL worth crawling on its own. No lastmod: the worker
+    // has no idea when the shipped copy was last edited, and a wrong date is
+    // worse than none.
+    xml.push_str("<url><loc>https://kascov.io/guide</loc></url>\n");
     if let Some(store) = store {
         let tip = store.tip()?;
         for c in store.list_page(None, 5000)? {
@@ -8146,17 +8152,22 @@ mod feed_and_sitemap_tests {
         let xml = build_sitemap_xml(Some(&store), now).unwrap();
         let doc = roxmltree::Document::parse(&xml).expect("sitemap must be well-formed XML");
         let urls: Vec<_> = doc.root_element().children().filter(|n| n.has_tag_name("url")).collect();
-        assert_eq!(urls.len(), 2, "root + the one coin");
+        assert_eq!(urls.len(), 3, "root + the builder guide + the one coin");
         let lastmod_of = |n: &roxmltree::Node<'_, '_>| {
             n.children().find(|c| c.has_tag_name("lastmod")).and_then(|c| c.text()).map(str::to_string)
         };
+        let loc_of = |n: &roxmltree::Node<'_, '_>| {
+            n.children().find(|c| c.has_tag_name("loc")).unwrap().text().unwrap().to_string()
+        };
         assert_eq!(lastmod_of(&urls[0]), Some(og::iso_date(now)));
+        // the guide is a static route: listed, deliberately undated
+        assert_eq!(loc_of(&urls[1]), "https://kascov.io/guide");
+        assert_eq!(lastmod_of(&urls[1]), None);
         // tip_ms − (tip_daa − last_activity_daa) × 100ms = 1,700,000,000,000
-        assert_eq!(lastmod_of(&urls[1]), Some(og::iso_date(1_700_000_000_000)));
-        let loc = urls[1].children().find(|c| c.has_tag_name("loc")).unwrap().text().unwrap();
-        assert!(loc.contains("/share/mainnet/"));
+        assert_eq!(lastmod_of(&urls[2]), Some(og::iso_date(1_700_000_000_000)));
+        assert!(loc_of(&urls[2]).contains("/share/mainnet/"));
         // W3C date shape (YYYY-MM-DD)
-        let lm = lastmod_of(&urls[1]).unwrap();
+        let lm = lastmod_of(&urls[2]).unwrap();
         assert_eq!(lm.len(), 10);
         assert!(lm.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() }));
         let _ = std::fs::remove_file(&path);
@@ -8167,8 +8178,9 @@ mod feed_and_sitemap_tests {
         let xml = build_sitemap_xml(None, 0).unwrap();
         let doc = roxmltree::Document::parse(&xml).unwrap();
         let urls: Vec<_> = doc.root_element().children().filter(|n| n.has_tag_name("url")).collect();
-        assert_eq!(urls.len(), 1);
+        assert_eq!(urls.len(), 2, "the root and the builder guide need no store");
         assert!(xml.contains("<lastmod>1970-01-01</lastmod>"));
+        assert!(xml.contains("<loc>https://kascov.io/guide</loc>"));
     }
 
     #[test]

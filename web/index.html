@@ -78,7 +78,7 @@
           <a class="nav-link" href="#/tokens" data-nav="tokens" data-network-route="tokens">tokens</a>
           <a class="nav-link" href="#/decode" data-nav="playground" data-network-route="decode">playground</a>
           <a class="nav-link" href="#/dev" data-nav="dev" data-network-route="dev">API</a>
-          <a class="nav-link" href="/guide.html">guide</a>
+          <a class="nav-link" href="#/guide" data-nav="guide">guide</a>
         </nav>
         <nav class="network-tabs" aria-label="Network">
           <button type="button" class="network-tab" data-action="network" data-network="testnet-10" aria-pressed="true">testnet-10</button>
@@ -573,7 +573,7 @@
       </nav>
       <header class="page-head">
         <h1>will this transaction pass?</h1>
-        <p class="page-sub">paste a transaction as JSON (the SDK / RPC shape) and find out <strong>before you broadcast</strong>: every input&rsquo;s compute budget checked against the classic <a href="/guide.html#trap" target="_blank" rel="noopener">&ldquo;script units exceeded&rdquo; trap</a>, masses measured against the block limit, an honest fee estimate — and for inputs that carry both their witness and their UTXO&rsquo;s script, a real run through Kaspa&rsquo;s script engine.</p>
+        <p class="page-sub">paste a transaction as JSON (the SDK / RPC shape) and find out <strong>before you broadcast</strong>: every input&rsquo;s compute budget checked against the classic <a href="#/guide?at=trap">&ldquo;script units exceeded&rdquo; trap</a>, masses measured against the block limit, an honest fee estimate — and for inputs that carry both their witness and their UTXO&rsquo;s script, a real run through Kaspa&rsquo;s script engine.</p>
       </header>
       <div class="decode-box">
         <label class="sr-only" for="preflight-input">Transaction JSON</label>
@@ -1230,7 +1230,7 @@ data: {"kind":"pending","tx_kind":"transition",
 
           <article class="api-endpoint" id="ep-preflight">
             <div class="ep-head"><span class="method post">POST</span><code class="ep-path">/data/{network}/preflight</code></div>
-            <p class="ep-desc">Will this transaction pass? Post a transaction as JSON (the SDK / RPC shape — <code class="mono">{version, inputs, outputs, lockTime, …}</code>) and get a verdict <em>before you broadcast</em>: per-input compute-budget checks (the classic <a href="/guide.html#trap" target="_blank" rel="noopener">&ldquo;script units exceeded&rdquo; trap</a>), compute/storage mass against the block limit, an honest fee estimate — and for inputs that carry both their <code class="mono">signatureScript</code> and their <code class="mono">utxo.scriptPublicKey</code>, a real run through the script engine with the budget the transaction declares. Nothing is broadcast, nothing is stored: responses are <code class="mono">no-store</code> and the transaction goes into the call and nowhere else. The network segment picks the mass limits. Served by newer workers; older ones answer <code class="mono">404</code>. Also behind the playground&rsquo;s <a href="#/preflight" data-network-route="preflight">check-a-transaction mode</a>.</p>
+            <p class="ep-desc">Will this transaction pass? Post a transaction as JSON (the SDK / RPC shape — <code class="mono">{version, inputs, outputs, lockTime, …}</code>) and get a verdict <em>before you broadcast</em>: per-input compute-budget checks (the classic <a href="#/guide?at=trap">&ldquo;script units exceeded&rdquo; trap</a>), compute/storage mass against the block limit, an honest fee estimate — and for inputs that carry both their <code class="mono">signatureScript</code> and their <code class="mono">utxo.scriptPublicKey</code>, a real run through the script engine with the budget the transaction declares. Nothing is broadcast, nothing is stored: responses are <code class="mono">no-store</code> and the transaction goes into the call and nowhere else. The network segment picks the mass limits. Served by newer workers; older ones answer <code class="mono">404</code>. Also behind the playground&rsquo;s <a href="#/preflight" data-network-route="preflight">check-a-transaction mode</a>.</p>
             <div class="ep-cols">
               <div class="ep-example"><div class="ep-ex-head">Request body — the transaction itself</div><pre class="codeblock"><code>{
   "version": 1,
@@ -1350,6 +1350,177 @@ X-Kascov-Signature: 3f9c41…  (keyed with your subscription's secret)
       </div>
     </section>
 
+    <!-- ============ BUILDER GUIDE ============ -->
+    <!-- Lives in the shell like every other page (it used to be a separate
+         guide.html). The prose ships in this document rather than being built
+         by JS so the route stays crawlable and the copy never needs a fetch. -->
+    <section id="view-guide" class="view-fade guide-doc" aria-label="Builder guide" hidden>
+      <header class="page-head">
+        <p class="page-eyebrow">builder guide &middot; testnet-10 &middot; 15 minutes</p>
+        <h1>Deploy &rarr; spend &rarr; <span class="grad">replay</span> a covenant.</h1>
+        <p class="page-sub">The working end-to-end path: compile a SilverScript <strong>Mecenas</strong>, deploy it as a real covenant (KIP-20) on testnet-10, spend it <em>under its own rules</em>, then replay that spend opcode-by-opcode in the browser. Along the way: the compute-budget trap that has stopped most first covenant deploys, and exactly how to avoid it.</p>
+      </header>
+
+      <p class="gd-honest"><strong>Everything here is tested.</strong> Every command was run against the live chain and the shipped <a href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">kascov</a> toolchain in July 2026; every transaction id links to a real, replayable on-chain spend. Nothing is hypothetical.</p>
+
+      <div class="guide-layout">
+        <nav class="guide-toc" aria-label="Guide sections">
+          <div class="guide-toc-group">On this page</div>
+          <a href="#/guide?at=prereqs"><span class="gd-toc-num">0</span>Prerequisites</a>
+          <a href="#/guide?at=compile"><span class="gd-toc-num">1</span>Compile a Mecenas</a>
+          <a href="#/guide?at=deploy"><span class="gd-toc-num">2</span>Deploy it as a covenant</a>
+          <a href="#/guide?at=trap"><span class="gd-toc-num">3</span>The compute-budget trap</a>
+          <a href="#/guide?at=spend"><span class="gd-toc-num">4</span>Spend it</a>
+          <a href="#/guide?at=replay"><span class="gd-toc-num">5</span>Replay it here</a>
+          <a href="#/guide?at=token-name"><span class="gd-toc-num">&#9733;</span>Name your token on chain</a>
+          <a href="#/guide?at=real"><span class="gd-toc-num">6</span>A real example, live</a>
+        </nav>
+
+        <div class="guide-main">
+          <section class="gd-block" id="gd-prereqs">
+            <h2><span class="gd-stepno">0</span>Prerequisites &mdash; 5 minutes, once</h2>
+            <p>You need a Rust toolchain (stable) and the kascov repo. <code class="mono">kascov-lab</code> is the covenant lab CLI: it builds, signs and broadcasts real covenant transactions on testnet-10.</p>
+            <div class="gd-code"><pre class="codeblock"><code>git clone https://github.com/Knitser/kascov.git
+cd kascov
+cargo build -p kascov-lab              <span class="c"># one-time; grabs the pinned rusty-kaspa rev</span>
+
+cargo run -p kascov-lab -- keygen      <span class="c"># makes a throwaway TN10 key, prints your address</span>
+<span class="o">address:         kaspatest:qq&hellip;</span>
+<span class="o">pubkey (x-only): 3f9c&hellip;</span>
+<span class="o">blake2b(pubkey): e377&hellip;                # you'll paste these two into the generator</span></code></pre></div>
+            <p>Fund the printed address at <a href="https://faucet-testnet.kaspanet.io" target="_blank" rel="noopener noreferrer">faucet-testnet.kaspanet.io</a> (it&rsquo;s Cloudflare-gated &mdash; use a browser), then confirm it arrived:</p>
+            <div class="gd-code"><pre class="codeblock"><code>cargo run -p kascov-lab -- balance
+<span class="o">balance: 100.00000000 TKAS</span></code></pre></div>
+            <div class="gd-callout">
+              <p><strong>In a hurry?</strong> One command runs this entire guide&rsquo;s loop &mdash; deploy a Mecenas, then spend it so it names itself on the explorer:</p>
+              <p><code class="mono">cargo run -p kascov-lab -- contract-demo</code> &nbsp;(or <code class="mono">escrow-demo</code> for a dispute-resolution flow). <code class="mono">kascov-lab examples</code> prints every recipe. The rest of this page does the same thing step by step, so you can see the moving parts.</p>
+            </div>
+          </section>
+
+          <section class="gd-block" id="gd-compile">
+            <h2><span class="gd-stepno">1</span>Compile a Mecenas</h2>
+            <p>A <strong>Mecenas</strong> is a patronage contract: after every <code class="mono">period</code>, anyone may push one <code class="mono">pledge</code> to the recipient (<code class="mono">receive</code>); the funder can reclaim the rest at any time with a signature (<code class="mono">reclaim</code>). Two ways to get the compiled hex:</p>
+            <h3>Option A &mdash; the generator (no toolchain)</h3>
+            <p>Open the <a href="#/decode">script playground</a> &rarr; &ldquo;make a Mecenas&rdquo; &mdash; fill in <code class="mono">recipient</code> (your keygen <em>pubkey</em>), <code class="mono">funder</code> (your keygen <em>blake2b(pubkey)</em> &mdash; this is what lets you reclaim), a pledge, and a period, and copy the compiled hex. Pick a short period like <code class="mono">600</code> DAA (&asymp; 1 minute on testnet-10, which runs ~10 DAA per second) so you can trigger <code class="mono">receive</code> within this guide. The <a href="#/build">guided builder</a> does the same thing as a form, and can deploy it for you.</p>
+            <h3>Option B &mdash; the compile API</h3>
+            <p>The same compiler (<code class="mono">silverc</code>) runs behind <code class="mono">POST /data/testnet-10/compile</code>. Constructor args are <strong>bare positional strings</strong>: <code class="mono">0x&hellip;</code> hex for <code class="mono">pubkey</code>/<code class="mono">byte[32]</code>, plain decimals for <code class="mono">int</code>:</p>
+            <div class="gd-code"><pre class="codeblock"><code>curl -s -X POST -H 'content-type: application/json' \
+  https://kascov.io/data/testnet-10/compile \
+  -d '{"source": "&lt;the Mecenas source from the playground&gt;",
+       "args": ["0x&lt;recipient pubkey&gt;", "0x&lt;funder blake2b&gt;", "100000000", "600"]}'
+<span class="o">{"ok":true,"hex":"6b6c76009c6375&hellip;"}</span></code></pre></div>
+            <div class="gd-callout">
+              <p><strong>Heads-up on arg encodings.</strong> The upstream <code class="mono">silverc --constructor-args</code> CLI wants a different shape &mdash; tagged Expr JSON like <code class="mono">{"kind":"int","data":600}</code>, where a <code class="mono">byte[32]</code> is an array of 32 <code class="mono">byte</code> objects &mdash; while the debugger and the endpoints above take the bare forms. The zero-dep converter <a href="https://github.com/Knitser/kascov/blob/main/clients/js/kascov-encode.mjs" target="_blank" rel="noopener noreferrer"><code class="mono">clients/js/kascov-encode.mjs</code></a> translates both directions (<code class="mono">node kascov-encode.mjs 0x44&hellip;44 600</code>), so you never hand-write 32 nested byte objects.</p>
+            </div>
+          </section>
+
+          <section class="gd-block" id="gd-deploy">
+            <h2><span class="gd-stepno">2</span>Deploy it as a covenant</h2>
+            <div class="gd-code"><pre class="codeblock"><code>cargo run -p kascov-lab -- deploy --program-hex &lt;the compiled hex&gt; --value 1000000000
+<span class="o">program:   SilverScript · Mecenas (181 bytes)</span>
+<span class="o">BIRTH      covenant b4ade48e3ad1eda5&hellip;</span>
+<span class="o">           tx a9a7df1a71307c05&hellip;</span>
+<span class="o">           program blake2b 3483c24b&hellip;</span></code></pre></div>
+            <p>What just happened, precisely:</p>
+            <ul>
+              <li>The coin is born holding 10 TKAS with a <strong>P2SH commitment</strong> state: <code class="mono">OpBlake2b &lt;blake2b-256(program)&gt; OpEqual</code>. The program itself stays hidden until you spend.</li>
+              <li>Output 0 carries a <code class="mono">CovenantBinding</code> with a fresh covenant id &mdash; <code class="mono">blake2b(outpoint &#8214; authorized outputs)</code> &mdash; the identity that persists across every future state transition (KIP-20).</li>
+              <li>The command prints a link like <code class="mono">kascov.io/testnet-10/c/&lt;id&gt;?program=&lt;hex&gt;</code> &mdash; the explorer verifies your program hash against the on-chain commitment <em>in the browser</em>, so you can prove what you deployed before revealing it.</li>
+            </ul>
+            <p>The coin appears on the <a href="#/explore" data-network-route="explore">explorer</a> within about a minute, labeled &ldquo;p2sh commitment&rdquo; until the reveal.</p>
+          </section>
+
+          <section class="gd-block" id="gd-trap">
+            <h2><span class="gd-stepno">3</span>The trap: &ldquo;script units exceeded&rdquo; and the v0-UTXO bootstrap</h2>
+            <p>This is where most first deploys die (<a href="https://github.com/kaspanet/rusty-kaspa/issues/1073" target="_blank" rel="noopener noreferrer">rusty-kaspa#1073</a> is the canonical report). You build a version-1 covenant transaction, set a huge <code class="mono">computeBudget</code>, spend a plain faucet UTXO &mdash; and the node answers:</p>
+            <div class="gd-code"><pre class="codeblock"><code><span class="e">failed to verify the signature script: script units exceeded
+the amount committed in the input: used=100000, limit=9999</span></code></pre></div>
+            <p>Three facts decode that message:</p>
+            <div class="gd-scroll" tabindex="0" aria-label="Compute budget facts"><table class="gd-table">
+              <tbody>
+                <tr><th>fact</th><th>number</th></tr>
+                <tr><td>Toccata (v1) transactions replace the per-input <code class="mono">sigOpCount: u8</code> with a per-input <code class="mono">computeBudget: u16</code> commitment. 1 budget unit = 100 grams = <strong>10,000 script units</strong>.</td><td><code class="mono">1 &rarr; 10,000</code></td></tr>
+                <tr><td>Every input gets a free allowance of one budget unit minus one script unit &mdash; that is the <code class="mono">limit=9999</code> you hit when your committed budget is effectively <strong>0</strong>.</td><td><code class="mono">9,999 free</code></td></tr>
+                <tr><td>One Schnorr <code class="mono">OpCheckSig</code> costs 1,000 grams &times; 100 units/gram &mdash; the <code class="mono">used=100000</code>. So even the most boring pay-to-pubkey input needs <strong>budget &ge; 10</strong> in a v1 transaction. Witness bytes you push are charged 1:1 on top.</td><td><code class="mono">100,000 / sig</code></td></tr>
+              </tbody>
+            </table></div>
+            <p>And the two misconceptions the error invites:</p>
+            <ul>
+              <li><strong>It is not the v0 UTXO limiting you.</strong> A v1 transaction can spend v0 (pre-Toccata) UTXOs &mdash; that is the bootstrap path; every covenant on testnet-10 started from a plain faucet UTXO. The budget is committed by the <em>spending input</em>, not derived from the UTXO.</li>
+              <li><strong>You can&rsquo;t patch the budget in afterwards.</strong> For v1 transactions the <code class="mono">computeBudget</code> field is covered by the signature hash. Setting it after signing invalidates the signature; and SDKs pinned to pre-Toccata wire formats silently drop the field when serializing &mdash; the node then sees budget 0 and you get <code class="mono">limit=9999</code> no matter what your local object said. If your tooling predates Toccata (e.g. wasm/py SDKs frozen at 2.0.x), it cannot express this transaction.</li>
+            </ul>
+            <div class="gd-callout gd-trap">
+              <p><strong>The fix (what <code class="mono">kascov-labkit</code> does, verbatim from the shipped code):</strong></p>
+              <p>Every input of a v1 transaction gets an explicit commitment &mdash; <code class="mono">TransactionInput::new_with_mass(outpoint, script, seq, ComputeCommit::ComputeBudget(ComputeBudget(n)))</code> &mdash; <em>including the plain fee input</em>, the one everybody forgets because it &ldquo;never needed anything&rdquo; pre-Toccata. <code class="mono">kascov-lab spend</code> exposes it as <code class="mono">--compute-budget</code> (default 20 per input; 1 unit = 10,000 script units).</p>
+              <p>Committed budget is charged as compute mass <em>whether the script uses it or not</em>, so the fee must scale with it. labkit prices two-input constrained spends as <code class="mono">fee = 100 sompi &times; (2 &times; budget &times; 100 grams + size headroom)</code> &mdash; commit generously, but not <code class="mono">65535</code>.</p>
+              <p>For plain (non-covenant) transfers, rusty-kaspa&rsquo;s own <code class="mono">consensus-core sign()</code> already stamps <code class="mono">ComputeBudget(10)</code> on every v1 input &mdash; exactly one signature check. That is what labkit&rsquo;s deploy relies on.</p>
+            </div>
+            <p>Or let the tool run this whole section for you: <a href="#/preflight"><strong>kascov&rsquo;s transaction preflight</strong></a> takes your transaction as JSON and answers <em>ready / will fail / incomplete</em> before you broadcast &mdash; per-input budgets checked against exactly this trap, masses against the block limit, and the fix spelled out (&ldquo;set <code class="mono">computeBudget: 10</code>&rdquo;). Your transaction goes into the call and nowhere else.</p>
+          </section>
+
+          <section class="gd-block" id="gd-spend">
+            <h2><span class="gd-stepno">4</span>Spend it &mdash; <code class="mono">--entrypoint receive</code></h2>
+            <p><code class="mono">receive</code> is the interesting entrypoint: it is <strong>output-constrained</strong> and needs <em>no signature at all</em>. Once the coin is older than <code class="mono">period</code>, <em>anyone</em> may build the spend &mdash; but the contract&rsquo;s own introspection (KIP-17) forces the outputs: exactly <code class="mono">pledge</code> to the recipient, and the remainder re-bound to the same P2SH so the covenant lives on. Dry-run it first &mdash; this runs the real Kaspa script engine locally, without broadcasting:</p>
+            <div class="gd-code"><pre class="codeblock"><code>cargo run -p kascov-lab -- spend --program-hex &lt;the same hex&gt; --entrypoint receive --dry-run
+<span class="o">SIMULATE   SilverScript · Mecenas . receive  (not broadcast)</span>
+<span class="o">           ✓ PASS —  the spend SATISFIES the contract — a node would accept it</span>
+<span class="o">           output[0] 1.00000000 TKAS</span>
+<span class="o">           output[1] 8.99999000 TKAS [covenant continues]</span></code></pre></div>
+            <p>(If you dry-run before <code class="mono">period</code> has elapsed you&rsquo;ll see the engine reject honestly &mdash; the age gate compiles to <code class="mono">OpCheckSequenceVerify</code>. Wait out your period and re-run.) Then drop <code class="mono">--dry-run</code> to broadcast:</p>
+            <div class="gd-code"><pre class="codeblock"><code>cargo run -p kascov-lab -- spend --program-hex &lt;the same hex&gt; --entrypoint receive
+<span class="o">SPEND      SilverScript · Mecenas . receive</span>
+<span class="o">           tx 05128801&hellip;</span></code></pre></div>
+            <p>Mechanics worth knowing:</p>
+            <ul>
+              <li>The witness reveals the program: <code class="mono">push(selector) ++ push(program)</code> for <code class="mono">receive</code> (no signature args); pure-signature entrypoints prepend <code class="mono">push(pubkey) ++ push(sig)</code>. From this moment kascov shows the coin as <strong>SilverScript &middot; Mecenas</strong>, constructor args labeled, permanently.</li>
+              <li>The tx has a <strong>second, plain input</strong> paying the real network fee &mdash; the contract&rsquo;s internal math hardcodes a 1000-sompi fee, and the node&rsquo;s compute-mass fee must hold on top. Both inputs commit <code class="mono">--compute-budget</code> (see <a href="#/guide?at=trap">step 3</a>).</li>
+              <li>The funder&rsquo;s exit is <code class="mono">--entrypoint reclaim</code>: a pure-signature spend that works immediately, if your key&rsquo;s blake2b is the coin&rsquo;s <code class="mono">funder</code> field.</li>
+            </ul>
+          </section>
+
+          <section class="gd-block" id="gd-replay">
+            <h2><span class="gd-stepno">5</span>Replay it right here</h2>
+            <p>Open your coin&rsquo;s page (<code class="mono">kascov.io/testnet-10/c/&lt;covenant-id&gt;</code>, or paste the txid into the search box above). In the UTXO panel, every spent state has a <strong>&ldquo;&#10697; replay this spend&rdquo;</strong> button &mdash; the worker fetches the captured witness and runs it through the actual <code class="mono">TxScriptEngine</code>, streaming an opcode-by-opcode trace with live stacks: the age check, the introspection ops reading your outputs, the final verdict.</p>
+            <p>The same replay is a plain JSON endpoint (<a href="#/dev" data-network-route="dev">API docs</a>):</p>
+            <div class="gd-code"><pre class="codeblock"><code>curl -s https://kascov.io/data/testnet-10/debug/&lt;txid&gt; | jq '.verdict, .trace[0:3]'</code></pre></div>
+            <p>Honest caveat, stated by the endpoint itself: the replay fabricates a 1-in/1-out context, so signature and output-introspection checks can diverge from the original transaction &mdash; the witness, program and data flow are the real on-chain bytes, but a <code class="mono">pass: false</code> replay does not mean the on-chain spend was invalid (it was accepted by consensus).</p>
+          </section>
+
+          <section class="gd-block" id="gd-token-name">
+            <h2><span class="gd-stepno">&#9733;</span>Name your token on chain (launchpads, this one&rsquo;s for you)</h2>
+            <p>kascov shows a token&rsquo;s <em>real</em> name only when that name lives on the chain itself &mdash; never from anyone&rsquo;s private database. The convention is simple: put a small JSON document in the <strong>genesis transaction&rsquo;s payload</strong> when you launch. Whoever authors the genesis (you, or your launchpad) is exactly the right party to claim the name, and anyone can verify it from the chain forever.</p>
+            <div class="gd-code"><pre class="codeblock"><code>{"name": "My Token", "ticker": "MTK",
+ "image": "https://…/mtk.png",
+ "image_hash": "sha256 hex of the image bytes"}</code></pre></div>
+            <p>Rules kascov applies when reading it: <code class="mono">name</code> up to 48 characters, <code class="mono">ticker</code> (or <code class="mono">symbol</code>) up to 12, plain JSON or hex-encoded JSON both work, and the whole payload stays under 4&nbsp;KB. The <a href="#/tokens" data-network-route="tokens">token directory</a> then shows the claimed name with a <em>named on chain</em> badge &mdash; honestly labeled as a deployer claim (names aren&rsquo;t unique; the canonical kascov name never disappears).</p>
+            <p><strong>Images:</strong> include <code class="mono">image_hash</code> &mdash; the SHA-256 of the exact image bytes &mdash; next to the URL. Today kascov surfaces the image as a link. Hash-committed images are the path to being <em>rendered</em>: because the genesis pins the bytes forever, kascov can fetch, verify, and serve the art itself, and nobody can swap it afterwards. An <code class="mono">image</code> without a hash stays a link permanently &mdash; an unpinned URL can change under everyone&rsquo;s feet, and kascov doesn&rsquo;t display what the chain can&rsquo;t hold to account. The KCC-0020 token draft doesn&rsquo;t cover display metadata yet; if a metadata convention lands in the standards track, kascov will read that too.</p>
+          </section>
+
+          <section class="gd-block" id="gd-real">
+            <h2><span class="gd-stepno">6</span>A real production example you can inspect right now</h2>
+            <p>This exact loop ran end-to-end on the live site on <strong>July 10, 2026</strong> &mdash; deploy &rarr; genesis &rarr; reclaim &rarr; revealed. The coin is <a href="#/testnet-10/c/b4ade48e3ad1eda5cfab75a8a9d757abf7faed20a557d274e3ca1fcacd990410"><strong>jolly-pearl-quail</strong></a> (<code class="mono">b4ade48e3ad1eda5&hellip;</code>), a Mecenas born via the one-click web deploy, then reclaimed by the funder key with <code class="mono">kascov-lab spend --entrypoint reclaim</code>:</p>
+            <div class="gd-scroll" tabindex="0" aria-label="Production example transactions"><table class="gd-table">
+              <tbody>
+                <tr><th>event</th><th>txid</th></tr>
+                <tr><td>genesis (deploy &mdash; P2SH commitment, provable)</td><td><a class="mono" href="#/testnet-10/tx/a9a7df1a71307c0518aa001920b42b9afecbaa503d61c279c08e45ee6bfc8bdb">a9a7df1a71307c0518aa001920b42b9afecbaa503d61c279c08e45ee6bfc8bdb</a></td></tr>
+                <tr><td>reclaim (reveals the program; funds exit &rarr; burn)</td><td><a class="mono" href="#/testnet-10/tx/051288013eecf1cc3f890005236b96567f743423390a540650af65f50c4288b3">051288013eecf1cc3f890005236b96567f743423390a540650af65f50c4288b3</a></td></tr>
+              </tbody>
+            </table></div>
+            <p>Replay the reveal yourself &mdash; one curl, no setup:</p>
+            <div class="gd-code"><pre class="codeblock"><code>curl -s https://kascov.io/data/testnet-10/debug/051288013eecf1cc3f890005236b96567f743423390a540650af65f50c4288b3 \
+  | jq '{verdict, steps: (.trace|length), fields: .trace[3].op}'</code></pre></div>
+            <p>The trace shows the witness pushing the funder&rsquo;s pubkey and signature, then the full 181-byte Mecenas program whose blake2b matches the deploy commitment &mdash; the coin page shows the decoded constructor args (<code class="mono">recipient</code>, <code class="mono">funder_hash</code>, <code class="mono">pledge</code>, <code class="mono">period</code>) it recovered from those bytes.</p>
+            <p>And it isn&rsquo;t just this guide&rsquo;s own loop anymore &mdash; builders are shipping on covenants. The <a href="https://github.com/w00c00/kaspa-covenant-game-kit" target="_blank" rel="noopener noreferrer"><strong>Kaspa Covenant Game Kit</strong></a> (by @w00c00) runs 1v1 games on player-funded covenant escrow with on-chain settlement, and its escrow contract verifies byte-identical on kascov &mdash; <a href="#/testnet-10/c/6a56fc3fb56fe86a57b55a0e588003cbc8cc8799c67f52a0936b67d4c820cb0b">inspect the verified escrow coin</a> yourself. More projects live in the <a href="#/">&ldquo;built with covenants&rdquo; showcase</a> on the landing page.</p>
+          </section>
+
+          <footer class="gd-foot">
+            <p><a href="#/decode">script playground &amp; generator</a> &middot; <a href="#/dev" data-network-route="dev">JSON API docs</a> &middot; <a href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov</a> &middot; <a href="https://github.com/Knitser/kascov/blob/main/docs/Covenant%20Lab.md" target="_blank" rel="noopener noreferrer">docs/Covenant Lab.md</a></p>
+            <p>Questions or a step that didn&rsquo;t work as written? Open an issue &mdash; this page only documents what has actually been run.</p>
+          </footer>
+        </div>
+      </div>
+    </section>
+
     <!-- ============ CHANGELOG ============ -->
     <section id="view-changelog" class="view-fade" aria-label="What's new" hidden>
       <header class="page-head">
@@ -1366,7 +1537,7 @@ X-Kascov-Signature: 3f9c41…  (keyed with your subscription's secret)
   <footer class="site-footer">
     <div class="container footer-inner">
       <p class="footer-motto">Kaspa nodes forget after roughly 30 hours. <strong>kascov remembers.</strong></p>
-      <p class="footer-nav"><a class="footer-link" href="#/explore" data-network-route="explore">explorer</a> · <a class="footer-link" href="#/decode" data-network-route="decode">playground</a> · <a class="footer-link" href="#/dev" data-network-route="dev">JSON API &amp; docs</a> · <a class="footer-link" href="/guide.html">the 15-minute guide</a> · <a class="footer-link" href="#/changelog">what&rsquo;s new</a> · <a class="footer-link" href="/feed.xml">feed</a></p>
+      <p class="footer-nav"><a class="footer-link" href="#/explore" data-network-route="explore">explorer</a> · <a class="footer-link" href="#/decode" data-network-route="decode">playground</a> · <a class="footer-link" href="#/dev" data-network-route="dev">JSON API &amp; docs</a> · <a class="footer-link" href="#/guide">the 15-minute guide</a> · <a class="footer-link" href="#/changelog">what&rsquo;s new</a> · <a class="footer-link" href="/feed.xml">feed</a></p>
       <p><a class="footer-link" href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov</a></p>
       <p class="footer-dim">data streams live from the kascov indexer — it never stops watching</p>
       <p class="footer-dim">not affiliated with the Kaspa Foundation</p>
@@ -1385,6 +1556,6 @@ X-Kascov-Signature: 3f9c41…  (keyed with your subscription's secret)
   <script src="/graph.js" defer></script>
   <script src="/gen.js" defer></script>
   <script src="/decode-payload.js" defer></script>
-  <script type="module" src="/app.js?v=20260725-requests"></script>
+  <script type="module" src="/app.js?v=20260725-guide"></script>
 </body>
 </html>

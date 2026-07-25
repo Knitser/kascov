@@ -2828,6 +2828,80 @@ button.build-card { width: 100%; text-align: left; font: inherit; color: inherit
   .ep-cols { grid-template-columns: 1fr; }
 }
 
+/* ---- builder guide (#/guide) ----
+   The API docs' two-column shell (sticky section rail + scroll-spy) carrying
+   long-form prose instead of endpoint cards. It used to be a standalone
+   guide.html with its own copy of the palette; these rules are that page
+   folded onto the site's own tokens so the guide can never drift again. */
+.guide-layout { display: grid; grid-template-columns: 210px 1fr; gap: 2.4rem; align-items: start; }
+.guide-toc { position: sticky; top: 84px; display: flex; flex-direction: column; gap: 0.1rem; font-size: 0.9rem; max-height: calc(100vh - 100px); overflow-y: auto; }
+.guide-toc-group { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); margin: 0 0 0.35rem; }
+.guide-toc a { display: flex; gap: 0.1rem; color: var(--muted); padding: 0.32rem 0.6rem; border-radius: 7px; border-left: 2px solid transparent; line-height: 1.35; }
+.guide-toc a:hover { color: var(--text); text-decoration: none; background: var(--bg-soft); }
+.guide-toc a[aria-current="true"] { color: var(--accent); border-left-color: var(--accent); background: var(--accent-soft); }
+.gd-toc-num { font-family: var(--mono); font-size: 0.78rem; color: var(--faint); min-width: 1.3rem; }
+.guide-toc a[aria-current="true"] .gd-toc-num { color: var(--accent); }
+
+.guide-main { min-width: 0; max-width: 78ch; }
+.gd-block { margin-bottom: 2.8rem; scroll-margin-top: 96px; }
+.gd-block h2 { font-family: var(--display); font-weight: 700; font-size: 1.42rem; line-height: 1.25; letter-spacing: -0.01em; color: var(--text); text-transform: none; margin: 0 0 0.7rem; }
+.gd-block h2::before, .gd-block h2::after { content: none; }
+.gd-block h3 { font-family: var(--display); font-weight: 600; font-size: 1.04rem; color: var(--text); margin: 1.6rem 0 0.4rem; }
+.gd-stepno { color: var(--accent); font-family: var(--mono); font-size: 0.95rem; margin-right: 0.55rem; }
+.gd-block p, .gd-block li { color: var(--muted); line-height: 1.68; }
+.gd-block p { margin: 0 0 0.9rem; }
+.gd-block p strong, .gd-block li strong { color: var(--text); }
+.gd-block ul { margin: 0.4rem 0 1rem; padding-left: 1.15rem; }
+.gd-block li { margin-bottom: 0.55rem; }
+.guide-main code.mono { color: var(--text); background: var(--bg-soft); border: 1px solid var(--border); border-radius: 5px; padding: 0.08em 0.35em; word-break: break-word; }
+.guide-main a code.mono { color: var(--accent); }
+
+.gd-honest { max-width: 78ch; margin: 0 0 1.8rem; padding: 0.75rem 1rem; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--muted); font-size: 0.92rem; line-height: 1.6; }
+.gd-honest strong { color: var(--text); }
+.gd-callout { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius-sm); background: var(--bg-soft); padding: 0.9rem 1.1rem; margin: 1.2rem 0; font-size: 0.94rem; }
+.gd-callout p { margin: 0.45rem 0; }
+.gd-callout.gd-trap { border-left-color: var(--burn); background: var(--burn-soft); }
+
+.gd-code { position: relative; margin: 1rem 0; }
+.gd-code .copy-btn { position: absolute; top: 0.5rem; right: 0.5rem; }
+.guide-doc .codeblock { background: #06120f; border: 1px solid var(--border); border-radius: 10px; padding: 0.9rem 1rem; overflow-x: auto; margin: 0; }
+.guide-doc .codeblock code { font-family: var(--mono); font-size: 0.8rem; line-height: 1.6; color: #cfe7e0; white-space: pre; }
+.guide-doc .codeblock .c { color: var(--faint); }   /* comment */
+.guide-doc .codeblock .o { color: var(--born); }    /* output line */
+.guide-doc .codeblock .e { color: var(--burn); }    /* error line */
+
+.gd-table { width: 100%; border-collapse: collapse; margin: 0.9rem 0; font-size: 0.9rem; }
+.gd-table th { text-align: left; color: var(--text); font-weight: 600; padding: 0.5rem 0.9rem 0.5rem 0; border-bottom: 1px solid var(--border); }
+.gd-table td { text-align: left; padding: 0.6rem 0.9rem 0.6rem 0; border-bottom: 1px solid var(--border); color: var(--muted); vertical-align: top; line-height: 1.6; }
+.gd-table td:last-child code.mono { white-space: nowrap; }
+.gd-table a.mono { word-break: break-all; }
+.gd-scroll { overflow-x: auto; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; }
+.gd-foot { margin-top: 2rem; padding-top: 1.2rem; border-top: 1px solid var(--border); color: var(--faint); font-size: 0.9rem; }
+.gd-foot p { margin: 0 0 0.5rem; }
+.gd-foot a { color: var(--accent); }
+
+@media (pointer: coarse) {
+  .guide-toc a { min-height: 44px; align-items: center; }
+  .gd-code .copy-btn { min-height: 44px; min-width: 58px; display: inline-grid; place-items: center; }
+}
+
+@media (max-width: 800px) {
+  .guide-layout { grid-template-columns: 1fr; gap: 1rem; }
+  .guide-toc { position: static; flex-flow: row wrap; max-height: none; gap: 0.3rem 0.5rem; padding-bottom: 0.8rem; border-bottom: 1px solid var(--border); margin-bottom: 1.4rem; }
+  .guide-toc-group { width: 100%; margin: 0; }
+  .guide-toc a { border-left: 0; }
+}
+
+@media (max-width: 600px) {
+  .gd-block { margin-bottom: 2.2rem; scroll-margin-top: 1rem; }
+  .gd-block h2 { font-size: 1.18rem; }
+  .gd-stepno { display: inline-grid; min-width: 1.4rem; }
+  .gd-honest, .gd-callout { padding: 0.8rem 0.85rem; }
+  .guide-doc .codeblock { padding: 3rem 0.8rem 0.8rem; }
+  .guide-doc .codeblock code { font-size: 0.74rem; }
+  .gd-code .copy-btn { top: 0.45rem; right: 0.45rem; }
+}
+
 /* verified contract — Etherscan-style "verified source", for covenants */
 .verified-contract { margin: 0.7rem 0; border: 1px solid rgba(91,228,155,0.28); border-radius: var(--radius-sm); background: linear-gradient(180deg, rgba(91,228,155,0.05), transparent 60%), var(--card); padding: 0.9rem 1rem; box-shadow: var(--hairline); }
 .vc-head { display: flex; align-items: center; flex-wrap: wrap; gap: 0.55rem; }

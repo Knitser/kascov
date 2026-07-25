@@ -31,7 +31,10 @@ function networkRouteHash(route, network) {
   if (view === 'dev' || view === 'build' || view === 'preflight') {
     return `#/${network}/${view}`;
   }
+  /* not network-scoped: switching networks must leave you where you were
+     instead of dropping you on the landing page */
   if (view === 'changelog') return '#/changelog';
+  if (view === 'guide') return '#/guide';
   return '#/';
 }
 

@@ -4,7 +4,6 @@ import test from 'node:test';
 
 const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 const index = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
-const guide = readFileSync(new URL('./guide.html', import.meta.url), 'utf8');
 
 test('phone header and navigation remain reachable without page overflow', () => {
   assert.match(css, /@media \(max-width: 720px\)[\s\S]*?\.header-inner\s*\{[\s\S]*?display:\s*grid/);
@@ -68,11 +67,14 @@ test('retention copy consistently uses the current roughly-30-hour window', () =
   assert.match(index, /roughly 30(?:&nbsp;|\s)hours/i);
 });
 
-test('standalone guide has a phone-safe and keyboard-visible shell', () => {
-  assert.match(guide, /viewport-fit=cover/);
-  assert.match(guide, /<a class="skip-link" href="#main">/);
-  assert.match(guide, /<main id="main"/);
-  assert.match(guide, /:focus-visible/);
-  assert.match(guide, /@media \(pointer: coarse\)/);
-  assert.match(guide, /class="table-scroll" tabindex="0"/);
+test('the builder guide is phone-safe inside the shell it now shares', () => {
+  /* it lives in index.html, so it inherits the site's viewport, skip link and
+     focus styles — what stays guide-specific is the two-column collapse, the
+     scrollable wide tables, and touch-sized controls */
+  assert.doesNotMatch(index, /(?:href|src)="[^"]*guide\.html/);
+  assert.match(css, /@media \(max-width: 800px\)[\s\S]*?\.guide-layout\s*\{[^}]*grid-template-columns:\s*1fr/);
+  assert.match(css, /@media \(max-width: 800px\)[\s\S]*?\.guide-toc\s*\{[^}]*position:\s*static/);
+  assert.match(css, /\.gd-scroll\s*\{[^}]*overflow-x:\s*auto/);
+  assert.match(css, /@media \(pointer: coarse\)[\s\S]*?\.guide-toc a\s*\{[^}]*min-height:\s*44px/);
+  assert.equal((index.match(/class="gd-scroll" tabindex="0"/g) || []).length, 2);
 });

@@ -11,7 +11,7 @@ import {
 test('only landing and explore require the network snapshot', () => {
   assert.equal(routeNeedsSnapshot('landing'), true);
   assert.equal(routeNeedsSnapshot('explore'), true);
-  for (const view of ['detail', 'address', 'lane', 'tokens', 'token', 'tx', 'decode', 'build', 'preflight', 'dev', 'changelog']) {
+  for (const view of ['detail', 'address', 'lane', 'tokens', 'token', 'tx', 'decode', 'build', 'preflight', 'dev', 'guide', 'changelog']) {
     assert.equal(routeNeedsSnapshot(view), false, `${view} must not wait for the grid`);
   }
 });
