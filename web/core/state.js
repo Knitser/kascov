@@ -125,11 +125,13 @@ const state = {
   digest: {},         // network -> { data, at, animated }
   activity: {},       // network -> { [range]: { data, at } } (data null = 404 miss)
   pulseRange: '24h',
+  pendingExpanded: false, // mempool feed: taller viewport, remembered across visits
   watch: new Set(),   // covenant ids starred on the current network
   watchNet: null,
 };
 
 try { state.nerd = localStorage.getItem('kascov-nerd') === '1'; } catch (e) { /* private mode */ }
+try { state.pendingExpanded = localStorage.getItem('kascov-mempool-expanded') === '1'; } catch (e) { /* private mode */ }
 try {
   const r = localStorage.getItem('kascov-pulse-range');
   if (ACTIVITY_RANGES.includes(r)) state.pulseRange = r;

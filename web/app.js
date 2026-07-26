@@ -120,17 +120,49 @@ const pendingLoads = {};
 const PENDING_ROWS_MAX = 24;   // DOM cap — mempool is a ticker, not an archive
 const PENDING_LIVE_MAX = 128;  // client-side entry cap (server caps its snapshot)
 
+/* the badge speaks the site's plain words (born/moved/retired, as in the digest
+   counts and the timeline chips), never the internal txKind */
+const PENDING_KIND_WORDS = { genesis: 'born', transition: 'moved', burn: 'retired' };
+
+/* one sentence per connection state, used for the LED's title AND for the only
+   thing this section ever announces */
+const PENDING_CONNECTION_WORDS = {
+  live: 'mempool stream connected',
+  connecting: 'connecting to the mempool stream',
+  retrying: 'mempool stream reconnecting',
+  paused: 'mempool stream paused',
+  offline: 'mempool stream unavailable',
+};
+
+/* Diff-guarded writes. Assigning a byte-identical className, attribute or text
+   is still a real mutation that invalidates style and the accessibility tree,
+   and this runs for every visible row on every frame. */
+const setPendingText = (el, value) => { if (el.textContent !== value) el.textContent = value; };
+const setPendingAttr = (el, name, value) => { if (el.getAttribute(name) !== value) el.setAttribute(name, value); };
+
 function pendingModel(network) {
   if (!pendingModels[network]) {
     pendingModels[network] = createPendingModel({
       rowCap: PENDING_ROWS_MAX,
       liveCap: PENDING_LIVE_MAX,
-      onChange: () => {
-        if (state.network === network && parseRoute().view === 'explore') renderPending(network);
-      },
+      onChange: () => schedulePendingRender(network),
     });
   }
   return pendingModels[network];
+}
+
+/* One paint per animation frame, not one per SSE frame. A busy mempool mutates
+   the model several times a tick (a 'pending' frame, a 'pending_resolved'
+   frame, then the removal timer), and each extra render is another full DOM
+   diff. Route renders still call renderPending directly — they need the
+   section mounted in the same tick. */
+const pendingFrames = {};
+function schedulePendingRender(network) {
+  if (pendingFrames[network]) return;
+  pendingFrames[network] = requestAnimationFrame(() => {
+    pendingFrames[network] = 0;
+    if (state.network === network && parseRoute().view === 'explore') renderPending(network);
+  });
 }
 
 function setPendingConnection(network, connection) {
@@ -158,16 +190,107 @@ function reconcilePending(network, force = false) {
     .catch(() => null)
     .finally(() => {
       pendingLoads[network] = Math.max(0, (pendingLoads[network] || 1) - 1);
-      if (state.network === network && parseRoute().view === 'explore') renderPending(network);
+      schedulePendingRender(network);
     });
 }
 
 function pendingEmptyCopy(connection) {
   if (connection === 'connecting') return 'checking the mempool…';
-  if (connection === 'retrying') return 'live stream reconnecting — showing the latest snapshot';
-  if (connection === 'paused') return 'live updates paused while this tab is away';
-  if (connection === 'offline') return 'live stream unavailable — showing the latest snapshot';
+  if (connection === 'retrying') return 'reconnecting to the stream';
+  if (connection === 'paused') return 'paused while this tab is away';
+  if (connection === 'offline') return 'showing the last snapshot';
   return 'nothing pending right now';
+}
+
+/* The empty state and the row list are mutually exclusive children of the same
+   fixed-height frame, so painting one always clears the other. */
+function paintPendingEmpty(host, copy) {
+  let empty = host.firstElementChild;
+  if (!empty || !empty.classList.contains('pending-empty')) {
+    /* clearing the rows can take focus with them, and a detached activeElement
+       drops focus to <body> — the next Tab would restart at the top of the page */
+    const hadFocus = host.contains(document.activeElement);
+    for (const el of [...host.children]) el.remove();
+    empty = document.createElement('div');
+    empty.className = 'pending-empty';
+    host.append(empty);
+    if (hadFocus) host.focus({ preventScroll: true });
+  }
+  host.classList.remove('is-overflowing');
+  setPendingText(empty, copy);
+}
+
+/* The only thing this section announces is its CONNECTION. #pending-count used
+   to be a polite atomic live region rewritten from every model mutation
+   (arrival, resolution, and the removal timer), i.e. a counter re-narrating
+   itself several times a second on a busy mempool. The number stays readable in
+   the heading; only a state change is worth interrupting a reader for. Seeded
+   with 'connecting' — index.html's static data-connection — so simply arriving
+   on the page announces nothing. */
+let pendingSpoken = 'connecting';
+function announcePendingConnection(connection) {
+  const live = $('#pending-announce');
+  if (!live || connection === pendingSpoken) return;
+  pendingSpoken = connection;
+  setPendingText(live, PENDING_CONNECTION_WORDS[connection] || '');
+}
+
+/* Header chrome (LED, count pill, expand toggle), written from BOTH render
+   paths. Doing it only in the populated path left the section with no
+   [data-expanded] on the first paint, so a reader who had chosen "show more"
+   got a 6-slot frame and then a 12-slot one a round-trip later: a 264px shove
+   on every single load, which is the exact complaint the reserved frame exists
+   to answer. It also left the LED in its default (live) look while the app was
+   still connecting. */
+function syncPendingChrome(section, connection, total, shown) {
+  section.dataset.connection = connection;
+  section.dataset.expanded = state.pendingExpanded ? 'true' : 'false';
+  const more = $('#pending-more');
+  if (more) {
+    setPendingAttr(more, 'aria-expanded', state.pendingExpanded ? 'true' : 'false');
+    setPendingText(more, state.pendingExpanded ? 'show less' : 'show more');
+  }
+  const dot = section.querySelector('.pending-live-dot');
+  if (dot) dot.title = PENDING_CONNECTION_WORDS[connection] || PENDING_CONNECTION_WORDS.offline;
+  const cnt = $('#pending-count');
+  if (cnt) {
+    const label = connection === 'live' ? 'live'
+      : connection === 'connecting' ? 'connecting'
+        : connection === 'retrying' ? 'retrying' : connection;
+    /* honest about the DOM cap: the model tracks up to PENDING_LIVE_MAX entries
+       but only the newest PENDING_ROWS_MAX are rows, so a bare "97 · live" over
+       a 24-row feed promised 73 rows that exist nowhere. */
+    setPendingText(cnt, !total ? label
+      : total > shown ? `${shown}/${total} · ${label}` : `${total} · ${label}`);
+  }
+  announcePendingConnection(connection);
+}
+
+/* Rows are links and there can be 24 of them behind a 6-slot frame, so leaving
+   them in the sequential tab order dragged a keyboard reader through 24 stops
+   (18 of them clipped) in the middle of the page. role="log" + tabindex="0"
+   makes the frame itself the single stop; arrows move a roving focus inside it,
+   and the rows stay real <a href> links for click, middle-click and copy-link. */
+let pendingKeysBound = false;
+function bindPendingKeys(host) {
+  if (pendingKeysBound) return;
+  pendingKeysBound = true;
+  host.addEventListener('keydown', (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const step = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
+    const rows = [...host.querySelectorAll('.pending-row')];
+    if (!rows.length) return;
+    let next = null;
+    if (step) {
+      const at = rows.indexOf(document.activeElement);
+      const from = at < 0 ? (step > 0 ? -1 : rows.length) : at;
+      next = rows[Math.min(rows.length - 1, Math.max(0, from + step))];
+    } else if (e.key === 'Home') next = rows[0];
+    else if (e.key === 'End') next = rows[rows.length - 1];
+    if (!next) return;
+    e.preventDefault();   /* arrows must not scroll the page out from under the feed */
+    next.focus();
+  });
 }
 
 function updatePendingRow(row, data, network) {
@@ -179,41 +302,45 @@ function updatePendingRow(row, data, network) {
   const meta = KIND_META[primary.txKind] || KIND_META.transition;
   const extra = Math.max(0, events.length - 1);
   const name = primary.covenantId ? friendlyName(primary.covenantId) : shortHex(data.txid, 8, 6);
-  const kind = events.length > 1 ? `${events.length} events` : (primary.txKind || 'pending');
+  const kind = events.length > 1
+    ? `${events.length} events`
+    : (PENDING_KIND_WORDS[primary.txKind] || 'pending');
   const resolution = data.resolution === 'confirmed' ? 'confirmed'
     : data.resolution === 'dropped' ? 'dropped' : '';
 
-  row.className = `pending-row ${meta.cls}` +
-    (resolution ? ` pending-${resolution}` : '');
-  row.href = `#/${network}/tx/${data.txid}`;
-  row.dataset.txid = data.txid;
-  row.dataset.generation = String(data.generation);
-  row.setAttribute('aria-label',
-    `${kind}: ${name}${extra ? ` and ${extra} more smart coin${extra === 1 ? '' : 's'}` : ''}; open transaction`);
-  row.title = `${events.length} covenant event${events.length === 1 ? '' : 's'} in ${data.txid}`;
-
-  let kindEl = row.querySelector('.pending-kind');
-  let nameEl = row.querySelector('.pending-name');
-  let txEl = row.querySelector('.pending-tx');
-  if (!kindEl) {
-    kindEl = document.createElement('span');
-    kindEl.className = 'pending-kind';
-    nameEl = document.createElement('span');
-    nameEl.className = 'lane-ns pending-name';
-    txEl = document.createElement('span');
-    txEl.className = 'lane-counts dim mono pending-tx';
-    const spin = document.createElement('span');
-    spin.className = 'pending-spin';
-    spin.setAttribute('aria-hidden', 'true');
-    spin.textContent = '⏳';
-    txEl.append(document.createTextNode(''), spin);
-    row.append(kindEl, nameEl, txEl);
+  if (!row.firstElementChild) {
+    row.append(
+      Object.assign(document.createElement('span'), { className: 'pending-kind' }),
+      Object.assign(document.createElement('span'), { className: 'lane-ns pending-name' }),
+      Object.assign(document.createElement('span'), { className: 'pending-tx' }),
+      Object.assign(document.createElement('span'), { className: 'pending-state' }),
+      Object.assign(document.createElement('span'), { className: 'pending-mark' }),
+    );
+    /* the wait ring / seal / void mark is decorative — the row's aria-label
+       already carries the state in words */
+    row.lastElementChild.setAttribute('aria-hidden', 'true');
+    row.tabIndex = -1;   /* roving focus: the frame is the tab stop, see bindPendingKeys */
   }
-  kindEl.textContent = kind;
-  nameEl.textContent = `${name}${extra ? ` +${extra} more` : ''}`;
-  const spin = txEl.querySelector('.pending-spin');
-  txEl.firstChild.textContent = resolution || shortHex(data.txid, 8, 6);
-  if (spin) spin.hidden = Boolean(resolution);
+  const [kindEl, nameEl, txEl, stateEl] = row.children;
+
+  /* the resolution lives in the CLASS, and CSS picks the rail, the mark and the
+     colours from it — nothing here toggles a hidden attribute or a style */
+  const cls = `pending-row ${meta.cls}${resolution ? ` pending-${resolution}` : ''}`;
+  if (row.className !== cls) row.className = cls;
+  setPendingAttr(row, 'href', `#/${network}/tx/${data.txid}`);
+  if (row.dataset.txid !== data.txid) row.dataset.txid = data.txid;
+  const generation = String(data.generation);
+  if (row.dataset.generation !== generation) row.dataset.generation = generation;
+  setPendingAttr(row, 'aria-label',
+    `${kind}: ${name}${extra ? ` and ${extra} more smart coin${extra === 1 ? '' : 's'}` : ''}` +
+    `${resolution ? `; ${resolution}` : ''}; open transaction`);
+  setPendingAttr(row, 'title', `${events.length} covenant event${events.length === 1 ? '' : 's'} in ${data.txid}`);
+  setPendingText(kindEl, kind);
+  setPendingText(nameEl, `${name}${extra ? ` +${extra} more` : ''}`);
+  /* identity is permanent: the resolution word gets its own slot instead of
+     erasing the txid at the exact moment you'd want to click it */
+  setPendingText(txEl, shortHex(data.txid, 8, 6));
+  setPendingText(stateEl, resolution);
 }
 
 function renderPending(network) {
@@ -222,54 +349,83 @@ function renderPending(network) {
   const host = $('#pending-row');
   if (!section || !host) return;
   const model = pendingModel(network);
+  bindPendingKeys(host);
+  /* Probing paints the reserved (empty) frame instead of hiding the section.
+     Hiding cost the page the section's whole height (heading, intro and frame)
+     on EVERY load — deterministically, and before a single tx had arrived. The
+     trade is deliberate: a worker that has no /pending collapses the section
+     once, permanently, one round-trip in (below), and every kascov worker
+     serves /pending. The chrome is synced here too, so the frame's height on
+     this paint is identical to the height on every paint after it. */
   if (!pendingReady[network] && !pendingLoads[network]) {
+    section.hidden = false;
+    syncPendingChrome(section, 'connecting', 0, 0);
+    paintPendingEmpty(host, pendingEmptyCopy('connecting'));
     reconcilePending(network);
-    section.hidden = true;
     return;
   }
   /* feature detection: hide the whole section ONLY when the worker doesn't
      serve /pending (404 leaves state.pending[network].data null). Once the
-     feature is supported the section STAYS in place, so a tx arriving or
-     clearing fills or empties it without ever shoving the page up or down. */
+     feature is supported the section STAYS in place, and its frame is a fixed
+     number of row slots, so a tx arriving or clearing fills or empties it
+     without ever shoving the page up or down. */
   const probed = state.pending[network];
   if (probed && probed.data === null) { section.hidden = true; return; }
   section.hidden = false;
   const view = model.view();
-  section.dataset.connection = view.connection;
-  const dot = section.querySelector('.pending-live-dot');
-  if (dot) {
-    dot.title = {
-      live: 'mempool stream connected',
-      connecting: 'connecting to the mempool stream',
-      retrying: 'mempool stream reconnecting',
-      paused: 'mempool stream paused',
-      offline: 'mempool stream unavailable',
-    }[view.connection];
-  }
-  const cnt = $('#pending-count');
-  if (cnt) {
-    const stateLabel = view.connection === 'live' ? 'live'
-      : view.connection === 'connecting' ? 'connecting'
-        : view.connection === 'retrying' ? 'reconnecting' : view.connection;
-    cnt.textContent = view.total ? `${view.total} · ${stateLabel}` : stateLabel;
-  }
+  syncPendingChrome(section, view.connection, view.total, view.rows.length);
   if (!view.rows.length) {
-    const existing = host.querySelector('.pending-empty');
-    host.replaceChildren(existing || Object.assign(document.createElement('div'), { className: 'pending-empty dim' }));
-    host.firstElementChild.textContent = pendingEmptyCopy(view.connection);
+    paintPendingEmpty(host, pendingEmptyCopy(view.connection));
     return;
   }
-  const keyed = new Map([...host.querySelectorAll('.pending-row')]
-    .map((row) => [row.dataset.txid, row]));
-  const fragment = document.createDocumentFragment();
-  for (const data of view.rows) {
-    const row = keyed.get(data.txid) || document.createElement('a');
-    keyed.delete(data.txid);
-    updatePendingRow(row, data, network);
-    fragment.append(row);
+  /* Newest FIRST, at the top. The model stays oldest-first (pending.test.mjs
+     pins that order); reversing here is what lets the feed have no autoscroll
+     at all — a new row appears where the eye already is, so scrollTop is
+     entirely the reader's and no gesture is ever cancelled. */
+  const rows = [...view.rows].reverse();
+  /* The reuse key is the TXID alone. It deliberately is NOT `txid|generation`:
+     applySnapshot mints a fresh generation for every row it doesn't carry over,
+     so a snapshot reconcile — which runs on every SSE reconnect and every tab
+     return — would invalidate all 24 keys and rebuild the whole feed, exactly
+     the remount this rewrite exists to stop. A re-broadcast still gets a new
+     node, detected from the DOM instead: a row still wearing a resolved class
+     while the model reports it pending IS the re-entry. */
+  const wanted = new Set(rows.map((data) => data.txid));
+  /* Prune first, position second. Removing leftovers BEFORE the position walk
+     means every survivor already sits at its final index, so insertBefore
+     never has to MOVE one — and a node that is never detached keeps its
+     running CSS animations. The old replaceChildren(fragment) detached every
+     row on every frame, which cancelled and restarted them all: that is why
+     the feed strobed, why focus vanished, and why a confirm never advanced
+     past its first keyframe. */
+  const focused = host.contains(document.activeElement) && document.activeElement !== host
+    ? document.activeElement
+    : null;
+  const focusedAt = focused ? [...host.children].indexOf(focused) : -1;
+  for (const el of [...host.children]) {
+    if (!el.classList.contains('pending-row') || !wanted.has(el.dataset.txid)) el.remove();
   }
-  host.replaceChildren(fragment);
-  host.scrollTop = host.scrollHeight;
+  const keyed = new Map([...host.children].map((el) => [el.dataset.txid, el]));
+  rows.forEach((data, i) => {
+    const prior = keyed.get(data.txid);
+    const reborn = Boolean(prior) && !data.resolution &&
+      (prior.classList.contains('pending-confirmed') || prior.classList.contains('pending-dropped'));
+    if (reborn) prior.remove();
+    const row = (reborn ? null : prior) || document.createElement('a');
+    updatePendingRow(row, data, network);
+    if (host.children[i] !== row) host.insertBefore(row, host.children[i] || null);
+  });
+  /* Every confirm prunes a row within 900ms, and removing the focused node drops
+     focus to <body> — the next Tab would restart at the top of the document.
+     Hand focus to whatever now occupies that slot, without scrolling. */
+  if (focused && !focused.isConnected) {
+    const heir = host.children[Math.min(Math.max(focusedAt, 0), host.children.length - 1)];
+    (heir && heir.classList.contains('pending-row') ? heir : host).focus({ preventScroll: true });
+  }
+  /* A full frame looks identical whether 6 or 24 rows exist, and the platform
+     scrollbar is an invisible overlay until a gesture starts. One class, read
+     after the mutations, drives a paint-only depth cue. */
+  host.classList.toggle('is-overflowing', host.scrollHeight - host.clientHeight > 1);
 }
 
 function notePending(network, message) {
@@ -5815,6 +5971,12 @@ const ACTIONS = {
           renderGrid(entry, network);
         }
       });
+  },
+
+  'pending-expand'(el) {
+    state.pendingExpanded = !state.pendingExpanded;
+    try { localStorage.setItem('kascov-mempool-expanded', state.pendingExpanded ? '1' : '0'); } catch (err) { /* private mode */ }
+    renderPending(state.network);
   },
 
   'nerd'(el) {

@@ -219,10 +219,17 @@
         <div id="pulse-chart" class="pulse-chart"></div>
       </section>
 
-      <section class="pending" id="section-pending" aria-label="Pending covenant activity" aria-live="polite" hidden>
-        <h2>in the mempool <span class="pending-live-dot" aria-hidden="true"></span> <span class="collapse-count dim" id="pending-count"></span></h2>
+      <section class="pending" id="section-pending" aria-label="Pending covenant activity" data-connection="connecting" data-expanded="false" hidden>
+        <h2><span class="pending-title">in the mempool</span>
+          <span class="pending-status">
+            <span class="pending-live-dot" aria-hidden="true"></span>
+            <span class="collapse-count" id="pending-count"></span>
+          </span>
+          <button type="button" class="pending-more" id="pending-more" data-action="pending-expand" aria-expanded="false" aria-controls="pending-row">show more</button>
+        </h2>
         <p class="dim families-sub">covenant transactions the node has seen but no block has confirmed yet, each clears the moment it lands on chain.</p>
-        <div id="pending-row"></div>
+        <span class="sr-only" id="pending-announce" aria-live="polite" aria-atomic="true"></span>
+        <div id="pending-row" role="log" aria-live="off" aria-label="Pending covenant transactions" tabindex="0"></div>
       </section>
 
       <section class="records" id="section-records" aria-label="Record holders" hidden>
@@ -1556,6 +1563,6 @@ the amount committed in the input: used=100000, limit=9999</span></code></pre></
   <script src="/graph.js" defer></script>
   <script src="/gen.js" defer></script>
   <script src="/decode-payload.js" defer></script>
-  <script type="module" src="/app.js?v=20260725-guide"></script>
+  <script type="module" src="/app.js?v=20260726-mempool"></script>
 </body>
 </html>

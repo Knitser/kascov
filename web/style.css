@@ -2965,81 +2965,399 @@ a.lane-ns-link { text-decoration: none; color: var(--text); }
 a.lane-ns-link:hover, a.lane-ns-link:focus-visible { color: var(--accent); text-decoration: underline; }
 .lane-ns-arrow { color: var(--muted); font-weight: 400; }
 
-/* live pending (mempool) feed — a ticker of covenant txs awaiting a block */
-.pending { margin-bottom: 2.4rem; }
-/* A quiet mempool stays compact; a burst grows to four visible rows and then
-   scrolls. Unlike the old clipped strip, every rendered row remains reachable. */
+/* live pending (mempool) feed — a ticker of covenant txs awaiting a block.
+   ONE reserved viewport: the frame is a whole number of fixed-height row slots
+   and its height depends only on --pending-rows, never on how many rows exist,
+   so filling, emptying and resolving can't shove "record holders" around. Same
+   reservation trick as .pulse-plot's min-height, made exact.
+   Newest row is at the TOP, which is what lets the feed have no autoscroll at
+   all — scrollTop belongs entirely to the reader. */
+.pending {
+  margin-bottom: 2.4rem;
+  --pending-row-h: 2.75rem;  /* 44px — the tap-target floor, and rows are links */
+  --pending-rows: 6;         /* visible slots; the h2 toggle raises it */
+  /* Resolution timing contract: hold + exit MUST stay strictly under
+     core/pending.js's confirmedMs (900) and droppedMs (700), or the model
+     deletes the entry while its collapse is still playing — which is what used
+     to yank the confirm at ~98% and leave it looking broken. */
+  --pending-confirm-hold: 560ms;
+  --pending-confirm-exit: 260ms;
+  --pending-drop-hold: 380ms;
+  --pending-drop-exit: 240ms;
+}
+.pending[data-expanded="true"] { --pending-rows: 12; }
+
 #pending-row {
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  min-height: 3.2rem;
-  max-height: 11rem;
+  position: relative;
+  /* +2px is the frame's own border: box-sizing is border-box globally
+     (style.css:33), so the slot area has to be paid for on top of it or the
+     last row clips — a fractional box is exactly the old "can't see more
+     than 4" bug. */
+  height: calc(var(--pending-row-h) * var(--pending-rows) + 2px);
+  padding: 0 0.7rem;   /* no VERTICAL padding: the slot rules key off the padding-box top */
+  overflow-x: clip;    /* explicit: overflow-y:auto alone would compute x to auto */
   overflow-y: auto;
-  scrollbar-gutter: stable;
+  overflow-anchor: auto;  /* a row landing at the top must not move what the reader is on */
+  /* both-edges, so the reserved bar doesn't make every row sit off-centre in
+     the frame for the (common) case of fewer rows than slots */
+  scrollbar-gutter: stable both-edges;
+  /* macOS overlay scrollbars are invisible until a gesture starts, so the feed
+     looked like it simply ended. Naming a colour opts into a real, thin bar. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  background-color: var(--bg-soft);
+  /* slot rules as a local-attachment gradient instead of per-row borders: they
+     scroll with the content, land exactly on the row pitch, continue past the
+     last row as visible empty slots (so the reserve reads as intentional), and
+     no hairline can dangle under the final row. */
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent calc(var(--pending-row-h) - 1px),
+    var(--border) calc(var(--pending-row-h) - 1px),
+    var(--border) var(--pending-row-h)
+  );
+  background-attachment: local;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--hairline);
 }
-#pending-row:has(.pending-empty) { justify-content: center; }
-.pending-empty { padding: 0.65rem 0.25rem; font-size: 0.92rem; }
-.pending h2 { display: flex; align-items: center; gap: 0.5rem; }
-.pending-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 var(--accent-soft); animation: pending-pulse 2s ease-out infinite; }
-.pending[data-connection="connecting"] .pending-live-dot,
-.pending[data-connection="retrying"] .pending-live-dot {
-  background: var(--burn);
-  animation: pending-pulse 1.2s ease-out infinite;
+#pending-row:focus-visible { outline-offset: 3px; }
+/* scrollbar-width/-color only landed in Safari 18.2 and Chrome 121, and the
+   repo already reaches for the WebKit pseudo-elements elsewhere: without this
+   the bar is an invisible overlay on older engines, which IS the mechanism of
+   "you can't scroll or see more than 4". */
+#pending-row::-webkit-scrollbar { width: 8px; }
+#pending-row::-webkit-scrollbar-track { background: transparent; }
+#pending-row::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; }
+/* Depth cue for the one case the empty slots can't cover: a FULL frame with more
+   rows below it. A sticky last child pinned to the bottom of the scrollport, with
+   a negative margin cancelling its own height, so it contributes ZERO layout and
+   ZERO scrollHeight — and it slides away exactly when the reader reaches the end.
+   (An inset shadow on the frame would be painted under the rows, which are
+   opaque, and never seen.) */
+#pending-row.is-overflowing::after {
+  content: ""; display: block; position: sticky; bottom: 0; z-index: 1;
+  height: 15px; margin-top: -15px; pointer-events: none;
+  background: linear-gradient(to top, var(--bg) 15%, transparent);
 }
-.pending[data-connection="offline"] .pending-live-dot,
-.pending[data-connection="paused"] .pending-live-dot {
-  background: var(--faint);
-  box-shadow: none;
-  animation: none;
+/* a snapshot must never masquerade as a live feed */
+.pending[data-connection="offline"] #pending-row,
+.pending[data-connection="paused"] #pending-row { opacity: 0.72; filter: saturate(0.75); }
+
+/* the empty state is an OVERLAY: it fills the frame and contributes no height,
+   so a reconnect message wrapping to two lines on a phone can't grow the box */
+.pending-empty {
+  position: absolute; inset: 0;
+  display: grid; place-content: center; justify-items: center; gap: 0.55rem;
+  padding: 0 1rem; text-align: center;
+  background: var(--bg-soft);   /* opaque: the slot rules must not cross the copy */
+  color: var(--faint); font-size: 0.88rem;
 }
-@keyframes pending-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(112, 199, 186, 0.45); }
-  70% { box-shadow: 0 0 0 7px rgba(112, 199, 186, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(112, 199, 186, 0); }
+/* paint-only, so it can't affect the reserved height: with no rows there is no
+   rhythm to show, and hairlines slicing through a centred sentence read as a
+   rendering fault. :has is paint here, never geometry. */
+#pending-row:has(> .pending-empty) { background-image: none; }
+.pending-empty::before {
+  content: ""; width: 22px; height: 22px; border-radius: 999px;
+  border: 1.5px dashed var(--border-strong);
+  background: radial-gradient(circle at center, var(--faint) 0 3px, transparent 3px);
+  animation: led 2.6s ease-in-out infinite;   /* existing keyframe */
 }
+
+/* ---- header: the LED is a status pill, not punctuation mid-sentence ---- */
+.pending h2 { flex-wrap: nowrap; }
+.pending h2 > * { white-space: nowrap; }
+/* The heading words live in their own element so `> *` actually covers them: an
+   ANONYMOUS text flex item still shrinks to min-content and wraps, which is why
+   the header's height used to depend on the live count — crossing 9 -> 10
+   pending txs re-wrapped "in the mempool" and pushed the page down ~18px on a
+   412px phone. Reserving the frame is pointless if the heading above it moves. */
+.pending-title { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pending-status {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  /* a FIXED width, not max-width: the pill's own width tracked the count string
+     ("1 · live" 87px vs "128 · connecting" 143px), so every count change
+     resized the heading's remaining space. No overflow:hidden here either — it
+     clipped the LED's livepulse ring (6px of box-shadow) into a slit. */
+  flex: 0 0 auto; width: 11rem; min-width: 0;
+  border-radius: 999px; padding: 0.1rem 0.55rem 0.1rem 0.45rem;
+  background: var(--bg-soft); border: 1px solid var(--border);
+  font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.08em;
+  text-transform: none; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+#pending-count {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: inherit;
+}
+.pending-live-dot {
+  flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--born);
+  animation: livepulse 2.2s ease-out infinite;   /* existing keyframe */
+}
+/* five states, five appearances — connecting and retrying used to be identical */
+.pending[data-connection="connecting"] .pending-live-dot { background: var(--accent); animation: led 1s ease-in-out infinite; }
+.pending[data-connection="retrying"] .pending-live-dot { background: var(--burn); animation: livepulse-amber 2.2s ease-out infinite; }
+.pending[data-connection="retrying"] .pending-status { border-color: rgba(242, 165, 102, 0.3); }
+.pending[data-connection="paused"] .pending-live-dot { background: var(--faint); animation: none; }
+.pending[data-connection="paused"] .pending-status { opacity: 0.75; }
+/* hollow, not just grey — filled-vs-hollow survives colour blindness */
+.pending[data-connection="offline"] .pending-live-dot {
+  background: transparent; border: 1.5px solid var(--faint); animation: none;
+}
+
+/* h2::after (the trailing hairline) is itself a flex item, so a real child
+   needs order to land on its right */
+.pending-more {
+  order: 1; flex: 0 0 auto;
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.08em;
+  /* the only interactive thing in the header, so it must not read like the
+     read-only status pill next to it: stronger text, accent-tinted edge, caret */
+  color: var(--muted); background: transparent;
+  border: 1px solid var(--border-strong); border-radius: 999px;
+  padding: 0.15rem 0.6rem; cursor: pointer;
+}
+.pending-more::after { content: "▾"; font-size: 0.7em; line-height: 1; color: var(--accent); }
+.pending-more[aria-expanded="true"]::after { content: "▴"; }
+.pending-more:hover, .pending-more:focus-visible { color: var(--accent); border-color: var(--accent); }
+
+/* ---- the resting row ---- */
 .pending-row {
-  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.85rem;
-  padding: 0.5rem 0; border-bottom: 1px solid var(--border);
-  flex: 0 0 auto;
-  color: var(--text);
-  text-decoration: none;
-  animation: pending-in 0.35s ease-out;
-}
-.pending-row:hover, .pending-row:focus-visible {
-  color: var(--text);
-  text-decoration: none;
-  background: rgba(112, 199, 186, 0.055);
+  position: relative;
+  display: grid;
+  /* every outer column is a FIXED width so all rows share one grid: an `auto`
+     badge column resolves per row, which is what made the coin names start at
+     three different x positions */
+  grid-template-columns: 5.75rem minmax(0, 1fr) auto 5.4rem 14px;
+  align-items: center; gap: 0.85rem;
+  height: var(--pending-row-h);
+  padding: 0 0.55rem 0 0.75rem;
+  border-radius: 8px;
+  overflow: hidden;      /* clips the confirm sweep AND the exit height collapse */
+  /* opaque, and the SAME colour as the frame: the row masks the container's
+     fixed-pitch slot gradient, so the hairlines can never cut through a row's
+     content while a neighbour is mid-collapse (the gradient is on a 44px grid,
+     a collapsing row is not). Below the last row the gradient still shows the
+     remaining empty slots. */
+  background: var(--bg-soft);
+  color: var(--text); text-decoration: none;
+  transition: background 0.15s ease;
+  /* one-shot by construction: renderPending reconciles in place and never
+     detaches a surviving row, so this cannot re-play on an SSE frame */
+  animation: pending-in 280ms ease-out;
 }
 @keyframes pending-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+/* separator as an INSET SHADOW on the row, not a border and not a border-bottom:
+   it costs no layout, travels with the row it belongs to (so it stays in phase
+   during an exit collapse), leaves no dangling hairline under the last row, and
+   cannot add a 1px residue when the exit animation reaches height 0. */
+.pending-row + .pending-row { box-shadow: inset 0 1px 0 var(--border); }
+.pending-row:hover, .pending-row:focus-visible {
+  color: var(--text); text-decoration: none; background: var(--card);
+}
+/* hover gets the site's own link vocabulary. Accent on the coin name is
+   RESERVED for "confirmed" — using it for hover made a merely-hovered row
+   indistinguishable from a resolved one on its loudest signal. */
+.pending-row:hover .pending-name, .pending-row:focus-visible .pending-name {
+  text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px;
+}
+.pending-row:hover::before, .pending-row:focus-visible::before { opacity: 1; }
+/* the frame clips at the first row's top edge (no vertical padding, by design),
+   so an OUTSIDE ring on the focused row is cut off — and tabbing scrolls the
+   focused row flush against an edge, which makes that the normal case */
+.pending-row:focus-visible { outline-offset: -2px; }
+
+/* the state rail carries lifecycle AND resolution. Concentrated accent reads as
+   accent; the identical rgba spread across a 1080px row reads as grey sludge,
+   which is exactly what the deleted pending-confirm wash was. */
+.pending-row::before {
+  content: ""; position: absolute; left: 0; top: 8px; bottom: 8px;
+  width: 2px; border-radius: 2px; background: var(--border); opacity: 0.9;
+  transition: background 0.18s ease, width 0.18s ease, opacity 0.18s ease;
+}
+.pending-row.kind-born::before { background: var(--born); opacity: 0.5; }
+.pending-row.kind-move::before { background: var(--move); opacity: 0.5; }
+.pending-row.kind-burn::before { background: var(--burn); opacity: 0.5; }
+
+/* typography and radius match .lane-ev-kind, the site's other lifecycle chip, so
+   the mempool badge and the lane-page badge read as one component. The track
+   stays fixed (that is what keeps coin names aligned) but the pill itself is
+   snug — stretched to 5.75rem it was a 92px balloon around the word "born". */
 .pending-kind {
-  font-family: var(--mono); font-size: 0.68rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
-  border-radius: 6px; padding: 0.16rem 0.5rem; white-space: nowrap;
+  justify-self: start;
+  font-family: var(--mono); font-size: 0.66rem; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  border-radius: 6px; padding: 0.12rem 0.45rem;
+  max-width: 100%;
+  text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   color: var(--muted); background: var(--bg-soft); border: 1px solid var(--border);
 }
+/* lifecycle colour is orthogonal to resolution — never dim or desaturate the
+   badge in a resolved row */
 .pending-row.kind-born .pending-kind { color: var(--born); background: var(--born-soft); border-color: transparent; }
 .pending-row.kind-move .pending-kind { color: var(--move); background: var(--move-soft); border-color: transparent; }
 .pending-row.kind-burn .pending-kind { color: var(--burn); background: var(--burn-soft); border-color: transparent; }
-.pending-name { font-size: 0.9rem; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pending-tx { display: inline-flex; align-items: center; gap: 0.4rem; white-space: nowrap; font-size: 0.8rem; }
-.pending-spin { display: inline-block; animation: pending-spin 1.6s linear infinite; }
-@keyframes pending-spin { to { transform: rotate(360deg); } }
-/* resolution: a confirm flashes accent then collapses; a drop just fades */
-.pending-row.pending-confirmed { animation: pending-confirm 0.9s ease-out forwards; }
-@keyframes pending-confirm {
-  0% { background: var(--accent-soft); }
-  60% { background: var(--accent-soft); }
-  100% { background: transparent; opacity: 0.55; }
+
+/* (0,2,0) on purpose: .lane-ns is declared LATER in this file (it sets
+   color/nowrap/ellipsis for lane rows) and would otherwise win the colour */
+.pending-row .pending-name { min-width: 0; transition: color 0.25s ease; }
+.pending-row .pending-tx {
+  font-family: var(--mono); font-size: 0.76rem; color: var(--faint);
+  white-space: nowrap; font-variant-numeric: tabular-nums;
 }
-.pending-row.pending-dropped { animation: pending-drop 0.7s ease-in forwards; }
-@keyframes pending-drop {
-  0% { opacity: 1; }
-  100% { opacity: 0.12; transform: translateX(6px); }
+.pending-state {
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.06em;
+  text-align: right; white-space: nowrap;
 }
+
+/* the wait indicator: CSS-drawn, palette-native, one stable 14px box. Replaces
+   the hourglass emoji — the only full-colour object on a monochrome palette,
+   whose rotated bounding box overflowed the row and whose `hidden` attribute
+   was silently defeated by an author `display` declaration. State is chosen by
+   the ROW's class, so there is no hidden/display interplay left to get wrong. */
+.pending-mark {
+  position: relative; width: 14px; height: 14px; border-radius: 999px;
+  border: 1.5px solid rgba(112, 199, 186, 0.28); overflow: hidden;
+}
+.pending-mark::after {
+  content: ""; position: absolute; inset: 0;
+  background: conic-gradient(from 0deg, var(--accent), transparent 80deg, transparent);
+  opacity: 0.75;
+  animation: radar-spin 1.9s linear infinite;   /* existing keyframe (the .radar idiom) */
+}
+
+/* ---- confirmed. Everything that MEANS confirmed is a PLAIN declaration, so a
+   reduced-motion reader still sees a confirmed row; only the light sweep and
+   the height collapse are animations. ---- */
+.pending-row.pending-confirmed::before { background: var(--accent); opacity: 1; width: 3px; }
+.pending-row.pending-confirmed .pending-name { color: var(--accent); }
+.pending-row.pending-confirmed .pending-state { color: var(--accent); }
+.pending-row.pending-confirmed .pending-mark { border-color: var(--accent); background: var(--accent-soft); }
+.pending-row.pending-confirmed .pending-mark::after { display: none; }
+.pending-row.pending-confirmed .pending-mark::before {
+  content: ""; position: absolute; left: 3px; top: 1px; width: 4px; height: 7px;
+  border-right: 1.5px solid var(--accent); border-bottom: 1.5px solid var(--accent);
+  transform: rotate(45deg);
+  animation: pending-seal-in 180ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes pending-seal-in {
+  from { opacity: 0; transform: rotate(45deg) scale(0.4); }
+  to { opacity: 1; transform: rotate(45deg) scale(1); }
+}
+/* ONE directional band of light crossing a rounded, inset row — never a fill.
+   Motion supplies the salience that --accent-soft cannot at 0.12 alpha, and
+   living on ::after means it can never fight .pending-row:hover's background. */
+.pending-row.pending-confirmed::after {
+  content: ""; position: absolute; inset: 0; border-radius: 8px; pointer-events: none;
+  /* narrow stops on purpose: a peak at 45% between two full-width ramps reads as
+     a tint over the whole row, which is the failure this replaced. 38-62% is a
+     band about a fifth of the row wide, so it reads as light MOVING. */
+  background: linear-gradient(90deg, transparent 38%, var(--accent-soft) 50%, transparent 62%);
+  animation: pending-sweep 300ms cubic-bezier(0.33, 0, 0.15, 1) 100ms both;
+}
+@keyframes pending-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+/* ---- dropped: the same slots, the opposite semantics. Amber, never red; no
+   flash, nothing brightens, no sweep. Readable peripherally. ---- */
+.pending-row.pending-dropped::before {
+  background: repeating-linear-gradient(180deg, var(--burn) 0 3px, transparent 3px 6px);
+  opacity: 0.8; width: 2px;
+}
+.pending-row.pending-dropped .pending-name { color: var(--muted); }
+.pending-row.pending-dropped .pending-state { color: var(--burn); }
+.pending-row.pending-dropped .pending-tx {
+  text-decoration: line-through;
+  text-decoration-color: rgba(242, 165, 102, 0.5);
+  text-decoration-thickness: 1px;   /* the strike lands on the txid, never the coin's name */
+}
+.pending-row.pending-dropped .pending-mark {
+  border-style: dashed; border-color: var(--burn); background: transparent;
+}
+.pending-row.pending-dropped .pending-mark::after { display: none; }
+
+/* ---- leaving. A row LEAVES by collapsing inside the reserved frame: the rows
+   below slide up exactly one slot, the frame's height never changes, and
+   nothing outside the section moves. Both animations finish strictly before
+   core/pending.js deletes the entry (820ms < 900, 620ms < 700), so a row is
+   never yanked mid-animation and the removal itself is invisible. Confirmed
+   rises; dropped deflates. ---- */
+.pending-row.pending-confirmed {
+  animation: pending-exit var(--pending-confirm-exit) cubic-bezier(0.4, 0, 1, 1) var(--pending-confirm-hold) both;
+}
+.pending-row.pending-dropped {
+  animation: pending-exit-drop var(--pending-drop-exit) ease-in var(--pending-drop-hold) both;
+}
+@keyframes pending-exit {
+  from { height: var(--pending-row-h); opacity: 1; }
+  to { height: 0; opacity: 0; transform: translateY(-6px); }
+}
+@keyframes pending-exit-drop {
+  from { height: var(--pending-row-h); opacity: 1; filter: saturate(1); }
+  to { height: 0; opacity: 0; filter: saturate(0.4); }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .pending-live-dot, .pending-spin, .pending-row { animation: none; }
+  /* The global reduced-motion rule pins every duration to 0.01ms
+     !important, so an animated end state becomes the resting state instantly —
+     which is why a confirm used to snap to 55% opacity and look broken. Name
+     the resolved selectors at matching specificity (a media query adds none)
+     and neutralise them outright: with all four confirm signals declared
+     statically, the reader sees a genuinely confirmed row for the full 900ms
+     and then it is simply gone. */
+  .pending-row,
+  .pending-row.pending-confirmed,
+  .pending-row.pending-dropped { animation: none; }
+  .pending-row.pending-confirmed::after { display: none; }
+  .pending-row.pending-confirmed .pending-mark::before,
+  .pending-live-dot,
+  .pending-empty::before { animation: none; }
+  .pending-mark::after {
+    animation: none;
+    background: conic-gradient(from 0deg, var(--accent), transparent 140deg, transparent);
+  }
 }
-@media (max-width: 640px) { .pending-row { grid-template-columns: auto 1fr; } .pending-tx { display: none; } }
+
+@media (max-width: 640px) {
+  /* 2.9rem x 5 keeps the frame in the same visual weight class as the
+     .pulse-plot mobile reserve. The expanded value MUST be
+     re-declared here: .pending[data-expanded="true"] is (0,2,0) and would
+     otherwise leak the desktop 12 onto phones. */
+  .pending { --pending-row-h: 2.9rem; --pending-rows: 5; }
+  .pending[data-expanded="true"] { --pending-rows: 9; }
+  #pending-row { padding-inline: 0.5rem; }
+  /* the resolution column is `auto` here, not a fixed 4.6rem: it is the empty
+     string for almost all of a row's life, and a 320px phone was reserving
+     73px of nothing while the coin name — the only identifier left once
+     .pending-tx is hidden — was ellipsised to 78px. */
+  .pending-row { grid-template-columns: 5.2rem minmax(0, 1fr) auto 14px; gap: 0.55rem; }
+  .pending-state { min-width: 0; font-size: 0.62rem; }
+  .pending-tx { display: none; }
+  .pending-status { width: 8.5rem; }
+}
+@media (max-width: 460px) {
+  /* Below this width one line cannot hold the title, the pill and the toggle
+     without truncating the heading, so give it two DETERMINISTIC lines: the
+     title owns the first, the pill and the toggle the second. The height still
+     depends only on the viewport, never on the count. */
+  .pending h2 { flex-wrap: wrap; row-gap: 0.4rem; }
+  /* the title keeps its natural width (never truncated, never 100% — a 100%
+     basis would push h2::before onto a line of its own), so the pill and the
+     toggle wrap to line two together. Every width in this header is now fixed,
+     so which items land on which line depends only on the viewport. */
+  .pending-title { flex: 0 0 auto; }
+  /* the trailing hairline is a flex:1 item: on a wrapped header it would eat the
+     whole second line and push the toggle onto a third */
+  .pending h2::after { display: none; }
+}
+@media (pointer: coarse) and (max-height: 500px) {
+  /* A landscape phone has no room for the expanded viewport at all, so the
+     expanded value MUST be re-declared: .pending[data-expanded="true"] is
+     (0,2,0) and beats this block's (0,1,0) regardless of source order — which
+     put a 530px frame inside a 390px-tall screen. */
+  .pending { --pending-rows: 4; }
+  .pending[data-expanded="true"] { --pending-rows: 6; }
+}
 
 /* ---- the lane dashboard page (#/{network}/lane/{ns}) ---- */
 .lane-head h1 { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }

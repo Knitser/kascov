@@ -78,3 +78,37 @@ test('the builder guide is phone-safe inside the shell it now shares', () => {
   assert.match(css, /@media \(pointer: coarse\)[\s\S]*?\.guide-toc a\s*\{[^}]*min-height:\s*44px/);
   assert.equal((index.match(/class="gd-scroll" tabindex="0"/g) || []).length, 2);
 });
+
+test('the mempool feed keeps a whole number of rows on phones and coarse pointers', () => {
+  /* 2.75rem = 44px, the tap-target floor this file already asserts, and the
+     rows are links — so the slot height and the tap target are one number */
+  assert.match(css, /--pending-row-h:\s*2\.75rem/);
+  const at = css.indexOf('--pending-row-h: 2.9rem');
+  const phone = css.slice(css.lastIndexOf('@media (max-width: 640px)', at), css.indexOf('\n}\n', at) + 3);
+  assert.match(phone, /\.pending \{ --pending-row-h: 2\.9rem; --pending-rows: 5; \}/);
+  /* the expanded value MUST be re-declared inside every query that changes the
+     row count: .pending[data-expanded="true"] is (0,2,0) and would otherwise
+     leak the desktop 12 onto a phone */
+  assert.match(phone, /\.pending\[data-expanded="true"\] \{ --pending-rows: 9; \}/);
+  assert.match(phone, /\.pending-row \{ grid-template-columns: 5\.2rem minmax\(0, 1fr\)/);
+  /* the same leak, one media block down: a landscape phone caps at 4 slots, so
+     its expanded value has to be capped too or the frame is taller than the screen */
+  assert.match(
+    css,
+    /@media \(pointer: coarse\) and \(max-height: 500px\) \{[\s\S]*?\.pending \{ --pending-rows: 4; \}\s*\.pending\[data-expanded="true"\] \{ --pending-rows: 6; \}/,
+  );
+  /* the header's height must depend on the viewport and NOTHING else: the words
+     are their own element (an anonymous text flex item wraps at min-content) and
+     the status pill has a fixed width (a max-width tracked the count string, so
+     9 -> 10 pending txs re-wrapped the heading and moved the page ~18px) */
+  assert.match(css, /\.pending h2 \{ flex-wrap: nowrap; \}/);
+  assert.match(css, /\.pending h2 > \* \{ white-space: nowrap; \}/);
+  assert.match(css, /\.pending-title \{[^}]*white-space: nowrap[^}]*text-overflow: ellipsis/);
+  /* comments stripped: this block's comment names the mistakes it fixed */
+  const pill = css.match(/\.pending-status \{([\s\S]*?)\n\}/)[1].replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.match(pill, /width:\s*11rem/);
+  assert.doesNotMatch(pill, /max-width/);
+  assert.doesNotMatch(pill, /overflow:\s*hidden/);   /* it clipped the LED's pulse ring */
+  assert.match(css, /@media \(max-width: 460px\)[\s\S]*?\.pending h2 \{ flex-wrap: wrap;/);
+  assert.match(index, /id="pending-row"[^>]*tabindex="0"/);
+});
