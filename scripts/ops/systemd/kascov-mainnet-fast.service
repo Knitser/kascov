@@ -1,0 +1,7 @@
+[Unit]
+Description=kascov mainnet off-site snapshot (5 min RPO, uploads only on change)
+[Service]
+Type=oneshot
+User=kascov
+Environment=HOME=/home/kascov
+ExecStart=/home/kascov/kascov-mainnet-fast.sh

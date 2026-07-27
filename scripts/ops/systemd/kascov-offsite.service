@@ -1,0 +1,7 @@
+[Unit]
+Description=kascov off-site backup push to GCS
+[Service]
+Type=oneshot
+User=kascov
+Environment=HOME=/home/kascov
+ExecStart=/home/kascov/kascov-offsite.sh

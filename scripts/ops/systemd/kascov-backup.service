@@ -1,0 +1,6 @@
+[Unit]
+Description=kascov DB backup (consistent snapshot + retention)
+[Service]
+Type=oneshot
+User=kascov
+ExecStart=/home/kascov/kascov-backup.sh

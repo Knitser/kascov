@@ -1,0 +1,14 @@
+[Unit]
+Description=kascov worker (shadow)
+After=network-online.target
+
+[Service]
+User=kascov
+ExecStart=/home/kascov/kascov-run.sh
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/kascov/kascov-shadow.log
+StandardError=append:/home/kascov/kascov-shadow.log
+
+[Install]
+WantedBy=multi-user.target
