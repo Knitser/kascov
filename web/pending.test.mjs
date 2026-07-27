@@ -348,8 +348,16 @@ test('the mempool feed is a browsable log and only its connection announces', ()
   assert.match(app, /row\.tabIndex = -1;/);
   assert.match(app, /function bindPendingKeys\(host\) \{/);
   assert.match(renderPendingSrc, /bindPendingKeys\(host\);/);
-  /* the module cache-buster moved with the change */
-  assert.match(index, /src="\/app\.js\?v=20260726-mempool"/);
+  /* The frontend must be cache-busted at all, or a fix ships to the server and
+     never reaches anyone who loaded the site before (Caddy sends etag and
+     last-modified but no Cache-Control, so revalidation is heuristic). Assert
+     the INVARIANT, not a literal version: pinning the exact stamp made this
+     test fail on every legitimate bump, which trains you to edit the assertion
+     instead of reading it. The stylesheet must carry the SAME stamp, since a
+     half-updated asset set is the case that breaks only in combination. */
+  const appStamp = index.match(/src="\/app\.js\?v=([^"]+)"/);
+  assert.ok(appStamp, 'app.js must carry a ?v= cache-buster');
+  assert.match(index, new RegExp(`href="/style\\.css\\?v=${appStamp[1]}"`));
 });
 
 test('the wait indicator is CSS-drawn and needs no hidden attribute', () => {
