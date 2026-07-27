@@ -2798,18 +2798,46 @@ impl Store {
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(db_err)
     }
 
-    /// One lane's headline numbers: (event count, distinct covenants).
-    /// Matches BOTH strict KIP-21 lanes (ev_by_lane) and generic tag lanes,
-    /// which live in payload_tag as 'tag:<hex>' with lane_namespace NULL
-    /// (ev_tag_stats) — the same rows lanes.json counts, so a tag lane's
-    /// detail page no longer reads 0 while lanes.json advertises thousands.
-    pub fn lane_stats(&self, namespace: &str) -> Result<(u64, u64)> {
+    /// True when `namespace` names a strict KIP-21 lane (rows carrying it in
+    /// lane_namespace). lanes.json publishes strict lanes and generic tag lanes
+    /// as DISJOINT sets (its tag aggregation is filtered to lane_namespace IS
+    /// NULL), so a detail view must resolve to exactly one of them and never
+    /// union the two, or a namespace that exists as both double-counts.
+    fn lane_is_strict(&self, namespace: &str) -> Result<bool> {
         self.conn
             .query_row(
-                "SELECT COUNT(*), COUNT(DISTINCT covenant_id)
-                 FROM covenant_events
-                 WHERE lane_namespace = ?1
-                    OR (lane_namespace IS NULL AND payload_tag = 'tag:' || ?1)",
+                "SELECT EXISTS(SELECT 1 FROM covenant_events WHERE lane_namespace = ?1)",
+                params![namespace],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n != 0)
+            .map_err(db_err)
+    }
+
+    /// The WHERE fragment selecting one lane's rows, matching whichever set
+    /// lanes.json counted it in: strict lane_namespace when that lane exists,
+    /// otherwise the generic tag lane stored as payload_tag 'tag:<hex>'.
+    fn lane_where(strict: bool) -> &'static str {
+        if strict {
+            "lane_namespace = ?1"
+        } else {
+            "lane_namespace IS NULL AND payload_tag = 'tag:' || ?1"
+        }
+    }
+
+    /// One lane's headline numbers: (event count, distinct covenants).
+    /// Resolves strict KIP-21 lanes (ev_by_lane) and generic tag lanes
+    /// (ev_tag_stats) the same way lanes.json aggregates them, so a tag lane's
+    /// detail page no longer reads 0 while lanes.json advertises thousands.
+    pub fn lane_stats(&self, namespace: &str) -> Result<(u64, u64)> {
+        let sql = format!(
+            "SELECT COUNT(*), COUNT(DISTINCT covenant_id)
+             FROM covenant_events WHERE {}",
+            Self::lane_where(self.lane_is_strict(namespace)?)
+        );
+        self.conn
+            .query_row(
+                &sql,
                 params![namespace],
                 |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
             )
@@ -2818,16 +2846,13 @@ impl Store {
 
     /// The newest events inside one lane namespace, newest first.
     pub fn lane_recent(&self, namespace: &str, limit: u64) -> Result<Vec<GlobalEventRow>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT covenant_id, seq, kind, txid, accepting_daa, tx_index
-                 FROM covenant_events
-                 WHERE lane_namespace = ?1
-                    OR (lane_namespace IS NULL AND payload_tag = 'tag:' || ?1)
-                 ORDER BY accepting_daa DESC, rowid DESC LIMIT ?2",
-            )
-            .map_err(db_err)?;
+        let sql = format!(
+            "SELECT covenant_id, seq, kind, txid, accepting_daa, tx_index
+             FROM covenant_events WHERE {}
+             ORDER BY accepting_daa DESC, rowid DESC LIMIT ?2",
+            Self::lane_where(self.lane_is_strict(namespace)?)
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
         let rows = stmt
             .query_map(params![namespace, limit.min(i64::MAX as u64) as i64], |row| {
                 Ok(GlobalEventRow {
@@ -2849,16 +2874,13 @@ impl Store {
     /// Returns `(bucket_start_daa, count)`; empty buckets are omitted.
     pub fn lane_activity(&self, namespace: &str, bucket_daa: u64) -> Result<Vec<(u64, u64)>> {
         let width = bucket_daa.max(1);
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT accepting_daa / ?2 AS bucket, COUNT(*)
-                 FROM covenant_events
-                 WHERE lane_namespace = ?1
-                    OR (lane_namespace IS NULL AND payload_tag = 'tag:' || ?1)
-                 GROUP BY bucket ORDER BY bucket",
-            )
-            .map_err(db_err)?;
+        let sql = format!(
+            "SELECT accepting_daa / ?2 AS bucket, COUNT(*)
+             FROM covenant_events WHERE {}
+             GROUP BY bucket ORDER BY bucket",
+            Self::lane_where(self.lane_is_strict(namespace)?)
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
         let rows = stmt
             .query_map(params![namespace, width as i64], |row| {
                 Ok((row.get::<_, u64>(0)? * width, row.get::<_, i64>(1)? as u64))
@@ -3789,6 +3811,21 @@ mod tests {
         assert_eq!(total, 2, "activity buckets must include tag-lane events");
         // An unrelated namespace stays empty — no cross-lane leakage.
         assert_eq!(store.lane_stats("deadbeef").unwrap(), (0, 0));
+
+        // Disjointness: once a STRICT KIP-21 lane exists under the same hex,
+        // the detail view must report that lane alone. lanes.json counts strict
+        // lanes and tag lanes as separate entries (its tag aggregation filters
+        // to lane_namespace IS NULL), so unioning them would double-count.
+        let mut blk = block_with_events(2, 200, vec![(0xC3, EventKind::Transition, 0x0C)]);
+        blk.events[0].payload = Some(b"GZ4M-strict".to_vec());
+        blk.events[0].lane_namespace = Some(ns.to_string());
+        store.apply(&blk, BlockHash([2; 32])).unwrap();
+        assert_eq!(
+            store.lane_stats(ns).unwrap(),
+            (1, 1),
+            "a strict lane must not be unioned with the same-hex tag lane"
+        );
+        assert_eq!(store.lane_recent(ns, 50).unwrap().len(), 1);
     }
 
     /// A sink-reset gap is the widest discontinuity in the DAA distribution;

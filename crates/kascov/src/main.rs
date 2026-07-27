@@ -1278,11 +1278,15 @@ async fn serve(
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
-                state
-                    .cache
-                    .lock()
-                    .await
-                    .retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(300));
+                {
+                    // Keep a generous backstop window only: evicting at the TTL
+                    // would delete the very body stale-while-revalidate serves
+                    // (the galaxy key's TTL and the old 300s sweep matched
+                    // exactly). Size is bounded by count instead.
+                    let mut cache = state.cache.lock().await;
+                    cache.retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(7200));
+                    evict_cache_if_large(&mut cache);
+                }
                 state
                     .build_locks
                     .lock()
@@ -3414,28 +3418,103 @@ async fn consistency_handler(
     }
 }
 
+/// The cache map: key -> (built_at, body).
+type BodyCache = std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<CachedBody>)>;
+
+/// How long past its TTL a body may still be served while a refresh runs
+/// behind it. Bounded on purpose: serving stale forever would turn a wedged
+/// builder into an invisible failure where every endpoint answers 200 with
+/// plausible-looking data. Past this window a caller waits for a real build.
+const STALE_SERVE_MAX: std::time::Duration = std::time::Duration::from_secs(900);
+
+/// Bound the cache WITHOUT evicting by age. A body that just passed its TTL is
+/// precisely the one stale-while-revalidate wants to serve, so an age-based
+/// sweep would delete it at the instant it becomes useful (the galaxy key hit
+/// this exactly: 300s TTL against a 300s sweep). Keep the newest entries.
+fn evict_cache_if_large(cache: &mut BodyCache) {
+    const MAX: usize = 2048;
+    const KEEP: usize = 1024;
+    if cache.len() <= MAX {
+        return;
+    }
+    let mut by_age: Vec<(std::time::Instant, String)> =
+        cache.iter().map(|(k, (at, _))| (*at, k.clone())).collect();
+    by_age.sort_unstable_by(|a, b| b.0.cmp(&a.0)); // newest first
+    let keep: std::collections::HashSet<String> =
+        by_age.into_iter().take(KEEP).map(|(_, k)| k).collect();
+    cache.retain(|k, _| keep.contains(k));
+}
+
 /// Serve a cached JSON body, building it (single-flight per key) when stale.
 /// `build` runs on the blocking pool against a fresh read-only store handle.
+///
+/// Stale-while-revalidate: past the TTL the last good body is returned
+/// immediately and the rebuild runs in the background, so a visitor never pays
+/// for a cold aggregate (these ran 7-21s on testnet-10 and, with traffic low
+/// enough that the TTL was usually expired, nearly every visitor paid it). The
+/// Cache-Control headers already advertised stale-while-revalidate; this makes
+/// the origin honour the same contract. Only a completely cold key blocks.
 async fn serve_cached(
-    state: &ServeState,
+    state: &std::sync::Arc<ServeState>,
     key: String,
     ttl_secs: u64,
     cache_control: &'static str,
     gzip_ok: bool,
     build: impl FnOnce() -> Result<Option<String>> + Send + 'static,
 ) -> axum::response::Response {
-    use axum::http::{header, StatusCode};
+    use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let fresh_body = |cache: &std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<CachedBody>)>| {
+    let ttl = std::time::Duration::from_secs(ttl_secs);
+    let fresh_body = |cache: &BodyCache| {
+        cache.get(&key).filter(|(at, _)| at.elapsed() < ttl).map(|(_, body)| body.clone())
+    };
+    // Past the TTL but still inside the stale window: serve it, refresh behind.
+    let stale_body = |cache: &BodyCache| {
         cache
             .get(&key)
-            .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(ttl_secs))
+            .filter(|(at, _)| at.elapsed() >= ttl && at.elapsed() < ttl + STALE_SERVE_MAX)
             .map(|(_, body)| body.clone())
     };
 
-    let mut body = { fresh_body(&*state.cache.lock().await) };
-    if body.is_none() {
+    let (fresh, stale) = {
+        let cache = state.cache.lock().await;
+        (fresh_body(&cache), stale_body(&cache))
+    };
+    if let Some(body) = fresh {
+        return cached_response(&body, cache_control, gzip_ok);
+    }
+    if let Some(body) = stale {
+        // Refresh behind the response. try_lock: if a build already holds the
+        // key nobody needs a second one, and the caller is served either way.
+        let st = state.clone();
+        let k = key.clone();
+        tokio::spawn(async move {
+            let key_lock = { st.build_locks.lock().await.entry(k.clone()).or_default().clone() };
+            let Ok(_building) = key_lock.try_lock() else { return };
+            match tokio::task::spawn_blocking(build).await {
+                Ok(Ok(Some(json))) => {
+                    let built = std::sync::Arc::new(CachedBody::new(json));
+                    let mut cache = st.cache.lock().await;
+                    evict_cache_if_large(&mut cache);
+                    cache.insert(k, (std::time::Instant::now(), built));
+                }
+                // The resource is gone: drop it so the next caller gets a 404
+                // instead of the stale body outliving what it described.
+                Ok(Ok(None)) => {
+                    st.cache.lock().await.remove(&k);
+                }
+                Ok(Err(err)) => tracing::warn!("{k}: background refresh failed: {err}"),
+                Err(err) => tracing::warn!("{k}: background refresh panicked: {err}"),
+            }
+        });
+        return cached_response(&body, cache_control, gzip_ok);
+    }
+
+    // Nothing usable cached (cold start, or older than the stale window): this
+    // is the only path that makes a caller wait for a build.
+    let mut body: Option<std::sync::Arc<CachedBody>>;
+    {
         // Single-flight: one build per key; latecomers wait, then re-check.
         let key_lock = {
             let mut locks = state.build_locks.lock().await;
@@ -3448,11 +3527,9 @@ async fn serve_cached(
                 Ok(Ok(Some(json))) => {
                     let built = std::sync::Arc::new(CachedBody::new(json));
                     let mut cache = state.cache.lock().await;
-                    // Detail keys accumulate — drop expired entries before they
-                    // become a slow leak (grid/live keys are refreshed in place).
-                    if cache.len() > 2048 {
-                        cache.retain(|_, (at, _)| at.elapsed() < std::time::Duration::from_secs(300));
-                    }
+                    // Detail keys accumulate — bound the map before it becomes a
+                    // slow leak (grid/live keys are refreshed in place).
+                    evict_cache_if_large(&mut cache);
                     cache.insert(key.clone(), (std::time::Instant::now(), built.clone()));
                     drop(cache);
                     let mut locks = state.build_locks.lock().await;
@@ -3476,7 +3553,18 @@ async fn serve_cached(
         }
     }
     let body = body.expect("cache hit or fresh build");
+    cached_response(&body, cache_control, gzip_ok)
+}
 
+/// Build the HTTP response for an already-cached body (shared by the fresh,
+/// stale and just-built paths so all three answer identically).
+fn cached_response(
+    body: &std::sync::Arc<CachedBody>,
+    cache_control: &'static str,
+    gzip_ok: bool,
+) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
     let gzipped = gzip_ok && !body.gzip.is_empty();
     let bytes = if gzipped { body.gzip.clone() } else { body.raw.clone() };
     let mut resp = (
