@@ -276,6 +276,22 @@ pub struct DigestStats {
     pub biggest_birth: Option<(CovenantId, u64)>,
 }
 
+/// Token identity a deployer CLAIMED in the genesis payload (the KCC-0021
+/// shape). Every field is an unsigned, non-unique assertion by whoever authored
+/// that transaction: the covenant id stays the canonical identity, and callers
+/// must render these with that provenance rather than as verified facts.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ClaimedTokenMeta {
+    pub name: Option<String>,
+    pub ticker: Option<String>,
+    pub image: Option<String>,
+    pub image_hash: Option<String>,
+    /// Display scale only, never applied to the integers kascov verifies.
+    /// `None` means the deployer declared none, which KCC-0021 reads as 0
+    /// (raw base units) rather than "unknown".
+    pub decimals: Option<u8>,
+}
+
 /// An event joined with its covenant, for cross-covenant feeds.
 #[derive(Clone, Debug, Serialize)]
 pub struct GlobalEventRow {
@@ -3007,18 +3023,15 @@ impl Store {
     }
 
     /// Deployer-claimed token metadata from the genesis transaction's payload.
-    /// Convention (kascov-defined, pending a metadata KCC): the genesis tx of
-    /// a token covenant may carry JSON — directly or hex-encoded, same as the
-    /// payload_tag conventions — with `name` (≤48 chars) and `ticker`/`symbol`
-    /// (≤12), optionally `image` (≤256, surfaced as a link, never hotlinked).
+    /// Convention (kascov-defined, now written up as KCC-0021): the genesis tx
+    /// of a token covenant may carry JSON — directly or hex-encoded, same as
+    /// the payload_tag conventions — with `name` (≤48 chars), `ticker`/`symbol`
+    /// (≤12), optionally `image` (≤256, surfaced as a link, never hotlinked),
+    /// `image_hash` (SHA-256 of the image bytes, the pin rendering verifies)
+    /// and `decimals` (display scale only).
     /// These are CLAIMS by whoever authored the genesis, not unique and not
-    /// validated — callers must present them with that provenance. Returns
-    /// (name, ticker, image, image_hash) — image_hash only when it is 64 hex
-    /// chars (SHA-256 of the image bytes, the pin future rendering verifies).
-    pub fn claimed_token_meta(
-        &self,
-        id: &CovenantId,
-    ) -> Result<Option<(Option<String>, Option<String>, Option<String>, Option<String>)>> {
+    /// validated — callers must present them with that provenance.
+    pub fn claimed_token_meta(&self, id: &CovenantId) -> Result<Option<ClaimedTokenMeta>> {
         let payload: Option<Vec<u8>> = self
             .conn
             .query_row(
@@ -3060,10 +3073,19 @@ impl Store {
         let image_hash = clean(&["image_hash"], 64).filter(|h| {
             h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())
         }).map(|h| h.to_lowercase());
+        // KCC-0021 `decimals`: a display scale only, never applied to the
+        // on-chain integers kascov verifies. Accepts a JSON integer or a
+        // base-10 string (KRC-20 carries its `dec` as a string, and deployers
+        // copy that habit). Bounded 0..=255 after ERC-20's uint8; anything
+        // else is treated as undeclared rather than silently clamped, so a
+        // typo cannot quietly move a token's decimal point.
+        let decimals = v.get("decimals").and_then(|d| {
+            d.as_u64().or_else(|| d.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        }).and_then(|n| u8::try_from(n).ok());
         if name.is_none() && ticker.is_none() {
             return Ok(None);
         }
-        Ok(Some((name, ticker, image, image_hash)))
+        Ok(Some(ClaimedTokenMeta { name, ticker, image, image_hash, decimals }))
     }
 
     /// Cached verified-art row: (status, content_type, bytes, fetched_ms).

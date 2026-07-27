@@ -9,7 +9,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use comfy_table::{presets::UTF8_FULL_CONDENSED, Table};
 use kascov_core::detect::{covenant_sightings, CovenantSighting};
 use kascov_core::node::NodeHandle;
-use kascov_core::store::Store;
+use kascov_core::store::{ClaimedTokenMeta, Store};
 use kascov_core::{BlockHash, CovenantId, Network, TxId};
 
 #[derive(Parser)]
@@ -3971,7 +3971,7 @@ async fn coins_handler(
 /// workers). `alive` keeps liveness available without overloading `status`.
 fn token_row_json(
     t: &kascov_core::tokens::TokenDirRow,
-    claimed: Option<&(Option<String>, Option<String>, Option<String>, Option<String>)>,
+    claimed: Option<&kascov_core::store::ClaimedTokenMeta>,
 ) -> serde_json::Value {
     let id_hex = t.token_id.to_string();
     let mut row = serde_json::json!({
@@ -4004,18 +4004,24 @@ fn token_row_json(
     }
     // Deployer-claimed identity from the genesis payload — claims, not
     // uniqueness; the canonical friendly name above stays primary identity.
-    if let Some((name, ticker, image, image_hash)) = claimed {
-        if let Some(n) = name {
+    if let Some(c) = claimed {
+        if let Some(n) = &c.name {
             row["claimed_name"] = serde_json::json!(n);
         }
-        if let Some(tk) = ticker {
+        if let Some(tk) = &c.ticker {
             row["claimed_ticker"] = serde_json::json!(tk);
         }
-        if let Some(img) = image {
+        if let Some(img) = &c.image {
             row["claimed_image"] = serde_json::json!(img);
         }
-        if let Some(ih) = image_hash {
+        if let Some(ih) = &c.image_hash {
             row["claimed_image_hash"] = serde_json::json!(ih);
+        }
+        // Display scale only. The supply/minted/burned above stay the exact
+        // on-chain integers kascov verified; a consumer that scales must do it
+        // for presentation and never feed the result back as an amount.
+        if let Some(d) = c.decimals {
+            row["claimed_decimals"] = serde_json::json!(d);
         }
         row["metadata_source"] = serde_json::json!("genesis_payload");
     }
@@ -5821,7 +5827,25 @@ fn share_info(
     summary: &kascov_core::store::CovenantSummary,
     network: Network,
 ) -> Result<ShareInfo> {
-    let name = og::friendly_name(&summary.covenant_id.to_string());
+    let nickname = og::friendly_name(&summary.covenant_id.to_string());
+    // A token that named itself in its genesis payload should share as that
+    // name: every link a launchpad or wallet posts otherwise renders as the
+    // canonical nickname, which reads as a different asset entirely. The claim
+    // LEADS but never replaces the nickname, and the description says where it
+    // came from, because a genesis payload is an unsigned, non-unique claim and
+    // must not be presented as verified identity (the same line KCC-0020's
+    // authors drew: claimed metadata never upgrades classification).
+    let claimed = store.claimed_token_meta(&summary.covenant_id)?;
+    let claimed_line = claimed.as_ref().and_then(|c| match (&c.name, &c.ticker) {
+        (Some(n), Some(t)) => Some(format!("{n} (${t})")),
+        (Some(n), None) => Some(n.clone()),
+        (None, Some(t)) => Some(format!("${t}")),
+        (None, None) => None,
+    });
+    let name = match &claimed_line {
+        Some(claim) => format!("{claim} · {nickname}"),
+        None => nickname.clone(),
+    };
     let alive = summary.live_utxos > 0;
     let unit = match network {
         Network::Mainnet => "KAS",
@@ -5855,6 +5879,9 @@ fn share_info(
     );
     if let Some(t) = summary.template.as_deref().filter(|t| !t.is_empty()) {
         description.push_str(&format!(" · {t}"));
+    }
+    if claimed_line.is_some() {
+        description.push_str(" · name claimed in its genesis payload");
     }
     Ok(ShareInfo { name, alive, balance_line, born_line, description })
 }
@@ -6059,7 +6086,7 @@ async fn token_image_handler(
     }
 
     // 2. no verified row: need a claim with BOTH url and hash
-    let Some((_, _, Some(url), Some(want_hash))) = claim else {
+    let Some(ClaimedTokenMeta { image: Some(url), image_hash: Some(want_hash), .. }) = claim else {
         return (StatusCode::NOT_FOUND, "token has no hash-committed image").into_response();
     };
 
@@ -6935,6 +6962,11 @@ struct SearchIndex {
     /// name matches, not just its first. Leading tokens are covered by the
     /// full-name walk over `names`.
     name_tokens: Vec<(String, [u8; 32])>,
+    /// Deployer-claimed token names and tickers, lowercased, same sorted shape.
+    /// Kept SEPARATE from `names` so a hit can be reported as the unsigned,
+    /// non-unique claim it is: two tokens may claim one ticker, and search must
+    /// return both rather than pick a winner and assert an identity.
+    claims: Vec<(String, [u8; 32])>,
     templates: Vec<(String, Vec<[u8; 32]>)>,
 }
 
@@ -6981,7 +7013,22 @@ fn build_search_index(store: &kascov_core::store::Store) -> Result<SearchIndex> 
         ids.sort_unstable();
     }
     templates.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    Ok(SearchIndex { names, name_tokens, templates })
+    // Claimed identity: the name and ticker a token wrote into its own genesis
+    // payload. Typing a ticker is the first thing anyone does on an explorer,
+    // and without this the tokens people actually talk about are unfindable.
+    let mut claims: Vec<(String, [u8; 32])> = Vec::new();
+    for t in store.token_directory()? {
+        let Some(c) = store.claimed_token_meta(&t.token_id)? else { continue };
+        for claim in [c.name.as_deref(), c.ticker.as_deref()].into_iter().flatten() {
+            let claim = claim.trim().to_lowercase();
+            if !claim.is_empty() {
+                claims.push((claim, t.token_id.0));
+            }
+        }
+    }
+    claims.sort_unstable();
+    claims.dedup();
+    Ok(SearchIndex { names, name_tokens, claims, templates })
 }
 
 /// The current index for `network`, rebuilding at most when the covenant set
@@ -7131,6 +7178,16 @@ async fn search_handler(
                     if let Some(s) = store.summary(&kascov_core::CovenantId(id))? {
                         seen.insert(id);
                         push(&s, "name", &mut rows);
+                    }
+                }
+            }
+            // Claimed name/ticker ("KASBTC"). Reported as `claimed` so a caller
+            // can render it as the deployer's assertion, not a verified name.
+            for id in name_prefix_matches(&idx.claims, &q, limit - rows.len()) {
+                if !seen.contains(&id) {
+                    if let Some(s) = store.summary(&kascov_core::CovenantId(id))? {
+                        seen.insert(id);
+                        push(&s, "claimed", &mut rows);
                     }
                 }
             }

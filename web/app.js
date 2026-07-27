@@ -4507,11 +4507,42 @@ function tokenStatusBadge(t) {
   return `<span class="pill ${m.cls}" title="${esc(tip)}">${esc(m.label)}</span>`;
 }
 
-/* token amounts are raw on-chain units (KCC20 carries no decimals kascov
-   would trust); anything non-numeric shows as itself rather than lying */
+/* token amounts are raw on-chain units (KCC20 itself carries no decimals);
+   anything non-numeric shows as itself rather than lying */
 function fmtTokenAmount(a) {
   if (typeof a === 'number' && Number.isFinite(a)) return fmtInt(a);
   return a == null ? '—' : String(a);
+}
+
+/* Scale a base-unit amount for DISPLAY by the decimals the deployer claimed in
+   the genesis payload (KCC-0021). kascov keeps verifying the raw integers; this
+   only decides where the point is drawn, and only when a token actually
+   declared a scale. Undeclared means 0 (raw units), never a guess: assuming 8
+   would silently misread a token that genuinely meant 0. */
+function scaleTokenAmount(a, decimals) {
+  const d = Number(decimals);
+  if (!Number.isInteger(d) || d <= 0 || d > 255) return null;
+  const n = typeof a === 'number' ? a : Number(a);
+  if (!Number.isFinite(n)) return null;
+  const scaled = n / Math.pow(10, d);
+  /* keep it readable: group the integer part, trim trailing zeros in the
+     fraction, and never render exponent notation */
+  const fixed = scaled.toFixed(Math.min(d, 8));
+  const [int, frac = ''] = fixed.split('.');
+  const trimmed = frac.replace(/0+$/, '');
+  const grouped = Number(int).toLocaleString('en-US');
+  return trimmed ? `${grouped}.${trimmed}` : grouped;
+}
+
+/* What to show for a token amount: the scaled figure when a scale was claimed,
+   with the exact base units always retained for the tooltip so the number
+   kascov actually verified is never more than a hover away. */
+function tokenAmountDisplay(a, decimals) {
+  const base = fmtTokenAmount(a);
+  const scaled = scaleTokenAmount(a, decimals);
+  return scaled
+    ? { text: scaled, title: `${base} base units (÷10^${decimals}, decimals claimed on chain)` }
+    : { text: base, title: `${base} base units` };
 }
 
 /* Compact form for the token stat tiles: a supply in raw base units can run to
@@ -4899,13 +4930,21 @@ function renderTokenPage(route) {
   const fieldsLine = (t.fields && Object.keys(t.fields).length
     ? `<div class="tokens-fields token-page-fields">${tokenFieldChips(t.fields)}</div>` : '') + imageLine;
 
+  /* decimals is a DISPLAY scale claimed in the genesis payload; holders is a
+     count and is never scaled by it */
+  const dec = t.claimed_decimals;
   const tiles = [
-    ['supply', t.supply], ['minted', t.minted], ['burned', t.burned], ['holders', t.holders],
+    ['supply', t.supply, true], ['minted', t.minted, true],
+    ['burned', t.burned, true], ['holders', t.holders, false],
   ].filter(([, v]) => v != null);
   const stats = tiles.length
-    ? `<div class="lane-stats token-stats">` + tiles.map(([label, v]) => {
-        const f = fmtTokenAmountShort(v);
-        return `<div class="stat"><span class="stat-n" title="${esc(f.full)}">${esc(f.short)}</span><span class="stat-label">${esc(label)}</span></div>`;
+    ? `<div class="lane-stats token-stats">` + tiles.map(([label, v, scalable]) => {
+        const scaled = scalable ? scaleTokenAmount(v, dec) : null;
+        const f = scaled ? fmtTokenAmountShort(v / Math.pow(10, dec)) : fmtTokenAmountShort(v);
+        const title = scaled
+          ? `${fmtTokenAmount(v)} base units (÷10^${dec}, decimals claimed on chain)`
+          : f.full;
+        return `<div class="stat"><span class="stat-n" title="${esc(title)}">${esc(f.short)}</span><span class="stat-label">${esc(label)}</span></div>`;
       }).join('') + `</div>`
     : '';
 
@@ -4921,7 +4960,7 @@ function renderTokenPage(route) {
       const pct = share != null ? (share >= 9.95 ? share.toFixed(0) : share.toFixed(1)) : null;
       return `<tr>` +
         `<td>${tokenOwnerLink(network, b.owner)}</td>` +
-        `<td class="tokens-supply">${esc(fmtTokenAmount(b.balance))}</td>` +
+        `<td class="tokens-supply" title="${esc(tokenAmountDisplay(b.balance, dec).title)}">${esc(tokenAmountDisplay(b.balance, dec).text)}</td>` +
         `<td class="token-share">${pct != null
           ? `<span class="lane-track token-share-track"><span class="lane-fill" style="width:${Math.max(Math.min(share, 100), 1).toFixed(1)}%"></span></span> ${esc(pct)}%`
           : '<span class="dim">—</span>'}</td>` +
