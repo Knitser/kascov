@@ -6916,6 +6916,15 @@ function tourSeen() {
 }
 
 function updateTourOffer() {
+  /* The how-to section's line is the only entry point that survives the flag,
+     so it stays put (removing it too would leave no way to replay the tour at
+     all) but it must stop greeting a returning reader as new. */
+  const line = document.querySelector('.guide-tourline a');
+  if (line) {
+    line.textContent = tourSeen()
+      ? 'replay the 30-second tour →'
+      : 'new here? take the 30-second tour →';
+  }
   const hero = document.querySelector('#view-landing .hero');
   if (!hero) return;
   const existing = document.getElementById('hero-tour');
