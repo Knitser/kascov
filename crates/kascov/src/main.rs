@@ -6358,6 +6358,8 @@ async fn share_handler(
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:site" content="@Knitser">
+<meta name="twitter:creator" content="@Knitser">
 <meta name="twitter:title" content="{title}">
 <meta name="twitter:description" content="{desc}">
 <meta name="twitter:image" content="{image}">
