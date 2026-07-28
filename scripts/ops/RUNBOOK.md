@@ -123,6 +123,40 @@ for p in 17110 17210 16111 16211; do nc -z -G 5 157.90.7.39 $p && echo "$p OPEN"
 
 Expected: 17110 and 17210 closed, 16111 and 16211 open.
 
+### Remote access
+
+**Nothing proxies kascov.io.** Every hostname (kascov.io, fees, rewind, pulse,
+ironwood.live) resolves straight to this box and Caddy terminates TLS itself.
+There is no edge WAF, no rate limiting, no origin cloaking. Never restrict
+80/443 to a CDN's ranges while that holds — it black-holes every site here.
+It also means the box's address is public by construction, so security has to
+come from the ports being shut, not from the address being unknown.
+
+The state to keep true, and the scripts that restore it:
+
+| port | who may reach it | why |
+| --- | --- | --- |
+| 22 SSH | anyone, **key only** | a key cannot be brute-forced; this is the fallback that makes everything else safe to lock |
+| 3389 RDP | admin IP only | no key auth exists for RDP, and the admin username is public in this repo's history |
+| 5985 WinRM | LocalSubnet | remote management, never needed from the internet |
+| 16111/16211 P2P | anyone | node peering |
+| 17110/17210 RPC | 172.16.0.0/12 | WSL worker only |
+| 80/443 | anyone | there is no proxy in front; see above |
+
+- `harden-1-ssh-keyonly.ps1` — key-only SSH. Validates with `sshd -T` and
+  self-restores its backup on a bad parse. Run this first; RDP is the fallback
+  while it runs.
+- `harden-2-remote-access.ps1` — scopes RDP to the IP of the live SSH session
+  and WinRM to LocalSubnet. Refuses to run unless SSH is already key-only.
+- `harden-3-allow-rdp-from.ps1` — the ISP rotates this box's admin address
+  (two different ranges inside one fortnight), so when RDP goes quiet, SSH in
+  and run this to re-point it at wherever you are now.
+
+Audit trail for why this matters (2026-07-29): 4,972 failed logons in 14 days,
+505 of them against the admin account by name, 120+ source IPs auto-blocked by
+RDPGuard. No successful unauthorized logon — every remote success was the admin
+account from a Thai ISP address, i.e. you.
+
 ## Caddy
 
 ```bash
