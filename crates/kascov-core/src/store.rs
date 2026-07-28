@@ -116,6 +116,13 @@ CREATE TABLE IF NOT EXISTS tokens (
     minted INTEGER,                       -- cumulative proven mints; NULL = not provable
     burned INTEGER,                       -- cumulative proven burns; NULL = not provable
     holders INTEGER NOT NULL DEFAULT 0,   -- distinct owners across live hash-proven cells
+    -- Where the proven supply actually sits, by decoded owner type. For a
+    -- bonding-curve token, covenant-held is the curve's unsold inventory (and
+    -- the locked pool after graduation); wallet-held is what people hold.
+    -- NULL when supply itself is not provable, or when the parts do not sum.
+    held_covenant INTEGER,                -- owner type 0x02
+    held_wallet INTEGER,                  -- owner types 0x00 and 0x03
+    held_script INTEGER,                  -- owner type 0x01
     unresolved_cells INTEGER NOT NULL DEFAULT 0, -- live cells whose state is unproven
     last_activity_daa INTEGER NOT NULL DEFAULT 0,
     fields_json TEXT,                     -- latest proven state fields (label -> hex)
@@ -765,6 +772,14 @@ impl Store {
             // (no deep backfill: bodies beyond node retention are gone, the
             // same limitation tx_index documents above).
             "ALTER TABLE covenant_utxos ADD COLUMN spent_input_index INTEGER",
+            // Where a proven supply actually sits, split by decoded owner type.
+            // Present in the CREATE above for fresh databases; these carry an
+            // existing one forward. Values are filled by the next derivation
+            // pass, so they read NULL until then, which is the same thing they
+            // mean when supply is unprovable: not established.
+            "ALTER TABLE tokens ADD COLUMN held_covenant INTEGER",
+            "ALTER TABLE tokens ADD COLUMN held_wallet INTEGER",
+            "ALTER TABLE tokens ADD COLUMN held_script INTEGER",
         ];
         for sql in &migrations {
             if let Err(e) = conn.execute(sql, []) {

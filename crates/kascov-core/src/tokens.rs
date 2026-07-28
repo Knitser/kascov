@@ -54,7 +54,9 @@ use kascov_decode::kcc20;
 ///    published a supply under an unvalidated badge must be rebuilt to drop it.
 /// 4: identifier type 0x03 admitted, so cells previously rejected as an
 ///    unknown owner type now resolve and their tokens must be re-derived.
-pub const TOKEN_DERIVATION_VERSION: &str = "4";
+/// 5: supply is now split by owner type (covenant / wallet / script), so
+///    existing rows must be rebuilt to populate the new columns.
+pub const TOKEN_DERIVATION_VERSION: &str = "5";
 
 /// Meta key holding the last completed derivation version.
 pub(crate) const TOKEN_DERIVATION_META: &str = "token_derivation_version";
@@ -75,6 +77,12 @@ pub struct TokenDirRow {
     pub minted: Option<i64>,
     pub burned: Option<i64>,
     pub holders: u64,
+    /// Proven supply split by decoded owner type: covenant-held (a bonding
+    /// curve's inventory or a locked pool), wallet-held, script-held. `None`
+    /// on the same gate as `supply`.
+    pub held_covenant: Option<i64>,
+    pub held_wallet: Option<i64>,
+    pub held_script: Option<i64>,
     pub unresolved_cells: u64,
     pub last_activity_daa: u64,
     /// Latest hash-proven state fields as a JSON object (label → hex value),
@@ -831,6 +839,28 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
     }
     let holders = balances.len() as u64;
 
+    // Who actually holds the supply, split by the owner type kascov already
+    // decoded per cell. "Total supply" alone is misleading for a bonding-curve
+    // token: before graduation a large share sits in the curve covenant's own
+    // inventory, and after graduation in the locked AMM pool, neither of which
+    // is in anyone's hands. Both are covenant-owned (type 0x02), while wallet
+    // holdings are pubkey-owned (0x00 signature-authorized, 0x03 authorized by
+    // a co-present P2PK input). Splitting them settles total versus circulating
+    // by MEASUREMENT rather than by argument, and every input is already
+    // hash-proven, so this adds no new trust.
+    let (mut held_covenant, mut held_wallet, mut held_script) = (0i128, 0i128, 0i128);
+    for (owner_key, (bal, _)) in &balances {
+        match owner_key.get(..2) {
+            Some("02") => held_covenant += bal,
+            Some("00") | Some("03") => held_wallet += bal,
+            Some("01") => held_script += bal,
+            // An owner type kascov does not classify cannot be attributed, so
+            // it is deliberately counted in none of the three buckets: the
+            // parts must never silently absorb something unexplained.
+            _ => {}
+        }
+    }
+
     // Sums are stamped only when the full history is provable and clean.
     //
     // `verdict.unvalidated` is part of this gate, not just `invalid`. Most
@@ -846,6 +876,11 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
     let mut supply_out: Option<i64> = None;
     let mut minted_out: Option<i64> = None;
     let mut burned_out: Option<i64> = None;
+    // Published on the same gate as supply: a breakdown of a number kascov
+    // could not prove would be worse than no breakdown at all.
+    let mut held_covenant_out: Option<i64> = None;
+    let mut held_wallet_out: Option<i64> = None;
+    let mut held_script_out: Option<i64> = None;
     if provable {
         match (i64::try_from(supply), i64::try_from(minted), i64::try_from(burned)) {
             (Ok(s), Ok(m), Ok(b)) if supply >= 0 => {
@@ -856,6 +891,16 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
                     supply_out = Some(s);
                     minted_out = Some(m);
                     burned_out = Some(b);
+                    // The frontier already equals supply exactly, and the three
+                    // buckets partition the same balances, so they sum to it by
+                    // construction. Only publish them if that actually holds:
+                    // an unclassified owner type would leave a remainder, and a
+                    // breakdown that does not add up must not ship.
+                    if held_covenant + held_wallet + held_script == frontier {
+                        held_covenant_out = i64::try_from(held_covenant).ok();
+                        held_wallet_out = i64::try_from(held_wallet).ok();
+                        held_script_out = i64::try_from(held_script).ok();
+                    }
                 } else {
                     verdict.flag_unvalidated(format!(
                         "live frontier sums {frontier} but event history derives supply {supply}"
@@ -880,8 +925,9 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
 
     conn.execute(
         "INSERT OR REPLACE INTO tokens (token_id, status, invalid_reason, supply, minted, burned,
-             holders, unresolved_cells, last_activity_daa, fields_json, derived_at_daa)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             holders, held_covenant, held_wallet, held_script,
+             unresolved_cells, last_activity_daa, fields_json, derived_at_daa)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             token_id.as_slice(),
             verdict.status(),
@@ -890,6 +936,9 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
             minted_out,
             burned_out,
             holders,
+            held_covenant_out,
+            held_wallet_out,
+            held_script_out,
             unresolved_cells,
             last_activity,
             fields_json,
@@ -1033,7 +1082,8 @@ pub(crate) fn rederive_affected(
 }
 
 const DIR_SELECT: &str = "SELECT t.token_id, t.status, t.invalid_reason, t.supply, t.minted,
-        t.burned, t.holders, t.unresolved_cells, t.last_activity_daa, t.fields_json,
+        t.burned, t.holders, t.held_covenant, t.held_wallet, t.held_script,
+        t.unresolved_cells, t.last_activity_daa, t.fields_json,
         t.derived_at_daa,
         (SELECT COUNT(*) FROM covenant_utxos u WHERE u.covenant_id = t.token_id AND u.spent_block IS NULL),
         (SELECT COALESCE(SUM(u.value), 0) FROM covenant_utxos u WHERE u.covenant_id = t.token_id AND u.spent_block IS NULL),
@@ -1051,13 +1101,16 @@ fn map_dir_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TokenDirRow> {
         minted: row.get(4)?,
         burned: row.get(5)?,
         holders: row.get(6)?,
-        unresolved_cells: row.get(7)?,
-        last_activity_daa: row.get(8)?,
-        fields_json: row.get(9)?,
-        derived_at_daa: row.get(10)?,
-        live_utxos: row.get(11)?,
-        live_value: row.get(12)?,
-        template: row.get(13)?,
+        held_covenant: row.get(7)?,
+        held_wallet: row.get(8)?,
+        held_script: row.get(9)?,
+        unresolved_cells: row.get(10)?,
+        last_activity_daa: row.get(11)?,
+        fields_json: row.get(12)?,
+        derived_at_daa: row.get(13)?,
+        live_utxos: row.get(14)?,
+        live_value: row.get(15)?,
+        template: row.get(16)?,
     })
 }
 
@@ -1353,6 +1406,57 @@ mod tests {
     }
     fn holder(n: u8, amount: i64) -> St {
         (owner(n), 0x00, amt(amount), 0)
+    }
+    /// Covenant-owned balance (type 0x02): a launchpad curve's own inventory,
+    /// or a locked pool after graduation. Not in anyone's hands.
+    fn covenant_held(n: u8, amount: i64) -> St {
+        (owner(n), 0x02, amt(amount), 0)
+    }
+    /// Presence-authorized wallet balance (type 0x03): same entity kind as a
+    /// 0x00 holder, spent via a co-present P2PK input rather than a signature.
+    fn presence_holder(n: u8, amount: i64) -> St {
+        (owner(n), 0x03, amt(amount), 0)
+    }
+
+    /// Total supply alone misreads a bonding-curve token: much of it is the
+    /// curve's unsold inventory. The split by owner type is what makes
+    /// "circulating" answerable by measurement instead of by argument, and the
+    /// parts must always account for the whole.
+    #[test]
+    fn supply_splits_by_owner_type() {
+        let mut store = test_store("held-split");
+        let outs = [
+            covenant_held(0x11, 700), // the curve still holds this
+            holder(0x22, 200),        // a signature-owned wallet
+            presence_holder(0x33, 100), // a presence-owned wallet (KRON's mode)
+        ];
+        // Genesis mints into a minter cell, then one transition distributes it
+        // into the three owner kinds. The spend is what reveals the program and
+        // lets witness recovery prove the live cells, exactly as on chain.
+        let g0 = minter_state(1000);
+        BlockBuilder::new(1, 100)
+            .event(COV, EventKind::Genesis, TX_G)
+            .out(COV, TX_G, 0, &g0)
+            .apply(&mut store);
+        let mut b = BlockBuilder::new(2, 200)
+            .event(COV, EventKind::Transition, TX_M)
+            .spend(TX_G, 0, TX_M, sig(&outs, &g0));
+        for (i, o) in outs.iter().enumerate() {
+            b = b.out(COV, TX_M, i as u32, o);
+        }
+        b.apply(&mut store);
+
+        let t = row(&store, COV).unwrap();
+        assert_eq!(t.validation, STATUS_VERIFIED);
+        assert_eq!(t.supply, Some(1000));
+        assert_eq!(t.held_covenant, Some(700), "curve inventory is not circulating");
+        assert_eq!(t.held_wallet, Some(300), "0x00 and 0x03 are both wallets");
+        // The invariant that makes the breakdown trustworthy at all.
+        assert_eq!(
+            t.held_covenant.unwrap() + t.held_wallet.unwrap() + t.held_script.unwrap_or(0),
+            t.supply.unwrap(),
+            "the parts must account for the whole"
+        );
     }
 
     /// genesis (minter branch, 0) → mint 100 → split 60/40: the happy path.

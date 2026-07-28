@@ -4028,6 +4028,18 @@ fn token_row_json(
     if let Some(v) = t.burned {
         row["burned"] = serde_json::json!(v);
     }
+    // Where the proven supply sits, by decoded owner type. "Total supply" on
+    // its own misreads a bonding-curve token: much of it is the curve's own
+    // unsold inventory before graduation, and a locked pool after. Publishing
+    // the split lets a consumer compute whichever figure it means instead of
+    // arguing about the word, and every part is hash-proven like the total.
+    if let (Some(cov), Some(wal)) = (t.held_covenant, t.held_wallet) {
+        row["held_by_covenant"] = serde_json::json!(cov);
+        row["held_by_wallet"] = serde_json::json!(wal);
+        if let Some(scr) = t.held_script {
+            row["held_by_script"] = serde_json::json!(scr);
+        }
+    }
     if let Some(fields) =
         t.fields_json.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
     {
