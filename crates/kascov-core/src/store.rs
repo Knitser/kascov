@@ -3089,7 +3089,18 @@ impl Store {
         };
         let name = clean(&["name"], 48);
         let ticker = clean(&["ticker", "symbol"], 12);
-        let image = clean(&["image"], 256);
+        // KCC-0021: the scheme MUST be https:// or ipfs://, and anything else
+        // "MUST be rejected at parse and the field dropped, so that a
+        // non-conforming scheme can never reach the fetch pipeline". Dropping
+        // it HERE rather than at render is the whole point: a payload is
+        // attacker-written, every consumer of this struct inherits whatever
+        // survives, and HTML escaping does not neutralize a scheme. A
+        // `javascript:` image would otherwise reach the token page as a
+        // clickable href, where target/rel do nothing to stop it.
+        let image = clean(&["image"], 256).filter(|u| {
+            let lower = u.to_ascii_lowercase();
+            lower.starts_with("https://") || lower.starts_with("ipfs://")
+        });
         // 64 lowercase hex chars or nothing — a malformed hash is no hash.
         let image_hash = clean(&["image_hash"], 64).filter(|h| {
             h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())
@@ -3900,6 +3911,51 @@ mod tests {
                 .collect(),
             created_utxos: vec![],
             spent_utxos: vec![],
+        }
+    }
+
+    /// A genesis payload is written by whoever deployed the covenant, so every
+    /// string in it is attacker-controlled. KCC-0021 requires an `image` to
+    /// carry an `https://` or `ipfs://` scheme and says anything else "MUST be
+    /// rejected at parse and the field dropped, so that a non-conforming scheme
+    /// can never reach the fetch pipeline". Dropping it here, rather than
+    /// trusting every consumer to re-check, is what keeps a `javascript:` URL
+    /// off the token page, where it would render as a clickable href that
+    /// escaping and rel/target attributes do nothing to defuse.
+    #[test]
+    fn claimed_image_keeps_only_conforming_schemes() {
+        let cases = [
+            ("https://example.test/a.png", true),
+            ("ipfs://bafyexample", true),
+            ("HTTPS://EXAMPLE.TEST/A.PNG", true), // scheme is case-insensitive
+            ("javascript:alert(document.domain)", false),
+            ("  javascript:alert(1)", false), // trimmed before the check
+            ("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=", false),
+            ("http://example.test/a.png", false),
+            ("//example.test/a.png", false),
+        ];
+        for (i, (url, keep)) in cases.iter().enumerate() {
+            let cov = 0xD0 + i as u8;
+            let mut store = test_store(&format!("claim-img-{i}"));
+            let mut blk =
+                block_with_events(1, 100, vec![(cov, EventKind::Genesis, 0xA0 + i as u8)]);
+            let payload = serde_json::json!({
+                "name": "Example", "ticker": "EX", "image": url,
+            });
+            blk.events[0].payload = Some(payload.to_string().into_bytes());
+            store.apply(&blk, BlockHash([1; 32])).unwrap();
+
+            let meta = store.claimed_token_meta(&CovenantId([cov; 32])).unwrap().unwrap();
+            // The sibling fields survive either way: one bad field is dropped,
+            // it never invalidates the whole object.
+            assert_eq!(meta.name.as_deref(), Some("Example"), "{url}");
+            assert_eq!(meta.ticker.as_deref(), Some("EX"), "{url}");
+            assert_eq!(
+                meta.image.is_some(),
+                *keep,
+                "image {url:?} should {} have survived",
+                if *keep { "" } else { "NOT" }
+            );
         }
     }
 
