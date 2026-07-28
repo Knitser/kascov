@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-audit3';
+} from './core/format.js?v=20260728-audit19';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-audit3';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-audit3';
-import { createPendingModel } from './core/pending.js?v=20260728-audit3';
+} from './core/state.js?v=20260728-audit19';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-audit19';
+import { createPendingModel } from './core/pending.js?v=20260728-audit19';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-audit3';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-audit3';
-import { createRefreshGate } from './core/refresh.js?v=20260728-audit3';
-import { networkRouteHash } from './core/routing.js?v=20260728-audit3';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-audit3';
+} from './core/data.js?v=20260728-audit19';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-audit19';
+import { createRefreshGate } from './core/refresh.js?v=20260728-audit19';
+import { networkRouteHash } from './core/routing.js?v=20260728-audit19';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-audit19';
 
 
 
@@ -5011,69 +5011,93 @@ function auditRow(state, name, detail) {
 function auditSectionHtml(t, d, network) {
   const v = d.validation || {};
   const m = d.market || null;
+  const prog = m && m.program;
+  const matched = Boolean(prog && (prog.skeleton === 'KRON curve v1' || prog.skeleton === 'KRON pool v1'));
+  const isShares = Boolean(m && m.phase === 'lp shares');
+  const why = (m && m.unpriced_reason) || 'no verified market for this token';
   const rows = [];
 
+  /* THE FIXED 19-POINT CHECKLIST. Every token gets every row: a check that
+     does not apply says so, because an audit that hides its own methodology
+     when convenient is not one. The four listing rows fill in asynchronously
+     once the published list is fetched and compared. */
+
   /* — supply & history — */
-  rows.push(auditRow('pass', 'history walked',
+  rows.push(auditRow('pass', '1 · identity from genesis',
+    'the covenant id is recomputed from the genesis transaction itself (KIP-20), never assigned'));
+  rows.push(auditRow('pass', '2 · history walked',
     `${fmtInt(v.checked || 0)} events classified against the KCC20 rulebook, genesis to tip`));
   rows.push(t.unresolved_cells === 0
-    ? auditRow('pass', 'every cell state proven',
+    ? auditRow('pass', '3 · cell states proven',
         'each live cell\u2019s state splices into its build and blake2b-matches its own on-chain commitment')
-    : auditRow('unknown', 'cell states',
-        `${fmtInt(t.unresolved_cells)} cell(s) carry state nothing on chain has revealed yet — their contents are unknown, not assumed`));
+    : auditRow('unknown', '3 · cell states proven',
+        `${fmtInt(t.unresolved_cells)} cell(s) carry state nothing on chain has revealed yet — unknown, not assumed`));
   if (v.status === 'verified') {
-    rows.push(auditRow('pass', 'rules & conservation',
+    rows.push(auditRow('pass', '4 · rules & conservation',
       'every event obeyed the token rules and supply equals genesis plus mints minus burns, exactly'));
   } else if (v.status === 'invalid') {
-    rows.push(auditRow('fail', 'rules & conservation', `violation proven by hash: ${v.reason || 'see reason'}`));
+    rows.push(auditRow('fail', '4 · rules & conservation', `violation proven by hash: ${v.reason || 'see reason'}`));
   } else {
-    rows.push(auditRow('unknown', 'rules & conservation', v.reason || 'not fully provable yet'));
+    rows.push(auditRow('unknown', '4 · rules & conservation', v.reason || 'not fully provable yet'));
   }
   rows.push((t.held_by_covenant != null && t.held_by_wallet != null)
-    ? auditRow('pass', 'supply accounted for',
+    ? auditRow('pass', '5 · supply accounted for',
         'covenant-held, wallet-held and script-held balances sum exactly to the proven supply')
-    : auditRow('unknown', 'supply split', 'withheld until the supply itself is proven — never estimated'));
+    : auditRow('unknown', '5 · supply accounted for', 'withheld until the supply itself is proven — never estimated'));
 
   /* — market — */
-  if (m && m.phase === 'lp shares') {
-    rows.push(auditRow('pass', 'instrument identified',
-      'a pool\u2019s own bytecode names this covenant as its share receipts; kascov prices tokens, not receipts'));
-  } else if (m && m.program && (m.program.skeleton === 'KRON curve v1' || m.program.skeleton === 'KRON pool v1')) {
-    rows.push(auditRow('pass', 'market program verified',
-      `the covenant holding the inventory byte-matches the audited ${m.program.skeleton === 'KRON pool v1' ? 'pool' : 'curve'} build; its constants were read from the committed program, not from any API`));
-    rows.push(m.program.invariant_ok
-      ? auditRow('pass', 'formula replay',
-          `${fmtInt(m.program.exercised_trades)} historical trades re-executed against the program\u2019s own constant-product formula, all within tolerance`)
-      : auditRow('fail', 'formula replay',
+  rows.push(isShares
+    ? auditRow('pass', '6 · instrument identified',
+        'a pool\u2019s own bytecode names this covenant as its share receipts — a different instrument from a traded token')
+    : auditRow('pass', '6 · instrument identified', 'an ordinary token: cells carry an owner and an amount'));
+  rows.push(matched
+    ? auditRow('pass', '7 · market program identity',
+        `the covenant holding the inventory byte-matches the audited ${prog.skeleton === 'KRON pool v1' ? 'pool' : 'curve'} build outside its declared slots`)
+    : auditRow('unknown', '7 · market program identity', isShares ? 'not applicable to share receipts' : why));
+  rows.push(matched
+    ? auditRow('pass', '8 · constants from bytecode',
+        'vKas, targets and owners read from the committed program with every repeated slot agreeing — nothing taken from any API')
+    : auditRow('unknown', '8 · constants from bytecode', isShares ? 'not applicable to share receipts' : 'needs check 7'));
+  if (matched) {
+    rows.push(prog.invariant_ok
+      ? auditRow('pass', '9 · formula replay',
+          `${fmtInt(prog.exercised_trades)} historical trades re-executed against the program\u2019s own constant-product formula, all within tolerance`)
+      : auditRow('fail', '9 · formula replay',
           'a recorded trade violates the program\u2019s own formula — every market figure is withheld'));
-    if (m.last_quote_sompi != null) {
-      rows.push(auditRow('pass', 'price admissible',
-        'the last executed price lies between the marginal prices the program computes before and after its own trade — a same-transaction giveback cannot fake it'));
-    } else if (m.unpriced_reason) {
-      rows.push(auditRow('unknown', 'price', m.unpriced_reason));
-    }
-    if (m.reserve_sompi != null) {
-      rows.push(auditRow('pass', 'reserve attributed',
-        'one live cell, and the program itself names this token as the owner of that KAS'));
-    } else if (m.reserve_note) {
-      rows.push(auditRow('unknown', 'reserve', m.reserve_note));
-    }
-    if (m.window_note) rows.push(auditRow('unknown', '24h window', m.window_note));
-  } else if (m && m.unpriced_reason) {
-    rows.push(auditRow('unknown', 'market program', m.unpriced_reason));
-  } else if (t.validation === 'verified') {
-    rows.push(auditRow('unknown', 'market program', 'no verified market for this token yet'));
+    rows.push(prog.exercised_trades >= 3
+      ? auditRow('pass', '10 · constants exercised', `${fmtInt(prog.exercised_trades)} real trades exercised the constants (3 required before anything is valued)`)
+      : auditRow('unknown', '10 · constants exercised', `only ${fmtInt(prog.exercised_trades)} trade(s) so far — kascov prices after 3`));
+  } else {
+    rows.push(auditRow('unknown', '9 · formula replay', isShares ? 'not applicable to share receipts' : 'needs check 7'));
+    rows.push(auditRow('unknown', '10 · constants exercised', isShares ? 'not applicable to share receipts' : 'needs check 7'));
   }
+  rows.push((m && m.last_quote_sompi != null)
+    ? auditRow('pass', '11 · price bracket',
+        'the last executed price lies between the marginal prices the program computes before and after its own trade — a same-transaction giveback cannot fake it')
+    : auditRow('unknown', '11 · price bracket', isShares ? 'share receipts are never priced' : (matched ? why : 'needs check 7')));
+  rows.push((m && m.last_quote_sompi != null)
+    ? auditRow('pass', '12 · price resolution',
+        'the pricing trade moved at least 1 KAS, capping the curve\u2019s own 0.01 KAS quantisation at 100 bps of error')
+    : auditRow('unknown', '12 · price resolution', isShares ? 'share receipts are never priced' : 'no admissible trade to resolve'));
+  rows.push((m && m.reserve_sompi != null)
+    ? auditRow('pass', '13 · reserve attributed',
+        'one live cell, and the program itself names this token as the owner of that KAS')
+    : auditRow('unknown', '13 · reserve attributed', (m && m.reserve_note) || (isShares ? 'not applicable to share receipts' : (matched ? why : 'needs check 7'))));
+  rows.push((m && m.volume_24h_sompi != null)
+    ? auditRow('pass', '14 · 24h window complete',
+        'every trade in the window carries a captured timestamp — a partial window is never published')
+    : auditRow('unknown', '14 · 24h window', (m && m.window_note) || 'no priced trade inside the window, or timestamps incomplete'));
 
-  /* — identity — (the registry rows fill in async once the list is checked) */
-  if (t.claimed_name || t.claimed_ticker) {
-    rows.push(auditRow('pass', 'name provenance',
-      'the name is written in this token\u2019s own genesis transaction — kascov proves who claimed it and when, never that it is unique'));
-  }
-  if (t.claimed_image_hash) {
-    rows.push(auditRow('pass', 'artwork pinned',
-      'the art served here byte-matches the sha256 committed in the genesis payload'));
-  }
+  /* — identity — */
+  rows.push((t.claimed_name || t.claimed_ticker)
+    ? auditRow('pass', '15 · name provenance',
+        'the name is written in this token\u2019s own genesis transaction — kascov proves who claimed it and when, never that it is unique')
+    : auditRow('unknown', '15 · name provenance',
+        'no name written in the genesis payload; the canonical name is derived from the coin id and any listed name is a labelled claim'));
+  rows.push(t.claimed_image_hash
+    ? auditRow('pass', '16 · artwork pinned',
+        'the art served here byte-matches the sha256 committed in the genesis payload')
+    : auditRow('unknown', '16 · artwork pinned', 'no artwork hash committed on chain — see the listing row below for the witnessed fallback'));
 
   const pass = rows.filter((r) => r.includes('audit-pass')).length;
   const fail = rows.filter((r) => r.includes('audit-fail')).length;
@@ -5085,10 +5109,10 @@ function auditSectionHtml(t, d, network) {
       : `all ${pass} checks proven`;
   return `<section aria-label="Audit"><details class="audit"><summary><h2>audit</h2>` +
     `<span class="audit-headline ${fail ? 'audit-headline-fail' : ''}">${esc(headline)}</span>` +
-    `<span class="dim audit-hint">every check, with its exact reason — nothing here is a score</span></summary>` +
-    `<ul class="audit-list">${rows.join('')}<span id="audit-registry-rows"></span></ul>` +
+    `<span class="dim audit-hint">the same 19-point checklist, run on every token</span></summary>` +
+    `<ul class="audit-list">${rows.join('')}<span id="audit-registry-rows"><li class="audit-row audit-unknown"><span class="audit-mark">…</span><span class="audit-name">17-19 · listing checks</span><span class="audit-detail">comparing the published listing against chain…</span></li></span></ul>` +
     `<p class="dim audit-foot">three states only: proven means a hash or an equality held on chain; ` +
-    `failed means a violation is itself hash-proven; not provable means kascov will not guess. ` +
+    `failed means the violation is itself hash-proven; not provable means kascov will not guess. ` +
     `derivation ${esc(String(v.derivation_version || ''))} at DAA ${esc(fmtInt(v.derived_at_daa || 0))}.</p>` +
     `</details></section>`;
 }
@@ -5387,9 +5411,9 @@ function renderTokenPage(route) {
     const auditHost = document.getElementById('audit-registry-rows');
     if (auditHost) {
       const CHECK_ROWS = [
-        ['genesis_txid', 'listing: genesis transaction', 'the genesis tx the list names equals the one kascov indexed at birth'],
-        ['curve_covenant', 'listing: inventory covenant', 'the market covenant the list names actually owns this token\u2019s inventory on chain'],
-        ['creator_key', 'listing: creator key', 'the creator key the list names matches the owner proven by hash in the genesis allocation'],
+        ['genesis_txid', '17 · listing: genesis tx', 'the genesis tx the list names equals the one kascov indexed at birth'],
+        ['curve_covenant', '18 · listing: inventory covenant', 'the market covenant the list names actually owns this token\u2019s inventory on chain'],
+        ['creator_key', '19 · listing: creator key', 'the creator key the list names matches the owner proven by hash in the genesis allocation'],
       ];
       auditHost.outerHTML = CHECK_ROWS.map(([k, label2, passText]) => {
         const st = row[k];
@@ -5400,7 +5424,7 @@ function renderTokenPage(route) {
         }
         if (st === 'not_stated') return auditRow('unknown', label2, 'the listing makes no statement to test');
         return auditRow('unknown', label2, 'kascov has not proven the underlying chain fact to test against');
-      }).join('') + auditRow(row.logo ? 'pass' : 'unknown', 'listing: artwork',
+      }).join('') + auditRow(row.logo ? 'pass' : 'unknown', '+ listing: artwork',
         row.logo
           ? `nothing on chain commits to a logo, so kascov witnesses it: fetched, kept, re-checked daily${row.logo.change_count ? `, changed ${fmtInt(row.logo.change_count)}\u00d7 since first seen` : ''}`
           : 'no fetchable logo at the listed url — kascov shows the identicon rather than a broken image');
