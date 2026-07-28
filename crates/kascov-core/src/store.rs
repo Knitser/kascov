@@ -3820,7 +3820,7 @@ impl Store {
             // and without this a quiet token's market would stay unverified
             // until its next trade happened to touch it.
             const MARKET_META: &str = "market_program_version";
-            const MARKET_VERSION: &str = "1-kron-curve-v1";
+            const MARKET_VERSION: &str = "2-kron-pool-v1";
             if self.meta(MARKET_META)?.as_deref() != Some(MARKET_VERSION) {
                 let markets: std::collections::BTreeSet<[u8; 32]> = self
                     .conn

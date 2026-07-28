@@ -1576,6 +1576,8 @@ a.btn:hover { text-decoration: none; }
 .flag-tpl { background: var(--accent-soft); color: var(--accent); text-transform: none; letter-spacing: 0.02em; }
 /* trades: a buy pulls toward the site's alive green, a sell toward the burn
    tone — the words stay, colour is reinforcement only. */
+.flag-phase { background: rgba(226, 176, 74, 0.12); color: #e2b04a; text-transform: none; letter-spacing: 0.02em; margin-left: 0.35rem; }
+.flag-grad { background: rgba(91, 228, 155, 0.12); color: var(--born, #5be49b); }
 .trade-buy { color: var(--born, #5be49b); font-weight: 600; }
 .trade-sell { color: var(--burn, #f78c6c); font-weight: 600; }
 .market-spot, .market-prog { margin: 0.4rem 0 0; font-size: 0.82rem; }

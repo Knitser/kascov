@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-market';
+} from './core/format.js?v=20260728-pool';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-market';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-market';
-import { createPendingModel } from './core/pending.js?v=20260728-market';
+} from './core/state.js?v=20260728-pool';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-pool';
+import { createPendingModel } from './core/pending.js?v=20260728-pool';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-market';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-market';
-import { createRefreshGate } from './core/refresh.js?v=20260728-market';
-import { networkRouteHash } from './core/routing.js?v=20260728-market';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-market';
+} from './core/data.js?v=20260728-pool';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-pool';
+import { createRefreshGate } from './core/refresh.js?v=20260728-pool';
+import { networkRouteHash } from './core/routing.js?v=20260728-pool';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-pool';
 
 
 
@@ -4663,9 +4663,22 @@ function marketSectionHtml(m, trades, network, toMs) {
         `<div class="stat"><span class="stat-n" title="${esc(tip)}">${esc(v)}</span><span class="stat-label">${esc(label)}</span></div>`
       ).join('') + `</div>`
     : '';
-  return `<section aria-label="Market"><h2>market</h2>` +
+  return `<section aria-label="Market"><h2>market ${marketPhaseChip(m)}</h2>` +
     `<p class="dim">every figure below is derived from chain and checked against the curve program's own formula — nothing comes from any launchpad's API.</p>` +
     tilesHtml + spotLine + whyLine + progLine + tradesHtml + `</section>`;
+}
+
+/* the market lifecycle chip: bonding with progress, graduated, or lp shares */
+function marketPhaseChip(m) {
+  if (!m || !m.phase || m.phase === 'unknown') return '';
+  if (m.phase === 'bonding') {
+    const pct = m.grad_progress_bps != null ? ` · ${(m.grad_progress_bps / 100).toFixed(0)}% to grad` : '';
+    return `<span class="flag flag-phase" title="this token still sells from its bonding curve; the percentage is the curve's live reserve against the graduation target read from its own bytecode">bonding${esc(pct)}</span>`;
+  }
+  if (m.phase === 'graduated') {
+    return `<span class="flag flag-phase flag-grad" title="the bonding curve completed; a pool covenant holds the liquidity now">graduated</span>`;
+  }
+  return `<span class="flag flag-phase" title="this token is a pool's LP share token — its value is the pool's net position per share, which is a different instrument, so kascov does not price it">lp shares</span>`;
 }
 
 function marketCellsHtml(m) {
@@ -4852,7 +4865,7 @@ function renderTokens() {
         : avatarSvg(cid, 26);
     return `<tr>` +
       `<td><a class="token-coin" href="${href}">${rowArt} ${nameHtml}</a></td>` +
-      `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}</td>` +
+      `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}${marketPhaseChip(t.market)}</td>` +
       (validated
         ? `<td class="tokens-supply">${t.supply != null ? esc(fmtTokenAmount(t.supply)) : '<span class="dim">—</span>'}</td>` +
           `<td class="tokens-holders">${t.holders != null ? esc(fmtInt(t.holders)) : '<span class="dim">—</span>'}</td>` +

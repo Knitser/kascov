@@ -190,6 +190,88 @@ pub fn match_kron_curve(program: &[u8]) -> Option<CurveParams> {
     })
 }
 
+/// The pool build the curve graduates into: a 94-byte state block (guard,
+/// kasReserve, tokenReserve, tokenCovenantId, shares, lpTokenCovenantId) in
+/// front of the same 57,475-byte template every curve embeds. The template is
+/// pinned from the copy inside a blake2b-proven curve program; only the two
+/// creator slots vary per deployment, and only the two reserves vary per
+/// state.
+const POOL_FIXTURE: &[u8] = include_bytes!("../../kascov-decode/fixtures/kron_pool_v1.bin");
+const POOL_STATE_LEN: usize = 94;
+const POOL_TEMPLATE_CREATOR_SLOTS: [usize; 2] = [159, 345];
+
+/// What a matched pool program states about itself, all from committed bytes.
+#[derive(Clone, Debug)]
+pub struct PoolParams {
+    pub token_covenant_id: [u8; 32],
+    /// KAS reserve in the program's 0.01 KAS units; sompi is this x 1e6.
+    pub kas_reserve_units: i64,
+    pub token_reserve: i64,
+    pub shares: i64,
+    pub lp_token_covenant_id: [u8; 32],
+    pub creator: [u8; 32],
+}
+
+/// Match a revealed program against the pinned pool build. The state block is
+/// parsed at fixed offsets (its five pushes have fixed widths), the template
+/// part must byte-equal the fixture outside the two creator slots, and the
+/// two creator slots must agree with each other.
+pub fn match_kron_pool(program: &[u8]) -> Option<PoolParams> {
+    if program.len() != POOL_STATE_LEN + POOL_FIXTURE.len() || program[0] != 0x6b {
+        return None;
+    }
+    // 0x6b | 08 k | 08 t | 20 cov | 08 shares | 20 lp  == 94 bytes
+    if program[1] != 0x08
+        || program[10] != 0x08
+        || program[19] != 0x20
+        || program[52] != 0x08
+        || program[61] != 0x20
+    {
+        return None;
+    }
+    let kas_reserve_units = le_i64(&program[2..10])?;
+    let token_reserve = le_i64(&program[11..19])?;
+    let token_covenant_id: [u8; 32] = program[20..52].try_into().ok()?;
+    let shares = le_i64(&program[53..61])?;
+    let lp_token_covenant_id: [u8; 32] = program[62..94].try_into().ok()?;
+
+    let tpl = &program[POOL_STATE_LEN..];
+    let fixture_units = push_units(POOL_FIXTURE);
+    let cand_units = push_units(tpl);
+    if cand_units.len() != fixture_units.len() {
+        return None;
+    }
+    let slots: BTreeSet<usize> = POOL_TEMPLATE_CREATOR_SLOTS.into_iter().collect();
+    let mut fpos = 0usize;
+    let mut cpos = 0usize;
+    for i in 0..fixture_units.len() {
+        let (fr, _) = &fixture_units[i];
+        let (cr, _) = &cand_units[i];
+        if POOL_FIXTURE[fpos..fr.start] != tpl[cpos..cr.start] {
+            return None;
+        }
+        if !slots.contains(&i) && POOL_FIXTURE[fr.clone()] != tpl[cr.clone()] {
+            return None;
+        }
+        fpos = fr.end;
+        cpos = cr.end;
+    }
+    if POOL_FIXTURE[fpos..] != tpl[cpos..] {
+        return None;
+    }
+    let creators: BTreeSet<&Vec<u8>> =
+        POOL_TEMPLATE_CREATOR_SLOTS.iter().map(|&i| &cand_units[i].1).collect();
+    let [creator] = *creators.into_iter().collect::<Vec<_>>().as_slice() else { return None };
+    Some(PoolParams {
+        token_covenant_id,
+        kas_reserve_units,
+        token_reserve,
+        shares,
+        lp_token_covenant_id,
+        creator: creator.as_slice().try_into().ok()?,
+    })
+}
+
 /// D6: the executed price must lie between the marginal prices the program
 /// computes before and after the trade, with one KAS quantum of slack. This
 /// is the anti-donation gate: a same-tx giveback shrinks `base_amount` while
@@ -291,17 +373,46 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
         _ => None,
     };
 
-    let (skeleton, params) = match params_known {
-        Some(v) => ("KRON curve v1", match_kron_curve(&program).map(|mut p| {
-            p.v_kas_units = v; // stable value; the re-match is a cheap sanity pass
-            p
-        })),
-        None => match match_kron_curve(&program) {
-            Some(p) => ("KRON curve v1", Some(p)),
-            None => ("unmatched", None),
-        },
-    };
-    let Some(p) = params else {
+    // Unify the two builds behind one shape: the pool is the same formula
+    // with no virtual reserve (V = 0), and it additionally names its LP token.
+    struct Matched {
+        skeleton: &'static str,
+        token_covenant_id: [u8; 32],
+        v_kas_units: i64,
+        token_reserve: i64,
+        graduation_kas_sompi: Option<i64>,
+        creator: [u8; 32],
+        kas_reserve_sompi: Option<i64>,
+        lp_token_covenant_id: Option<[u8; 32]>,
+        shares: Option<i64>,
+    }
+    let _ = params_known; // the re-match below is cheap either way
+    let matched: Option<Matched> = match_kron_curve(&program)
+        .map(|c| Matched {
+            skeleton: "KRON curve v1",
+            token_covenant_id: c.token_covenant_id,
+            v_kas_units: c.v_kas_units,
+            token_reserve: c.token_reserve,
+            graduation_kas_sompi: Some(c.graduation_kas_sompi),
+            creator: c.creator_fee_owner,
+            kas_reserve_sompi: None,
+            lp_token_covenant_id: None,
+            shares: None,
+        })
+        .or_else(|| {
+            match_kron_pool(&program).map(|p| Matched {
+                skeleton: "KRON pool v1",
+                token_covenant_id: p.token_covenant_id,
+                v_kas_units: 0,
+                token_reserve: p.token_reserve,
+                graduation_kas_sompi: None,
+                creator: p.creator,
+                kas_reserve_sompi: p.kas_reserve_units.checked_mul(1_000_000),
+                lp_token_covenant_id: Some(p.lp_token_covenant_id),
+                shares: Some(p.shares),
+            })
+        });
+    let Some(p) = matched else {
         conn.execute(
             "INSERT OR REPLACE INTO market_programs (covenant_id, program_hash, skeleton)
              VALUES (?1, ?2, 'unmatched')",
@@ -319,7 +430,7 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
     // Full replay of the named token's admitted trades against the program's
     // own formula. Cheap at observed scale (thousands of rows, integer math);
     // incrementality can come with the first covenant that needs it.
-    let v = p.v_sompi();
+    let v = p.v_kas_units as i128 * KAS_QUANTUM_SOMPI;
     let mut trades = conn
         .prepare_cached(
             "SELECT seq, side, base_amount, quote_sompi, kas_before_sompi, kas_after_sompi,
@@ -365,19 +476,22 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
     conn.execute(
         "INSERT OR REPLACE INTO market_programs (covenant_id, program_hash, skeleton,
              v_kas_units, token_reserve, token_covenant_id, graduation_kas_sompi,
-             fee_owners_json, invariant_checked_through_seq, invariant_trades,
+             fee_owners_json, kas_reserve_sompi, lp_token_covenant_id, shares,
+             invariant_checked_through_seq, invariant_trades,
              invariant_ok, exercised_trades)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             covenant_id.as_slice(),
             program_hash.as_slice(),
-            skeleton,
+            p.skeleton,
             p.v_kas_units,
             p.token_reserve,
             p.token_covenant_id.as_slice(),
             p.graduation_kas_sompi,
-            serde_json::json!({ "creator_fee_owner": hex::encode(p.creator_fee_owner) })
-                .to_string(),
+            serde_json::json!({ "creator_fee_owner": hex::encode(p.creator) }).to_string(),
+            p.kas_reserve_sompi,
+            p.lp_token_covenant_id.as_ref().map(|l| l.as_slice().to_vec()),
+            p.shares,
             checked_through,
             exercised,
             ok as i64,
@@ -413,6 +527,15 @@ const WINDOW_SPAN_MS: i64 = 86_400_000;
 /// flagship token), and kascov does not publish numbers it can prove wrong.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct MarketSummary {
+    /// Where this token's market lives: 'bonding' while its curve sells,
+    /// 'graduated' once a pool holds the liquidity, 'lp shares' when the
+    /// token IS a pool's share token (never priced).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Progress toward graduation in basis points, while bonding: the curve's
+    /// live reserve against the graduation target its own bytes state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grad_progress_bps: Option<i64>,
     /// Why nothing below is populated, when nothing is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unpriced_reason: Option<String>,
@@ -467,6 +590,23 @@ pub(crate) fn market_summary(
     scan: u64,
 ) -> Result<MarketSummary> {
     let mut out = MarketSummary::default();
+    // A pool's SHARE token is not a token anyone trades against a curve: its
+    // "price" would be the pool's net position per share, which is a different
+    // instrument. Labelled, never priced.
+    let lp_of: Option<[u8; 32]> = conn
+        .query_row(
+            "SELECT covenant_id FROM market_programs WHERE lp_token_covenant_id = ?1",
+            [token_id.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_err)?;
+    if lp_of.is_some() {
+        out.phase = Some("lp shares".into());
+        out.unpriced_reason =
+            Some("this token is a pool's LP share token; kascov does not price LP shares".into());
+        return Ok(out);
+    }
     let Some(market) = market_covenant_id else {
         out.unpriced_reason =
             Some("no single covenant holds this token's inventory".into());
@@ -478,7 +618,12 @@ pub(crate) fn market_summary(
         out.unpriced_reason = Some("the market covenant's program is not yet verified".into());
         return Ok(out);
     };
-    if prog.skeleton != "KRON curve v1" {
+    out.phase = Some(match prog.skeleton.as_str() {
+        "KRON curve v1" => "bonding".into(),
+        "KRON pool v1" => "graduated".into(),
+        _ => "unknown".into(),
+    });
+    if prog.skeleton != "KRON curve v1" && prog.skeleton != "KRON pool v1" {
         out.unpriced_reason = Some(
             "the covenant holding the inventory runs a program kascov does not recognise,              so no exchange rate it produces can be verified"
                 .into(),
@@ -589,6 +734,12 @@ pub(crate) fn market_summary(
         .is_some_and(|t| t == *token_id);
     if cells == 1 && names_this_token {
         out.reserve_sompi = Some(value);
+        if let (Some(grad), true) = (prog.graduation_kas_sompi, prog.skeleton == "KRON curve v1") {
+            if grad > 0 {
+                out.grad_progress_bps =
+                    (value as i128).checked_mul(10_000).map(|n| (n / grad as i128) as i64);
+            }
+        }
     } else if cells != 1 {
         out.reserve_note = Some("the market covenant's KAS sits in more than one cell".into());
     } else {
@@ -693,6 +844,37 @@ mod tests {
         assert!(match_kron_curve(&evil).is_none(), "almost the build is not the build");
         assert!(match_kron_curve(b"\x51\x52\x53").is_none());
         assert!(match_kron_curve(&[]).is_none());
+    }
+
+    #[test]
+    fn the_pool_build_matches_and_reads_its_state() {
+        // assemble a pool program: guard + five state pushes + the template
+        let mut prog = vec![0x6bu8];
+        let push = |out: &mut Vec<u8>, data: &[u8]| {
+            out.push(data.len() as u8);
+            out.extend_from_slice(data);
+        };
+        push(&mut prog, &67_924_883i64.to_le_bytes()); // kasReserve (0.01 KAS units)
+        push(&mut prog, &31_255_037i64.to_le_bytes()); // tokenReserve
+        push(&mut prog, &[0x7a; 32]); // token covenant
+        push(&mut prog, &1_057_766i64.to_le_bytes()); // shares
+        push(&mut prog, &[0x18; 32]); // lp share token
+        assert_eq!(prog.len(), POOL_STATE_LEN);
+        prog.extend_from_slice(POOL_FIXTURE);
+        let p = match_kron_pool(&prog).expect("state + pinned template must match");
+        assert_eq!(p.kas_reserve_units, 67_924_883);
+        assert_eq!(p.token_reserve, 31_255_037);
+        assert_eq!(p.token_covenant_id, [0x7a; 32]);
+        assert_eq!(p.lp_token_covenant_id, [0x18; 32]);
+        assert_eq!(p.shares, 1_057_766);
+        // a flipped template byte outside the creator slots is a different build
+        let mut evil = prog.clone();
+        let units = push_units(POOL_FIXTURE);
+        let t = (0..units.len())
+            .find(|i| !POOL_TEMPLATE_CREATOR_SLOTS.contains(i) && !units[*i].1.is_empty())
+            .unwrap();
+        evil[POOL_STATE_LEN + units[t].0.end - 1] ^= 0x01;
+        assert!(match_kron_pool(&evil).is_none());
     }
 
     /// The donation attack the bracket exists for: buy 1,000, give 999 back
