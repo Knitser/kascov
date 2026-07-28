@@ -1574,16 +1574,11 @@ a.btn:hover { text-decoration: none; }
 .spend-note { margin: 0.5rem 0 0; font-size: 0.8rem; }
 
 .flag-tpl { background: var(--accent-soft); color: var(--accent); text-transform: none; letter-spacing: 0.02em; }
-/* deliberately NOT the accent colour a verified template gets: this is the
-   deployer's assertion sitting next to facts kascov proved. */
-.flag-claimed {
-  background: var(--surface-2, rgba(255, 255, 255, 0.06));
-  color: var(--faint);
-  text-transform: none;
-  letter-spacing: 0.02em;
-  font-style: italic;
-  font-weight: 600;
-}
+/* the listed-name line sits under the id chip, in the page's quiet voice: it
+   reports somebody else's name and kascov's own check of everything around it,
+   so it must not compete with the verdict badge above it. */
+.listed-line { margin: 0.35rem 0 0; font-size: 0.82rem; line-height: 1.5; }
+.listed-line .flag { margin-right: 0.35rem; }
 /* verified token art: rendered ON TOP of the deterministic avatar; a failed
    or unverified fetch removes itself and the avatar stays — art is a bonus,
    never a broken-image icon */

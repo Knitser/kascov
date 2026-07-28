@@ -34,6 +34,7 @@ import {
   loadChangelog,
   loadCommunity,
   loadLaunchpads,
+  loadRegistry, registryEntry,
 } from './core/data.js?v=20260725-requests';
 import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js';
 import { createRefreshGate } from './core/refresh.js?v=20260725-requests';
@@ -4930,6 +4931,7 @@ function renderTokenPage(route) {
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(id)}" aria-label="copy this token’s covenant id">copy id</button>` +
     `<a class="token-coin-link" href="#/${esc(network)}/c/${esc(id)}">underlying smart coin →</a></p>` +
     `<p class="trade-line" id="token-trade-line" hidden></p>` +
+    `<p class="listed-line" id="token-listed-line" hidden></p>` +
     `</div></header>`;
 
   /* claimed image: a LINK, never hotlinked — an unpinned URL can change under
@@ -5041,6 +5043,40 @@ function renderTokenPage(route) {
     tokenValidationHtml(t, d.validation) +
     holdersSection +
     timelineSection;
+
+  /* A launchpad publishes a name this token never wrote on chain. kascov shows
+     it, and shows what it was able to test: the list also states which
+     transaction was the genesis, which covenant holds the inventory and which
+     key took the genesis allocation, and all three are things kascov proved
+     itself. The name is the part nothing can check, so it stays a claim and the
+     canonical name stays visible beside it. */
+  loadRegistry(network).then(() => {
+    const el = document.getElementById('token-listed-line');
+    const row = registryEntry(network, id);
+    if (!el || !row) return;
+    const label = row.ticker || row.name;
+    if (!label) return;
+    const CHECKS = [
+      ['genesis_txid', 'the genesis transaction'],
+      ['curve_covenant', 'the covenant holding its inventory'],
+      ['creator_key', 'the key that took the genesis allocation'],
+    ];
+    const tested = CHECKS.filter(([k]) => row[k] === 'match' || row[k] === 'differ');
+    const agreed = tested.filter(([k]) => row[k] === 'match');
+    const disagreed = tested.filter(([k]) => row[k] === 'differ');
+    /* Nothing testable was stated: the name is carried, and carried alone. */
+    const verdict = !tested.length
+      ? 'the list states nothing else kascov could check against the chain.'
+      : disagreed.length
+        ? `kascov checked ${tested.length}, and ${disagreed.length === 1 ? 'one disagrees' : `${disagreed.length} disagree`} with the chain: ` +
+          `${disagreed.map(([, d]) => d).join(', ')}.`
+        : `kascov checked ${agreed.length === 1 ? 'the one other thing it states' : `all ${agreed.length} other things it states`} ` +
+          `against the chain and ${agreed.length === 1 ? 'it agrees' : 'they agree'}: ${agreed.map(([, d]) => d).join(', ')}.`;
+    el.innerHTML =
+      `<span class="flag flag-claimed" title="a launchpad publishes this name; nothing on chain carries it. the canonical name kascov derives is ${esc(name)}">listed as ${esc(label)}</span> ` +
+      `<span class="dim">${esc(verdict)}</span>`;
+    el.hidden = false;
+  });
 
   /* launchpad trade button: the genesis payload committed art hosted by a
      known launchpad — an on-chain fact that marks where the token launched.

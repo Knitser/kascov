@@ -59,12 +59,16 @@ test('the grid rescue cards label a claimed hit too', () => {
   assert.match(gridCards, /flag-claimed/);
 });
 
-test('the claim badge does not borrow the styling of a proven fact', () => {
-  const claimed = css.match(/\n\.flag-claimed \{([\s\S]*?)\n\}/);
-  assert.ok(claimed, '.flag-claimed must exist');
-  assert.doesNotMatch(
-    claimed[1], /var\(--accent\)/,
-    'the accent colour marks things kascov derived; a claim is not one',
+test('the claim badge keeps the one styling claims already have', () => {
+  // .flag-claimed is shared with the token page's "named on chain" badge, so
+  // there must be exactly one rule: a second, later definition would silently
+  // win the cascade and this file would be asserting against dead CSS.
+  const rules = [...css.matchAll(/^\.flag-claimed[\s{]/gm)];
+  assert.equal(rules.length, 1, 'exactly one .flag-claimed rule may exist');
+  const claimed = css.match(/^\.flag-claimed \{([^}]*)\}/m);
+  assert.match(
+    claimed[1], /border:[^;]*dashed/,
+    'the dashed border is what marks a badge as somebody\'s claim rather than a derived fact',
   );
 });
 

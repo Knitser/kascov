@@ -348,6 +348,37 @@ async function loadPending(network) {
   });
 }
 
+/* A launchpad's published token list, with every structural statement in it
+   already tested against chain by the worker. This is the ONLY place a name
+   kascov did not derive itself enters the app, so callers must render it as a
+   claim. A 503 (no list reachable) caches a null and the feature hides. */
+async function loadRegistry(network) {
+  const t = state.registry[network];
+  if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
+  return shareFeedRequest(`registry/${network}`, async () => {
+    try {
+      const res = await fetch(`data/${network}/registry.json`, { cache: 'no-cache' });
+      if (!res.ok) { state.registry[network] = { data: null, at: Date.now() }; return null; }
+      const data = await res.json();
+      state.registry[network] = { data, at: Date.now() };
+      return data;
+    } catch (e) {
+      return t ? t.data : null;
+    }
+  });
+}
+
+/* The checked entry for one covenant, or null. Only an entry kascov could
+   actually attach to a token it knows is returned: an entry for a covenant the
+   index has never seen carries a name vouched for by nothing. */
+function registryEntry(network, covId) {
+  const t = state.registry[network];
+  const rows = t && t.data && Array.isArray(t.data.tokens) ? t.data.tokens : null;
+  if (!rows) return null;
+  const row = rows.find((r) => r.covenant_id === covId);
+  return row && row.known ? row : null;
+}
+
 async function loadInscriptions(network) {
   const t = state.inscriptions[network];
   if (t && Date.now() - t.at < TEMPLATES_TTL_MS) return t.data;
@@ -655,6 +686,7 @@ export {
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
   loadDetail, loadAddress, loadLite,
   loadTemplates, loadLanes, loadPending, loadInscriptions, loadLifespans, loadFamilies,
+  loadRegistry, registryEntry,
   loadActivity, loadReorgs, loadDigest,
   galaxyCache, loadGalaxy,
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,
