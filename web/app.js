@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-pool';
+} from './core/format.js?v=20260728-phase';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-pool';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-pool';
-import { createPendingModel } from './core/pending.js?v=20260728-pool';
+} from './core/state.js?v=20260728-phase';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-phase';
+import { createPendingModel } from './core/pending.js?v=20260728-phase';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-pool';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-pool';
-import { createRefreshGate } from './core/refresh.js?v=20260728-pool';
-import { networkRouteHash } from './core/routing.js?v=20260728-pool';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-pool';
+} from './core/data.js?v=20260728-phase';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-phase';
+import { createRefreshGate } from './core/refresh.js?v=20260728-phase';
+import { networkRouteHash } from './core/routing.js?v=20260728-phase';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-phase';
 
 
 
@@ -4672,8 +4672,10 @@ function marketSectionHtml(m, trades, network, toMs) {
 function marketPhaseChip(m) {
   if (!m || !m.phase || m.phase === 'unknown') return '';
   if (m.phase === 'bonding') {
-    const pct = m.grad_progress_bps != null ? ` · ${(m.grad_progress_bps / 100).toFixed(0)}% to grad` : '';
-    return `<span class="flag flag-phase" title="this token still sells from its bonding curve; the percentage is the curve's live reserve against the graduation target read from its own bytecode">bonding${esc(pct)}</span>`;
+    const label = m.grad_progress_bps != null
+      ? `${(m.grad_progress_bps / 100).toFixed(0)}% to grad`
+      : 'bonding';
+    return `<span class="flag flag-phase" title="this token still sells from its bonding curve; the percentage is the curve's live reserve against the graduation target read from its own bytecode">${esc(label)}</span>`;
   }
   if (m.phase === 'graduated') {
     return `<span class="flag flag-phase flag-grad" title="the bonding curve completed; a pool covenant holds the liquidity now">graduated</span>`;
@@ -4864,8 +4866,8 @@ function renderTokens() {
         ? `<span class="token-art-wrap token-art-wrap-sm token-art-listed" title="${esc(GLOSSARY.listed_logo)}">${avatarSvg(cid, 26)}<img class="token-art token-art-sm" src="listed-img/${esc(network)}/${esc(cid)}" alt="" loading="lazy" onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`
         : avatarSvg(cid, 26);
     return `<tr>` +
-      `<td><a class="token-coin" href="${href}">${rowArt} ${nameHtml}</a></td>` +
-      `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}${marketPhaseChip(t.market)}</td>` +
+      `<td><a class="token-coin" href="${href}">${rowArt} ${nameHtml}</a>${marketPhaseChip(t.market)}</td>` +
+      `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}</td>` +
       (validated
         ? `<td class="tokens-supply">${t.supply != null ? esc(fmtTokenAmount(t.supply)) : '<span class="dim">—</span>'}</td>` +
           `<td class="tokens-holders">${t.holders != null ? esc(fmtInt(t.holders)) : '<span class="dim">—</span>'}</td>` +
