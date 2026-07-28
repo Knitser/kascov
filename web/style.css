@@ -1588,6 +1588,27 @@ a.btn:hover { text-decoration: none; }
   white-space: nowrap;
 }
 .flag-grad { background: rgba(91, 228, 155, 0.12); color: var(--born, #5be49b); }
+/* the audit report: a checklist that reads like the receipts it is. summary
+   row stays visible; the details open to the full list. */
+.audit summary { display: flex; align-items: baseline; gap: 0.8rem; cursor: pointer; list-style: none; flex-wrap: wrap; }
+.audit summary::-webkit-details-marker { display: none; }
+.audit summary h2 { display: inline; margin: 0; }
+.audit summary::after { content: '▸'; color: var(--faint); margin-left: auto; }
+.audit[open] summary::after { content: '▾'; }
+.audit-headline { color: var(--born, #5be49b); font-weight: 700; font-size: 0.9rem; }
+.audit-headline-fail { color: var(--burn, #f78c6c); }
+.audit-hint { font-size: 0.78rem; }
+.audit-list { list-style: none; margin: 0.8rem 0 0; padding: 0; }
+.audit-row { display: flex; gap: 0.7rem; align-items: baseline; padding: 0.4rem 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.86rem; }
+.audit-mark { width: 1.1rem; flex: none; text-align: center; font-weight: 700; }
+.audit-pass .audit-mark { color: var(--born, #5be49b); }
+.audit-fail .audit-mark { color: var(--burn, #f78c6c); }
+.audit-unknown .audit-mark { color: var(--faint); }
+.audit-name { flex: none; min-width: 13rem; color: #dfeeeb; font-weight: 600; }
+.audit-fail .audit-name { color: var(--burn, #f78c6c); }
+.audit-detail { color: var(--dim, #7f938e); line-height: 1.45; }
+.audit-foot { margin-top: 0.7rem; font-size: 0.76rem; }
+@media (max-width: 700px) { .audit-name { min-width: 8rem; } .audit-row { flex-wrap: wrap; } }
 .trade-buy { color: var(--born, #5be49b); font-weight: 600; }
 .trade-sell { color: var(--burn, #f78c6c); font-weight: 600; }
 .market-spot, .market-prog { margin: 0.4rem 0 0; font-size: 0.82rem; }
