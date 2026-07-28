@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-method';
+} from './core/format.js?v=20260728-scoped';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-method';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-method';
-import { createPendingModel } from './core/pending.js?v=20260728-method';
+} from './core/state.js?v=20260728-scoped';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-scoped';
+import { createPendingModel } from './core/pending.js?v=20260728-scoped';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-method';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-method';
-import { createRefreshGate } from './core/refresh.js?v=20260728-method';
-import { networkRouteHash } from './core/routing.js?v=20260728-method';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-method';
+} from './core/data.js?v=20260728-scoped';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-scoped';
+import { createRefreshGate } from './core/refresh.js?v=20260728-scoped';
+import { networkRouteHash } from './core/routing.js?v=20260728-scoped';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-scoped';
 
 
 
@@ -5387,12 +5387,14 @@ function renderTokenPage(route) {
     const agreed = tested.filter(([k]) => row[k] === 'match');
     const disagreed = tested.filter(([k]) => row[k] === 'differ');
     /* Nothing testable was stated: the name is carried, and carried alone. */
-    /* one compact verdict — the per-check receipts live in the audit panel */
+    /* one compact verdict, SCOPED to the listing — without naming whose
+       statements these are, "2 of 3" reads like a verdict on the token
+       itself, one panel above an audit that counts 19 */
     const verdict = !tested.length
-      ? 'the list states nothing else kascov could check.'
+      ? 'the listing states nothing else kascov could check.'
       : disagreed.length
-        ? `${agreed.length} of ${tested.length} checked statements match the chain — details in the audit below.`
-        : `all ${agreed.length} checked statements match the chain — details in the audit below.`;
+        ? `${agreed.length} of the listing's ${tested.length} testable statements match the chain — receipts at audit checks 17-19 below.`
+        : `all ${agreed.length} of the listing's testable statements match the chain — receipts at audit checks 17-19 below.`;
     /* Same precedence as the directory, applied to the page's own header: an
        on-chain claim outranks the list, the list fills the gap, and the
        canonical name never disappears. Without this the row read Kron Token
