@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-registry';
+} from './core/format.js?v=20260728-registry2';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-registry';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-registry';
-import { createPendingModel } from './core/pending.js?v=20260728-registry';
+} from './core/state.js?v=20260728-registry2';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-registry2';
+import { createPendingModel } from './core/pending.js?v=20260728-registry2';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-registry';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-registry';
-import { createRefreshGate } from './core/refresh.js?v=20260728-registry';
-import { networkRouteHash } from './core/routing.js?v=20260728-registry';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-registry';
+} from './core/data.js?v=20260728-registry2';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-registry2';
+import { createRefreshGate } from './core/refresh.js?v=20260728-registry2';
+import { networkRouteHash } from './core/routing.js?v=20260728-registry2';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-registry2';
 
 
 
@@ -5065,13 +5065,15 @@ function renderTokenPage(route) {
     const agreed = tested.filter(([k]) => row[k] === 'match');
     const disagreed = tested.filter(([k]) => row[k] === 'differ');
     /* Nothing testable was stated: the name is carried, and carried alone. */
+    const list = (xs) => xs.map(([, d]) => d).join(', ');
     const verdict = !tested.length
       ? 'the list states nothing else kascov could check against the chain.'
       : disagreed.length
-        ? `kascov checked ${tested.length}, and ${disagreed.length === 1 ? 'one disagrees' : `${disagreed.length} disagree`} with the chain: ` +
-          `${disagreed.map(([, d]) => d).join(', ')}.`
-        : `kascov checked ${agreed.length === 1 ? 'the one other thing it states' : `all ${agreed.length} other things it states`} ` +
-          `against the chain and ${agreed.length === 1 ? 'it agrees' : 'they agree'}: ${agreed.map(([, d]) => d).join(', ')}.`;
+        ? `of the ${tested.length} other things it states, ` +
+          `${disagreed.length === 1 ? 'one does not match' : `${disagreed.length} do not match`} the chain: ${list(disagreed)}.`
+        : agreed.length === 1
+          ? `the one other thing it states matches the chain: ${list(agreed)}.`
+          : `all ${agreed.length} other things it states match the chain: ${list(agreed)}.`;
     el.innerHTML =
       `<span class="flag flag-claimed" title="a launchpad publishes this name; nothing on chain carries it. the canonical name kascov derives is ${esc(name)}">listed as ${esc(label)}</span> ` +
       `<span class="dim">${esc(verdict)}</span>`;
