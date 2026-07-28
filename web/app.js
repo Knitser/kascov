@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-audit2';
+} from './core/format.js?v=20260728-audit3';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-audit2';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-audit2';
-import { createPendingModel } from './core/pending.js?v=20260728-audit2';
+} from './core/state.js?v=20260728-audit3';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-audit3';
+import { createPendingModel } from './core/pending.js?v=20260728-audit3';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-audit2';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-audit2';
-import { createRefreshGate } from './core/refresh.js?v=20260728-audit2';
-import { networkRouteHash } from './core/routing.js?v=20260728-audit2';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-audit2';
+} from './core/data.js?v=20260728-audit3';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-audit3';
+import { createRefreshGate } from './core/refresh.js?v=20260728-audit3';
+import { networkRouteHash } from './core/routing.js?v=20260728-audit3';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-audit3';
 
 
 
@@ -5079,7 +5079,7 @@ function auditSectionHtml(t, d, network) {
   const fail = rows.filter((r) => r.includes('audit-fail')).length;
   const unk = rows.filter((r) => r.includes('audit-unknown')).length;
   const headline = fail
-    ? `${fail} violation${fail === 1 ? '' : 's'} proven`
+    ? `${fail} check${fail === 1 ? '' : 's'} failed`
     : unk
       ? `${pass} proven · ${unk} not provable`
       : `all ${pass} checks proven`;
@@ -5404,6 +5404,21 @@ function renderTokenPage(route) {
         row.logo
           ? `nothing on chain commits to a logo, so kascov witnesses it: fetched, kept, re-checked daily${row.logo.change_count ? `, changed ${fmtInt(row.logo.change_count)}\u00d7 since first seen` : ''}`
           : 'no fetchable logo at the listed url — kascov shows the identicon rather than a broken image');
+      /* the listing rows joined the list after the headline was counted —
+         recount so the summary always matches the receipts below it */
+      const rowsNow = [...document.querySelectorAll('.audit-row')];
+      const nFail = rowsNow.filter((x) => x.classList.contains('audit-fail')).length;
+      const nPass = rowsNow.filter((x) => x.classList.contains('audit-pass')).length;
+      const nUnk = rowsNow.filter((x) => x.classList.contains('audit-unknown')).length;
+      const head = document.querySelector('.audit-headline');
+      if (head) {
+        head.textContent = nFail
+          ? `${nFail} check${nFail === 1 ? '' : 's'} failed`
+          : nUnk
+            ? `${nPass} proven · ${nUnk} not provable`
+            : `all ${nPass} checks proven`;
+        head.classList.toggle('audit-headline-fail', nFail > 0);
+      }
     }
   });
 
