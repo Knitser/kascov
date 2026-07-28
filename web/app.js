@@ -4642,7 +4642,9 @@ function marketSectionHtml(m, trades, network, toMs) {
     ? `<p class="dim">${esc(m.unpriced_reason)}</p>` : '';
   const progLine = m.program && m.program.skeleton === 'KRON curve v1'
     ? `<p class="dim market-prog">curve program verified from its own committed bytes: vKas ${esc(fmtInt(m.program.v_kas_units))}, ${esc(fmtInt(m.program.exercised_trades))} trades replayed against its formula${m.program.invariant_ok ? '' : ' — INVARIANT VIOLATION, nothing priced'}.</p>`
-    : '';
+    : m.program && m.program.skeleton === 'KRON pool v1'
+      ? `<p class="dim market-prog">pool program verified from its own committed bytes: ${esc(fmtInt(m.program.exercised_trades))} trades replayed against its constant-product formula, reserves read from its own state block${m.program.invariant_ok ? '' : ' — INVARIANT VIOLATION, nothing priced'}.</p>`
+      : '';
   let tradesHtml = '';
   const rows = Array.isArray(trades) ? trades.filter((t) => t.co_covenants === 0).slice(0, 12) : [];
   if (rows.length) {
@@ -5126,13 +5128,17 @@ function auditMethodHtml(t, v, m) {
   const steps = [
     ['the commitment', 'every hidden covenant program is committed on chain as a 32-byte blake2b-256 fingerprint (OpBlake2b <hash> OpEqual). the program itself only appears when a cell is spent — the spender must reveal it, and consensus checks the fingerprint. kascov recomputes that hash on every reveal and accepts nothing on a mismatch.'],
     ['state without a reveal', 'a cell nobody has spent reveals nothing, so kascov takes a proven sibling program of the same build, splices candidate field values into its state block, and hashes the result against the unspent cell\u2019s own commitment. only an exact hash match is accepted: a wrong guess costs a hash, never a wrong answer. this is how supplies, owners and the creator allocations no launch ever spends are proven.'],
-    ['the market program', 'the covenant holding the inventory is byte-compared against an audited build everywhere outside its declared slots, its constants (vKas, targets, owners) are read out of those slots with every repeated slot required to agree, and then every historical trade is re-executed against the program\u2019s own formula. one flipped byte anywhere else and it simply is not the build — matching is never widened to make a program fit.'],
+    ['the market program', 'the covenant holding the inventory is byte-compared against an audited build everywhere outside its declared slots, its constants (vKas or reserves, targets, owners) are read out of those slots with every repeated slot required to agree, and then every historical trade is re-executed against the program\u2019s own formula. one flipped byte anywhere else and it simply is not the build — matching is never widened to make a program fit.'],
   ];
+  const isPool = prog && /pool/i.test(prog.skeleton || '');
   const repro = prog && prog.program_hash
-    ? `<p class="audit-repro"><span class="audit-repro-label">reproduce it:</span> fetch any transaction that spends the market covenant ` +
+    ? `<p class="audit-repro"><span class="audit-repro-label">reproduce it:</span> fetch the newest transaction that spends the market covenant ` +
       `<span class="mono">${esc(shortHex(prog.covenant_id || '', 10, 8))}</span>, take the final push of its input\u2019s signature script, ` +
       `blake2b-256 it, and compare with <span class="mono">${esc(prog.program_hash)}</span> — the digest kascov verified and the chain committed. ` +
-      `read vKas out of the matched slots and you will get <span class="mono">${esc(fmtInt(prog.v_kas_units))}</span>.</p>`
+      (isPool
+        ? `the opening bytes of that same program are the pool\u2019s state block: its live KAS and token reserves, the exact figures priced above. every trade moves them, so this digest re-stamps with every trade.`
+        : `read vKas out of the matched slots and you will get <span class="mono">${esc(fmtInt(prog.v_kas_units))}</span>.`) +
+      `</p>`
     : '';
   return `<details class="audit-method"><summary>how these proofs work — verify one yourself</summary>` +
     steps.map(([h, b]) => `<p class="audit-step"><span class="audit-step-h">${esc(h)}</span> ${esc(b)}</p>`).join('') +
