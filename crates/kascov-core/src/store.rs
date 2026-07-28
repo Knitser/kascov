@@ -3815,6 +3815,27 @@ impl Store {
         // as must mechanically invalidate every stored trade and price.
         let stamp = token_derivation_stamp();
         if self.meta(TOKEN_DERIVATION_META)?.as_deref() == Some(stamp.as_str()) {
+            // The trade rows are current, but market-program verification has
+            // its own one-shot gate: it arrived after v7 stamped these rows,
+            // and without this a quiet token's market would stay unverified
+            // until its next trade happened to touch it.
+            const MARKET_META: &str = "market_program_version";
+            const MARKET_VERSION: &str = "1-kron-curve-v1";
+            if self.meta(MARKET_META)?.as_deref() != Some(MARKET_VERSION) {
+                let markets: std::collections::BTreeSet<[u8; 32]> = self
+                    .conn
+                    .prepare(
+                        "SELECT DISTINCT market_covenant_id FROM tokens
+                         WHERE market_covenant_id IS NOT NULL",
+                    )
+                    .map_err(db_err)?
+                    .query_map([], |r| r.get::<_, [u8; 32]>(0))
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(db_err)?;
+                crate::market::rederive_market_programs(&self.conn, &markets)?;
+                self.set_meta(MARKET_META, MARKET_VERSION)?;
+            }
             return Ok(0);
         }
         let tx = self.conn.transaction().map_err(db_err)?;
