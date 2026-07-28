@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js';
+} from './core/format.js?v=20260728-registry';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js';
-import { createPendingModel } from './core/pending.js';
+} from './core/state.js?v=20260728-registry';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-registry';
+import { createPendingModel } from './core/pending.js?v=20260728-registry';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260725-requests';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js';
-import { createRefreshGate } from './core/refresh.js?v=20260725-requests';
-import { networkRouteHash } from './core/routing.js';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js';
+} from './core/data.js?v=20260728-registry';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-registry';
+import { createRefreshGate } from './core/refresh.js?v=20260728-registry';
+import { networkRouteHash } from './core/routing.js?v=20260728-registry';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-registry';
 
 
 
