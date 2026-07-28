@@ -286,11 +286,16 @@ pub fn bracket_holds(
     quote_sompi: i128,
     base_amount: i128,
     is_buy: bool,
+    fee_in_bps: i128,
 ) -> bool {
     if base_amount <= 0 || quote_sompi <= 0 || b0 <= 0 || b1 <= 0 {
         return false;
     }
-    let q = KAS_QUANTUM_SOMPI;
+    // One KAS quantum for the program's own quantisation, plus the fee the
+    // build declares it keeps INSIDE the reserve (an AMM pool's LP fee): that
+    // fee moves the executed price off the pure marginal by a bounded, known
+    // amount. Zero for the curve, whose price is exact.
+    let q = KAS_QUANTUM_SOMPI + quote_sompi * fee_in_bps / 10_000;
     let lo_num = if is_buy { v_sompi + k0 - q } else { v_sompi + k1 - q };
     let lo_den = if is_buy { b0 } else { b1 };
     let hi_num = if is_buy { v_sompi + k1 + q } else { v_sompi + k0 + q };
@@ -315,7 +320,15 @@ pub fn bracket_holds(
 /// [`INVARIANT_MAX_GROWTH_PPM`] — the upper bound is the in-covenant-fee
 /// detector: a fee routed into the reserve grows `k` orders of magnitude
 /// faster and refuses the parameters outright.
-pub fn invariant_holds(v_sompi: i128, k0: i128, k1: i128, b0: i128, b1: i128) -> bool {
+pub fn invariant_holds(
+    v_sompi: i128,
+    k0: i128,
+    k1: i128,
+    b0: i128,
+    b1: i128,
+    quote_sompi: i128,
+    fee_in_bps: i128,
+) -> bool {
     let (Some(before), Some(after)) =
         ((v_sompi + k0).checked_mul(b0), (v_sompi + k1).checked_mul(b1))
     else {
@@ -324,8 +337,22 @@ pub fn invariant_holds(v_sompi: i128, k0: i128, k1: i128, b0: i128, b1: i128) ->
     if after < before {
         return false;
     }
-    let Some(growth) = (after - before).checked_mul(1_000_000) else { return false };
-    let Some(cap) = before.checked_mul(INVARIANT_MAX_GROWTH_PPM) else { return false };
+    let Some(growth) = after.checked_sub(before) else { return false };
+    if fee_in_bps == 0 {
+        // the curve: k is constant to within quantisation — 10 ppm is 300x
+        // the measured residual and orders below any hidden fee
+        let (Some(g), Some(cap)) =
+            (growth.checked_mul(1_000_000), before.checked_mul(INVARIANT_MAX_GROWTH_PPM))
+        else {
+            return false;
+        };
+        return g <= cap;
+    }
+    // the pool: k grows by exactly the LP fee held in-reserve, so the cap is
+    // that fee (plus a quantum) scaled by the larger token side — dk from a
+    // KAS-side deposit f is f x B
+    let fee = quote_sompi * fee_in_bps / 10_000 + KAS_QUANTUM_SOMPI;
+    let Some(cap) = fee.checked_mul(b0.max(b1)) else { return false };
     growth <= cap
 }
 
@@ -439,6 +466,10 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
     // own formula. Cheap at observed scale (thousands of rows, integer math);
     // incrementality can come with the first covenant that needs it.
     let v = p.v_kas_units as i128 * KAS_QUANTUM_SOMPI;
+    // What the build keeps inside its reserve per trade: nothing on the
+    // curve, the 20 bps LP fee on the pool (a constant of the pinned
+    // template, identical across every deployment).
+    let fee_in_bps: i128 = if p.skeleton == "KRON pool v1" { 20 } else { 0 };
     let mut trades = conn
         .prepare_cached(
             "SELECT seq, side, base_amount, quote_sompi, kas_before_sompi, kas_after_sompi,
@@ -471,10 +502,11 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
             continue; // stored, never judged: another covenant moved too
         }
         let (k0, k1, b0, b1) = (k0 as i128, k1 as i128, b0 as i128, b1 as i128);
-        if !bracket_holds(v, k0, k1, b0, b1, quote as i128, base as i128, side == "buy") {
+        if !bracket_holds(v, k0, k1, b0, b1, quote as i128, base as i128, side == "buy", fee_in_bps)
+        {
             continue; // off-curve: never priced, never counted
         }
-        if !invariant_holds(v, k0, k1, b0, b1) {
+        if !invariant_holds(v, k0, k1, b0, b1, quote as i128, fee_in_bps) {
             ok = false; // one violation poisons the whole program's figures
             break;
         }
@@ -654,6 +686,7 @@ pub(crate) fn market_summary(
     }
 
     let v = prog.v_kas_units as i128 * KAS_QUANTUM_SOMPI;
+    let fee_in_bps: i128 = if prog.skeleton == "KRON pool v1" { 20 } else { 0 };
     let trades = crate::tokens::token_trades_page(conn, token_id, scan)?;
     // publishable: same-tx-clean, on this market, bracket-passing
     let publishable: Vec<&crate::tokens::TokenTradeRow> = trades
@@ -670,6 +703,7 @@ pub(crate) fn market_summary(
                     t.quote_sompi as i128,
                     t.base_amount as i128,
                     t.side == "buy",
+                    fee_in_bps,
                 )
         })
         .collect();
@@ -898,20 +932,20 @@ mod tests {
         let quote: i128 = 250_000_000_000;
         let k1 = k0 + quote;
         let (b0, b1): (i128, i128) = (10_000_000, 8_000_000);
-        assert!(bracket_holds(v, k0, k1, b0, b1, quote, 2_000_000, true));
+        assert!(bracket_holds(v, k0, k1, b0, b1, quote, 2_000_000, true, 0));
         // the same KAS against a NET one token: the donation. The bracket's
         // upper bound is the after-marginal price, and this lands orders of
         // magnitude above it.
         assert!(
-            !bracket_holds(v, k0, k1, b0, b0 - 1, quote, 1, true),
+            !bracket_holds(v, k0, k1, b0, b0 - 1, quote, 1, true, 0),
             "a donated giveback never prices the trade"
         );
         // the invariant is two-sided: k held exactly passes, k shrinking and
         // k growing past the fee threshold both refuse
-        assert!(invariant_holds(v, k0, k1, b0, b1));
-        assert!(!invariant_holds(v, k0, k0 - quote, b0, b1), "k may not shrink");
+        assert!(invariant_holds(v, k0, k1, b0, b1, quote, 0));
+        assert!(!invariant_holds(v, k0, k0 - quote, b0, b1, quote, 0), "k may not shrink");
         assert!(
-            !invariant_holds(v, k0, k1 + k1 / 100, b0, b1),
+            !invariant_holds(v, k0, k1 + k1 / 100, b0, b1, quote, 0),
             "an in-covenant fee grows k past the cap and refuses the parameters"
         );
     }
