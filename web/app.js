@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-audit19';
+} from './core/format.js?v=20260728-method';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-audit19';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-audit19';
-import { createPendingModel } from './core/pending.js?v=20260728-audit19';
+} from './core/state.js?v=20260728-method';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-method';
+import { createPendingModel } from './core/pending.js?v=20260728-method';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-audit19';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-audit19';
-import { createRefreshGate } from './core/refresh.js?v=20260728-audit19';
-import { networkRouteHash } from './core/routing.js?v=20260728-audit19';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-audit19';
+} from './core/data.js?v=20260728-method';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-method';
+import { createRefreshGate } from './core/refresh.js?v=20260728-method';
+import { networkRouteHash } from './core/routing.js?v=20260728-method';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-method';
 
 
 
@@ -5114,7 +5114,31 @@ function auditSectionHtml(t, d, network) {
     `<p class="dim audit-foot">three states only: proven means a hash or an equality held on chain; ` +
     `failed means the violation is itself hash-proven; not provable means kascov will not guess. ` +
     `derivation ${esc(String(v.derivation_version || ''))} at DAA ${esc(fmtInt(v.derived_at_daa || 0))}.</p>` +
+    auditMethodHtml(t, v, m) +
     `</details></section>`;
+}
+
+/* "verify one yourself": the methodology behind the checklist, with this
+   token's own hashes inlined so a reader can reproduce a proof with nothing
+   but a public node API. This is what the verified badge actually means. */
+function auditMethodHtml(t, v, m) {
+  const prog = m && m.program;
+  const steps = [
+    ['the commitment', 'every hidden covenant program is committed on chain as a 32-byte blake2b-256 fingerprint (OpBlake2b <hash> OpEqual). the program itself only appears when a cell is spent — the spender must reveal it, and consensus checks the fingerprint. kascov recomputes that hash on every reveal and accepts nothing on a mismatch.'],
+    ['state without a reveal', 'a cell nobody has spent reveals nothing, so kascov takes a proven sibling program of the same build, splices candidate field values into its state block, and hashes the result against the unspent cell\u2019s own commitment. only an exact hash match is accepted: a wrong guess costs a hash, never a wrong answer. this is how supplies, owners and the creator allocations no launch ever spends are proven.'],
+    ['the market program', 'the covenant holding the inventory is byte-compared against an audited build everywhere outside its declared slots, its constants (vKas, targets, owners) are read out of those slots with every repeated slot required to agree, and then every historical trade is re-executed against the program\u2019s own formula. one flipped byte anywhere else and it simply is not the build — matching is never widened to make a program fit.'],
+  ];
+  const repro = prog && prog.program_hash
+    ? `<p class="audit-repro"><span class="audit-repro-label">reproduce it:</span> fetch any transaction that spends the market covenant ` +
+      `<span class="mono">${esc(shortHex(prog.covenant_id || '', 10, 8))}</span>, take the final push of its input\u2019s signature script, ` +
+      `blake2b-256 it, and compare with <span class="mono">${esc(prog.program_hash)}</span> — the digest kascov verified and the chain committed. ` +
+      `read vKas out of the matched slots and you will get <span class="mono">${esc(fmtInt(prog.v_kas_units))}</span>.</p>`
+    : '';
+  return `<details class="audit-method"><summary>how these proofs work — verify one yourself</summary>` +
+    steps.map(([h, b]) => `<p class="audit-step"><span class="audit-step-h">${esc(h)}</span> ${esc(b)}</p>`).join('') +
+    repro +
+    `<p class="dim">${esc(`this token's history: ${fmtInt(v.checked || 0)} events checked under derivation ${v.derivation_version || ''}. nothing in this panel came from any launchpad's API.`)}</p>` +
+    `</details>`;
 }
 
 function tokenValidationHtml(t, validation) {

@@ -817,6 +817,10 @@ pub(crate) fn market_summary(
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct MarketProgramRow {
     pub covenant_id: crate::CovenantId,
+    /// blake2b-256 of the revealed program — the same digest the chain's own
+    /// P2SH commitment carries, republished so anyone can recompute it from
+    /// any spending transaction and compare.
+    pub program_hash: String,
     pub skeleton: String,
     pub v_kas_units: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -832,19 +836,20 @@ pub(crate) fn market_program_row(
     covenant_id: &[u8; 32],
 ) -> Result<Option<MarketProgramRow>> {
     conn.query_row(
-        "SELECT covenant_id, skeleton, v_kas_units, token_reserve, graduation_kas_sompi,
-                invariant_ok, exercised_trades
+        "SELECT covenant_id, program_hash, skeleton, v_kas_units, token_reserve,
+                graduation_kas_sompi, invariant_ok, exercised_trades
          FROM market_programs WHERE covenant_id = ?1",
         [covenant_id.as_slice()],
         |r| {
             Ok(MarketProgramRow {
                 covenant_id: crate::CovenantId(r.get(0)?),
-                skeleton: r.get(1)?,
-                v_kas_units: r.get(2)?,
-                token_reserve: r.get(3)?,
-                graduation_kas_sompi: r.get(4)?,
-                invariant_ok: r.get::<_, i64>(5)? == 1,
-                exercised_trades: r.get(6)?,
+                program_hash: hex::encode(r.get::<_, Vec<u8>>(1)?),
+                skeleton: r.get(2)?,
+                v_kas_units: r.get(3)?,
+                token_reserve: r.get(4)?,
+                graduation_kas_sompi: r.get(5)?,
+                invariant_ok: r.get::<_, i64>(6)? == 1,
+                exercised_trades: r.get(7)?,
             })
         },
     )

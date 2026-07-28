@@ -1608,6 +1608,15 @@ a.btn:hover { text-decoration: none; }
 .audit-fail .audit-name { color: var(--burn, #f78c6c); }
 .audit-detail { color: var(--dim, #7f938e); line-height: 1.45; }
 .audit-foot { margin-top: 0.7rem; font-size: 0.76rem; }
+.audit-method { margin-top: 0.9rem; border-top: 1px solid rgba(255,255,255,0.07); padding-top: 0.7rem; }
+.audit-method summary { cursor: pointer; color: var(--accent); font-size: 0.84rem; list-style: none; }
+.audit-method summary::-webkit-details-marker { display: none; }
+.audit-method summary::before { content: '▸ '; }
+.audit-method[open] summary::before { content: '▾ '; }
+.audit-step { font-size: 0.82rem; line-height: 1.55; color: var(--dim, #7f938e); margin: 0.55rem 0 0; }
+.audit-step-h { color: #dfeeeb; font-weight: 700; margin-right: 0.35rem; }
+.audit-repro { font-size: 0.82rem; line-height: 1.6; margin: 0.7rem 0 0; padding: 0.55rem 0.7rem; background: rgba(112,199,186,0.06); border-left: 2px solid var(--accent); word-break: break-all; }
+.audit-repro-label { color: var(--accent); font-weight: 700; margin-right: 0.3rem; }
 @media (max-width: 700px) { .audit-name { min-width: 8rem; } .audit-row { flex-wrap: wrap; } }
 .trade-buy { color: var(--born, #5be49b); font-weight: 600; }
 .trade-sell { color: var(--burn, #f78c6c); font-weight: 600; }
