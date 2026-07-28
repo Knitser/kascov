@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-phaseline';
+} from './core/format.js?v=20260728-marketcol';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-phaseline';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-phaseline';
-import { createPendingModel } from './core/pending.js?v=20260728-phaseline';
+} from './core/state.js?v=20260728-marketcol';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-marketcol';
+import { createPendingModel } from './core/pending.js?v=20260728-marketcol';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-phaseline';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-phaseline';
-import { createRefreshGate } from './core/refresh.js?v=20260728-phaseline';
-import { networkRouteHash } from './core/routing.js?v=20260728-phaseline';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-phaseline';
+} from './core/data.js?v=20260728-marketcol';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-marketcol';
+import { createRefreshGate } from './core/refresh.js?v=20260728-marketcol';
+import { networkRouteHash } from './core/routing.js?v=20260728-marketcol';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-marketcol';
 
 
 
@@ -4668,19 +4668,27 @@ function marketSectionHtml(m, trades, network, toMs) {
     tilesHtml + spotLine + whyLine + progLine + tradesHtml + `</section>`;
 }
 
-/* the market lifecycle chip: bonding with progress, graduated, or lp shares */
+/* The market lifecycle, in plain words rather than launchpad slang — each
+   label carries its own explanation, because kascov never assumes the reader
+   knows what a bonding curve is. */
 function marketPhaseChip(m) {
   if (!m || !m.phase || m.phase === 'unknown') return '';
   if (m.phase === 'bonding') {
-    const label = m.grad_progress_bps != null
-      ? `${(m.grad_progress_bps / 100).toFixed(0)}% to grad`
-      : 'bonding';
-    return `<span class="flag flag-phase" title="this token still sells from its bonding curve; the percentage is the curve's live reserve against the graduation target read from its own bytecode">${esc(label)}</span>`;
+    const pct = m.grad_progress_bps != null ? ` · ${(m.grad_progress_bps / 100).toFixed(0)}%` : '';
+    return `<span class="flag flag-phase" title="this token still sells from its launch curve — a covenant that prices each sale by formula. the percentage is how far its KAS reserve has climbed toward the completion target written in the curve's own bytecode; at 100% the liquidity moves to a trading pool">bonding${esc(pct)}</span>`;
   }
   if (m.phase === 'graduated') {
-    return `<span class="flag flag-phase flag-grad" title="the bonding curve completed; a pool covenant holds the liquidity now">graduated</span>`;
+    return `<span class="flag flag-phase flag-grad" title="the launch curve reached its target and closed; a pool covenant holds the liquidity now and trading continues there — all read from the pool's own committed bytecode">bonding complete</span>`;
   }
-  return `<span class="flag flag-phase" title="this token is a pool's LP share token — its value is the pool's net position per share, which is a different instrument, so kascov does not price it">lp shares</span>`;
+  return `<span class="flag flag-phase" title="these are receipts for a share of a pool's liquidity, named as such by the pool's own bytecode. their value is the pool's holdings per share, not a traded price, so kascov does not price them">pool shares</span>`;
+}
+
+/* the market column cell: the phase, or a dash carrying the reason */
+function marketPhaseCell(m) {
+  const chip = marketPhaseChip(m);
+  if (chip) return `<td class="tokens-phase">${chip}</td>`;
+  const why = (m && m.unpriced_reason) || 'no verified market program for this token';
+  return `<td class="dim" title="${esc(why)}">—</td>`;
 }
 
 function marketCellsHtml(m, network) {
@@ -4866,18 +4874,12 @@ function renderTokens() {
         ? `<span class="token-art-wrap token-art-wrap-sm token-art-listed" title="${esc(GLOSSARY.listed_logo)}">${avatarSvg(cid, 26)}<img class="token-art token-art-sm" src="listed-img/${esc(network)}/${esc(cid)}" alt="" loading="lazy" onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`
         : avatarSvg(cid, 26);
     return `<tr>` +
-      `<td>${(() => {
-        /* the phase chip gets a deliberate second line under the name — as a
-           trailing inline it wrapped wherever each name happened to end, so
-           every row placed it somewhere else */
-        const phase = marketPhaseChip(t.market);
-        return `<a class="token-coin" href="${href}">${rowArt} ${nameHtml}</a>` +
-          (phase ? `<div class="token-phase-line">${phase}</div>` : '');
-      })()}</td>` +
+      `<td><a class="token-coin" href="${href}">${rowArt} ${nameHtml}</a></td>` +
       `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}</td>` +
       (validated
         ? `<td class="tokens-supply">${t.supply != null ? esc(fmtTokenAmount(t.supply)) : '<span class="dim">—</span>'}</td>` +
           `<td class="tokens-holders">${t.holders != null ? esc(fmtInt(t.holders)) : '<span class="dim">—</span>'}</td>` +
+          marketPhaseCell(t.market) +
           marketCellsHtml(t.market, network)
         : `<td class="tokens-value" title="${esc(GLOSSARY.cell_kas)}">${t.live_value != null ? esc(amountWithUsd(t.live_value, network)) : '<span class="dim">—</span>'}</td>`) +
       `<td><span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span></td>` +
@@ -4891,6 +4893,7 @@ function renderTokens() {
     `<thead><tr><th>token</th><th>template</th>` +
     (validated
       ? `<th>supply</th><th>holders</th>` +
+        `<th title="where this token's market stands — read from its own covenant programs, never from a launchpad's API">market</th>` +
         `<th title="${esc(GLOSSARY.market_price)}">price (KAS)</th>` +
         `<th title="${esc(GLOSSARY.market_reserve)}">reserve</th>` +
         `<th title="${esc(GLOSSARY.market_vol)}">vol 24h</th>`
