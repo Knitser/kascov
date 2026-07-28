@@ -52,7 +52,9 @@ use kascov_decode::kcc20;
 ///    to pick up tokens previously filed as generic p2sh commitments.
 /// 3: the supply gate now consults `unvalidated`, so already-derived rows that
 ///    published a supply under an unvalidated badge must be rebuilt to drop it.
-pub const TOKEN_DERIVATION_VERSION: &str = "3";
+/// 4: identifier type 0x03 admitted, so cells previously rejected as an
+///    unknown owner type now resolve and their tokens must be re-derived.
+pub const TOKEN_DERIVATION_VERSION: &str = "4";
 
 /// Meta key holding the last completed derivation version.
 pub(crate) const TOKEN_DERIVATION_META: &str = "token_derivation_version";
@@ -142,6 +144,11 @@ pub fn owner_display(owner_hex: &str) -> String {
         "00" => rest.to_string(),
         "01" => format!("script:{rest}"),
         "02" => format!("covenant:{rest}"),
+        // 0x03 is the same entity as 0x00, an x-only pubkey, so it routes to
+        // the same address page. It is kept distinguishable because the
+        // authorization differs: the cell carries no signature and is spent by
+        // presenting a co-present P2PK input.
+        "03" => format!("presence:{rest}"),
         _ => owner_hex.to_string(),
     }
 }
@@ -243,8 +250,24 @@ fn prove_direct(cells: &mut [Cell]) {
 /// shapes don't always carry them as clean per-output arrays (vault swaps
 /// pack them differently), and hash-gating means wrong guesses only cost a
 /// hash. Values outside this domain could never validate anyway.
-const TYPE_MINTER_DOMAIN: [(u8, u8); 6] =
-    [(0x00, 0x00), (0x00, 0x01), (0x01, 0x00), (0x01, 0x01), (0x02, 0x00), (0x02, 0x01)];
+const TYPE_MINTER_DOMAIN: [(u8, u8); 8] = [
+    (0x00, 0x00),
+    (0x00, 0x01),
+    (0x01, 0x00),
+    (0x01, 0x01),
+    (0x02, 0x00),
+    (0x02, 0x01),
+    // 0x03: an ordinary wallet pubkey authorized by a CO-PRESENT P2PK input
+    // rather than by a signature on the token cell itself. Proven from chain,
+    // not from any published spec: the arm at offset 0x0144 of the deployed
+    // program calls OpTxInputSpk (KIP-17) and rebuilds 0x0000 || 0x20 ||
+    // owner || 0xac, which is verbatim Kaspa Schnorr P2PK; all 143 distinct
+    // type-0x03 owners on mainnet are valid secp256k1 x coordinates (a chance
+    // coincidence would be 2^-143); and 72 such cells have already been spent,
+    // so mainnet consensus itself has executed this arm.
+    (0x03, 0x00),
+    (0x03, 0x01),
+];
 
 /// Proof pass B: witness recovery. For each tx that created still-unproven
 /// cells, the sigscripts of the tx's inputs — the token's own inputs plus
@@ -367,7 +390,12 @@ fn judge(cell: &Cell) -> std::result::Result<Judged, String> {
             }
         }));
     };
-    if !matches!(st.identifier_type, 0x00 | 0x01 | 0x02) {
+    // 0x03 is a pubkey owner like 0x00, differing only in how a spend is
+    // authorized (a co-present P2PK input instead of an inline signature).
+    // It is an AUTHORIZATION mode, not an accounting one: the owner is still a
+    // 32 byte key and conservation is untouched, so admitting it cannot move a
+    // supply figure, only who a balance is attributed to.
+    if !matches!(st.identifier_type, 0x00 | 0x01 | 0x02 | 0x03) {
         return Err(format!(
             "unknown identifier type 0x{:02x} on {}",
             st.identifier_type,
