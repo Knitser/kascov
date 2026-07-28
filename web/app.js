@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-trade';
+} from './core/format.js?v=20260728-trade2';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-trade';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-trade';
-import { createPendingModel } from './core/pending.js?v=20260728-trade';
+} from './core/state.js?v=20260728-trade2';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-trade2';
+import { createPendingModel } from './core/pending.js?v=20260728-trade2';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-trade';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-trade';
-import { createRefreshGate } from './core/refresh.js?v=20260728-trade';
-import { networkRouteHash } from './core/routing.js?v=20260728-trade';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-trade';
+} from './core/data.js?v=20260728-trade2';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-trade2';
+import { createRefreshGate } from './core/refresh.js?v=20260728-trade2';
+import { networkRouteHash } from './core/routing.js?v=20260728-trade2';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-trade2';
 
 
 
@@ -5113,29 +5113,31 @@ function renderTokenPage(route) {
      list whose other statements kascov checked against the chain. The link
      itself always comes from kascov's own curated table, never from the
      fetched list, so a compromised list cannot redirect anyone. */
-  const listedHere = registryEntry(network, id);
-  if (t.claimed_image || listedHere) {
-    Promise.all([loadLaunchpads(), loadRegistry(network)]).then(([pads, reg]) => {
-      const el = document.getElementById('token-trade-line');
-      if (!pads || !el) return;
-      const onNet = (p) => !Array.isArray(p.networks) || p.networks.includes(network);
-      const pad = pads.find((p) =>
-        onNet(p) && Array.isArray(p.image_prefixes) && t.claimed_image &&
-        p.image_prefixes.some((pre) => t.claimed_image.startsWith(pre)))
-        || (listedHere && reg && reg.list_name
-          ? pads.find((p) => onNet(p) && p.listed_by === reg.list_name)
-          : null);
-      if (!pad || !pad.trade_url) return;
-      const url = pad.trade_url.replace('{id}', id);
-      const why = t.claimed_image
-        ? `this token’s genesis committed art hosted by ${pad.name}, which marks where it launched`
-        : `${pad.name} lists this token, and kascov checked that listing’s other statements against the chain`;
-      el.innerHTML = `<a class="trade-btn" href="${esc(url)}" target="_blank" rel="noopener noreferrer" ` +
-        `title="${esc(why)}. kascov only links out; trading happens on their site, and kascov never sees your keys">` +
-        `trade on ${esc(pad.name)} ↗</a>`;
-      el.hidden = false;
-    });
-  }
+  Promise.all([loadLaunchpads(), loadRegistry(network)]).then(([pads, reg]) => {
+    const el = document.getElementById('token-trade-line');
+    if (!pads || !el) return;
+    /* The listing lookup has to happen HERE, not in a guard around this
+       block: registryEntry reads a cache the await above is what fills, so
+       asking before it resolves answers null on every first page load. */
+    const listed = registryEntry(network, id);
+    if (!t.claimed_image && !listed) return;
+    const onNet = (p) => !Array.isArray(p.networks) || p.networks.includes(network);
+    const pad = pads.find((p) =>
+      onNet(p) && Array.isArray(p.image_prefixes) && t.claimed_image &&
+      p.image_prefixes.some((pre) => t.claimed_image.startsWith(pre)))
+      || (listed && reg && reg.list_name
+        ? pads.find((p) => onNet(p) && p.listed_by === reg.list_name)
+        : null);
+    if (!pad || !pad.trade_url) return;
+    const url = pad.trade_url.replace('{id}', id);
+    const why = t.claimed_image
+      ? `this token’s genesis committed art hosted by ${pad.name}, which marks where it launched`
+      : `${pad.name} lists this token, and kascov checked that listing’s other statements against the chain`;
+    el.innerHTML = `<a class="trade-btn" href="${esc(url)}" target="_blank" rel="noopener noreferrer" ` +
+      `title="${esc(why)}. kascov only links out; trading happens on their site, and kascov never sees your keys">` +
+      `trade on ${esc(pad.name)} ↗</a>`;
+    el.hidden = false;
+  });
 }
 
 /* a coin page's "part of token …" backlink — built only from data ALREADY in
