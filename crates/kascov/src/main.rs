@@ -4519,7 +4519,15 @@ async fn tokens_handler(
         let mut tokens: Vec<(u64, String, serde_json::Value)> = Vec::new();
         for t in store.token_directory()? {
             let claimed = store.claimed_token_meta(&t.token_id)?;
-            tokens.push((t.last_activity_daa, t.token_id.to_string(), token_row_json(&t, claimed.as_ref())));
+            let mut row = token_row_json(&t, claimed.as_ref());
+            // The gated market figures. Verified tokens only: an unvalidated
+            // supply must never sit next to a price that implies health.
+            if t.validation == "verified" {
+                if let Ok(m) = store.token_market_summary(&t, false) {
+                    row["market"] = serde_json::to_value(&m)?;
+                }
+            }
+            tokens.push((t.last_activity_daa, t.token_id.to_string(), row));
         }
         // Vault/"minter" covenants keep their legacy row shape (liveness in
         // `status`, no verdict) so old and new frontends render them as
@@ -4716,6 +4724,16 @@ async fn token_handler(
             "tip_daa": tip.map(|t| t.0),
             "tip_at_ms": tip.map(|t| t.1),
             "token": token_row_json(&t, store.claimed_token_meta(&t.token_id)?.as_ref()),
+            "market": if t.validation == "verified" {
+                serde_json::to_value(&store.token_market_summary(&t, true)?)?
+            } else {
+                serde_json::Value::Null
+            },
+            "trades": store
+                .token_trades_page(&token_id, 100)?
+                .iter()
+                .map(|tr| serde_json::to_value(tr))
+                .collect::<std::result::Result<Vec<_>, _>>()?,
             "balances": balances,
             "events": events,
             "validation": {

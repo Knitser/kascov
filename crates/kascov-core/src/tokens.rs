@@ -1417,9 +1417,25 @@ pub(crate) fn rederive_affected(
     for minter in minters {
         todo.extend(derive_minter(conn, minter)?);
     }
+    let mut markets: BTreeSet<[u8; 32]> = BTreeSet::new();
     for token in &todo {
         derive_token(conn, token)?;
+        if let Some(m) = conn
+            .query_row(
+                "SELECT market_covenant_id FROM tokens WHERE token_id = ?1",
+                [token.as_slice()],
+                |r| r.get::<_, Option<[u8; 32]>>(0),
+            )
+            .optional()
+            .map_err(db_err)?
+            .flatten()
+        {
+            markets.insert(m);
+        }
     }
+    // Re-verify each touched token's market program. The skip gate makes the
+    // steady state one hash compare plus an incremental-cheap replay.
+    crate::market::rederive_market_programs(conn, &markets)?;
     Ok(())
 }
 

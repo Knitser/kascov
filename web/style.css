@@ -1574,6 +1574,12 @@ a.btn:hover { text-decoration: none; }
 .spend-note { margin: 0.5rem 0 0; font-size: 0.8rem; }
 
 .flag-tpl { background: var(--accent-soft); color: var(--accent); text-transform: none; letter-spacing: 0.02em; }
+/* trades: a buy pulls toward the site's alive green, a sell toward the burn
+   tone — the words stay, colour is reinforcement only. */
+.trade-buy { color: var(--born, #5be49b); font-weight: 600; }
+.trade-sell { color: var(--burn, #f78c6c); font-weight: 600; }
+.market-spot, .market-prog { margin: 0.4rem 0 0; font-size: 0.82rem; }
+.market-trades td, .market-trades th { white-space: nowrap; }
 /* witnessed launchpad art: a picture somebody published, served from kascov's
    own saved copy. The dashed ring is the tell — chain-proven art replaces the
    identicon cleanly, a witnessed logo never sheds the ring. */

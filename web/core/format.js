@@ -103,6 +103,9 @@ const KIND_META = {
 /* plain-words explanations, surfaced as hover/long-press titles wherever
    jargon appears — the site should never assume the reader knows KIPs */
 const GLOSSARY = {
+  market_price: 'the last executed trade on this token\u2019s bonding curve: the KAS that moved divided by the tokens that moved, in one transaction, verified against the curve program\u2019s own formula. shown before launchpad fees. an em dash means kascov could not prove a price \u2014 hover it for the exact reason',
+  market_reserve: 'the KAS actually sitting in the covenant that sells this token \u2014 what the market could pay out, read from its live cell. this is the honest cousin of TVL',
+  market_vol: 'KAS moved through verified trades of this token in the last 24 hours',
   listed_logo: 'a launchpad publishes this picture; nothing on chain commits to it. kascov shows its own saved copy from a recorded date, not the launchpad\u2019s server, and re-checks the source daily \u2014 if the art changes, that is counted and dated here, never silently swapped',
   cell_kas: 'the KAS sitting inside this token’s own cells, which every Kaspa output must carry to exist. it is NOT what the token is worth and has nothing to do with its price: a token whose cells hold 160 KAS can be worth far more or far less. the money people paid sits in the covenant that sold them, not in the token’s cells',
   claimed_name:'a name the deployer wrote into the coin’s own birth transaction. kascov proves WHO claimed it and WHEN, never that it is true or unique — the name above, built from the coin’s id, is the one kascov derives itself',

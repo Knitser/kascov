@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-witness2';
+} from './core/format.js?v=20260728-market';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-witness2';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-witness2';
-import { createPendingModel } from './core/pending.js?v=20260728-witness2';
+} from './core/state.js?v=20260728-market';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-market';
+import { createPendingModel } from './core/pending.js?v=20260728-market';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-witness2';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-witness2';
-import { createRefreshGate } from './core/refresh.js?v=20260728-witness2';
-import { networkRouteHash } from './core/routing.js?v=20260728-witness2';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-witness2';
+} from './core/data.js?v=20260728-market';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-market';
+import { createRefreshGate } from './core/refresh.js?v=20260728-market';
+import { networkRouteHash } from './core/routing.js?v=20260728-market';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-market';
 
 
 
@@ -4603,6 +4603,96 @@ function tokenFieldChips(fields) {
   }).join('');
 }
 
+/* The three market columns. Every figure is a gated chain derivation shipped
+   as integers; a missing one renders an em dash CARRYING ITS REASON, because
+   "no number" and "zero" are different facts and the page must say which. */
+/* The token page's market section: the four figures that survived the gates,
+   each an integer chain derivation, plus the newest verified trades. A gap is
+   a stated reason, never a blank — and there is deliberately NO market cap
+   here: a marginal price times supply overstates what could actually be taken
+   out, and kascov does not publish numbers it can prove wrong. */
+function marketSectionHtml(m, trades, network, toMs) {
+  if (!m) return '';
+  const tiles = [];
+  if (m.last_quote_sompi != null && m.last_base_amount) {
+    tiles.push(['last price', `${fmtPriceKas(m.last_quote_sompi, m.last_base_amount)} KAS`,
+      `the newest verified trade: ${fmtInt(m.last_quote_sompi)} sompi for ${fmtInt(m.last_base_amount)} tokens, before launchpad fees`]);
+  }
+  if (m.reserve_sompi != null) {
+    tiles.push(['reserve', fmtAmount(m.reserve_sompi, network),
+      GLOSSARY.market_reserve]);
+  }
+  if (m.volume_24h_sompi != null) {
+    tiles.push(['vol 24h', fmtAmount(m.volume_24h_sompi, network),
+      `${fmtInt(m.trades_24h || 0)} verified trades in the last 24 hours`]);
+  }
+  if (m.change_24h_bps != null) {
+    const pct = (m.change_24h_bps / 100).toFixed(2);
+    tiles.push(['24h', `${m.change_24h_bps >= 0 ? '+' : ''}${pct}%`,
+      'last verified price against the newest verified price from before the 24h window']);
+  }
+  if (m.exit_value_sompi != null) {
+    tiles.push(['exit value', fmtAmount(Number(m.exit_value_sompi), network),
+      'what selling ALL circulating supply into this curve would return, capped by the reserve — the honest cousin of market cap, which kascov deliberately does not publish']);
+  }
+  const spotLine = (m.spot_num_sompi != null && m.spot_den)
+    ? `<p class="dim market-spot">spot (next small trade): ${esc(fmtPriceKas(Number(m.spot_num_sompi) - 0, m.spot_den * 1))} KAS — a marginal price; real fills land below or above it with size.</p>`
+    : '';
+  const whyLine = (!tiles.length && m.unpriced_reason)
+    ? `<p class="dim">${esc(m.unpriced_reason)}</p>` : '';
+  const progLine = m.program && m.program.skeleton === 'KRON curve v1'
+    ? `<p class="dim market-prog">curve program verified from its own committed bytes: vKas ${esc(fmtInt(m.program.v_kas_units))}, ${esc(fmtInt(m.program.exercised_trades))} trades replayed against its formula${m.program.invariant_ok ? '' : ' — INVARIANT VIOLATION, nothing priced'}.</p>`
+    : '';
+  let tradesHtml = '';
+  const rows = Array.isArray(trades) ? trades.filter((t) => t.co_covenants === 0).slice(0, 12) : [];
+  if (rows.length) {
+    tradesHtml = `<div class="tokens-tablewrap"><table class="tokens-table market-trades">` +
+      `<thead><tr><th>side</th><th>KAS</th><th>tokens</th><th>price (KAS)</th><th>when</th></tr></thead><tbody>` +
+      rows.map((t) => {
+        const ms = t.accepting_time_ms != null ? t.accepting_time_ms : toMs(t.accepting_daa);
+        return `<tr><td class="${t.side === 'buy' ? 'trade-buy' : 'trade-sell'}">${esc(t.side)}</td>` +
+          `<td class="mono">${esc(fmtAmount(t.quote_sompi, network))}</td>` +
+          `<td class="mono">${esc(fmtInt(t.base_amount))}</td>` +
+          `<td class="mono">${esc(fmtPriceKas(t.quote_sompi, t.base_amount))}</td>` +
+          `<td>${ms != null ? esc(relTimeShort(ms)) : `DAA ${esc(fmtInt(t.accepting_daa))}`}</td></tr>`;
+      }).join('') + `</tbody></table></div>`;
+  }
+  if (!tiles.length && !whyLine && !tradesHtml) return '';
+  const tilesHtml = tiles.length
+    ? `<div class="lane-stats token-stats">` + tiles.map(([label, v, tip]) =>
+        `<div class="stat"><span class="stat-n" title="${esc(tip)}">${esc(v)}</span><span class="stat-label">${esc(label)}</span></div>`
+      ).join('') + `</div>`
+    : '';
+  return `<section aria-label="Market"><h2>market</h2>` +
+    `<p class="dim">every figure below is derived from chain and checked against the curve program's own formula — nothing comes from any launchpad's API.</p>` +
+    tilesHtml + spotLine + whyLine + progLine + tradesHtml + `</section>`;
+}
+
+function marketCellsHtml(m) {
+  const dash = (why) => `<td class="dim" title="${esc(why || 'not derivable from chain yet')}">—</td>`;
+  if (!m) return dash('no market figures for this token') + dash('') + dash('');
+  const why = m.unpriced_reason || '';
+  const price = (m.last_quote_sompi != null && m.last_base_amount)
+    ? `<td class="mono" title="last executed trade: ${esc(fmtInt(m.last_quote_sompi))} sompi for ${esc(fmtInt(m.last_base_amount))} tokens, before launchpad fees">${esc(fmtPriceKas(m.last_quote_sompi, m.last_base_amount))}</td>`
+    : dash(why);
+  const reserve = (m.reserve_sompi != null)
+    ? `<td class="mono">${esc(fmtAmount(m.reserve_sompi, state.network))}</td>`
+    : dash(m.reserve_note || why);
+  const vol = (m.volume_24h_sompi != null)
+    ? `<td class="mono" title="${esc(fmtInt(m.trades_24h || 0))} trades in the last 24h">${esc(fmtAmount(m.volume_24h_sompi, state.network))}</td>`
+    : dash(m.window_note || (m.trades_24h == null ? 'no priced trade in the last 24 hours' : why));
+  return price + reserve + vol;
+}
+
+/* price per whole token in KAS, rendered from the exact integer pair — the
+   division happens only here, for display, never for arithmetic */
+function fmtPriceKas(quoteSompi, baseAmount) {
+  const px = quoteSompi / baseAmount / 1e8;
+  if (!isFinite(px) || px <= 0) return '—';
+  const digits = px >= 1 ? 4 : px >= 0.0001 ? 6 : 8;
+  return px.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '');
+}
+
 function renderTokens() {
   const network = state.network;
   const view = $('#view-tokens');
@@ -4765,7 +4855,8 @@ function renderTokens() {
       `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}</td>` +
       (validated
         ? `<td class="tokens-supply">${t.supply != null ? esc(fmtTokenAmount(t.supply)) : '<span class="dim">—</span>'}</td>` +
-          `<td class="tokens-holders">${t.holders != null ? esc(fmtInt(t.holders)) : '<span class="dim">—</span>'}</td>`
+          `<td class="tokens-holders">${t.holders != null ? esc(fmtInt(t.holders)) : '<span class="dim">—</span>'}</td>` +
+          marketCellsHtml(t.market)
         : '') +
       `<td class="tokens-value" title="${esc(GLOSSARY.cell_kas)}">${t.live_value != null ? esc(amountWithUsd(t.live_value, network)) : '<span class="dim">—</span>'}</td>` +
       `<td><span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span></td>` +
@@ -4777,7 +4868,12 @@ function renderTokens() {
   const tableHtml = (list) =>
     `<div class="tokens-tablewrap"><table class="tokens-table">` +
     `<thead><tr><th>token</th><th>template</th>` +
-    (validated ? `<th>supply</th><th>holders</th>` : '') +
+    (validated
+      ? `<th>supply</th><th>holders</th>` +
+        `<th title="${esc(GLOSSARY.market_price)}">price (KAS)</th>` +
+        `<th title="${esc(GLOSSARY.market_reserve)}">reserve</th>` +
+        `<th title="${esc(GLOSSARY.market_vol)}">vol 24h</th>`
+      : '') +
     `<th title="${esc(GLOSSARY.cell_kas)}">cell kas</th><th>state</th>${validated ? '<th>validation</th>' : ''}<th>last activity</th><th>technical</th></tr></thead>` +
     `<tbody>${list.map(rowHtml).join('')}</tbody></table></div>`;
   const selected = selectTokens(shown, tokenDirectoryUi);
@@ -5095,6 +5191,7 @@ function renderTokenPage(route) {
   view.innerHTML = back + header + fieldsLine +
     stats +
     supplySplit +
+    marketSectionHtml(d.market, d.trades, network, toMs) +
     tokenValidationHtml(t, d.validation) +
     holdersSection +
     timelineSection;

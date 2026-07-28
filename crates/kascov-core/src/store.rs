@@ -3873,6 +3873,25 @@ impl Store {
             }
             tx.commit().map_err(db_err)?;
         }
+        // Verify every market covenant the derivation just linked: read its
+        // program constants out of committed bytes and replay its trades.
+        // A failure here downgrades that covenant's figures, never the pass.
+        {
+            let markets: std::collections::BTreeSet<[u8; 32]> = self
+                .conn
+                .prepare(
+                    "SELECT DISTINCT market_covenant_id FROM tokens
+                     WHERE market_covenant_id IS NOT NULL",
+                )
+                .map_err(db_err)?
+                .query_map([], |r| r.get::<_, [u8; 32]>(0))
+                .map_err(db_err)?
+                .collect::<std::result::Result<_, _>>()
+                .map_err(db_err)?;
+            if let Err(err) = crate::market::rederive_market_programs(&self.conn, &markets) {
+                tracing::warn!("market-program verification failed: {err}");
+            }
+        }
         self.set_meta(TOKEN_DERIVATION_META, &stamp)?;
         Ok(ids.len() as u64)
     }
@@ -3907,6 +3926,27 @@ impl Store {
         limit: u64,
     ) -> Result<Vec<crate::tokens::TokenEventRow>> {
         crate::tokens::token_events_page(&self.conn, &id.0, after_seq, limit)
+    }
+
+    /// The gated market summary for one token, computed at serve time. `deep`
+    /// widens the trade scan from the directory's 32 to a token page's 1000.
+    pub fn token_market_summary(
+        &self,
+        row: &crate::tokens::TokenDirRow,
+        deep: bool,
+    ) -> Result<crate::market::MarketSummary> {
+        let tip_ms = self.tip()?.map(|(_, ms)| ms as i64);
+        crate::market::market_summary(
+            &self.conn,
+            &row.token_id.0,
+            row.market_covenant_id.as_ref().map(|c| &c.0),
+            row.held_covenant,
+            row.held_wallet,
+            row.held_script,
+            row.trades_missing_time,
+            tip_ms,
+            if deep { 1000 } else { 32 },
+        )
     }
 
     /// Newest admitted trades first, as stored by the derivation.
