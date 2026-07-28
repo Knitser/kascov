@@ -4948,6 +4948,38 @@ function renderTokenPage(route) {
       }).join('') + `</div>`
     : '';
 
+  /* Where the supply actually sits. "Total supply" alone misreads a
+     bonding-curve token: much of it can still be the launch covenant's own
+     unsold inventory, or a locked pool after graduation, neither of which is
+     in anyone's hands. The worker only sends this when the parts reconcile to
+     the proven total, so an absent breakdown means "not established" and the
+     UI simply says nothing rather than guessing. */
+  const hw = t.held_by_wallet, hc = t.held_by_covenant, hs = t.held_by_script;
+  let supplySplit = '';
+  if (typeof hw === 'number' && typeof hc === 'number' && t.supply > 0) {
+    const parts = [
+      ['in wallets', hw, 'split-wallet', 'held by ordinary keys, spendable by their owners'],
+      ['covenant held', hc, 'split-covenant', 'held by the launch covenant itself, a bonding curve’s unsold inventory or a locked pool'],
+      ['script held', hs || 0, 'split-script', 'held by a script hash'],
+    ].filter(([, v]) => v > 0);
+    const pct = (v) => (v / t.supply) * 100;
+    supplySplit =
+      `<div class="supply-split">` +
+      `<p class="supply-split-head">where the supply sits <span class="dim">verified from chain, not from any registry</span></p>` +
+      `<div class="supply-split-bar" role="img" aria-label="${esc(parts.map(([l, v]) => `${l} ${pct(v).toFixed(1)}%`).join(', '))}">` +
+      parts.map(([, v, cls]) => `<span class="${cls}" style="width:${pct(v).toFixed(2)}%"></span>`).join('') +
+      `</div>` +
+      `<ul class="supply-split-keys">` +
+      parts.map(([label, v, cls, tip]) => {
+        const d = tokenAmountDisplay(v, dec);
+        return `<li title="${esc(tip)}"><span class="supply-split-dot ${cls}"></span>` +
+          `<span class="supply-split-label">${esc(label)}</span> ` +
+          `<strong>${esc(pct(v) >= 9.95 ? pct(v).toFixed(0) : pct(v).toFixed(1))}%</strong> ` +
+          `<span class="dim" title="${esc(d.title)}">${esc(d.text)}</span></li>`;
+      }).join('') +
+      `</ul></div>`;
+  }
+
   /* top holders: balance share against the live supply when the worker gave
      one, else against the sum of what it listed — never a made-up total */
   const balances = Array.isArray(d.balances) ? d.balances : [];
@@ -4989,6 +5021,7 @@ function renderTokenPage(route) {
 
   view.innerHTML = back + header + fieldsLine +
     stats +
+    supplySplit +
     tokenValidationHtml(t, d.validation) +
     holdersSection +
     timelineSection;
