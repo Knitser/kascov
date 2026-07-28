@@ -1,6 +1,7 @@
 mod og;
 mod preflight;
 mod registry;
+mod witness;
 
 use std::collections::{HashSet, VecDeque};
 
@@ -1187,6 +1188,9 @@ async fn serve(
         // try_sends into this queue and a per-network task does the POSTs.
         let (hook_tx, hook_rx) = tokio::sync::mpsc::channel::<HookEvent>(HOOK_QUEUE);
         tokio::spawn(webhook_delivery_forever(network, db.clone(), hook_rx));
+        // Witnessed launchpad logos: a background pinner, so a page view never
+        // triggers an outbound fetch to a host a third-party list chose.
+        tokio::spawn(witness_forever(network, base_dir.clone()));
         tokio::spawn(follow_forever(
             network,
             cli.rpc.clone(),
@@ -1372,6 +1376,9 @@ async fn serve(
         .route("/og/{network}/{id}", get(og_card_handler))
         .route("/badge/{network}/{id}", get(badge_handler))
         .route("/img/{network}/{id}", get(token_image_handler))
+        // witnessed launchpad logos: kascov's own copy, never the proven /img
+        // namespace — that one's cache headers promise chain-proven bytes
+        .route("/listed-img/{network}/{id}", get(listed_img_handler))
         .route("/data/{network}/index.json", get(data_index_handler))
         .route("/share/{network}/{id}", get(share_handler))
         .route("/sitemap.xml", get(sitemap_handler))
@@ -3839,6 +3846,7 @@ async fn registry_handler(
 
     let list_name = registry::list_name(&body);
     let db = state.base_dir.join(format!("{network}.db"));
+    let db2 = db.clone();
     let built = tokio::task::spawn_blocking(move || -> Result<String> {
         let store = kascov_core::store::Store::open(&db, network)?;
         let mut checked = Vec::with_capacity(entries.len());
@@ -3863,6 +3871,31 @@ async fn registry_handler(
             checked.push(registry::check(entry, &facts));
         }
         let agreed = checked.iter().filter(|c| c.all_checks_passed).count();
+        // Witnessed logos ride along so the client knows which tokens have a
+        // copy worth asking /listed-img for, and how often the art has moved.
+        let mut tokens_json: Vec<serde_json::Value> = Vec::with_capacity(checked.len());
+        {
+            let witness_conn = rusqlite::Connection::open_with_flags(
+                &db2,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .ok();
+            for c in &checked {
+                let mut v = serde_json::to_value(c)?;
+                if let Some(conn) = &witness_conn {
+                    if let Ok(Some(row)) = witness::load_row(conn, &c.covenant_id) {
+                        if row.state == "witnessed" {
+                            v["logo"] = serde_json::json!({
+                                "witnessed_at_ms": row.first_seen_ms,
+                                "change_count": row.change_count,
+                                "last_change_ms": row.last_change_ms,
+                            });
+                        }
+                    }
+                }
+                tokens_json.push(v);
+            }
+        }
         Ok(serde_json::json!({
             "network": network.to_string(),
             // the publisher's own name, matched against kascov's curated
@@ -3870,9 +3903,9 @@ async fn registry_handler(
             "list_name": list_name,
             "source": std::env::var("KASCOV_REGISTRY_URL").ok(),
             "fetched_at_ms": now_ms(),
-            "listed": checked.len(),
+            "listed": tokens_json.len(),
             "agreed_with_chain": agreed,
-            "tokens": checked,
+            "tokens": tokens_json,
         })
         .to_string())
     })
@@ -3891,6 +3924,249 @@ async fn registry_handler(
             .into_response(),
         _ => fail("could not check the list against the index"),
     }
+}
+
+/// One client for logo fetches. Redirects are NOT followed automatically:
+/// every hop gets its own SSRF preflight, because no on-chain commitment binds
+/// any of these URLs and the list that carries them is third-party controlled.
+fn witness_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
+                .user_agent(concat!("kascov/", env!("CARGO_PKG_VERSION"), " (+https://kascov.io)"))
+                .build()
+                .map_err(|err| tracing::error!("witness client unavailable: {err}"))
+                .ok()
+        })
+        .as_ref()
+}
+
+/// Fetch one listed logo: preflight every hop, cap the body while reading it,
+/// and classify what came back. The Content-Type header is never trusted —
+/// the bytes speak for themselves in `process_image`.
+async fn fetch_logo(client: &reqwest::Client, url: &str) -> witness::Checked {
+    let mut current = url.to_string();
+    for _hop in 0..3 {
+        let vet = current.clone();
+        // blocking DNS — keep it off the runtime workers
+        let allowed = tokio::task::spawn_blocking(move || webhook_target_allowed(&vet)).await;
+        if !matches!(allowed, Ok(Ok(()))) {
+            return witness::Checked::Failed;
+        }
+        let resp = match client
+            .get(&current)
+            .header(reqwest::header::ACCEPT, "image/*")
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => return witness::Checked::Failed,
+        };
+        if resp.status().is_redirection() {
+            let next = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|loc| reqwest::Url::parse(&current).ok()?.join(loc).ok());
+            let Some(next) = next.filter(|u| matches!(u.scheme(), "http" | "https")) else {
+                return witness::Checked::Failed;
+            };
+            current = next.to_string();
+            continue;
+        }
+        if !resp.status().is_success() {
+            return witness::Checked::Failed;
+        }
+        if resp.content_length().is_some_and(|n| n as usize > witness::MAX_SOURCE_BYTES) {
+            return witness::Checked::NotAnImage;
+        }
+        // Content-Length is a hint; the cap is enforced while reading.
+        let mut resp = resp;
+        let mut body: Vec<u8> = Vec::new();
+        loop {
+            match resp.chunk().await {
+                Ok(Some(c)) => {
+                    body.extend_from_slice(&c);
+                    if body.len() > witness::MAX_SOURCE_BYTES {
+                        return witness::Checked::NotAnImage;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => return witness::Checked::Failed,
+            }
+        }
+        return match tokio::task::spawn_blocking(move || witness::process_image(&body)).await {
+            Ok(Ok(t)) => witness::Checked::Image(t),
+            Ok(Err(_)) => witness::Checked::NotAnImage,
+            Err(_) => witness::Checked::Failed,
+        };
+    }
+    witness::Checked::Failed
+}
+
+/// The background pinner: read the published list on a slow cycle, witness
+/// anything new or due, and record what changed. Sequential and rate-limited —
+/// this is a courtesy crawler, not a scraper, and an anonymous page view must
+/// never be what triggers an outbound fetch.
+async fn witness_forever(network: Network, base_dir: std::path::PathBuf) {
+    let Some(client) = witness_client() else { return };
+    let archive_path = base_dir.join(format!("{network}.db"));
+    let media_path = witness::media_db_path(&base_dir, &network.to_string());
+    loop {
+        let body = match registry_client() {
+            Some(c) => registry::fetch_list(c).await.ok(),
+            None => None,
+        };
+        let entries =
+            body.as_deref().and_then(|b| registry::parse_list(b, &network.to_string()).ok());
+        let Some(entries) = entries else {
+            // no list for this network (or unreachable): look again in an hour
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            continue;
+        };
+        let now = now_ms() as i64;
+        for e in entries.iter() {
+            let Some(url) = e.image.clone() else { continue };
+            if !url.to_ascii_lowercase().starts_with("https://") {
+                continue; // ipfs:// needs a gateway policy first — not yet
+            }
+            let cov = e.covenant_id.clone();
+            let ap = archive_path.clone();
+            let loaded = tokio::task::spawn_blocking(
+                move || -> Result<Option<witness::WitnessRow>> {
+                    let conn = rusqlite::Connection::open(&ap)?;
+                    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+                    witness::ensure_witness_schema(&conn)?;
+                    witness::load_row(&conn, &cov)
+                },
+            )
+            .await;
+            let row = match loaded {
+                Ok(Ok(r)) => r,
+                _ => continue,
+            };
+            let (mut row, replaced) = match row {
+                None => (
+                    witness::WitnessRow {
+                        covenant_id: e.covenant_id.clone(),
+                        source_url: url.clone(),
+                        state: "unavailable".into(),
+                        ..Default::default()
+                    },
+                    false,
+                ),
+                // a url change in the signed list is the publisher updating
+                // the logo: check it now, adopt on the first good fetch
+                Some(r) => {
+                    let replaced = r.source_url != url;
+                    (r, replaced)
+                }
+            };
+            let due = replaced || row.first_seen_ms.is_none() && row.last_checked_ms.is_none()
+                || now >= row.next_check_ms;
+            if !due {
+                continue;
+            }
+            row.source_url = url.clone();
+            let outcome = fetch_logo(client, &url).await;
+            let effect = witness::apply_check(row, outcome, now, replaced);
+            let ap = archive_path.clone();
+            let mp = media_path.clone();
+            let saved = tokio::task::spawn_blocking(move || -> Result<()> {
+                let archive = rusqlite::Connection::open(&ap)?;
+                archive.busy_timeout(std::time::Duration::from_millis(5000))?;
+                witness::ensure_witness_schema(&archive)?;
+                let media = witness::open_media_db(&mp)?;
+                witness::save_effect(&archive, &media, &effect)
+            })
+            .await;
+            if let Ok(Err(err)) = saved {
+                tracing::warn!("{network}: witness save failed: {err}");
+            }
+            // ~10 fetches a minute, and only when something is actually due
+            tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        }
+        // the parse succeeded, so absence from the list is a statement too
+        let ids: std::collections::HashSet<String> =
+            entries.iter().map(|e| e.covenant_id.clone()).collect();
+        let ap = archive_path.clone();
+        let _ = tokio::task::spawn_blocking(move || -> Result<()> {
+            let conn = rusqlite::Connection::open(&ap)?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+            witness::ensure_witness_schema(&conn)?;
+            let mut stmt = conn
+                .prepare("SELECT covenant_id FROM listed_image_witness WHERE state = 'witnessed'")?;
+            let known: Vec<String> =
+                stmt.query_map([], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+            for k in known {
+                if !ids.contains(&k) {
+                    conn.execute(
+                        "UPDATE listed_image_witness SET state='delisted' WHERE covenant_id=?1",
+                        [&k],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+    }
+}
+
+/// GET /listed-img/{network}/{id} — the witnessed copy of a listed logo.
+/// Distinct from /img on purpose: that namespace promises chain-proven bytes
+/// and carries `immutable`. This one revalidates, because its subject is
+/// allowed to change and a change must be able to reach readers.
+async fn listed_img_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let id = id.to_ascii_lowercase();
+    if id.len() != 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (StatusCode::BAD_REQUEST, "bad covenant id").into_response();
+    }
+    let ap = state.base_dir.join(format!("{network}.db"));
+    let mp = witness::media_db_path(&state.base_dir, &network.to_string());
+    let got = tokio::task::spawn_blocking(move || -> Option<(String, String, Vec<u8>)> {
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+        let archive = rusqlite::Connection::open_with_flags(&ap, flags).ok()?;
+        let media = rusqlite::Connection::open_with_flags(&mp, flags).ok()?;
+        witness::serve_lookup(&archive, &media, &id).ok().flatten()
+    })
+    .await;
+    let Ok(Some((sha, ctype, bytes))) = got else {
+        return (StatusCode::NOT_FOUND, "no witnessed logo").into_response();
+    };
+    let etag = format!("\"{sha}\"");
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim().trim_start_matches("W/") == etag))
+    {
+        return StatusCode::NOT_MODIFIED.into_response();
+    }
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, ctype),
+            (header::CACHE_CONTROL, "public, max-age=3600".to_string()),
+            (header::ETAG, etag),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".to_string()),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 async fn data_handler(

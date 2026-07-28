@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-history';
+} from './core/format.js?v=20260728-witness';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-history';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-history';
-import { createPendingModel } from './core/pending.js?v=20260728-history';
+} from './core/state.js?v=20260728-witness';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-witness';
+import { createPendingModel } from './core/pending.js?v=20260728-witness';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-history';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-history';
-import { createRefreshGate } from './core/refresh.js?v=20260728-history';
-import { networkRouteHash } from './core/routing.js?v=20260728-history';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-history';
+} from './core/data.js?v=20260728-witness';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-witness';
+import { createRefreshGate } from './core/refresh.js?v=20260728-witness';
+import { networkRouteHash } from './core/routing.js?v=20260728-witness';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-witness';
 
 
 
@@ -4664,8 +4664,15 @@ function renderTokens() {
      mutates, because the source array is the cached response. */
   const tokens = (Array.isArray(d.tokens) ? d.tokens : []).map((t) => {
     const listed = registryEntry(network, String(t.covenant_id || ''));
-    if (!listed || (!listed.name && !listed.ticker)) return t;
-    return { ...t, listed_name: listed.name || null, listed_ticker: listed.ticker || null };
+    if (!listed || (!listed.name && !listed.ticker && !listed.logo)) return t;
+    return {
+      ...t,
+      listed_name: listed.name || null,
+      listed_ticker: listed.ticker || null,
+      /* kascov WITNESSED this logo: fetched it on a recorded date and serves
+         its own copy. Not chain-proven art, and never dressed as it. */
+      listed_logo: Boolean(listed.logo),
+    };
   });
   const validated = tokens.some((t) => tokenVstatus(t));
   if (tokenDirectoryUi.network !== network) {
@@ -4743,9 +4750,16 @@ function renderTokens() {
     const nameHtml = (cName || cTicker)
       ? `<span class="token-name" title="${esc(claimTitle)}">${esc(cName || cTicker)}${cTicker && cName ? ` <span class="dim mono">$${esc(cTicker)}</span>` : ''}</span> <span class="dim token-canonical">${esc(name)}</span>`
       : `<span class="token-name">${esc(name)}</span>`;
+    /* three tiers of row art, weakest never dressed as strongest: art proven
+       against a hash committed on chain fully replaces the identicon; a logo a
+       launchpad lists (served from kascov's own witnessed copy) renders inside
+       a dashed ring with the identicon behind it; everything else stays the
+       identicon derived from the coin id. */
     const rowArt = t.claimed_image_hash
       ? `<span class="token-art-wrap token-art-wrap-sm">${avatarSvg(cid, 26)}<img class="token-art token-art-sm" src="img/${esc(network)}/${esc(cid)}" alt="" onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`
-      : avatarSvg(cid, 26);
+      : t.listed_logo
+        ? `<span class="token-art-wrap token-art-wrap-sm token-art-listed" title="${esc(GLOSSARY.listed_logo)}">${avatarSvg(cid, 26)}<img class="token-art token-art-sm" src="listed-img/${esc(network)}/${esc(cid)}" alt="" loading="lazy" onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`
+        : avatarSvg(cid, 26);
     return `<tr>` +
       `<td><a class="token-coin" href="${href}">${rowArt} ${nameHtml}</a></td>` +
       `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}</td>` +
@@ -5115,9 +5129,19 @@ function renderTokenPage(route) {
         : agreed.length === 1
           ? `the one other thing it states matches the chain: ${list(agreed)}.`
           : `all ${agreed.length} other things it states match the chain: ${list(agreed)}.`;
-    el.innerHTML =
+    /* the witnessed copy of the listed logo, when there is one. The date and
+       the change count come from kascov's own record: a re-skin at the source
+       is adopted only after two agreeing daily checks, and it stays counted
+       here forever — a logo that changes is a fact, not a refresh. */
+    const art = row.logo
+      ? `<span class="token-art-wrap token-art-listed listed-line-art" title="${esc(GLOSSARY.listed_logo)}">${avatarSvg(id, 26)}<img class="token-art token-art-sm" src="listed-img/${esc(network)}/${esc(id)}" alt="" onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span> `
+      : '';
+    const changed = row.logo && row.logo.change_count > 0
+      ? ` <span class="dim">logo changed ${esc(fmtInt(row.logo.change_count))}× since kascov first saw it${row.logo.last_change_ms ? `, last ${esc(relTimeShort(row.logo.last_change_ms))}` : ''}.</span>`
+      : '';
+    el.innerHTML = art +
       `<span class="flag flag-claimed" title="a launchpad publishes this name; nothing on chain carries it. the canonical name kascov derives is ${esc(name)}">listed as ${esc(label)}</span> ` +
-      `<span class="dim">${esc(verdict)}</span>`;
+      `<span class="dim">${esc(verdict)}</span>` + changed;
     el.hidden = false;
   });
 

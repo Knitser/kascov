@@ -34,6 +34,10 @@ resvg = { workspace = true }
 # pull native-tls). `json` for the POST bodies.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 sha2 = "0.10"
+rusqlite = { workspace = true }
+# Witnessed launchpad logos: decode + thumbnail only, pure Rust, no native
+# codecs. Decode limits guard against decompression bombs (see witness.rs).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
 # Well-formedness checks for the XML surfaces (/feed.xml, /sitemap.xml) —

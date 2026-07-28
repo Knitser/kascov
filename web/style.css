@@ -1574,6 +1574,16 @@ a.btn:hover { text-decoration: none; }
 .spend-note { margin: 0.5rem 0 0; font-size: 0.8rem; }
 
 .flag-tpl { background: var(--accent-soft); color: var(--accent); text-transform: none; letter-spacing: 0.02em; }
+/* witnessed launchpad art: a picture somebody published, served from kascov's
+   own saved copy. The dashed ring is the tell — chain-proven art replaces the
+   identicon cleanly, a witnessed logo never sheds the ring. */
+.token-art-listed .token-art {
+  border: 1.5px dashed rgba(127, 147, 142, 0.75);
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+.listed-line-art { vertical-align: middle; margin-right: 0.4rem; }
+.listed-line-art .token-art { width: 26px; height: 26px; }
 /* the history footer: a count and the control that loads the page before it,
    sitting quietly under the timeline rather than competing with it. */
 .timeline-more {
