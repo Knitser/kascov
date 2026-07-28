@@ -47,10 +47,12 @@ use kascov_decode::kcc20;
 /// change to `derive_token`'s classification/validation logic or to the
 /// KCC20 skeletons in kascov-decode (a KCC20-relevant `CLASSIFIER_VERSION`
 /// bump implies a bump here too); the boot pass then rederives everything.
-/// Bumped to 2 when the state-block locator replaced the pinned-skeleton match:
-/// the re-stamp pass reclassifies stored reveals, so discovery must run again
-/// to pick up tokens that were previously filed as generic p2sh commitments.
-pub const TOKEN_DERIVATION_VERSION: &str = "2";
+/// 2: the state-block locator replaced the pinned-skeleton match, so the
+///    re-stamp pass reclassifies stored reveals and discovery must run again
+///    to pick up tokens previously filed as generic p2sh commitments.
+/// 3: the supply gate now consults `unvalidated`, so already-derived rows that
+///    published a supply under an unvalidated badge must be rebuilt to drop it.
+pub const TOKEN_DERIVATION_VERSION: &str = "3";
 
 /// Meta key holding the last completed derivation version.
 pub(crate) const TOKEN_DERIVATION_META: &str = "token_derivation_version";
