@@ -4,9 +4,14 @@
 #
 # Run in WSL on the VPS (worker listens on 127.0.0.1:8080 there). On Windows,
 # port-forward 80/443 -> WSL, OR run Caddy on Windows and proxy to the WSL IP.
-# TLS: Cloudflare sits in front (proxied/orange-cloud), so Caddy uses an
-# internal/origin cert and Cloudflare terminates public TLS. If you ever go
-# grey-cloud, switch `tls internal` to real ACME.
+#
+# NOTE (verified 2026-07-29): this file is the WSL variant and is NOT what
+# production runs — see kascov.windows.Caddyfile. Its old `tls internal` +
+# Cloudflare note was stale: nothing proxies kascov.io today. Every hostname
+# resolves straight to the box and Caddy terminates public TLS itself via
+# ACME, so there is no edge WAF, no rate limiting, and no origin cloaking in
+# front of the origin. Do not restrict ingress to Cloudflare ranges while
+# that is true — it would black-hole the whole site.
 
 kascov.io, www.kascov.io {
 	encode zstd gzip
@@ -43,7 +48,9 @@ kascov.io, www.kascov.io {
 		file_server
 	}
 
-	# behind Cloudflare: origin cert, public TLS terminated at the edge
+	# WSL-variant only. Production (kascov.windows.Caddyfile) has no `tls`
+	# directive and lets Caddy provision a real ACME cert, because nothing
+	# terminates TLS in front of the origin.
 	tls internal
 
 	log {

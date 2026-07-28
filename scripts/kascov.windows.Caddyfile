@@ -49,19 +49,38 @@ kascov.io {
 		}
 	}
 
+	# Aggregate-only traffic dashboard. The user file is created directly on
+	# the VPS (one "username password-hash" line) and is never committed.
+	@trafficDashboard path /ops/traffic /ops/traffic/*
+	basic_auth @trafficDashboard {
+		import secrets/kascov-traffic-users
+	}
+	header @trafficDashboard {
+		Cache-Control "private, no-store"
+		Pragma "no-cache"
+		X-Robots-Tag "noindex, nofollow, noarchive"
+	}
+	log_skip @trafficDashboard
+
 	@stream path /data/*/stream
 	handle @stream {
 		reverse_proxy 127.0.0.1:8080 {
 			flush_interval -1
 		}
 	}
-	@worker path /data/* /share/* /og/* /badge/* /img/* /sitemap.xml /feed.xml /health /healthz
+	@worker path /data/* /share/* /og/* /badge/* /img/* /listed-img/* /sitemap.xml /feed.xml /health /healthz
 	handle @worker {
 		reverse_proxy 127.0.0.1:8080
 	}
 	handle {
 		root * C:/kascov/web
 		try_files {path} {path}.html {path}/ /index.html
+		# The HTML shell must always be revalidated. Assets are cache-busted
+		# with ?v= in the HTML, but that only helps if the HTML itself is
+		# fresh: a cached index.html keeps asking for yesterday's asset URLs,
+		# so a fix ships to the server and never reaches a returning visitor.
+		@html path / /index.html /guide /guide.html /og-card.html
+		header @html Cache-Control "no-cache"
 		file_server
 	}
 }
