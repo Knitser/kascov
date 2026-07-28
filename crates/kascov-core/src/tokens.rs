@@ -802,7 +802,17 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
     let holders = balances.len() as u64;
 
     // Sums are stamped only when the full history is provable and clean.
-    let provable = all_events_clean && verdict.invalid.is_none();
+    //
+    // `verdict.unvalidated` is part of this gate, not just `invalid`. Most
+    // unvalidated paths route through the `unknown` closure, which also clears
+    // all_events_clean, so the two agreed by construction. The terminal-burn
+    // branch flags unvalidated WITHOUT clearing it, and that one gap let a
+    // token kascov had explicitly declared out of model still stamp a supply:
+    // two testnet-10 tokens were publishing one under an `unvalidated` badge.
+    // Reading the verdict directly makes the invariant hold by definition
+    // rather than by every future caller remembering to clear a flag.
+    let provable =
+        all_events_clean && verdict.invalid.is_none() && verdict.unvalidated.is_none();
     let mut supply_out: Option<i64> = None;
     let mut minted_out: Option<i64> = None;
     let mut burned_out: Option<i64> = None;
@@ -1477,8 +1487,17 @@ mod tests {
         assert_eq!(t.validation, STATUS_UNVALIDATED);
         assert!(t
             .invalid_reason
+            .as_deref()
             .unwrap()
             .contains("terminal burn without a minter input"));
+        // THE INVARIANT: a token kascov could not validate must not publish a
+        // number anyway. This branch flags unvalidated without clearing
+        // all_events_clean, and `provable` used to consult only `invalid`, so
+        // two testnet-10 tokens shipped a supply under an `unvalidated` badge.
+        // Asserting the status alone is what let that through for so long.
+        assert_eq!(t.supply, None, "unvalidated must never publish a supply");
+        assert_eq!(t.minted, None, "unvalidated must never publish minted");
+        assert_eq!(t.burned, None, "unvalidated must never publish burned");
     }
 
     /// The reorg gold test: apply, roll back mid-history, re-apply a
