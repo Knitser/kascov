@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-trade2';
+} from './core/format.js?v=20260728-cellkas';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-trade2';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-trade2';
-import { createPendingModel } from './core/pending.js?v=20260728-trade2';
+} from './core/state.js?v=20260728-cellkas';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-cellkas';
+import { createPendingModel } from './core/pending.js?v=20260728-cellkas';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-trade2';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-trade2';
-import { createRefreshGate } from './core/refresh.js?v=20260728-trade2';
-import { networkRouteHash } from './core/routing.js?v=20260728-trade2';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-trade2';
+} from './core/data.js?v=20260728-cellkas';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-cellkas';
+import { createRefreshGate } from './core/refresh.js?v=20260728-cellkas';
+import { networkRouteHash } from './core/routing.js?v=20260728-cellkas';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-cellkas';
 
 
 
@@ -4753,7 +4753,7 @@ function renderTokens() {
         ? `<td class="tokens-supply">${t.supply != null ? esc(fmtTokenAmount(t.supply)) : '<span class="dim">—</span>'}</td>` +
           `<td class="tokens-holders">${t.holders != null ? esc(fmtInt(t.holders)) : '<span class="dim">—</span>'}</td>`
         : '') +
-      `<td class="tokens-value">${t.live_value != null ? esc(amountWithUsd(t.live_value, network)) : '<span class="dim">—</span>'}</td>` +
+      `<td class="tokens-value" title="${esc(GLOSSARY.cell_kas)}">${t.live_value != null ? esc(amountWithUsd(t.live_value, network)) : '<span class="dim">—</span>'}</td>` +
       `<td><span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span></td>` +
       (validated ? `<td>${tokenStatusBadge(t) || '<span class="pill pill-unvalidated">unknown</span>'}</td>` : '') +
       `<td class="tokens-when">${when}</td>` +
@@ -4764,7 +4764,7 @@ function renderTokens() {
     `<div class="tokens-tablewrap"><table class="tokens-table">` +
     `<thead><tr><th>token</th><th>template</th>` +
     (validated ? `<th>supply</th><th>holders</th>` : '') +
-    `<th>holds</th><th>state</th>${validated ? '<th>validation</th>' : ''}<th>last activity</th><th>technical</th></tr></thead>` +
+    `<th title="${esc(GLOSSARY.cell_kas)}">cell kas</th><th>state</th>${validated ? '<th>validation</th>' : ''}<th>last activity</th><th>technical</th></tr></thead>` +
     `<tbody>${list.map(rowHtml).join('')}</tbody></table></div>`;
   const selected = selectTokens(shown, tokenDirectoryUi);
   const visibleTokens = selected.slice(0, tokenDirectoryUi.limit);

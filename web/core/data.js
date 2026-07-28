@@ -5,11 +5,11 @@
    galaxy, lane pages, changelog). No DOM — everything here returns data
    and fills the caches in core/state; rendering stays in app.js. */
 
-import { friendlyName } from './format.js?v=20260728-trade2';
+import { friendlyName } from './format.js?v=20260728-cellkas';
 import {
   GRID_PAGE, ACTIVITY_TTL_MS, ACTIVITY_MISS_TTL_MS,
   makeAnchor, daaToMs, state,
-} from './state.js?v=20260728-trade2';
+} from './state.js?v=20260728-cellkas';
 
 /* the wire says 'active'/'burned'; the UI speaks alive/retired — the one
    place that mapping happens (grid rows, detail coins, search results and
