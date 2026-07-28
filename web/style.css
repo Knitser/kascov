@@ -1273,6 +1273,15 @@ a.btn:hover { text-decoration: none; }
   white-space: nowrap;
   flex: none;
 }
+/* A claim is somebody's word, so it reads as an aside rather than as a fact
+   in the row's own voice: no accent colour, and truncated instead of pushing
+   the coin's derived name out of the row on a narrow screen. */
+.suggest-claimed {
+  font-style: italic;
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .suggest-item .pill { flex: none; }
 
 /* ============================================================== site nav */
@@ -1565,6 +1574,16 @@ a.btn:hover { text-decoration: none; }
 .spend-note { margin: 0.5rem 0 0; font-size: 0.8rem; }
 
 .flag-tpl { background: var(--accent-soft); color: var(--accent); text-transform: none; letter-spacing: 0.02em; }
+/* deliberately NOT the accent colour a verified template gets: this is the
+   deployer's assertion sitting next to facts kascov proved. */
+.flag-claimed {
+  background: var(--surface-2, rgba(255, 255, 255, 0.06));
+  color: var(--faint);
+  text-transform: none;
+  letter-spacing: 0.02em;
+  font-style: italic;
+  font-weight: 600;
+}
 /* verified token art: rendered ON TOP of the deterministic avatar; a failed
    or unverified fetch removes itself and the avatar stays — art is a bonus,
    never a broken-image icon */

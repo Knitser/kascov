@@ -103,6 +103,7 @@ const KIND_META = {
 /* plain-words explanations, surfaced as hover/long-press titles wherever
    jargon appears — the site should never assume the reader knows KIPs */
 const GLOSSARY = {
+  claimed_name: 'a name the deployer wrote into the coin’s own birth transaction. kascov proves WHO claimed it and WHEN, never that it is true or unique — the name above, built from the coin’s id, is the one kascov derives itself',
   alive: 'this smart coin still has live (unspent) state on the network — its story can continue',
   retired: 'every piece of this coin\u2019s state has been spent without continuing the covenant — its story ended (recorded here forever)',
   genesis: 'born: a transaction created this coin\u2019s permanent identity (its KIP-20 covenant id)',

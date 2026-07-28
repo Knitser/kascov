@@ -7227,12 +7227,24 @@ async fn search_handler(
                 }
             }
             // Claimed name/ticker ("KASBTC"). Reported as `claimed` so a caller
-            // can render it as the deployer's assertion, not a verified name.
+            // can render it as the deployer's assertion, not a verified name,
+            // and carrying the claimed string itself under `claimed`. Every
+            // row's `name` is the canonical slug, so without that string a
+            // search for KASBTC returns a row with no visible reason for being
+            // in the results, which reads as the slug having matched.
             for id in name_prefix_matches(&idx.claims, &q, limit - rows.len()) {
                 if !seen.contains(&id) {
-                    if let Some(s) = store.summary(&kascov_core::CovenantId(id))? {
+                    let cid = kascov_core::CovenantId(id);
+                    if let Some(s) = store.summary(&cid)? {
                         seen.insert(id);
                         push(&s, "claimed", &mut rows);
+                        if let Some(claim) =
+                            store.claimed_token_meta(&cid)?.and_then(|m| m.name.or(m.ticker))
+                        {
+                            if let Some(row) = rows.last_mut() {
+                                row["claimed"] = serde_json::Value::String(claim);
+                            }
+                        }
                     }
                 }
             }

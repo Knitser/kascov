@@ -1710,10 +1710,16 @@ function remoteGridCardsHtml(entry, network) {
       const alive = isAlive(r);
       const name = r.name || friendlyName(r.id);
       const tpl = semanticTemplate(r.template);
+      /* matched on a claimed name: say whose word that is. The card's title is
+         the canonical slug either way, so an unlabelled claim hit looks like
+         the slug matched a query it has nothing to do with. */
+      const claim = r.matched === 'claimed'
+        ? `<span class="flag flag-claimed" title="${esc(GLOSSARY.claimed_name)}">claims ${esc(r.claimed || 'this name')}</span>`
+        : '';
       return `<article class="card">` +
         `<div class="card-head">${avatarSvg(r.id, 40)}` +
         `<div class="card-id"><a class="card-link" href="#/${esc(network)}/c/${esc(r.id)}">${esc(name)}</a>` +
-        (tpl ? `<span class="flag flag-tpl flag-tpl-primary">${esc(tpl)}</span>` : '') +
+        (tpl ? `<span class="flag flag-tpl flag-tpl-primary">${esc(tpl)}</span>` : '') + claim +
         `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span>` +
         `</div></div>` +
         `<p class="card-story">lives further back on the chain — tap to read its story.</p>` +
@@ -1786,9 +1792,13 @@ function renderSuggest() {
         seen.add(r.id);
         /* a row the grid DID load renders from its richer local record */
         const local = entry && entry.index.byId.get(r.id);
+        /* carry WHAT matched. The server distinguishes an id, a chain-derived
+           name, a template and a deployer's claimed name; collapsing all four
+           to 'remote' printed "from the chain" over a name kascov never
+           verified. */
         suggest.items.push({
           e: local || { c: { covenant_id: r.id, status: r.status, template: r.template }, name: r.name || friendlyName(r.id) },
-          why: 'remote', tx: null, score: 9,
+          why: r.matched || 'remote', tx: null, score: 9, claimed: r.claimed || null,
         });
       }
     }
@@ -1800,7 +1810,13 @@ function renderSuggest() {
     const tpl = semanticTemplate(s.e.c.template);
     const href = `#/${esc(state.network)}/c/${esc(s.e.c.covenant_id)}` +
       (s.tx ? `?tx=${esc(s.tx)}` : '');
+    /* a claimed name is the deployer's assertion, never something kascov
+       verified, so it says so and shows the claimed string that actually
+       matched (the visible name beside it is always the canonical slug). */
     const kind = s.why === 'name' ? '' :
+      s.why === 'claimed' ? `<span class="suggest-kind suggest-claimed" title="${esc(GLOSSARY.claimed_name)}">claims ${esc(s.claimed || 'this name')}</span>` :
+      s.why === 'id' ? `<span class="suggest-kind">id match</span>` :
+      s.why === 'template' ? `<span class="suggest-kind">template</span>` :
       s.why === 'remote' ? `<span class="suggest-kind">from the chain</span>` :
       `<span class="suggest-kind">${esc(s.why)} ${esc(shortHex(s.tx || s.e.c.covenant_id, 8, 6))}</span>`;
     return `<a class="suggest-item" id="sugg-${i}" role="option" href="${href}" data-suggest="${i}">` +
