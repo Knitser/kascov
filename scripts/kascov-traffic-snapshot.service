@@ -1,0 +1,14 @@
+[Unit]
+Description=Build kascov private traffic dashboard snapshot
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=kascov
+WorkingDirectory=/home/kascov/kascov
+ExecStart=/usr/bin/python3 /home/kascov/kascov/scripts/traffic_snapshot.py --output /mnt/c/kascov/web/ops/traffic/traffic.json
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+

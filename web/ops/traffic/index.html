@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="color-scheme" content="dark">
+  <title>traffic · kascov ops</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Back to kascov">
+      <span class="brand-mark" aria-hidden="true"><span></span></span>
+      <span>kascov</span>
+      <span class="ops-label">ops</span>
+    </a>
+    <div class="live-state" id="live-state" aria-live="polite">
+      <span class="live-dot" aria-hidden="true"></span>
+      <span id="live-label">connecting</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="intro" aria-labelledby="page-title">
+      <div>
+        <p class="eyebrow">private traffic observatory</p>
+        <h1 id="page-title">Who is looking at kascov?</h1>
+        <p class="lede">Aggregated from privacy-filtered Caddy logs. No cookies, tracking pixels, or visitor identifiers.</p>
+      </div>
+      <div class="window-picker" role="group" aria-label="Report window">
+        <button type="button" data-window="5m">5m</button>
+        <button type="button" data-window="24h" aria-pressed="true">24h</button>
+        <button type="button" data-window="7d">7d</button>
+        <button type="button" data-window="30d">30d</button>
+      </div>
+    </section>
+
+    <div class="notice notice-error" id="error-notice" role="alert" hidden></div>
+
+    <section class="metric-grid" id="metric-grid" aria-label="Traffic summary"></section>
+
+    <section class="dashboard-grid">
+      <article class="panel panel-wide">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">request volume</p>
+            <h2>Requests over time</h2>
+          </div>
+          <div class="legend" aria-hidden="true">
+            <span><i class="legend-total"></i>all</span>
+            <span><i class="legend-api"></i>API</span>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <svg id="request-chart" class="line-chart" viewBox="0 0 900 300" role="img" aria-label="Requests and API calls over time"></svg>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">API source</p>
+            <h2>UI versus external clients</h2>
+          </div>
+        </div>
+        <div id="api-source"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">response health</p>
+            <h2>Status classes</h2>
+          </div>
+        </div>
+        <div id="status-classes" class="status-list"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">most requested</p>
+            <h2>Top API endpoints</h2>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Endpoint</th><th scope="col">Calls</th></tr></thead>
+            <tbody id="api-table"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">browser entries</p>
+            <h2>Top pages</h2>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th scope="col">Page</th><th scope="col">Views</th></tr></thead>
+            <tbody id="page-table"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <footer>
+      <p id="coverage">Waiting for the first aggregate snapshot…</p>
+      <p>Visitor totals are approximate. API totals are exact for retained logs. Dashboard requests are excluded.</p>
+    </footer>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

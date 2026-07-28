@@ -70,6 +70,7 @@ class TrafficReportTests(unittest.TestCase):
         data = report.as_dict(10)
 
         self.assertEqual(data["visitors"]["unique_browsers_approx"], 2)
+        self.assertEqual(data["visitors"]["active_browsers_approx"], 2)
         self.assertEqual(data["visitors"]["sessions_30m"], 3)
         self.assertEqual(data["visitors"]["page_views"], 4)
         self.assertEqual(data["requests"]["api_calls"], 2)
@@ -79,6 +80,49 @@ class TrafficReportTests(unittest.TestCase):
         self.assertEqual(data["requests"]["bot_requests"], 2)
         self.assertNotIn("/wp-login.php", data["top_pages"])
         self.assertIn("/data/testnet-10/coin/:id", data["top_api_endpoints"])
+
+    def test_series_buckets_requests_without_exporting_visitor_keys(self):
+        base = dt.datetime(2026, 7, 25, tzinfo=dt.UTC).timestamp()
+        report = traffic_report.TrafficReport(bucket_seconds=60)
+        report.add(row(base + 1, "/", ip="private-hash"))
+        report.add(
+            row(
+                base + 61,
+                "/data/testnet-10-live.json",
+                ip="private-hash",
+                referer="https://kascov.io/",
+            )
+        )
+        report.add(row(base + 62, "/data/mainnet-live.json", ip="api-client", ua="curl/8"))
+        data = report.as_dict(10)
+
+        self.assertEqual(len(data["series"]), 2)
+        self.assertEqual(data["series"][0]["page_views"], 1)
+        self.assertEqual(data["series"][1]["api_calls"], 2)
+        self.assertEqual(data["series"][1]["first_party_api_calls"], 1)
+        self.assertEqual(data["series"][1]["external_api_calls"], 1)
+        self.assertNotIn("private-hash", json.dumps(data))
+        self.assertNotIn("api-client", json.dumps(data))
+
+    def test_spa_fallback_does_not_turn_scanner_paths_into_page_views(self):
+        base = dt.datetime(2026, 7, 25, tzinfo=dt.UTC).timestamp()
+        report = traffic_report.TrafficReport()
+        report.add(row(base, "/.git/config"))
+        report.add(row(base + 1, "/phpinfo"))
+        report.add(row(base + 2, "/decode"))
+        data = report.as_dict(10)
+
+        self.assertEqual(data["visitors"]["page_views"], 1)
+        self.assertEqual(data["top_pages"], {"/decode": 1})
+
+    def test_private_dashboard_requests_do_not_feed_back_into_traffic(self):
+        base = dt.datetime(2026, 7, 25, tzinfo=dt.UTC).timestamp()
+        report = traffic_report.TrafficReport()
+        report.add(row(base, "/ops/traffic/"))
+        report.add(row(base + 1, "/ops/traffic/traffic.json"))
+        report.add(row(base + 2, "/"))
+
+        self.assertEqual(report.as_dict(10)["requests"]["total"], 1)
 
     def test_analyze_filters_old_and_malformed_rows(self):
         cutoff = dt.datetime(2026, 7, 25, tzinfo=dt.UTC).timestamp()

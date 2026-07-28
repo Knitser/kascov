@@ -25,8 +25,22 @@ DEFAULT_LOG_GLOB = "/mnt/c/caddy/logs/kascov-access*"
 SESSION_GAP_SECONDS = 30 * 60
 API_PREFIX = "/data/"
 INTERNAL_PATHS = ("/health", "/healthz")
-NON_PAGE_PREFIXES = ("/data/", "/og/", "/badge/", "/img/")
+INTERNAL_DASHBOARD_PREFIX = "/ops/traffic"
+NON_PAGE_PREFIXES = ("/data/", "/og/", "/badge/", "/img/", "/share/", "/ops/")
 NON_PAGE_EXACT = ("/sitemap.xml", "/feed.xml", "/robots.txt", "/favicon.ico")
+KNOWN_PAGE_PATHS = {
+    "/",
+    "/build",
+    "/changelog",
+    "/decode",
+    "/dev",
+    "/explore",
+    "/guide",
+    "/guide.html",
+    "/playground",
+    "/preflight",
+    "/tokens",
+}
 ASSET_EXTENSIONS = {
     ".avif",
     ".css",
@@ -168,7 +182,13 @@ def is_page_view(method: str, status: int, path: str, user_agent: str) -> bool:
         return False
     if path in NON_PAGE_EXACT or path in INTERNAL_PATHS:
         return False
-    return not path.startswith(NON_PAGE_PREFIXES)
+    if path.startswith(NON_PAGE_PREFIXES):
+        return False
+    # Caddy intentionally falls unknown paths back to index.html for SPA
+    # deep links. A scanner asking for /.git/config or /phpinfo therefore
+    # receives a 200 too; only count the site's real non-hash entry points.
+    normalized = path.rstrip("/") or "/"
+    return normalized in KNOWN_PAGE_PATHS
 
 
 def normalize_path(path: str) -> str:
@@ -217,7 +237,8 @@ class LatencyHistogram:
 
 
 class TrafficReport:
-    def __init__(self) -> None:
+    def __init__(self, bucket_seconds: int = 3600) -> None:
+        self.bucket_seconds = max(60, int(bucket_seconds))
         self.total_requests = 0
         self.api_calls = 0
         self.first_party_api_calls = 0
@@ -232,10 +253,12 @@ class TrafficReport:
         self.first_ts: float | None = None
         self.last_ts: float | None = None
         self.visitor_last_seen: dict[str, float] = {}
+        self.active_browser_last_seen: dict[str, float] = {}
         self.pages: collections.Counter[str] = collections.Counter()
         self.api_endpoints: collections.Counter[str] = collections.Counter()
         self.statuses: collections.Counter[str] = collections.Counter()
         self.hours: collections.Counter[str] = collections.Counter()
+        self.series: dict[int, collections.Counter[str]] = {}
         self.latency = LatencyHistogram()
 
     def add(self, row: dict) -> None:
@@ -244,6 +267,8 @@ class TrafficReport:
         method = str(request.get("method") or "")
         uri = str(request.get("uri") or "/")
         path = urlsplit(uri).path or "/"
+        if path == INTERNAL_DASHBOARD_PREFIX or path.startswith(f"{INTERNAL_DASHBOARD_PREFIX}/"):
+            return
         headers = request.get("headers") or {}
         user_agent = header(headers, "User-Agent")
         status = int(row.get("status") or 0)
@@ -257,27 +282,56 @@ class TrafficReport:
         if not path.endswith("/stream"):
             self.latency.add(max(0.0, duration))
         self.statuses[f"{status // 100}xx" if status else "unknown"] += 1
-        if status >= 400:
+        is_error = status >= 400
+        if is_error:
             self.errors += 1
-        if is_bot(user_agent) or PROBE_PATH.search(path):
+        bot_request = bool(is_bot(user_agent) or PROBE_PATH.search(path))
+        if bot_request:
             self.bot_requests += 1
         if path in INTERNAL_PATHS:
             self.health_checks += 1
-        if path.startswith(API_PREFIX):
+        api_call = path.startswith(API_PREFIX)
+        first_party_api = api_call and is_first_party(request)
+        if api_call:
             self.api_calls += 1
-            if is_first_party(request):
+            if first_party_api:
                 self.first_party_api_calls += 1
             self.api_endpoints[normalize_path(path)] += 1
-        if is_page_view(method, status, path, user_agent):
+        page_view = is_page_view(method, status, path, user_agent)
+        key = visitor_key(request)
+        if page_view:
             self.page_views += 1
             self.pages[normalize_path(path)] += 1
-            key = visitor_key(request)
             if key:
                 previous = self.visitor_last_seen.get(key)
                 if previous is None or ts - previous > SESSION_GAP_SECONDS:
                     self.sessions += 1
                 if previous is None or ts > previous:
                     self.visitor_last_seen[key] = ts
+        # "Active now" includes a browser that loaded a page or is still
+        # polling the first-party API. The opaque key never leaves this
+        # process; only the aggregate count is serialized.
+        if key and is_browser(user_agent) and (page_view or first_party_api):
+            previous = self.active_browser_last_seen.get(key)
+            if previous is None or ts > previous:
+                self.active_browser_last_seen[key] = ts
+
+        bucket = int(ts // self.bucket_seconds) * self.bucket_seconds
+        point = self.series.setdefault(bucket, collections.Counter())
+        point["requests"] += 1
+        point["bytes_out"] += max(0, size)
+        if api_call:
+            point["api_calls"] += 1
+        if first_party_api:
+            point["first_party_api_calls"] += 1
+        if api_call and not first_party_api:
+            point["external_api_calls"] += 1
+        if page_view:
+            point["page_views"] += 1
+        if bot_request:
+            point["bot_requests"] += 1
+        if is_error:
+            point["errors"] += 1
 
         when = dt.datetime.fromtimestamp(ts, dt.UTC)
         self.hours[when.strftime("%Y-%m-%d %H:00 UTC")] += 1
@@ -294,6 +348,7 @@ class TrafficReport:
             },
             "visitors": {
                 "unique_browsers_approx": len(self.visitor_last_seen),
+                "active_browsers_approx": len(self.active_browser_last_seen),
                 "sessions_30m": self.sessions,
                 "page_views": self.page_views,
             },
@@ -317,6 +372,20 @@ class TrafficReport:
             "status_classes": dict(sorted(self.statuses.items())),
             "top_pages": dict(self.pages.most_common(top)),
             "top_api_endpoints": dict(self.api_endpoints.most_common(top)),
+            "series": [
+                {
+                    "timestamp": iso_time(float(timestamp)),
+                    "requests": counts["requests"],
+                    "api_calls": counts["api_calls"],
+                    "first_party_api_calls": counts["first_party_api_calls"],
+                    "external_api_calls": counts["external_api_calls"],
+                    "page_views": counts["page_views"],
+                    "bot_requests": counts["bot_requests"],
+                    "errors": counts["errors"],
+                    "bytes_out": counts["bytes_out"],
+                }
+                for timestamp, counts in sorted(self.series.items())
+            ],
             "input": {
                 "malformed_lines": self.malformed_lines,
                 "filtered_old_lines": self.filtered_old_lines,
