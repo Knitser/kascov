@@ -3631,6 +3631,82 @@ impl Store {
     /// its own transaction, so a crash mid-pass redoes the (deterministic)
     /// work instead of trusting partial state. Returns how many tokens were
     /// derived (0 = already current).
+    /// Re-stamp `revealed_template` on reveals whose program carries a KCC20
+    /// state block that the registry's pinned skeletons never matched.
+    ///
+    /// Why this exists: token discovery enumerates candidates from the STORED
+    /// template column, so a covenant stamped "p2sh commitment" at write time
+    /// stays invisible to `derive_tokens_if_stale` no matter how much the
+    /// decoder improves. A live mainnet token (1,888 programs, one unguarded
+    /// build) sat in that bucket. Improving the decoder alone fixes only what
+    /// arrives next; this re-reads what is already stored.
+    ///
+    /// The claim is PROVEN, not guessed: `p2sh_reveal` returns a program only
+    /// when blake2b(redeem) equals the output's P2SH commitment, so the bytes
+    /// examined here are the committed on-chain script. Locating a state block
+    /// in them is a fact about the chain.
+    ///
+    /// Sited in the follower startup path, NEVER in `Store::open`: a
+    /// full-table rewrite inside open is precisely the shape that wedged
+    /// testnet-10 for 49 hours. Chunked, resumable by rowid, one transaction
+    /// per batch, so WAL readers keep serving throughout.
+    pub fn restamp_kcc20_if_stale(&mut self) -> Result<u64> {
+        const META: &str = "kcc20_restamp_version";
+        /// Bump when the state-block locator learns a new build.
+        const VERSION: &str = "1-locate-state-block";
+        if self.meta(META)?.as_deref() == Some(VERSION) {
+            return Ok(0);
+        }
+        const BATCH: i64 = 1000;
+        let mut restamped = 0u64;
+        let mut after: i64 = 0;
+        loop {
+            let rows: Vec<(i64, Vec<u8>, Vec<u8>)> = {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        // Only ever FILLS the unrecognized bucket. A row that
+                        // already carries a positive identification is left
+                        // alone, so this pass can add coverage but can never
+                        // overwrite an existing verdict with a weaker one.
+                        "SELECT rowid, spk_script, spent_sig FROM covenant_utxos
+                         WHERE spent_sig IS NOT NULL AND rowid > ?1
+                           AND (revealed_template IS NULL
+                                OR revealed_template = ''
+                                OR revealed_template = 'p2sh commitment')
+                         ORDER BY rowid LIMIT ?2",
+                    )
+                    .map_err(db_err)?;
+                let collected = stmt
+                    .query_map(params![after, BATCH], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?;
+                collected
+            };
+            if rows.is_empty() {
+                break;
+            }
+            let tx = self.conn.transaction().map_err(db_err)?;
+            for (rowid, spk, sig) in &rows {
+                after = *rowid;
+                let Some(program) = kascov_decode::p2sh_reveal(spk, sig) else { continue };
+                if kascov_decode::kcc20::locate_state_block(&program).is_none() {
+                    continue;
+                }
+                tx.execute(
+                    "UPDATE covenant_utxos SET revealed_template = 'KCC20 token' WHERE rowid = ?1",
+                    params![rowid],
+                )
+                .map_err(db_err)?;
+                restamped += 1;
+            }
+            tx.commit().map_err(db_err)?;
+        }
+        self.set_meta(META, VERSION)?;
+        Ok(restamped)
+    }
+
     pub fn derive_tokens_if_stale(&mut self) -> Result<u64> {
         use crate::tokens::{TOKEN_DERIVATION_META, TOKEN_DERIVATION_VERSION};
         if self.meta(TOKEN_DERIVATION_META)?.as_deref() == Some(TOKEN_DERIVATION_VERSION) {

@@ -1582,6 +1582,18 @@ async fn follow_forever(
         // BEFORE the node connect, because it needs no node and must not
         // wait out an outage. The meta gate makes reruns O(1); a failure
         // retries next session.
+        // Re-read stored reveals with the current state-block locator BEFORE
+        // deriving: discovery enumerates candidates from the stored template
+        // column, so a token whose build the old pinned skeletons missed stays
+        // invisible until its rows are re-stamped. Same siting rule as the
+        // derivation below — off Store::open, off the serve path.
+        match store.restamp_kcc20_if_stale() {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("{network}: KCC20 re-stamp complete — {n} reveals restamped"),
+            Err(err) => {
+                tracing::warn!("{network}: KCC20 re-stamp failed ({err}) — will retry next session")
+            }
+        }
         match store.derive_tokens_if_stale() {
             Ok(0) => {}
             Ok(n) => tracing::info!("{network}: token derivation pass complete — {n} tokens derived"),
