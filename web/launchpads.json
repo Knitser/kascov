@@ -5,5 +5,12 @@
     "trade_url": "https://kasparocket.fun/token/{id}",
     "image_prefixes": ["https://storage.googleapis.com/kaspa-rocket-prod-uploads/"],
     "networks": ["testnet-10"]
+  },
+  {
+    "name": "KRON",
+    "site": "https://kron.technology",
+    "trade_url": "https://kron.technology/token/{id}",
+    "listed_by": "KRON",
+    "networks": ["mainnet"]
   }
 ]

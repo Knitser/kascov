@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-listed2';
+} from './core/format.js?v=20260728-trade';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-listed2';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-listed2';
-import { createPendingModel } from './core/pending.js?v=20260728-listed2';
+} from './core/state.js?v=20260728-trade';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-trade';
+import { createPendingModel } from './core/pending.js?v=20260728-trade';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-listed2';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-listed2';
-import { createRefreshGate } from './core/refresh.js?v=20260728-listed2';
-import { networkRouteHash } from './core/routing.js?v=20260728-listed2';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-listed2';
+} from './core/data.js?v=20260728-trade';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-trade';
+import { createRefreshGate } from './core/refresh.js?v=20260728-trade';
+import { networkRouteHash } from './core/routing.js?v=20260728-trade';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-trade';
 
 
 
@@ -5107,22 +5107,31 @@ function renderTokenPage(route) {
     el.hidden = false;
   });
 
-  /* launchpad trade button: the genesis payload committed art hosted by a
-     known launchpad — an on-chain fact that marks where the token launched.
-     Filled in async from the curated registry; missing registry, no match,
-     or an already-replaced view all mean: no button. */
-  if (t.claimed_image) {
-    loadLaunchpads().then((pads) => {
+  /* Launchpad trade button. Two ways to know where a token launched, both
+     evidence rather than assertion: its genesis payload committed art hosted
+     by that launchpad (an on-chain fact), or the launchpad publishes it in a
+     list whose other statements kascov checked against the chain. The link
+     itself always comes from kascov's own curated table, never from the
+     fetched list, so a compromised list cannot redirect anyone. */
+  const listedHere = registryEntry(network, id);
+  if (t.claimed_image || listedHere) {
+    Promise.all([loadLaunchpads(), loadRegistry(network)]).then(([pads, reg]) => {
       const el = document.getElementById('token-trade-line');
       if (!pads || !el) return;
+      const onNet = (p) => !Array.isArray(p.networks) || p.networks.includes(network);
       const pad = pads.find((p) =>
-        Array.isArray(p.image_prefixes) &&
-        p.image_prefixes.some((pre) => t.claimed_image.startsWith(pre)) &&
-        (!Array.isArray(p.networks) || p.networks.includes(network)));
+        onNet(p) && Array.isArray(p.image_prefixes) && t.claimed_image &&
+        p.image_prefixes.some((pre) => t.claimed_image.startsWith(pre)))
+        || (listedHere && reg && reg.list_name
+          ? pads.find((p) => onNet(p) && p.listed_by === reg.list_name)
+          : null);
       if (!pad || !pad.trade_url) return;
       const url = pad.trade_url.replace('{id}', id);
+      const why = t.claimed_image
+        ? `this token’s genesis committed art hosted by ${pad.name}, which marks where it launched`
+        : `${pad.name} lists this token, and kascov checked that listing’s other statements against the chain`;
       el.innerHTML = `<a class="trade-btn" href="${esc(url)}" target="_blank" rel="noopener noreferrer" ` +
-        `title="this token’s genesis committed art hosted by ${esc(pad.name)} — that marks where it launched. kascov only links out; trading happens on their site">` +
+        `title="${esc(why)}. kascov only links out; trading happens on their site, and kascov never sees your keys">` +
         `trade on ${esc(pad.name)} ↗</a>`;
       el.hidden = false;
     });

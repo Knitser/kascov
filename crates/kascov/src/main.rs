@@ -3837,6 +3837,7 @@ async fn registry_handler(
         Err(e) => return fail(&e.to_string()),
     };
 
+    let list_name = registry::list_name(&body);
     let db = state.base_dir.join(format!("{network}.db"));
     let built = tokio::task::spawn_blocking(move || -> Result<String> {
         let store = kascov_core::store::Store::open(&db, network)?;
@@ -3864,6 +3865,9 @@ async fn registry_handler(
         let agreed = checked.iter().filter(|c| c.all_checks_passed).count();
         Ok(serde_json::json!({
             "network": network.to_string(),
+            // the publisher's own name, matched against kascov's curated
+            // launchpad table — never used as a link itself
+            "list_name": list_name,
             "source": std::env::var("KASCOV_REGISTRY_URL").ok(),
             "fetched_at_ms": now_ms(),
             "listed": checked.len(),

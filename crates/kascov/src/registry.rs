@@ -143,6 +143,15 @@ fn clean_text(s: &str, max: usize) -> Option<String> {
         .then(|| s.to_string())
 }
 
+/// The publisher's own name for the list ("KRON"). Used only to look the
+/// publisher up in kascov's OWN curated launchpad table: a link kascov sends a
+/// reader to is never taken from the fetched document, so a compromised list
+/// cannot redirect anybody.
+pub fn list_name(body: &str) -> Option<String> {
+    let doc: serde_json::Value = serde_json::from_str(body).ok()?;
+    doc.get("name").and_then(|v| v.as_str()).and_then(|s| clean_text(s, 32))
+}
+
 /// Parse the published document. Returns the entries for `network` only: a
 /// list is published per network and mixing them would attach a mainnet name
 /// to a testnet covenant that happens to share an id prefix.
