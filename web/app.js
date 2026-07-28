@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-witness';
+} from './core/format.js?v=20260728-witness2';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-witness';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-witness';
-import { createPendingModel } from './core/pending.js?v=20260728-witness';
+} from './core/state.js?v=20260728-witness2';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-witness2';
+import { createPendingModel } from './core/pending.js?v=20260728-witness2';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-witness';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-witness';
-import { createRefreshGate } from './core/refresh.js?v=20260728-witness';
-import { networkRouteHash } from './core/routing.js?v=20260728-witness';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-witness';
+} from './core/data.js?v=20260728-witness2';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-witness2';
+import { createRefreshGate } from './core/refresh.js?v=20260728-witness2';
+import { networkRouteHash } from './core/routing.js?v=20260728-witness2';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-witness2';
 
 
 
@@ -5129,6 +5129,29 @@ function renderTokenPage(route) {
         : agreed.length === 1
           ? `the one other thing it states matches the chain: ${list(agreed)}.`
           : `all ${agreed.length} other things it states match the chain: ${list(agreed)}.`;
+    /* Same precedence as the directory, applied to the page's own header: an
+       on-chain claim outranks the list, the list fills the gap, and the
+       canonical name never disappears. Without this the row read Kron Token
+       while its own page still led with the slug. */
+    if (!(t.claimed_name || t.claimed_ticker)) {
+      const h1 = view.querySelector('.detail-head h1');
+      const tags = view.querySelector('.detail-head .detail-tags');
+      const titleText = row.name
+        ? `${row.name}${row.ticker ? ` ($${row.ticker})` : ''}`
+        : `$${row.ticker}`;
+      if (h1 && !h1.dataset.listedTitle) {
+        h1.dataset.listedTitle = '1';
+        h1.textContent = titleText;
+        document.title = `token ${titleText} — kascov`;
+        if (tags) tags.insertAdjacentHTML('beforeend', `<span class="dim token-canonical">${esc(name)}</span>`);
+      }
+      const wrap = view.querySelector('.detail-head .token-art-wrap');
+      if (row.logo && wrap && !wrap.querySelector('img')) {
+        wrap.classList.add('token-art-listed');
+        wrap.insertAdjacentHTML('beforeend',
+          `<img class="token-art" src="listed-img/${esc(network)}/${esc(id)}" alt="" title="${esc(GLOSSARY.listed_logo)}" onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()">`);
+      }
+    }
     /* the witnessed copy of the listed logo, when there is one. The date and
        the change count come from kascov's own record: a re-skin at the source
        is adopted only after two agreeing daily checks, and it stays counted
