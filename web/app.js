@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-registry2';
+} from './core/format.js?v=20260728-listed2';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-registry2';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-registry2';
-import { createPendingModel } from './core/pending.js?v=20260728-registry2';
+} from './core/state.js?v=20260728-listed2';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-listed2';
+import { createPendingModel } from './core/pending.js?v=20260728-listed2';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-registry2';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-registry2';
-import { createRefreshGate } from './core/refresh.js?v=20260728-registry2';
-import { networkRouteHash } from './core/routing.js?v=20260728-registry2';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-registry2';
+} from './core/data.js?v=20260728-listed2';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-listed2';
+import { createRefreshGate } from './core/refresh.js?v=20260728-listed2';
+import { networkRouteHash } from './core/routing.js?v=20260728-listed2';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-listed2';
 
 
 
@@ -4621,6 +4621,15 @@ function renderTokens() {
       ? `<p class="tokens-note tokens-note-info">${esc((d && d.note) || TOKEN_NOTE_VALIDATED)}</p>`
       : `<p class="tokens-note">⚠ ${esc((d && d.note) || TOKEN_NOTE_FALLBACK)}</p>`) +
     `</header>`;
+  /* The checked launchpad list is a second, slower source of display names.
+     Warm it once and repaint when it lands. The guard is on the cache SLOT and
+     not on the promise: loadRegistry resolves instantly once cached, so an
+     unguarded repaint would call straight back into this function forever. */
+  if (!state.registry[network]) {
+    loadRegistry(network).then(() => {
+      if (state.network === network && parseRoute().view === 'tokens') renderTokens();
+    });
+  }
   const cached = tokenPages.get(network);
   const fresh = cached && Date.now() - cached.at < TOKENS_TTL_MS;
   if (!fresh) {
@@ -4649,7 +4658,15 @@ function renderTokens() {
     return;
   }
   const d = cached.data || {};
-  const tokens = Array.isArray(d.tokens) ? d.tokens : [];
+  /* Fold the checked listing into each row BEFORE anything filters or sorts,
+     so the directory's own search matches the name it actually shows: a row
+     displaying KRON has to be findable by typing KRON. Copies rather than
+     mutates, because the source array is the cached response. */
+  const tokens = (Array.isArray(d.tokens) ? d.tokens : []).map((t) => {
+    const listed = registryEntry(network, String(t.covenant_id || ''));
+    if (!listed || (!listed.name && !listed.ticker)) return t;
+    return { ...t, listed_name: listed.name || null, listed_ticker: listed.ticker || null };
+  });
   const validated = tokens.some((t) => tokenVstatus(t));
   if (tokenDirectoryUi.network !== network) {
     tokenDirectoryUi.network = network;
@@ -4712,9 +4729,19 @@ function renderTokens() {
     /* deployer-claimed identity from the genesis payload: shown first when
        present, with the canonical name kept beside it — a claim is a claim,
        not uniqueness, and the tooltip says so */
-    const claimed = t.claimed_name || t.claimed_ticker;
-    const nameHtml = claimed
-      ? `<span class="token-name" title="named on chain by its deployer in the genesis payload — claims aren’t unique; the canonical name stays ${esc(name)}">${esc(t.claimed_name || t.claimed_ticker)}${t.claimed_ticker && t.claimed_name ? ` <span class="dim mono">$${esc(t.claimed_ticker)}</span>` : ''}</span> <span class="dim token-canonical">${esc(name)}</span>`
+    /* Two sources of a display name, and the genesis payload outranks the
+       other because it is on chain. A launchpad's published list is off chain
+       entirely, so it only fills the gap for tokens that never wrote a name at
+       launch, and it says so in the tooltip. Both are claims, and both keep the
+       canonical name beside them: who said it is the whole distinction. */
+    const onChain = Boolean(t.claimed_name || t.claimed_ticker);
+    const cName = t.claimed_name || t.listed_name || null;
+    const cTicker = t.claimed_ticker || t.listed_ticker || null;
+    const claimTitle = onChain
+      ? `named on chain by its deployer in the genesis payload — claims aren’t unique; the canonical name stays ${name}`
+      : `a launchpad publishes this name; nothing on chain carries it. kascov checked the rest of that listing against the chain — open the token to see what matched. the canonical name stays ${name}`;
+    const nameHtml = (cName || cTicker)
+      ? `<span class="token-name" title="${esc(claimTitle)}">${esc(cName || cTicker)}${cTicker && cName ? ` <span class="dim mono">$${esc(cTicker)}</span>` : ''}</span> <span class="dim token-canonical">${esc(name)}</span>`
       : `<span class="token-name">${esc(name)}</span>`;
     const rowArt = t.claimed_image_hash
       ? `<span class="token-art-wrap token-art-wrap-sm">${avatarSvg(cid, 26)}<img class="token-art token-art-sm" src="img/${esc(network)}/${esc(cid)}" alt="" onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`

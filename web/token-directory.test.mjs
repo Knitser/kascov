@@ -27,6 +27,18 @@ test('directory searches claimed and canonical identity', () => {
   assert.deepEqual(selectTokens(rows, { query: 'gamma' }).map((r) => r.covenant_id), ['cc']);
 });
 
+/* A row that DISPLAYS a launchpad's name has to be findable by typing it.
+   These tokens carry no name on chain at all, so without this the directory
+   shows KRON and then finds nothing when you search KRON. */
+test('directory finds a token by the name a launchpad lists it under', () => {
+  const listed = [
+    { covenant_id: 'dd', listed_ticker: 'KRON', listed_name: 'Kron Token', status: 'verified', alive: true },
+    { covenant_id: 'ee', status: 'verified', alive: true },
+  ];
+  assert.deepEqual(selectTokens(listed, { query: 'kron' }).map((r) => r.covenant_id), ['dd']);
+  assert.deepEqual(selectTokens(listed, { query: 'kron token' }).map((r) => r.covenant_id), ['dd']);
+});
+
 test('directory filters and sorts without mutating the response', () => {
   const original = rows.map((r) => r.covenant_id);
   assert.deepEqual(selectTokens(rows, { validation: 'verified' }).map((r) => r.covenant_id), ['aa']);

@@ -15,6 +15,10 @@ function tokenSearchText(token) {
     token && token.name,
     token && token.claimed_name,
     token && token.claimed_ticker,
+    /* a name a launchpad publishes and kascov checked the rest of. The row
+       displays it, so the row's own filter has to match it. */
+    token && token.listed_name,
+    token && token.listed_ticker,
     token && token.template,
   ].filter(Boolean).join(' ').toLowerCase();
 }
