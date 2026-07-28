@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-columns';
+} from './core/format.js?v=20260728-phaseline';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-columns';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-columns';
-import { createPendingModel } from './core/pending.js?v=20260728-columns';
+} from './core/state.js?v=20260728-phaseline';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-phaseline';
+import { createPendingModel } from './core/pending.js?v=20260728-phaseline';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-columns';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-columns';
-import { createRefreshGate } from './core/refresh.js?v=20260728-columns';
-import { networkRouteHash } from './core/routing.js?v=20260728-columns';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-columns';
+} from './core/data.js?v=20260728-phaseline';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-phaseline';
+import { createRefreshGate } from './core/refresh.js?v=20260728-phaseline';
+import { networkRouteHash } from './core/routing.js?v=20260728-phaseline';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-phaseline';
 
 
 
@@ -4866,7 +4866,14 @@ function renderTokens() {
         ? `<span class="token-art-wrap token-art-wrap-sm token-art-listed" title="${esc(GLOSSARY.listed_logo)}">${avatarSvg(cid, 26)}<img class="token-art token-art-sm" src="listed-img/${esc(network)}/${esc(cid)}" alt="" loading="lazy" onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`
         : avatarSvg(cid, 26);
     return `<tr>` +
-      `<td><a class="token-coin" href="${href}">${rowArt} ${nameHtml}</a>${marketPhaseChip(t.market)}</td>` +
+      `<td>${(() => {
+        /* the phase chip gets a deliberate second line under the name — as a
+           trailing inline it wrapped wherever each name happened to end, so
+           every row placed it somewhere else */
+        const phase = marketPhaseChip(t.market);
+        return `<a class="token-coin" href="${href}">${rowArt} ${nameHtml}</a>` +
+          (phase ? `<div class="token-phase-line">${phase}</div>` : '');
+      })()}</td>` +
       `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}</td>` +
       (validated
         ? `<td class="tokens-supply">${t.supply != null ? esc(fmtTokenAmount(t.supply)) : '<span class="dim">—</span>'}</td>` +
