@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-phase';
+} from './core/format.js?v=20260728-columns';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-phase';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-phase';
-import { createPendingModel } from './core/pending.js?v=20260728-phase';
+} from './core/state.js?v=20260728-columns';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-columns';
+import { createPendingModel } from './core/pending.js?v=20260728-columns';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-phase';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-phase';
-import { createRefreshGate } from './core/refresh.js?v=20260728-phase';
-import { networkRouteHash } from './core/routing.js?v=20260728-phase';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-phase';
+} from './core/data.js?v=20260728-columns';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-columns';
+import { createRefreshGate } from './core/refresh.js?v=20260728-columns';
+import { networkRouteHash } from './core/routing.js?v=20260728-columns';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-columns';
 
 
 
@@ -4683,7 +4683,7 @@ function marketPhaseChip(m) {
   return `<span class="flag flag-phase" title="this token is a pool's LP share token — its value is the pool's net position per share, which is a different instrument, so kascov does not price it">lp shares</span>`;
 }
 
-function marketCellsHtml(m) {
+function marketCellsHtml(m, network) {
   const dash = (why) => `<td class="dim" title="${esc(why || 'not derivable from chain yet')}">—</td>`;
   if (!m) return dash('no market figures for this token') + dash('') + dash('');
   const why = m.unpriced_reason || '';
@@ -4691,10 +4691,10 @@ function marketCellsHtml(m) {
     ? `<td class="mono" title="last executed trade: ${esc(fmtInt(m.last_quote_sompi))} sompi for ${esc(fmtInt(m.last_base_amount))} tokens, before launchpad fees">${esc(fmtPriceKas(m.last_quote_sompi, m.last_base_amount))}</td>`
     : dash(why);
   const reserve = (m.reserve_sompi != null)
-    ? `<td class="mono">${esc(fmtAmount(m.reserve_sompi, state.network))}</td>`
+    ? `<td class="mono">${esc(amountWithUsd(m.reserve_sompi, network))}</td>`
     : dash(m.reserve_note || why);
   const vol = (m.volume_24h_sompi != null)
-    ? `<td class="mono" title="${esc(fmtInt(m.trades_24h || 0))} trades in the last 24h">${esc(fmtAmount(m.volume_24h_sompi, state.network))}</td>`
+    ? `<td class="mono" title="${esc(fmtInt(m.trades_24h || 0))} trades in the last 24h">${esc(amountWithUsd(m.volume_24h_sompi, network))}</td>`
     : dash(m.window_note || (m.trades_24h == null ? 'no priced trade in the last 24 hours' : why));
   return price + reserve + vol;
 }
@@ -4871,9 +4871,8 @@ function renderTokens() {
       (validated
         ? `<td class="tokens-supply">${t.supply != null ? esc(fmtTokenAmount(t.supply)) : '<span class="dim">—</span>'}</td>` +
           `<td class="tokens-holders">${t.holders != null ? esc(fmtInt(t.holders)) : '<span class="dim">—</span>'}</td>` +
-          marketCellsHtml(t.market)
-        : '') +
-      `<td class="tokens-value" title="${esc(GLOSSARY.cell_kas)}">${t.live_value != null ? esc(amountWithUsd(t.live_value, network)) : '<span class="dim">—</span>'}</td>` +
+          marketCellsHtml(t.market, network)
+        : `<td class="tokens-value" title="${esc(GLOSSARY.cell_kas)}">${t.live_value != null ? esc(amountWithUsd(t.live_value, network)) : '<span class="dim">—</span>'}</td>`) +
       `<td><span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span></td>` +
       (validated ? `<td>${tokenStatusBadge(t) || '<span class="pill pill-unvalidated">unknown</span>'}</td>` : '') +
       `<td class="tokens-when">${when}</td>` +
@@ -4888,8 +4887,8 @@ function renderTokens() {
         `<th title="${esc(GLOSSARY.market_price)}">price (KAS)</th>` +
         `<th title="${esc(GLOSSARY.market_reserve)}">reserve</th>` +
         `<th title="${esc(GLOSSARY.market_vol)}">vol 24h</th>`
-      : '') +
-    `<th title="${esc(GLOSSARY.cell_kas)}">cell kas</th><th>state</th>${validated ? '<th>validation</th>' : ''}<th>last activity</th><th>technical</th></tr></thead>` +
+      : `<th title="${esc(GLOSSARY.cell_kas)}">cell kas</th>`) +
+    `<th>state</th>${validated ? '<th>validation</th>' : ''}<th>last activity</th><th>technical</th></tr></thead>` +
     `<tbody>${list.map(rowHtml).join('')}</tbody></table></div>`;
   const selected = selectTokens(shown, tokenDirectoryUi);
   const visibleTokens = selected.slice(0, tokenDirectoryUi.limit);
