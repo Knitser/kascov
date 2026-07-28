@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-audit';
+} from './core/format.js?v=20260728-audit2';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-audit';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-audit';
-import { createPendingModel } from './core/pending.js?v=20260728-audit';
+} from './core/state.js?v=20260728-audit2';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-audit2';
+import { createPendingModel } from './core/pending.js?v=20260728-audit2';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-audit';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-audit';
-import { createRefreshGate } from './core/refresh.js?v=20260728-audit';
-import { networkRouteHash } from './core/routing.js?v=20260728-audit';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-audit';
+} from './core/data.js?v=20260728-audit2';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-audit2';
+import { createRefreshGate } from './core/refresh.js?v=20260728-audit2';
+import { networkRouteHash } from './core/routing.js?v=20260728-audit2';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-audit2';
 
 
 
@@ -5029,7 +5029,7 @@ function auditSectionHtml(t, d, network) {
   } else {
     rows.push(auditRow('unknown', 'rules & conservation', v.reason || 'not fully provable yet'));
   }
-  rows.push((t.held_covenant != null && t.held_wallet != null)
+  rows.push((t.held_by_covenant != null && t.held_by_wallet != null)
     ? auditRow('pass', 'supply accounted for',
         'covenant-held, wallet-held and script-held balances sum exactly to the proven supply')
     : auditRow('unknown', 'supply split', 'withheld until the supply itself is proven — never estimated'));
@@ -5339,15 +5339,12 @@ function renderTokenPage(route) {
     const agreed = tested.filter(([k]) => row[k] === 'match');
     const disagreed = tested.filter(([k]) => row[k] === 'differ');
     /* Nothing testable was stated: the name is carried, and carried alone. */
-    const list = (xs) => xs.map(([, d]) => d).join(', ');
+    /* one compact verdict — the per-check receipts live in the audit panel */
     const verdict = !tested.length
-      ? 'the list states nothing else kascov could check against the chain.'
+      ? 'the list states nothing else kascov could check.'
       : disagreed.length
-        ? `of the ${tested.length} other things it states, ` +
-          `${disagreed.length === 1 ? 'one does not match' : `${disagreed.length} do not match`} the chain: ${list(disagreed)}.`
-        : agreed.length === 1
-          ? `the one other thing it states matches the chain: ${list(agreed)}.`
-          : `all ${agreed.length} other things it states match the chain: ${list(agreed)}.`;
+        ? `${agreed.length} of ${tested.length} checked statements match the chain — details in the audit below.`
+        : `all ${agreed.length} checked statements match the chain — details in the audit below.`;
     /* Same precedence as the directory, applied to the page's own header: an
        on-chain claim outranks the list, the list fills the gap, and the
        canonical name never disappears. Without this the row read Kron Token
