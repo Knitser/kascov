@@ -155,6 +155,63 @@ CREATE TABLE IF NOT EXISTS token_events (
 );
 CREATE INDEX IF NOT EXISTS tev_by_event ON token_events(covenant_id, seq);
 CREATE INDEX IF NOT EXISTS tev_by_token_time ON token_events(token_id, accepting_daa, tx_index);
+-- One admitted trade: this token's cells moved against the market covenant's
+-- KAS in a single transaction, with both sides hash-proven. RAW CHAIN FACTS
+-- ONLY — no bracket verdict, no skeleton, no window aggregate lives here, so
+-- the table stays a pure function of this token's own proven states plus
+-- covenant_utxos values, and the publish/suppress decision can change without
+-- rewriting history. base_amount and quote_sompi are the integer price PAIR;
+-- nothing downstream is ever allowed to collapse them into a float.
+CREATE TABLE IF NOT EXISTS token_trades (
+    token_id BLOB NOT NULL,
+    seq INTEGER NOT NULL,                 -- covenant_events.seq of this token
+    txid BLOB NOT NULL,
+    market_covenant_id BLOB NOT NULL,     -- the counterparty covenant on THIS trade
+    side TEXT NOT NULL,                   -- 'buy' | 'sell' (taker's view)
+    base_amount INTEGER NOT NULL,         -- tokens moved, > 0
+    quote_sompi INTEGER NOT NULL,         -- KAS moved, > 0
+    kas_before_sompi INTEGER NOT NULL,
+    kas_after_sompi INTEGER NOT NULL,
+    base_before INTEGER NOT NULL,
+    base_after INTEGER NOT NULL,
+    co_covenants INTEGER NOT NULL,        -- other covenants moved by this tx
+    accepting_daa INTEGER NOT NULL,
+    accepting_blue_score INTEGER,
+    tx_index INTEGER,
+    accepting_time_ms INTEGER,            -- NULL on pre-capture rows: windows fail closed
+    PRIMARY KEY (token_id, seq)
+);
+CREATE INDEX IF NOT EXISTS tt_by_token_order ON token_trades(token_id, seq DESC);
+CREATE INDEX IF NOT EXISTS tt_by_token_time  ON token_trades(token_id, accepting_time_ms);
+CREATE INDEX IF NOT EXISTS tt_by_market      ON token_trades(market_covenant_id);
+-- What kascov could read out of a market covenant's own hash-committed
+-- program bytes: the skeleton it matched, the curve constants, and how far
+-- the two-sided invariant replay has checked its trades. A row here is what
+-- LICENSES publishing a price at all — no recognised program, no price.
+CREATE TABLE IF NOT EXISTS market_programs (
+    covenant_id BLOB PRIMARY KEY,
+    program_hash BLOB NOT NULL,
+    skeleton TEXT NOT NULL,               -- e.g. 'KRON curve v1' | 'unmatched'
+    v_kas_units INTEGER NOT NULL DEFAULT 0,
+    token_reserve INTEGER,
+    token_covenant_id BLOB,
+    lp_token_covenant_id BLOB,
+    kas_reserve_sompi INTEGER,
+    shares INTEGER,
+    graduation_kas_sompi INTEGER,
+    fee_bps_json TEXT,
+    fee_owners_json TEXT,
+    pool_template_hash BLOB,
+    state_proved_txid BLOB,
+    state_proved_index INTEGER,
+    invariant_checked_through_seq INTEGER NOT NULL DEFAULT -1,
+    invariant_trades INTEGER NOT NULL DEFAULT 0,
+    invariant_ok INTEGER NOT NULL DEFAULT 0,
+    exercised_trades INTEGER NOT NULL DEFAULT 0,
+    wedge_bps INTEGER,
+    derived_at_daa INTEGER
+);
+CREATE INDEX IF NOT EXISTS mp_by_token ON market_programs(token_covenant_id);
 CREATE TABLE IF NOT EXISTS token_balances (
     token_id BLOB NOT NULL,
     owner TEXT NOT NULL,                  -- hex(identifier_type || owner_identifier)
@@ -715,7 +772,11 @@ pub(crate) fn registry() -> &'static kascov_decode::Registry {
 /// backfills re-derive them; rows the old classifier gave a real name keep
 /// it. Version 2: observed-family skeletons (genesis0 / PURE / KCC20) and
 /// the 512 B → 2 KiB inscription window.
-const CLASSIFIER_VERSION: &str = "2";
+pub(crate) const CLASSIFIER_VERSION: &str = "2";
+/// Bump when the state-block locator learns a new build (the restamp pass's
+/// version gate). Exported so the token-derivation stamp can compose it: a
+/// decoder learning a build MUST invalidate every stored price.
+pub(crate) const KCC20_RESTAMP_VERSION: &str = "1-locate-state-block";
 
 /// KCC-1 spec commit the §8.3 TemplateHash derivation is pinned to. Bump on
 /// any change to the derivation (spec churn or state-range coverage) — see
@@ -780,6 +841,15 @@ impl Store {
             "ALTER TABLE tokens ADD COLUMN held_covenant INTEGER",
             "ALTER TABLE tokens ADD COLUMN held_wallet INTEGER",
             "ALTER TABLE tokens ADD COLUMN held_script INTEGER",
+            // The trade layer (derivation v7): which covenant is this token's
+            // market, how many trades were admitted, how many candidates were
+            // rejected for co-moving another token, and how many admitted
+            // trades predate timestamp capture (those null every 24h window
+            // for the token — a partial window is never published).
+            "ALTER TABLE tokens ADD COLUMN market_covenant_id BLOB",
+            "ALTER TABLE tokens ADD COLUMN trades INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tokens ADD COLUMN co_moved_trades INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tokens ADD COLUMN trades_missing_time INTEGER NOT NULL DEFAULT 0",
         ];
         for sql in &migrations {
             if let Err(e) = conn.execute(sql, []) {
@@ -3684,9 +3754,7 @@ impl Store {
     /// per batch, so WAL readers keep serving throughout.
     pub fn restamp_kcc20_if_stale(&mut self) -> Result<u64> {
         const META: &str = "kcc20_restamp_version";
-        /// Bump when the state-block locator learns a new build.
-        const VERSION: &str = "1-locate-state-block";
-        if self.meta(META)?.as_deref() == Some(VERSION) {
+        if self.meta(META)?.as_deref() == Some(KCC20_RESTAMP_VERSION) {
             return Ok(0);
         }
         const BATCH: i64 = 1000;
@@ -3735,13 +3803,18 @@ impl Store {
             }
             tx.commit().map_err(db_err)?;
         }
-        self.set_meta(META, VERSION)?;
+        self.set_meta(META, KCC20_RESTAMP_VERSION)?;
         Ok(restamped)
     }
 
     pub fn derive_tokens_if_stale(&mut self) -> Result<u64> {
-        use crate::tokens::{TOKEN_DERIVATION_META, TOKEN_DERIVATION_VERSION};
-        if self.meta(TOKEN_DERIVATION_META)?.as_deref() == Some(TOKEN_DERIVATION_VERSION) {
+        use crate::tokens::{token_derivation_stamp, TOKEN_DERIVATION_META};
+        // The stamp is a COMPOSITE of the derivation, classifier and restamp
+        // versions: three passes rewrite decoder stamps without touching the
+        // derivation constant, and any of them changing what a program decodes
+        // as must mechanically invalidate every stored trade and price.
+        let stamp = token_derivation_stamp();
+        if self.meta(TOKEN_DERIVATION_META)?.as_deref() == Some(stamp.as_str()) {
             return Ok(0);
         }
         let tx = self.conn.transaction().map_err(db_err)?;
@@ -3749,6 +3822,7 @@ impl Store {
             "DELETE FROM token_events",
             "DELETE FROM token_balances",
             "DELETE FROM token_minters",
+            "DELETE FROM token_trades",
             "DELETE FROM tokens",
         ] {
             tx.execute(sql, []).map_err(db_err)?;
@@ -3799,7 +3873,7 @@ impl Store {
             }
             tx.commit().map_err(db_err)?;
         }
-        self.set_meta(TOKEN_DERIVATION_META, TOKEN_DERIVATION_VERSION)?;
+        self.set_meta(TOKEN_DERIVATION_META, &stamp)?;
         Ok(ids.len() as u64)
     }
 
@@ -3833,6 +3907,15 @@ impl Store {
         limit: u64,
     ) -> Result<Vec<crate::tokens::TokenEventRow>> {
         crate::tokens::token_events_page(&self.conn, &id.0, after_seq, limit)
+    }
+
+    /// Newest admitted trades first, as stored by the derivation.
+    pub fn token_trades_page(
+        &self,
+        id: &CovenantId,
+        limit: u64,
+    ) -> Result<Vec<crate::tokens::TokenTradeRow>> {
+        crate::tokens::token_trades_page(&self.conn, &id.0, limit)
     }
 
     /// One page of a token's event deltas walking BACKWARDS from the tip.

@@ -60,7 +60,23 @@ use kascov_decode::kcc20;
 ///    and per-field arguments are read, including the numbers carried in
 ///    OP_0/OP_1..OP_16 — so launch-time creator allocations that were stuck
 ///    unproven now resolve and their tokens must be re-derived.
-pub const TOKEN_DERIVATION_VERSION: &str = "6";
+/// 7: per-trade chain facts (`token_trades`) and the market-covenant link —
+///    every token must be rebuilt so its trades are extracted.
+pub const TOKEN_DERIVATION_VERSION: &str = "7";
+
+/// The stored derivation stamp COMPOSES every version whose bump changes what
+/// a stored program decodes as. Three passes rewrite decoder stamps without
+/// touching the derivation constant (`backfill_templates`,
+/// `reclassify_if_stale`, `restamp_kcc20_if_stale`); composing them here makes
+/// any decoder learning invalidate every stored trade and price mechanically
+/// rather than by someone remembering to bump two constants together.
+pub fn token_derivation_stamp() -> String {
+    format!(
+        "{TOKEN_DERIVATION_VERSION}/{}/{}",
+        crate::store::CLASSIFIER_VERSION,
+        crate::store::KCC20_RESTAMP_VERSION
+    )
+}
 
 /// Meta key holding the last completed derivation version.
 pub(crate) const TOKEN_DERIVATION_META: &str = "token_derivation_version";
@@ -93,9 +109,41 @@ pub struct TokenDirRow {
     /// same shape the per-request registry decode used to produce.
     pub fields_json: Option<String>,
     pub derived_at_daa: Option<u64>,
+    /// The unique covenant owner of this token's live inventory — the bonding
+    /// curve or pool it trades against. `None` when zero or several covenants
+    /// hold balances: nothing downstream may then attribute a reserve.
+    pub market_covenant_id: Option<CovenantId>,
+    /// Admitted trades extracted from hash-proven state deltas (see
+    /// `extract_trade_candidate`). Raw counts; pricing is gated elsewhere.
+    pub trades: i64,
+    /// Admitted trades that also moved a third covenant — stored, never priced.
+    pub co_moved_trades: i64,
+    /// Admitted trades whose event predates timestamp capture. Nonzero nulls
+    /// every 24h window for this token: a partial window is never published.
+    pub trades_missing_time: i64,
     pub live_utxos: u64,
     pub live_value: u64,
     pub template: Option<String>,
+}
+
+/// One admitted trade, as stored: the integer price pair plus the market
+/// covenant's before/after balances on both legs.
+#[derive(Clone, Debug, Serialize)]
+pub struct TokenTradeRow {
+    pub seq: u64,
+    pub txid: TxId,
+    pub market_covenant_id: CovenantId,
+    pub side: String,
+    pub base_amount: i64,
+    pub quote_sompi: i64,
+    pub kas_before_sompi: i64,
+    pub kas_after_sompi: i64,
+    pub base_before: i64,
+    pub base_after: i64,
+    pub co_covenants: i64,
+    pub accepting_daa: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepting_time_ms: Option<i64>,
 }
 
 /// One holder of a token: aggregated over live hash-proven cells.
@@ -442,6 +490,156 @@ fn prove_recovered(conn: &Connection, token_id: &[u8; 32], cells: &mut Vec<Cell>
     Ok(())
 }
 
+/// One admitted trade candidate: this token's cells moved against exactly one
+/// covenant owner's inventory, with KAS moving the opposite way in the same
+/// transaction. Raw chain facts only — pricing, bracketing and windows are
+/// decided at serve time so this table never has to be rewritten for a
+/// policy change.
+struct TradeRow {
+    seq: u64,
+    txid: [u8; 32],
+    market: [u8; 32],
+    side: &'static str,
+    base_amount: i64,
+    quote_sompi: i64,
+    kas_before: i64,
+    kas_after: i64,
+    base_before: i64,
+    base_after: i64,
+    co_covenants: i64,
+    accepting_daa: u64,
+    blue_score: Option<i64>,
+    tx_index: Option<u64>,
+    time_ms: Option<i64>,
+}
+
+/// D1-D4 of the trade design, over states that are ALREADY hash-proven.
+///
+/// The admission rules, each rejecting a real transaction shape:
+/// - exactly ONE covenant owner with a nonzero net delta (a graduation moves
+///   two covenant owners; it is not a trade);
+/// - KAS and tokens moved in OPPOSITE directions (a launch hands the curve
+///   both, same sign; a self-consolidation merge moves no net tokens at all);
+/// - both magnitudes fit i64.
+///
+/// `co_covenants` counts OTHER covenants evented by the same tx, from
+/// covenant_events — a source-table fact no decoder pass ever rewrites. A
+/// template test here fails open: a token output is a P2SH, stamped
+/// 'p2sh commitment' until some future spend reveals it.
+#[allow(clippy::too_many_arguments)]
+fn extract_trade_candidate(
+    conn: &Connection,
+    token_id: &[u8; 32],
+    seq: u64,
+    txid: &[u8; 32],
+    accepting_daa: u64,
+    tx_index: Option<u64>,
+    blue_score: Option<i64>,
+    time_ms: Option<i64>,
+    in_states: &[Judged],
+    out_states: &[Judged],
+) -> Result<Option<TradeRow>> {
+    // per-owner net token delta, i128 against overflow
+    let mut delta: BTreeMap<&str, i128> = BTreeMap::new();
+    for s in out_states {
+        *delta.entry(s.owner_key.as_str()).or_insert(0) += s.amount as i128;
+    }
+    for s in in_states {
+        *delta.entry(s.owner_key.as_str()).or_insert(0) -= s.amount as i128;
+    }
+    let movers: Vec<(&str, i128)> = delta
+        .iter()
+        .filter(|(k, v)| k.starts_with("02") && **v != 0)
+        .map(|(k, v)| (*k, *v))
+        .collect();
+    let [(market_key, d_tok)] = movers.as_slice() else { return Ok(None) };
+    let Ok(market_bytes) = hex::decode(&market_key[2..]) else { return Ok(None) };
+    let Ok(market) = <[u8; 32]>::try_from(market_bytes.as_slice()) else { return Ok(None) };
+
+    // K0/K1: the market covenant's KAS consumed and re-created by this tx.
+    // The created side anchors on txid (the PK prefix) with covenant_id
+    // filtered in Rust: without ANALYZE the planner otherwise picks the
+    // covenant index and walks every cell the market has ever had.
+    let mut k0: i128 = 0;
+    {
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT COALESCE(SUM(value), 0) FROM covenant_utxos
+                 WHERE spent_txid = ?1 AND covenant_id = ?2",
+            )
+            .map_err(db_err)?;
+        k0 = stmt
+            .query_row(params![txid.as_slice(), market.as_slice()], |r| r.get::<_, i64>(0))
+            .map_err(db_err)? as i128;
+    }
+    let mut k1: i128 = 0;
+    {
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT covenant_id, value FROM covenant_utxos WHERE txid = ?1",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([txid.as_slice()], |r| {
+                Ok((r.get::<_, [u8; 32]>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(db_err)?;
+        for row in rows {
+            let (cov, value) = row.map_err(db_err)?;
+            if cov == market {
+                k1 += value as i128;
+            }
+        }
+    }
+    let d_kas = k1 - k0;
+    // opposite directions or it is not a trade
+    if d_kas == 0 || (d_kas > 0) == (*d_tok > 0) {
+        return Ok(None);
+    }
+    let b0: i128 =
+        in_states.iter().filter(|s| s.owner_key == *market_key).map(|s| s.amount as i128).sum();
+    let b1: i128 =
+        out_states.iter().filter(|s| s.owner_key == *market_key).map(|s| s.amount as i128).sum();
+    let (Ok(quote_sompi), Ok(base_amount)) =
+        (i64::try_from(d_kas.abs()), i64::try_from(d_tok.abs()))
+    else {
+        return Ok(None);
+    };
+    let (Ok(kas_before), Ok(kas_after), Ok(base_before), Ok(base_after)) =
+        (i64::try_from(k0), i64::try_from(k1), i64::try_from(b0), i64::try_from(b1))
+    else {
+        return Ok(None);
+    };
+
+    // other covenants evented by the same tx (beyond the token and its market)
+    let co_covenants: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT covenant_id) FROM covenant_events
+             WHERE txid = ?1 AND covenant_id NOT IN (?2, ?3)",
+            params![txid.as_slice(), token_id.as_slice(), market.as_slice()],
+            |r| r.get(0),
+        )
+        .map_err(db_err)?;
+
+    Ok(Some(TradeRow {
+        seq,
+        txid: *txid,
+        market,
+        side: if d_kas > 0 { "buy" } else { "sell" },
+        base_amount,
+        quote_sompi,
+        kas_before,
+        kas_after,
+        base_before,
+        base_after,
+        co_covenants,
+        accepting_daa,
+        blue_score,
+        tx_index,
+        time_ms,
+    }))
+}
+
 /// A fully judged cell state: proven identity AND in-model field values.
 struct Judged {
     amount: i64,
@@ -570,6 +768,7 @@ fn delete_token_rows(conn: &Connection, id: &[u8; 32]) -> Result<()> {
     for sql in [
         "DELETE FROM token_events WHERE token_id = ?1",
         "DELETE FROM token_balances WHERE token_id = ?1",
+        "DELETE FROM token_trades WHERE token_id = ?1",
         "DELETE FROM tokens WHERE token_id = ?1",
     ] {
         conn.execute(sql, [id.as_slice()]).map_err(db_err)?;
@@ -601,6 +800,8 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
     conn.execute("DELETE FROM token_events WHERE token_id = ?1", [token_id.as_slice()])
         .map_err(db_err)?;
     conn.execute("DELETE FROM token_balances WHERE token_id = ?1", [token_id.as_slice()])
+        .map_err(db_err)?;
+    conn.execute("DELETE FROM token_trades WHERE token_id = ?1", [token_id.as_slice()])
         .map_err(db_err)?;
     let derived_at = processed_daa(conn)?;
 
@@ -678,13 +879,15 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
     // the canonical feed order for a single covenant.
     let mut stmt = conn
         .prepare(
-            "SELECT seq, kind, txid, accepting_daa, tx_index FROM covenant_events
+            "SELECT seq, kind, txid, accepting_daa, tx_index, accepting_blue_score,
+                    accepting_time_ms FROM covenant_events
              WHERE covenant_id = ?1 ORDER BY seq",
         )
         .map_err(db_err)?;
-    let events: Vec<(u64, String, [u8; 32], u64, Option<u64>)> = stmt
+    #[allow(clippy::type_complexity)]
+    let events: Vec<(u64, String, [u8; 32], u64, Option<u64>, Option<i64>, Option<i64>)> = stmt
         .query_map([token_id.as_slice()], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
         })
         .map_err(db_err)?
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -699,7 +902,8 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
     let mut minted: i128 = 0;
     let mut burned: i128 = 0;
 
-    for (seq, ev_kind, txid, accepting_daa, tx_index) in &events {
+    let mut trade_rows: Vec<TradeRow> = Vec::new();
+    for (seq, ev_kind, txid, accepting_daa, tx_index, blue_score, time_ms) in &events {
         seen_txids.insert(*txid);
         let ins: &[usize] = ins_of.get(txid).map(Vec::as_slice).unwrap_or(&[]);
         let outs: &[usize] = outs_of.get(txid).map(Vec::as_slice).unwrap_or(&[]);
@@ -740,6 +944,24 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
                 continue;
             }
         };
+        // Trade extraction rides the SAME proven states the verdict rides —
+        // never token_events rows, whose entries are absolute cell amounts
+        // (summing those reads every merge as a phantom inflow). Genesis and
+        // migration fall out of the admission rules by themselves.
+        if let Some(t) = extract_trade_candidate(
+            conn,
+            token_id,
+            *seq,
+            txid,
+            *accepting_daa,
+            *tx_index,
+            *blue_score,
+            *time_ms,
+            &in_states,
+            &out_states,
+        )? {
+            trade_rows.push(t);
+        }
 
         if in_states.is_empty() {
             // Outputs without token inputs: legal only as the KIP-20-proven
@@ -986,11 +1208,31 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
         .to_string()
     });
 
+    // The market link, from the live frontier: the UNIQUE covenant owner with
+    // a nonzero balance. Zero or several means no reserve, no spot, no exit
+    // value can ever be attributed — each trade still carries its own
+    // counterparty, so the trade history survives the ambiguity.
+    let market_covenant_id: Option<Vec<u8>> = {
+        let covs: Vec<&String> = balances
+            .iter()
+            .filter(|(k, (bal, _))| k.starts_with("02") && *bal != 0)
+            .map(|(k, _)| k)
+            .collect();
+        match covs.as_slice() {
+            [one] => hex::decode(&one[2..]).ok().filter(|b| b.len() == 32),
+            _ => None,
+        }
+    };
+    let trades_stored = trade_rows.len() as i64;
+    let co_moved_trades = trade_rows.iter().filter(|t| t.co_covenants > 0).count() as i64;
+    let trades_missing_time = trade_rows.iter().filter(|t| t.time_ms.is_none()).count() as i64;
+
     conn.execute(
         "INSERT OR REPLACE INTO tokens (token_id, status, invalid_reason, supply, minted, burned,
              holders, held_covenant, held_wallet, held_script,
-             unresolved_cells, last_activity_daa, fields_json, derived_at_daa)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             unresolved_cells, last_activity_daa, fields_json, derived_at_daa,
+             market_covenant_id, trades, co_moved_trades, trades_missing_time)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             token_id.as_slice(),
             verdict.status(),
@@ -1006,9 +1248,46 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
             last_activity,
             fields_json,
             derived_at,
+            market_covenant_id,
+            trades_stored,
+            co_moved_trades,
+            trades_missing_time,
         ],
     )
     .map_err(db_err)?;
+    {
+        let mut insert_trade = conn
+            .prepare_cached(
+                "INSERT INTO token_trades (token_id, seq, txid, market_covenant_id, side,
+                     base_amount, quote_sompi, kas_before_sompi, kas_after_sompi,
+                     base_before, base_after, co_covenants, accepting_daa,
+                     accepting_blue_score, tx_index, accepting_time_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+            )
+            .map_err(db_err)?;
+        for t in &trade_rows {
+            insert_trade
+                .execute(params![
+                    token_id.as_slice(),
+                    t.seq,
+                    t.txid.as_slice(),
+                    t.market.as_slice(),
+                    t.side,
+                    t.base_amount,
+                    t.quote_sompi,
+                    t.kas_before,
+                    t.kas_after,
+                    t.base_before,
+                    t.base_after,
+                    t.co_covenants,
+                    t.accepting_daa,
+                    t.blue_score,
+                    t.tx_index,
+                    t.time_ms,
+                ])
+                .map_err(db_err)?;
+        }
+    }
     {
         let mut insert_event = conn
             .prepare(
@@ -1147,7 +1426,8 @@ pub(crate) fn rederive_affected(
 const DIR_SELECT: &str = "SELECT t.token_id, t.status, t.invalid_reason, t.supply, t.minted,
         t.burned, t.holders, t.held_covenant, t.held_wallet, t.held_script,
         t.unresolved_cells, t.last_activity_daa, t.fields_json,
-        t.derived_at_daa,
+        t.derived_at_daa, t.market_covenant_id, t.trades, t.co_moved_trades,
+        t.trades_missing_time,
         (SELECT COUNT(*) FROM covenant_utxos u WHERE u.covenant_id = t.token_id AND u.spent_block IS NULL),
         (SELECT COALESCE(SUM(u.value), 0) FROM covenant_utxos u WHERE u.covenant_id = t.token_id AND u.spent_block IS NULL),
         CASE WHEN EXISTS(SELECT 1 FROM covenant_utxos u WHERE u.covenant_id = t.token_id
@@ -1171,9 +1451,13 @@ fn map_dir_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TokenDirRow> {
         last_activity_daa: row.get(11)?,
         fields_json: row.get(12)?,
         derived_at_daa: row.get(13)?,
-        live_utxos: row.get(14)?,
-        live_value: row.get(15)?,
-        template: row.get(16)?,
+        market_covenant_id: row.get::<_, Option<[u8; 32]>>(14)?.map(CovenantId),
+        trades: row.get(15)?,
+        co_moved_trades: row.get(16)?,
+        trades_missing_time: row.get(17)?,
+        live_utxos: row.get(18)?,
+        live_value: row.get(19)?,
+        template: row.get(20)?,
     })
 }
 
@@ -1198,6 +1482,44 @@ pub(crate) fn token_row(conn: &Connection, id: &[u8; 32]) -> Result<Option<Token
         .transpose()
         .map_err(db_err)?;
     Ok(row)
+}
+
+pub(crate) fn token_trades_page(
+    conn: &Connection,
+    id: &[u8; 32],
+    limit: u64,
+) -> Result<Vec<TokenTradeRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT seq, txid, market_covenant_id, side, base_amount, quote_sompi,
+                    kas_before_sompi, kas_after_sompi, base_before, base_after,
+                    co_covenants, accepting_daa, accepting_time_ms
+             FROM token_trades WHERE token_id = ?1 ORDER BY seq DESC LIMIT ?2",
+        )
+        .map_err(db_err)?;
+    let limit = limit.min(i64::MAX as u64) as i64;
+    let rows = stmt
+        .query_map(params![id.as_slice(), limit], |r| {
+            Ok(TokenTradeRow {
+                seq: r.get(0)?,
+                txid: TxId(r.get(1)?),
+                market_covenant_id: CovenantId(r.get(2)?),
+                side: r.get(3)?,
+                base_amount: r.get(4)?,
+                quote_sompi: r.get(5)?,
+                kas_before_sompi: r.get(6)?,
+                kas_after_sompi: r.get(7)?,
+                base_before: r.get(8)?,
+                base_after: r.get(9)?,
+                co_covenants: r.get(10)?,
+                accepting_daa: r.get(11)?,
+                accepting_time_ms: r.get(12)?,
+            })
+        })
+        .map_err(db_err)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    Ok(rows)
 }
 
 pub(crate) fn token_balances(conn: &Connection, id: &[u8; 32], limit: u64) -> Result<Vec<TokenBalanceRow>> {
@@ -1469,6 +1791,18 @@ mod tests {
                 outpoint: Outpoint { txid: TxId(txid), index },
                 covenant_id: CovenantId(cov),
                 value: 1000,
+                spk_version: 0,
+                spk_script: spk(&program(st)),
+            });
+            self
+        }
+        /// An output with an explicit KAS value — the market-covenant side of
+        /// a trade is measured purely in cell values.
+        fn out_v(mut self, cov: [u8; 32], txid: [u8; 32], index: u32, st: &St, value: u64) -> Self {
+            self.block.created_utxos.push(NewUtxo {
+                outpoint: Outpoint { txid: TxId(txid), index },
+                covenant_id: CovenantId(cov),
+                value,
                 spk_version: 0,
                 spk_script: spk(&program(st)),
             });
@@ -1753,6 +2087,106 @@ mod tests {
         assert_eq!(t.supply, Some(1_000_000_000), "the launch minted a round billion");
         assert_eq!(t.held_covenant, Some(999_999_999), "the curve's unsold inventory");
         assert_eq!(t.held_wallet, Some(1), "the creator kept one unit");
+    }
+
+    /// The trade layer's foundation: a token delta against exactly one
+    /// covenant owner, with the market covenant's KAS moving the opposite way
+    /// in the same tx, is stored as a trade with the integer price pair. A
+    /// launch (KAS and inventory arriving together) is not a trade, and the
+    /// numbers stored are the market's actual before/after cell values.
+    #[test]
+    fn trades_extract_from_proven_deltas_and_opposite_kas() {
+        const MKT: [u8; 32] = [0x11; 32]; // == the curve owner in covenant_held(0x11, ..)
+        const TX_MKT: [u8; 32] = [0xB0; 32];
+        let mut store = test_store("trade-extract");
+
+        let g0 = minter_state(1000);
+        let launch = [covenant_held(0x11, 700), holder(0x22, 300)];
+        let after = [covenant_held(0x11, 500), holder(0x33, 200)];
+
+        // the market covenant exists and holds 5,000 sompi
+        BlockBuilder::new(1, 100)
+            .event(MKT, EventKind::Genesis, TX_MKT)
+            .out_v(MKT, TX_MKT, 0, &holder(0x44, 1), 5000)
+            .event(COV, EventKind::Genesis, TX_G)
+            .out(COV, TX_G, 0, &g0)
+            .apply(&mut store);
+
+        // launch: the curve receives inventory, the market's KAS does not
+        // move in this tx — not a trade
+        let mut b = BlockBuilder::new(2, 200)
+            .event(COV, EventKind::Transition, TX_M)
+            .spend(TX_G, 0, TX_M, sig(&launch, &g0));
+        for (i, o) in launch.iter().enumerate() {
+            b = b.out(COV, TX_M, i as u32, o);
+        }
+        b.apply(&mut store);
+
+        // the trade: 200 tokens leave the curve, 1,000 sompi enter the market
+        let mut t = BlockBuilder::new(3, 300)
+            .event(COV, EventKind::Transition, TX_T)
+            .event(MKT, EventKind::Transition, TX_T)
+            .spend(TX_M, 0, TX_T, sig(&after, &launch[0]))
+            .spend(TX_MKT, 0, TX_T, Vec::new())
+            .out_v(MKT, TX_T, 5, &holder(0x44, 1), 6000);
+        for (i, o) in after.iter().enumerate() {
+            t = t.out(COV, TX_T, i as u32, o);
+        }
+        t.apply(&mut store);
+
+        let row = row(&store, COV).unwrap();
+        assert_eq!(row.validation, STATUS_VERIFIED, "reason: {:?}", row.invalid_reason);
+        assert_eq!(row.trades, 1, "the launch is not a trade; the sale is");
+        assert_eq!(row.co_moved_trades, 0);
+        assert_eq!(row.market_covenant_id, Some(CovenantId(MKT)));
+
+        let trades = store.token_trades_page(&CovenantId(COV), 10).unwrap();
+        assert_eq!(trades.len(), 1);
+        let tr = &trades[0];
+        assert_eq!(tr.side, "buy", "the market gained KAS and shed tokens");
+        assert_eq!((tr.base_amount, tr.quote_sompi), (200, 1000), "the integer price pair");
+        assert_eq!((tr.kas_before_sompi, tr.kas_after_sompi), (5000, 6000));
+        assert_eq!((tr.base_before, tr.base_after), (700, 500));
+        assert_eq!(tr.co_covenants, 0);
+    }
+
+    /// A graduation moves inventory from one covenant owner to another. Two
+    /// covenant owners with nonzero deltas is not a trade, whatever the KAS
+    /// did — the admission rule, not an event-kind allowlist, is what knows.
+    #[test]
+    fn a_graduation_is_not_a_trade() {
+        const MKT: [u8; 32] = [0x11; 32];
+        const POOL: [u8; 32] = [0x12; 32];
+        const TX_MKT: [u8; 32] = [0xB0; 32];
+        let mut store = test_store("trade-grad");
+        let g0 = minter_state(1000);
+        let curve = [covenant_held(0x11, 1000)];
+        let pool = [covenant_held(0x12, 1000)];
+
+        BlockBuilder::new(1, 100)
+            .event(MKT, EventKind::Genesis, TX_MKT)
+            .out_v(MKT, TX_MKT, 0, &holder(0x44, 1), 9000)
+            .event(COV, EventKind::Genesis, TX_G)
+            .out(COV, TX_G, 0, &g0)
+            .apply(&mut store);
+        BlockBuilder::new(2, 200)
+            .event(COV, EventKind::Transition, TX_M)
+            .spend(TX_G, 0, TX_M, sig(&curve, &g0))
+            .out(COV, TX_M, 0, &curve[0])
+            .apply(&mut store);
+        // graduation: inventory moves curve -> pool while the market's KAS
+        // leaves in the same tx
+        BlockBuilder::new(3, 300)
+            .event(COV, EventKind::Transition, TX_T)
+            .event(MKT, EventKind::Transition, TX_T)
+            .spend(TX_M, 0, TX_T, sig(&pool, &curve[0]))
+            .spend(TX_MKT, 0, TX_T, Vec::new())
+            .out(COV, TX_T, 0, &pool[0])
+            .apply(&mut store);
+
+        let row = row(&store, COV).unwrap();
+        assert_eq!(row.trades, 0, "two covenant owners moved: a migration, not a trade");
+        assert!(store.token_trades_page(&CovenantId(COV), 10).unwrap().is_empty());
     }
 
     /// genesis (minter branch, 0) → mint 100 → split 60/40: the happy path.
