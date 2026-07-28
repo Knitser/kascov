@@ -44,24 +44,24 @@ if ($eff -notmatch 'no') {
 "SSH is key-only, safe to proceed ($eff)"
 
 # 3. scope RDP to the admin IP
-Get-NetFirewallRule -Direction Inbound -Enabled True |
-  Where-Object { $_.DisplayName -like 'Remote Desktop*' } |
-  ForEach-Object {
-    Set-NetFirewallRule -Name $_.Name -RemoteAddress $me
-    "  scoped: {0}" -f $_.DisplayName
-  }
+$rdp = @(Get-NetFirewallRule -Direction Inbound -Enabled True |
+        Where-Object { $_.DisplayName -like 'Remote Desktop*' })
+foreach ($r in $rdp) {
+  Set-NetFirewallRule -Name $r.Name -RemoteAddress $me
+  "  scoped: {0}" -f $r.DisplayName
+}
 
 # 4. WinRM 5985 is a remote-management port with no business being open to the
 #    world; there is already a LocalSubnet rule, so drop the Any one to local.
-Get-NetFirewallRule -Direction Inbound -Enabled True |
-  Where-Object { $_.DisplayName -like 'Windows Remote Management*' } |
-  ForEach-Object {
-    $af = $_ | Get-NetFirewallAddressFilter
-    if ($af.RemoteAddress -eq 'Any') {
-      Set-NetFirewallRule -Name $_.Name -RemoteAddress LocalSubnet
-      "  scoped to LocalSubnet: {0}" -f $_.DisplayName
-    }
+$winrm = @(Get-NetFirewallRule -Direction Inbound -Enabled True |
+          Where-Object { $_.DisplayName -like 'Windows Remote Management*' })
+foreach ($r in $winrm) {
+  $af = $r | Get-NetFirewallAddressFilter
+  if ($af.RemoteAddress -eq 'Any') {
+    Set-NetFirewallRule -Name $r.Name -RemoteAddress LocalSubnet
+    "  scoped to LocalSubnet: {0}" -f $r.DisplayName
   }
+}
 
 # 5. show the resulting state for the ports that matter
 ""

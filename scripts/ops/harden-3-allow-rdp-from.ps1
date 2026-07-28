@@ -24,10 +24,10 @@ $allow = @($me)
 if ($Extra) { $allow += $Extra }
 "allowing RDP from: {0}" -f ($allow -join ', ')
 
-Get-NetFirewallRule -Direction Inbound -Enabled True |
-  Where-Object { $_.DisplayName -like 'Remote Desktop*' } |
-  ForEach-Object {
-    Set-NetFirewallRule -Name $_.Name -RemoteAddress $allow
-    "  updated: {0}" -f $_.DisplayName
-  }
+$rdp = @(Get-NetFirewallRule -Direction Inbound -Enabled True |
+        Where-Object { $_.DisplayName -like 'Remote Desktop*' })
+foreach ($r in $rdp) {
+  Set-NetFirewallRule -Name $r.Name -RemoteAddress $allow
+  "  updated: {0}" -f $r.DisplayName
+}
 "done - RDP now answers only to the address(es) above."
