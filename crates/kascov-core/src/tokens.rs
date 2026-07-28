@@ -1260,6 +1260,52 @@ pub(crate) fn token_events_page(
     Ok(rows)
 }
 
+/// One page of a token's classified event deltas, NEWEST first. `before_seq`
+/// is an exclusive cursor walking backwards; `None` starts at the tip.
+///
+/// A history is read from the present backwards. Serving only the ascending
+/// page meant a reader of an active token saw its first minutes and nothing
+/// since: KRON has 1,346 events and a first page holds 100 of them.
+pub(crate) fn token_events_page_before(
+    conn: &Connection,
+    id: &[u8; 32],
+    before_seq: Option<u64>,
+    limit: u64,
+) -> Result<Vec<TokenEventRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT e.seq, e.delta_idx, e.kind, e.amount, e.owner_from, e.owner_to,
+                    e.accepting_daa, e.tx_index, ce.txid, ce.kind
+             FROM token_events e
+             JOIN covenant_events ce ON ce.covenant_id = e.covenant_id AND ce.seq = e.seq
+             WHERE e.token_id = ?1 AND e.seq < ?2
+             ORDER BY e.seq DESC, e.delta_idx DESC LIMIT ?3",
+        )
+        .map_err(db_err)?;
+    // `None` means "from the tip": every real seq is below this bound.
+    let before = before_seq.map(|s| s as i64).unwrap_or(i64::MAX);
+    let limit = limit.min(i64::MAX as u64) as i64;
+    let rows = stmt
+        .query_map(params![id.as_slice(), before, limit], |r| {
+            Ok(TokenEventRow {
+                seq: r.get(0)?,
+                delta_idx: r.get(1)?,
+                kind: r.get(2)?,
+                amount: r.get(3)?,
+                owner_from: r.get(4)?,
+                owner_to: r.get(5)?,
+                accepting_daa: r.get(6)?,
+                tx_index: r.get(7)?,
+                txid: TxId(r.get(8)?),
+                event_kind: r.get(9)?,
+            })
+        })
+        .map_err(db_err)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    Ok(rows)
+}
+
 /// How many classified events (distinct seqs) the validator walked for one
 /// token — the "N events checked" figure of the validation summary.
 pub(crate) fn token_event_count(conn: &Connection, id: &[u8; 32]) -> Result<u64> {
@@ -1589,6 +1635,54 @@ mod tests {
         assert_eq!(t.supply, Some(1_000_000_000), "the round total the launch intended");
         assert_eq!(t.held_covenant, Some(999_999_999));
         assert_eq!(t.held_wallet, Some(1), "the creator allocation is a wallet balance");
+    }
+
+    /// A history is served newest first and walked backwards a page at a time,
+    /// so the cursor has to cover every delta exactly once and then stop. The
+    /// bug that motivated this: the page served the OLDEST events and never
+    /// paged, so an active token showed its first minutes and nothing since.
+    #[test]
+    fn history_pages_backwards_over_every_event_exactly_once() {
+        let mut store = test_store("events-desc");
+        apply_happy_path(&mut store);
+        let id = CovenantId(COV);
+
+        let ascending = store.token_events_page(&id, None, u64::MAX).unwrap();
+        assert!(ascending.len() >= 4, "need a few deltas to page over");
+        let newest = ascending.last().unwrap().seq;
+        assert!(newest > 0, "the token must have moved after genesis");
+
+        // First descending page really is the tip, in reverse order.
+        let head = store.token_events_page_before(&id, None, u64::MAX).unwrap();
+        assert_eq!(head.len(), ascending.len(), "same rows, other direction");
+        assert_eq!(head.first().unwrap().seq, newest, "newest first");
+        assert!(
+            head.windows(2).all(|w| (w[0].seq, w[0].delta_idx) >= (w[1].seq, w[1].delta_idx)),
+            "a descending page must not wobble"
+        );
+
+        // Walk it one delta at a time. Small pages are where an off-by-one in
+        // an exclusive cursor shows up as a skipped or repeated event.
+        let mut seen: Vec<(u64, u64)> = Vec::new();
+        let mut before: Option<u64> = None;
+        for _ in 0..64 {
+            let page = store.token_events_page_before(&id, before, 1).unwrap();
+            let Some(row) = page.first() else { break };
+            seen.push((row.seq, row.delta_idx));
+            // the cursor is exclusive on seq, so a seq with several deltas is
+            // consumed whole by the caller before it advances
+            before = Some(row.seq);
+            let rest = store.token_events_page_before(&id, before, u64::MAX).unwrap();
+            if rest.is_empty() && row.seq == 0 {
+                break;
+            }
+        }
+        assert_eq!(seen.first().unwrap().0, newest, "the walk starts at the tip");
+        assert!(
+            seen.windows(2).all(|w| w[0].0 > w[1].0),
+            "each step must land on a strictly older event, never repeat one"
+        );
+        assert_eq!(*seen.last().unwrap(), (0, 0), "the walk reaches genesis and stops");
     }
 
     /// The same recovery, end to end on real mainnet bytes: the launch

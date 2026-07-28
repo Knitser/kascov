@@ -4301,10 +4301,15 @@ const TOKEN_BALANCES_MAX: u64 = 500;
 const TOKEN_EVENTS_DEFAULT: u64 = 200;
 const TOKEN_EVENTS_MAX: u64 = 1000;
 
-/// GET /data/{network}/token/{id}?limit=&after_seq=&events_limit= — one
-/// derived token: its directory row, top holders (limit ≤ 500), the
-/// classified event-delta history (oldest first, exclusive `after_seq`
-/// cursor, `next_after_seq` when more remain), and the validation summary.
+/// GET /data/{network}/token/{id}?limit=&after_seq=&before_seq=&order=&events_limit=
+/// — one derived token: its directory row, top holders (limit ≤ 500), the
+/// classified event-delta history, and the validation summary.
+///
+/// The history reads oldest first by default (exclusive `after_seq` cursor,
+/// `next_after_seq` when more remain). `order=desc`, or supplying a
+/// `before_seq` cursor, reads it newest first instead and returns
+/// `next_before_seq`. Either way a page cuts on a whole-event boundary, so no
+/// event's deltas straddle two pages.
 /// 404 for ids the derivation doesn't know as tokens.
 async fn token_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
@@ -4329,6 +4334,10 @@ async fn token_handler(
         None => Ok(default),
         Some(s) => s.parse::<u64>().map(|l| l.clamp(1, max)).map_err(|_| name.to_string()),
     };
+    // `order=desc` (or a `before_seq` cursor) reads the history newest first.
+    let before_seq = q.get("before_seq").and_then(|s| s.parse::<u64>().ok());
+    let newest_first = before_seq.is_some()
+        || q.get("order").is_some_and(|o| o.eq_ignore_ascii_case("desc"));
     let (limit, events_limit) = match (
         parse_limit("limit", TOKEN_BALANCES_DEFAULT, TOKEN_BALANCES_MAX),
         parse_limit("events_limit", TOKEN_EVENTS_DEFAULT, TOKEN_EVENTS_MAX),
@@ -4342,8 +4351,9 @@ async fn token_handler(
     let after_seq = q.get("after_seq").and_then(|s| s.parse::<u64>().ok());
     let db = state.base_dir.join(format!("{network}.db"));
     let key = format!(
-        "{network}/token/{token_id}?limit={limit}&after_seq={}&events_limit={events_limit}",
+        "{network}/token/{token_id}?limit={limit}&after_seq={}&before_seq={}&desc={newest_first}&events_limit={events_limit}",
         after_seq.map_or(String::new(), |s| s.to_string()),
+        before_seq.map_or(String::new(), |s| s.to_string()),
     );
     let cc = "public, max-age=15, s-maxage=30, stale-while-revalidate=120";
     serve_cached(&state, key, 30, cc, accepts_gzip(&headers), move || {
@@ -4365,13 +4375,27 @@ async fn token_handler(
         // Over-fetch one delta row to learn whether another page exists, then
         // cut on a whole-event (seq) boundary so no event's deltas straddle
         // pages. A single event never carries more deltas than a page holds.
-        let mut rows = store.token_events_page(&token_id, after_seq, events_limit + 1)?;
+        //
+        // Two directions. Ascending is the original contract and stays the
+        // default so existing callers are untouched. Descending walks back from
+        // the tip, which is how a history is actually read: an active token's
+        // first ascending page is its first few minutes and nothing since.
+        let mut rows = if newest_first {
+            store.token_events_page_before(&token_id, before_seq, events_limit + 1)?
+        } else {
+            store.token_events_page(&token_id, after_seq, events_limit + 1)?
+        };
         let more = rows.len() as u64 > events_limit;
-        let next_after_seq = if more {
+        let boundary_seq = if more {
             rows.truncate(events_limit as usize);
             let boundary = rows.last().map(|r| r.seq);
             if let Some(boundary) = boundary {
-                let complete: Vec<_> = rows.iter().filter(|r| r.seq < boundary).cloned().collect();
+                // descending: the straddled seq is the LOWEST one here
+                let complete: Vec<_> = rows
+                    .iter()
+                    .filter(|r| if newest_first { r.seq > boundary } else { r.seq < boundary })
+                    .cloned()
+                    .collect();
                 if !complete.is_empty() {
                     rows = complete;
                 }
@@ -4380,6 +4404,8 @@ async fn token_handler(
         } else {
             None
         };
+        let (next_after_seq, next_before_seq) =
+            if newest_first { (None, boundary_seq) } else { (boundary_seq, None) };
         let events: Vec<serde_json::Value> = rows
             .iter()
             .map(|e| {
@@ -4425,6 +4451,9 @@ async fn token_handler(
                 "derived_at_daa": t.derived_at_daa,
             },
         });
+        if let Some(seq) = next_before_seq {
+            out["next_before_seq"] = serde_json::json!(seq);
+        }
         if let Some(seq) = next_after_seq {
             out["next_after_seq"] = serde_json::json!(seq);
         }

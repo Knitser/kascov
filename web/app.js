@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-cellkas';
+} from './core/format.js?v=20260728-history';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-cellkas';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-cellkas';
-import { createPendingModel } from './core/pending.js?v=20260728-cellkas';
+} from './core/state.js?v=20260728-history';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-history';
+import { createPendingModel } from './core/pending.js?v=20260728-history';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -29,17 +29,17 @@ import {
   galaxyCache, loadGalaxy,
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,
   TOKENS_TTL_MS, tokenPages, loadTokens,
-  tokenDetails, loadTokenDetail,
+  tokenDetails, loadTokenDetail, loadOlderTokenEvents,
   txDetails, loadTxDetail,
   loadChangelog,
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-cellkas';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-cellkas';
-import { createRefreshGate } from './core/refresh.js?v=20260728-cellkas';
-import { networkRouteHash } from './core/routing.js?v=20260728-cellkas';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-cellkas';
+} from './core/data.js?v=20260728-history';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-history';
+import { createRefreshGate } from './core/refresh.js?v=20260728-history';
+import { networkRouteHash } from './core/routing.js?v=20260728-history';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-history';
 
 
 
@@ -4817,7 +4817,10 @@ const TOKEN_EV_META = {
   transfer: { icon: 'move', cls: 'kind-move', chip: 'tok-transfer' },
   burn:     { icon: 'burn', cls: 'kind-burn', chip: 'tok-burn' },
 };
-const TOKEN_EVENTS_SHOWN = 200; /* defensive DOM cap — the endpoint may not cap */
+/* Defensive DOM cap. The endpoint caps a page at 1000 rows, and older pages
+   only arrive when a reader asks for them, so this only has to stop a runaway
+   loop rather than a first paint: KRON's entire 2,579-row history fits. */
+const TOKEN_EVENTS_SHOWN = 6000;
 
 /* an owner pubkey as a compact link to its address page (plain text when it
    isn't a pubkey shape we can route) */
@@ -5054,14 +5057,25 @@ function renderTokenPage(route) {
 
   /* the classified timeline — every event the validator walked, as
      mint/transfer/burn chips with amounts */
+  /* Newest first, because that is how a history is read. The worker sends the
+     tip page; older pages are appended on demand. `checked` is the count the
+     validator actually walked, so the note can say how much of the whole is on
+     screen rather than only how much of what was fetched. */
   const events = Array.isArray(d.events) ? d.events : [];
   let timelineSection = '';
   if (events.length) {
     const shown = events.slice(0, TOKEN_EVENTS_SHOWN);
-    const capNote = events.length > shown.length
-      ? `<p class="dim">showing ${esc(fmtInt(shown.length))} of ${esc(fmtInt(events.length))} events.</p>` : '';
+    const totalSeqs = d.validation && d.validation.checked;
+    const seenSeqs = new Set(shown.map((ev) => ev.seq)).size;
+    const older = d.next_before_seq != null;
+    const note = older
+      ? `<p class="timeline-more"><span class="dim">newest first · ${esc(fmtInt(seenSeqs))}` +
+        (totalSeqs ? ` of ${esc(fmtInt(totalSeqs))}` : '') +
+        ` events shown</span> ` +
+        `<button type="button" class="btn btn-quiet" data-action="older-events">load older</button></p>`
+      : `<p class="dim">newest first · the whole history, ${esc(fmtInt(seenSeqs))} event${seenSeqs === 1 ? '' : 's'}.</p>`;
     timelineSection = `<section aria-label="Token history"><h2>token history</h2>` +
-      `<ol class="timeline">${shown.map((ev) => tokenEventItem(ev, network, toMs)).join('')}</ol>${capNote}</section>`;
+      `<ol class="timeline">${shown.map((ev) => tokenEventItem(ev, network, toMs)).join('')}</ol>${note}</section>`;
   }
 
   view.innerHTML = back + header + fieldsLine +
@@ -6640,6 +6654,20 @@ const ACTIONS = {
   'tokens-more'(el) {
     tokenDirectoryUi.limit += TOKEN_DIRECTORY_PAGE;
     renderTokens();
+  },
+
+  'older-events'(el) {
+    const route = parseRoute();
+    if (route.view !== 'token' || !route.id) return;
+    el.disabled = true;
+    el.textContent = 'loading…';
+    loadOlderTokenEvents(state.network, route.id).then((added) => {
+      const now = parseRoute();
+      if (now.view !== 'token' || now.id !== route.id) return;
+      if (added) { render(); return; }
+      /* nothing came back: say so rather than leaving a dead button */
+      el.textContent = 'no older events loaded';
+    });
   },
 
   'jump-section'(el) {

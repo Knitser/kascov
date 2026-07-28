@@ -1574,6 +1574,24 @@ a.btn:hover { text-decoration: none; }
 .spend-note { margin: 0.5rem 0 0; font-size: 0.8rem; }
 
 .flag-tpl { background: var(--accent-soft); color: var(--accent); text-transform: none; letter-spacing: 0.02em; }
+/* the history footer: a count and the control that loads the page before it,
+   sitting quietly under the timeline rather than competing with it. */
+.timeline-more {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 0.6rem;
+}
+.btn-quiet {
+  background: transparent;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.14));
+  color: var(--fg, #dfeeeb);
+  font-size: 0.82rem;
+  padding: 0.25rem 0.7rem;
+}
+.btn-quiet:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn-quiet:disabled { opacity: 0.55; cursor: default; }
 /* the listed-name line sits under the id chip, in the page's quiet voice: it
    reports somebody else's name and kascov's own check of everything around it,
    so it must not compete with the verdict badge above it. */

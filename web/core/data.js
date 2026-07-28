@@ -5,11 +5,11 @@
    galaxy, lane pages, changelog). No DOM — everything here returns data
    and fills the caches in core/state; rendering stays in app.js. */
 
-import { friendlyName } from './format.js?v=20260728-cellkas';
+import { friendlyName } from './format.js?v=20260728-history';
 import {
   GRID_PAGE, ACTIVITY_TTL_MS, ACTIVITY_MISS_TTL_MS,
   makeAnchor, daaToMs, state,
-} from './state.js?v=20260728-cellkas';
+} from './state.js?v=20260728-history';
 
 /* the wire says 'active'/'burned'; the UI speaks alive/retired — the one
    place that mapping happens (grid rows, detail coins, search results and
@@ -591,11 +591,14 @@ async function loadTokens(network) {
    missing and reprobed after the ttl. */
 const tokenDetails = new Map(); // `${network}/${id}` -> { data|missing, at }
 
+/* A history is read from the present backwards, so this asks for newest first.
+   Ascending was the old default and it meant an active token showed its first
+   minutes and nothing since: KRON has 1,346 events and a page holds 100. */
 async function loadTokenDetail(network, id) {
   const key = `${network}/${id}`;
   const t = tokenDetails.get(key);
   if (t && Date.now() - t.at < TOKENS_TTL_MS) return t;
-  const res = await fetch(`data/${network}/token/${id}`, { cache: 'no-cache' });
+  const res = await fetch(`data/${network}/token/${id}?order=desc`, { cache: 'no-cache' });
   if (res.status === 404) {
     const rec = { missing: true, at: Date.now() };
     tokenDetails.set(key, rec);
@@ -605,6 +608,34 @@ async function loadTokenDetail(network, id) {
   const rec = { data: await res.json(), at: Date.now() };
   tokenDetails.set(key, rec);
   return rec;
+}
+
+/* Append the next older page of a token's history onto the record already in
+   the cache. Returns true when rows were added, so the caller knows whether a
+   repaint is worth it. Silent on failure: the button simply stays. */
+async function loadOlderTokenEvents(network, id) {
+  const key = `${network}/${id}`;
+  const rec = tokenDetails.get(key);
+  const before = rec && rec.data ? rec.data.next_before_seq : null;
+  if (before == null || rec.loadingOlder) return false;
+  rec.loadingOlder = true;
+  try {
+    const res = await fetch(
+      `data/${network}/token/${id}?order=desc&before_seq=${encodeURIComponent(before)}`,
+      { cache: 'no-cache' },
+    );
+    if (!res.ok) return false;
+    const page = await res.json();
+    const rows = Array.isArray(page.events) ? page.events : [];
+    rec.data.events = (rec.data.events || []).concat(rows);
+    /* absent means the walk reached the token's genesis */
+    rec.data.next_before_seq = page.next_before_seq ?? null;
+    return rows.length > 0;
+  } catch (e) {
+    return false;
+  } finally {
+    rec.loadingOlder = false;
+  }
 }
 
 /* one transaction's covenant footprint — the same route the search resolver
@@ -691,7 +722,7 @@ export {
   galaxyCache, loadGalaxy,
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,
   TOKENS_TTL_MS, tokenPages, loadTokens,
-  tokenDetails, loadTokenDetail,
+  tokenDetails, loadTokenDetail, loadOlderTokenEvents,
   txDetails, loadTxDetail,
   loadChangelog,
   loadCommunity,

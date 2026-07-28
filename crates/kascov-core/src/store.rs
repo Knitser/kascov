@@ -3835,6 +3835,16 @@ impl Store {
         crate::tokens::token_events_page(&self.conn, &id.0, after_seq, limit)
     }
 
+    /// One page of a token's event deltas walking BACKWARDS from the tip.
+    pub fn token_events_page_before(
+        &self,
+        id: &CovenantId,
+        before_seq: Option<u64>,
+        limit: u64,
+    ) -> Result<Vec<crate::tokens::TokenEventRow>> {
+        crate::tokens::token_events_page_before(&self.conn, &id.0, before_seq, limit)
+    }
+
     /// Every registered minter/vault covenant with the token ids it pins.
     pub fn token_minter_directory(&self) -> Result<Vec<crate::tokens::TokenMinterRow>> {
         crate::tokens::token_minter_directory(&self.conn)
