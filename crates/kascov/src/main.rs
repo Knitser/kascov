@@ -1,5 +1,6 @@
 mod og;
 mod preflight;
+mod registry;
 
 use std::collections::{HashSet, VecDeque};
 
@@ -1364,6 +1365,7 @@ async fn serve(
         .route("/data/{network}/search", get(search_handler))
         .route("/data/{network}/stream", get(stream_handler))
         .route("/data/{network}/pending", get(pending_handler))
+        .route("/data/{network}/registry.json", get(registry_handler))
         // share surface: crawler-visible per-coin pages (the SPA is
         // hash-routed, so scrapers never see #/… urls) + PNG OG cards
         // (Facebook/X reject SVG og:images) + the sitemap that feeds them.
@@ -3740,6 +3742,150 @@ async fn price_handler() -> axum::response::Response {
             r#"{"error":"price unavailable"}"#,
         )
             .into_response(),
+    }
+}
+
+/// The last fetch of the published token list: when it ran, and the raw body
+/// (None = the fetch failed).
+struct ListState {
+    fetched_at: std::time::Instant,
+    body: Option<String>,
+}
+
+/// One client for the token-list fetch, built once so connections are reused.
+/// The URL is operator-configured rather than request-supplied, so a bounded
+/// redirect chain is a convenience rather than an SSRF surface.
+fn registry_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::limited(2))
+                .user_agent(concat!("kascov/", env!("CARGO_PKG_VERSION"), " (+https://kascov.io)"))
+                .build()
+                .map_err(|err| tracing::error!("token-list client unavailable: {err}"))
+                .ok()
+        })
+        .as_ref()
+}
+
+fn registry_cache() -> &'static tokio::sync::Mutex<Option<ListState>> {
+    static CACHE: std::sync::OnceLock<tokio::sync::Mutex<Option<ListState>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
+/// A launchpad's published token list, with every structural statement in it
+/// tested against kascov's own index. See `registry.rs` for why the checking is
+/// the feature and the names are the byproduct.
+///
+/// Only the fetch is cached. The comparison is redone per request against the
+/// live index, so a token that graduates or a creator who sells is reflected
+/// without waiting for the list's TTL to lapse.
+async fn registry_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let network = match resolve_network(&state, &net) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let fail = |msg: &str| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+                (header::CACHE_CONTROL, "public, max-age=30"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            serde_json::json!({ "error": msg }).to_string(),
+        )
+            .into_response()
+    };
+
+    let body = {
+        let mut cache = registry_cache().lock().await;
+        let stale = match &*cache {
+            Some(s) => {
+                let ttl = if s.body.is_some() {
+                    registry::LIST_TTL_OK
+                } else {
+                    registry::LIST_TTL_ERR
+                };
+                s.fetched_at.elapsed() >= ttl
+            }
+            None => true,
+        };
+        if stale {
+            let fetched = match registry_client() {
+                Some(client) => registry::fetch_list(client).await.ok(),
+                None => None,
+            };
+            *cache = Some(ListState { fetched_at: std::time::Instant::now(), body: fetched });
+        }
+        cache.as_ref().and_then(|s| s.body.clone())
+    };
+    let Some(body) = body else { return fail("token list unavailable") };
+    let entries = match registry::parse_list(&body, &network.to_string()) {
+        Ok(e) => e,
+        // A list published for another network is a configuration mistake, not
+        // a transient failure, so it is reported rather than silently empty.
+        Err(e) => return fail(&e.to_string()),
+    };
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    let built = tokio::task::spawn_blocking(move || -> Result<String> {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let mut checked = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let mut facts = registry::ChainFacts::default();
+            if let Ok(bytes) = <[u8; 32]>::try_from(hex::decode(&entry.covenant_id)?.as_slice()) {
+                let id = kascov_core::CovenantId(bytes);
+                facts.known = store.token_row(&id)?.is_some();
+                if facts.known {
+                    facts.owners =
+                        store.token_balances(&id, 512)?.into_iter().map(|b| b.owner).collect();
+                    for ev in store.token_events_page(&id, None, 512)? {
+                        if ev.seq == 0 && ev.event_kind == "genesis" {
+                            facts.genesis_txid.get_or_insert_with(|| ev.txid.to_string());
+                            if let Some(owner) = ev.owner_to {
+                                facts.genesis_owners.push(owner);
+                            }
+                        }
+                    }
+                }
+            }
+            checked.push(registry::check(entry, &facts));
+        }
+        let agreed = checked.iter().filter(|c| c.all_checks_passed).count();
+        Ok(serde_json::json!({
+            "network": network.to_string(),
+            "source": std::env::var("KASCOV_REGISTRY_URL").ok(),
+            "fetched_at_ms": now_ms(),
+            "listed": checked.len(),
+            "agreed_with_chain": agreed,
+            "tokens": checked,
+        })
+        .to_string())
+    })
+    .await;
+
+    match built {
+        Ok(Ok(json)) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+                (header::CACHE_CONTROL, "public, max-age=60, s-maxage=120"),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            json,
+        )
+            .into_response(),
+        _ => fail("could not check the list against the index"),
     }
 }
 
