@@ -1080,7 +1080,9 @@ impl Store {
             let tx = self.conn.transaction().map_err(db_err)?;
             for (rowid, version, spk, sig) in &rows {
                 let template = kascov_decode::p2sh_reveal(spk, sig)
-                    .and_then(|redeem| registry().decode(*version, &redeem).template)
+                    .and_then(|redeem| {
+                        kascov_decode::kcc20::revealed_template(registry(), *version, &redeem)
+                    })
                     .unwrap_or("");
                 tx.execute(
                     "UPDATE covenant_utxos SET revealed_template = ?1 WHERE rowid = ?2",
@@ -1331,7 +1333,9 @@ impl Store {
                     let redeem = kascov_decode::p2sh_reveal(&spk, sig);
                     kcc1_hash = redeem.as_deref().and_then(kascov_decode::kcc20::kcc1_template_hash);
                     let template = redeem
-                        .and_then(|redeem| registry().decode(version, &redeem).template)
+                        .and_then(|redeem| {
+                            kascov_decode::kcc20::revealed_template(registry(), version, &redeem)
+                        })
                         .unwrap_or("");
                     note_kcc20(&CovenantId(covenant_id), template);
                     template.to_string()
@@ -1825,7 +1829,9 @@ impl Store {
             let redeem = kascov_decode::p2sh_reveal(&spk, sig);
             let kcc1_hash = redeem.as_deref().and_then(kascov_decode::kcc20::kcc1_template_hash);
             let revealed = redeem
-                .and_then(|redeem| registry().decode(version, &redeem).template)
+                .and_then(|redeem| {
+                    kascov_decode::kcc20::revealed_template(registry(), version, &redeem)
+                })
                 .unwrap_or("");
             let updated = tx
                 .execute(

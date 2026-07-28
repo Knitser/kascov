@@ -65,6 +65,28 @@ impl TokenState {
     }
 }
 
+/// The template a revealed program should be filed under. The registry
+/// answers first, since a matched skeleton also labels the program's fields.
+/// Where it has no skeleton, a located state block is still evidence enough
+/// that the program is a KCC20 token: the block's shape is what the accounting
+/// reads, and every value it yields is hash-gated before anything trusts it.
+///
+/// The fallback is load-bearing, not cosmetic. Skeletons derive from observed
+/// fixture PAIRS, so a build can only be registered once the chain has shown
+/// each state field varying — and `is_minter` has never varied on the
+/// unguarded build KRON deploys. Without this, such a build stays unrecognized
+/// at reveal time and its tokens are invisible until a backfill pass reruns.
+pub fn revealed_template(
+    registry: &Registry,
+    spk_version: u16,
+    program: &[u8],
+) -> Option<&'static str> {
+    registry
+        .decode(spk_version, program)
+        .template
+        .or_else(|| locate_state_block(program).map(|_| TOKEN_TEMPLATE))
+}
+
 /// Decode `program` as a KCC20 token state via the registry skeletons.
 /// Returns the four labeled fields only when the template is "KCC20 token"
 /// and every field is present with its observed width (owner 32 bytes,

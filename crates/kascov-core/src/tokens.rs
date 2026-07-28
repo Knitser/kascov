@@ -56,7 +56,11 @@ use kascov_decode::kcc20;
 ///    unknown owner type now resolve and their tokens must be re-derived.
 /// 5: supply is now split by owner type (covenant / wallet / script), so
 ///    existing rows must be rebuilt to populate the new columns.
-pub const TOKEN_DERIVATION_VERSION: &str = "5";
+/// 6: recovery reaches genesis cells — sibling outputs serve as splice bases
+///    and per-field arguments are read, including the numbers carried in
+///    OP_0/OP_1..OP_16 — so launch-time creator allocations that were stuck
+///    unproven now resolve and their tokens must be re-derived.
+pub const TOKEN_DERIVATION_VERSION: &str = "6";
 
 /// Meta key holding the last completed derivation version.
 pub(crate) const TOKEN_DERIVATION_META: &str = "token_derivation_version";
@@ -277,6 +281,30 @@ const TYPE_MINTER_DOMAIN: [(u8, u8); 8] = [
     (0x03, 0x01),
 ];
 
+/// Cap on per-field candidates taken from a single sigscript. Observed launch
+/// transactions carry a handful of each; a script with more distinct 32-byte
+/// pushes than this is a vault, whose arguments arrive struct-of-arrays anyway.
+/// The cap bounds the brute force, and hitting it can only leave a cell
+/// unproven — never mis-prove one, since every candidate is still hash-gated.
+const FIELD_CANDIDATE_CAP: usize = 64;
+
+/// Every value a sigscript pushes, including the ones the opcode carries
+/// itself. `OP_0` and `OP_1`..`OP_16` encode their number in the opcode rather
+/// than as pushed data, so reading only `inst.data` makes a small amount — a
+/// one-unit creator allocation, say — invisible to recovery.
+fn arg_pushes(sig: &[u8]) -> Vec<Vec<u8>> {
+    let (instructions, _) = kascov_decode::disasm::disassemble(sig);
+    instructions
+        .into_iter()
+        .filter_map(|inst| match (inst.opcode, inst.data) {
+            (_, Some(data)) => Some(data),
+            (0x00, None) => Some(Vec::new()),
+            (op @ 0x51..=0x60, None) => Some(vec![op - 0x50]),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Proof pass B: witness recovery. For each tx that created still-unproven
 /// cells, the sigscripts of the tx's inputs — the token's own inputs plus
 /// any co-spent covenant's inputs (a vault leader carries args for the
@@ -309,11 +337,20 @@ fn prove_recovered(conn: &Connection, token_id: &[u8; 32], cells: &mut Vec<Cell>
             if outs.iter().all(|&i| cells[i].proven.is_some()) {
                 continue;
             }
-            let Some(ins) = ins_of.get(txid) else { continue }; // genesis: nothing to recover from
+            let no_inputs = Vec::new();
+            let ins = ins_of.get(txid).unwrap_or(&no_inputs);
             let n = outs.len();
-            // Proven programs of this tx's inputs are same-build splice bases.
-            let bases: Vec<Vec<u8>> = ins
+            // Same-build splice bases: the proven programs of this tx's own
+            // token inputs AND of its sibling outputs. Siblings matter because
+            // a genesis transaction has no token inputs at all, so a cell
+            // created there that nobody has spent — a creator allocation held
+            // back at launch — could never be recovered without them. Where a
+            // base comes from cannot make a proof wrong: `prove_output_state`
+            // accepts only a splice whose blake2b equals the output's own
+            // commitment, so anything it returns IS the committed program.
+            let bases: BTreeSet<Vec<u8>> = ins
                 .iter()
+                .chain(outs.iter())
                 .filter_map(|&i| cells[i].proven.as_ref().map(|(_, p)| p.clone()))
                 .filter(|p| kcc20::has_state_block(p))
                 .collect();
@@ -321,7 +358,9 @@ fn prove_recovered(conn: &Connection, token_id: &[u8; 32], cells: &mut Vec<Cell>
                 continue;
             }
             // Argument carriers: this token's input sigs, then the sigs of
-            // co-spent inputs of other covenants in the same tx.
+            // co-spent inputs of other covenants in the same tx. A genesis
+            // transaction contributes none of its own, but the launch covenant
+            // it spends is exactly such a co-spent input.
             let mut sigs: Vec<Vec<u8>> =
                 ins.iter().filter_map(|&i| cells[i].spent_sig.clone()).collect();
             let foreign: Vec<Vec<u8>> = foreign_sigs
@@ -331,39 +370,63 @@ fn prove_recovered(conn: &Connection, token_id: &[u8; 32], cells: &mut Vec<Cell>
                 .map_err(db_err)?;
             sigs.extend(foreign);
             for sig in &sigs {
-                let (instructions, _) = kascov_decode::disasm::disassemble(sig);
-                let pushes: Vec<Vec<u8>> =
-                    instructions.into_iter().filter_map(|inst| inst.data).collect();
-                let owners: Vec<&Vec<u8>> = pushes.iter().filter(|p| p.len() == n * 32).collect();
-                let amounts: Vec<&Vec<u8>> = pushes.iter().filter(|p| p.len() == n * 8).collect();
-                for base in &bases {
-                    for ow in &owners {
-                        for am in &amounts {
-                            for (k, &out_idx) in outs.iter().enumerate() {
-                                if cells[out_idx].proven.is_some() {
-                                    continue;
-                                }
-                                let owner: [u8; 32] =
-                                    ow[k * 32..(k + 1) * 32].try_into().expect("32-byte slice");
-                                let amount: [u8; 8] =
-                                    am[k * 8..(k + 1) * 8].try_into().expect("8-byte slice");
+                let pushes = arg_pushes(sig);
+                // Two observed argument shapes. Struct-of-arrays: one push
+                // carrying all n owners and one carrying all n amounts, which
+                // is how a covenant run passes the states it is about to
+                // create. Per-field: a separate push per value, which is how a
+                // launch transaction passes its genesis states.
+                let owners_soa: Vec<&Vec<u8>> =
+                    pushes.iter().filter(|p| p.len() == n * 32).collect();
+                let amounts_soa: Vec<&Vec<u8>> =
+                    pushes.iter().filter(|p| p.len() == n * 8).collect();
+                let owners_flat: Vec<&Vec<u8>> = pushes.iter().filter(|p| p.len() == 32).collect();
+                let amounts_flat: Vec<&Vec<u8>> = pushes.iter().filter(|p| p.len() <= 8).collect();
+                for (k, &out_idx) in outs.iter().enumerate() {
+                    if cells[out_idx].proven.is_some() {
+                        continue;
+                    }
+                    let mut owner_cands: BTreeSet<[u8; 32]> = BTreeSet::new();
+                    for ow in &owners_soa {
+                        owner_cands
+                            .insert(ow[k * 32..(k + 1) * 32].try_into().expect("32-byte slice"));
+                    }
+                    for ow in owners_flat.iter().take(FIELD_CANDIDATE_CAP) {
+                        owner_cands.insert(ow.as_slice().try_into().expect("32-byte push"));
+                    }
+                    let mut amount_cands: BTreeSet<[u8; 8]> = BTreeSet::new();
+                    for am in &amounts_soa {
+                        amount_cands
+                            .insert(am[k * 8..(k + 1) * 8].try_into().expect("8-byte slice"));
+                    }
+                    for am in amounts_flat.iter().take(FIELD_CANDIDATE_CAP) {
+                        // Script integers are little-endian and minimally
+                        // encoded, so a one-unit allocation arrives as a single
+                        // byte and widens by zero-extension on the right.
+                        let mut a = [0u8; 8];
+                        a[..am.len()].copy_from_slice(am);
+                        amount_cands.insert(a);
+                    }
+                    'cell: for base in &bases {
+                        for owner in &owner_cands {
+                            for amount in &amount_cands {
                                 for (id_type, minter) in TYPE_MINTER_DOMAIN {
                                     if let Some(st) = kcc20::prove_output_state(
                                         base,
                                         &cells[out_idx].spk_script,
-                                        &owner,
+                                        owner,
                                         id_type,
-                                        &amount,
+                                        amount,
                                         minter,
                                     ) {
                                         let program = kcc20::splice_token_state(
-                                            base, &owner, id_type, &amount, minter,
+                                            base, owner, id_type, amount, minter,
                                         )
                                         .expect("base had a state block");
                                         cells[out_idx].proven = Some((st, program));
                                         cells[out_idx].unproven = None;
                                         changed = true;
-                                        break;
+                                        break 'cell;
                                     }
                                 }
                             }
@@ -1365,6 +1428,18 @@ mod tests {
             });
             self
         }
+        /// An output whose committed script is supplied verbatim, for tests
+        /// driven by real on-chain commitments rather than synthesised states.
+        fn out_spk(mut self, cov: [u8; 32], txid: [u8; 32], index: u32, spk: Vec<u8>) -> Self {
+            self.block.created_utxos.push(NewUtxo {
+                outpoint: Outpoint { txid: TxId(txid), index },
+                covenant_id: CovenantId(cov),
+                value: 1000,
+                spk_version: 0,
+                spk_script: spk,
+            });
+            self
+        }
         fn spend(mut self, prev_txid: [u8; 32], index: u32, spender: [u8; 32], sig: Vec<u8>) -> Self {
             self.block.spent_utxos.push((
                 Outpoint { txid: TxId(prev_txid), index },
@@ -1457,6 +1532,133 @@ mod tests {
             t.supply.unwrap(),
             "the parts must account for the whole"
         );
+    }
+
+    /// A launch holds part of the supply back in a creator cell nobody has
+    /// spent, so nothing ever reveals that cell's program. Recovery reaches it
+    /// anyway: the sibling curve output of the same genesis is a same-build
+    /// splice base, and the launch covenant's sigscript carries the fields per
+    /// output rather than as arrays — with a one-unit allocation encoded as
+    /// bare OP_1, in the opcode itself. Modelled on mainnet eager-teal-magpie
+    /// (genesis c3faf69d), whose curve took 999,999,999 and creator cell 1.
+    #[test]
+    fn genesis_creator_allocation_recovers_without_a_reveal() {
+        const LAUNCH: [u8; 32] = [0xC2; 32];
+        const TX_L: [u8; 32] = [0xA3; 32];
+        let mut store = test_store("genesis-holdback");
+        let curve = covenant_held(0x20, 999_999_999);
+        let dev = presence_holder(0x30, 1);
+
+        // The launch covenant has to exist before the genesis can spend it.
+        BlockBuilder::new(1, 100)
+            .event(LAUNCH, EventKind::Genesis, TX_L)
+            .out(LAUNCH, TX_L, 0, &minter_state(0))
+            .apply(&mut store);
+
+        // Per-field launch arguments: each owner as its own push, each amount
+        // minimally encoded — 999,999,999 in four bytes, and 1 as bare OP_1.
+        let mut launch_sig = Vec::new();
+        launch_sig.extend(push(&curve.0));
+        launch_sig.push(0x52); // OP_2, the curve's identifier type
+        launch_sig.extend(push(&999_999_999i64.to_le_bytes()[..4]));
+        launch_sig.push(0x00); // OP_0, not a minter
+        launch_sig.extend(push(&dev.0));
+        launch_sig.push(0x53); // OP_3, presence-owned
+        launch_sig.push(0x51); // OP_1 — the entire creator allocation
+        launch_sig.push(0x00);
+        launch_sig.extend(push(&program(&minter_state(0)))); // the launch reveal
+
+        BlockBuilder::new(2, 200)
+            .event(COV, EventKind::Genesis, TX_G)
+            .event(LAUNCH, EventKind::Burn, TX_G)
+            .spend(TX_L, 0, TX_G, launch_sig)
+            .out(COV, TX_G, 0, &curve)
+            .out(COV, TX_G, 1, &dev)
+            .apply(&mut store);
+
+        // The curve trades on, which is what reveals its program. The creator
+        // cell is never touched, so only the sibling can serve as its base.
+        BlockBuilder::new(3, 300)
+            .event(COV, EventKind::Transition, TX_T)
+            .spend(TX_G, 0, TX_T, sig(&[curve], &curve))
+            .out(COV, TX_T, 0, &curve)
+            .apply(&mut store);
+
+        let t = row(&store, COV).unwrap();
+        assert_eq!(t.validation, STATUS_VERIFIED, "reason: {:?}", t.invalid_reason);
+        assert_eq!(t.supply, Some(1_000_000_000), "the round total the launch intended");
+        assert_eq!(t.held_covenant, Some(999_999_999));
+        assert_eq!(t.held_wallet, Some(1), "the creator allocation is a wallet balance");
+    }
+
+    /// The same recovery, end to end on real mainnet bytes: the launch
+    /// arguments transaction c3faf69d actually passed, the two commitments its
+    /// token outputs actually carry, and the deployed program those
+    /// commitments commit to. Output :2 has never been spent, so nothing ever
+    /// reveals it and only recovery can reach it. This is the live token
+    /// eager-teal-magpie, reproduced offline.
+    #[test]
+    fn real_mainnet_launch_recovers_the_creator_cell() {
+        /// The 2,433-byte unguarded KCC20 program KRON deploys, from chain.
+        const KRON: &[u8] =
+            include_bytes!("../../kascov-decode/fixtures/kcc20_unguarded_kron.bin");
+        /// Input 0's sigscript of c3faf69d, argument pushes only. The 172 KB
+        /// redeem push that follows is omitted: every candidate filter rejects
+        /// it on length, so carrying it would only bloat the fixture.
+        const ARGS: &[u8] =
+            include_bytes!("../../kascov-decode/fixtures/kcc20_kron_launch_args.bin");
+        const LAUNCH: [u8; 32] = [0xC2; 32];
+        const TX_L: [u8; 32] = [0xA3; 32];
+
+        fn bytes(h: &str) -> Vec<u8> {
+            hex::decode(h).unwrap()
+        }
+        let mut store = test_store("kron-launch");
+        // What mainnet committed to at c3faf69d:1 (the bonding curve's unsold
+        // inventory) and c3faf69d:2 (the allocation the creator held back).
+        let curve_spk =
+            bytes("aa20a5b8fe20d75829e4b9f481bf3f018734ce11ee3bd8856bbdddc28729c49f3c2487");
+        let creator_spk =
+            bytes("aa201ed943cf928024fc6ae30f230641d582c80a41070a917c5d2732f2d31cb52b6c87");
+        let curve_owner: [u8; 32] =
+            bytes("81dd058295fc39ec31ea3c70adceb7580fd39a36affb2e584786b7bb245c9f89")
+                .try_into()
+                .unwrap();
+        let curve_program =
+            kcc20::splice_token_state(KRON, &curve_owner, 0x02, &amt(999_999_999), 0).unwrap();
+
+        BlockBuilder::new(1, 100)
+            .event(LAUNCH, EventKind::Genesis, TX_L)
+            .out(LAUNCH, TX_L, 0, &minter_state(0))
+            .apply(&mut store);
+
+        let mut launch_sig = ARGS.to_vec();
+        launch_sig.extend(push(&program(&minter_state(0))));
+        BlockBuilder::new(2, 200)
+            .event(COV, EventKind::Genesis, TX_G)
+            .event(LAUNCH, EventKind::Burn, TX_G)
+            .spend(TX_L, 0, TX_G, launch_sig)
+            .out_spk(COV, TX_G, 1, curve_spk.clone())
+            .out_spk(COV, TX_G, 2, creator_spk)
+            .apply(&mut store);
+
+        // The curve trades on, which is what reveals its program. The creator
+        // cell stays untouched, exactly as it still is on mainnet.
+        let mut curve_sig = Vec::new();
+        curve_sig.extend(push(&curve_owner));
+        curve_sig.extend(push(&amt(999_999_999)));
+        curve_sig.extend(push(&curve_program));
+        BlockBuilder::new(3, 300)
+            .event(COV, EventKind::Transition, TX_T)
+            .spend(TX_G, 1, TX_T, curve_sig)
+            .out_spk(COV, TX_T, 0, curve_spk)
+            .apply(&mut store);
+
+        let t = row(&store, COV).unwrap();
+        assert_eq!(t.validation, STATUS_VERIFIED, "reason: {:?}", t.invalid_reason);
+        assert_eq!(t.supply, Some(1_000_000_000), "the launch minted a round billion");
+        assert_eq!(t.held_covenant, Some(999_999_999), "the curve's unsold inventory");
+        assert_eq!(t.held_wallet, Some(1), "the creator kept one unit");
     }
 
     /// genesis (minter branch, 0) → mint 100 → split 60/40: the happy path.
