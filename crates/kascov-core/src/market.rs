@@ -367,9 +367,17 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
         )
         .optional()
         .map_err(db_err)?;
+    // "unmatched" is a verdict of a particular MATCHER, not of the program:
+    // when the matcher learns a new build, old unmatched rows must be retried
+    // even though neither the program nor its hash moved. The tag says which
+    // matcher gave up.
+    const MATCHER_VERSION: &str = "2";
+    let unmatched_tag = format!("unmatched:{MATCHER_VERSION}");
     let params_known = match &known {
         Some((h, skel, v)) if h.as_slice() == program_hash && skel == "KRON curve v1" => Some(*v),
-        Some((h, _, _)) if h.as_slice() == program_hash => return Ok(()), // unmatched, unchanged
+        Some((h, skel, _)) if h.as_slice() == program_hash && *skel == unmatched_tag => {
+            return Ok(()); // this matcher already gave up on these exact bytes
+        }
         _ => None,
     };
 
@@ -415,8 +423,8 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
     let Some(p) = matched else {
         conn.execute(
             "INSERT OR REPLACE INTO market_programs (covenant_id, program_hash, skeleton)
-             VALUES (?1, ?2, 'unmatched')",
-            params![covenant_id.as_slice(), program_hash.as_slice()],
+             VALUES (?1, ?2, ?3)",
+            params![covenant_id.as_slice(), program_hash.as_slice(), unmatched_tag],
         )
         .map_err(db_err)?;
         tracing::warn!(
