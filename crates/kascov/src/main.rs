@@ -100,6 +100,11 @@ enum Command {
         #[arg(long)]
         out: std::path::PathBuf,
     },
+    /// Re-read stored reveals with the current state-block locator and re-derive
+    /// tokens. The follower runs this automatically at startup; this exposes it
+    /// so it can be rehearsed against a COPY of a database before the real one,
+    /// and timed. Needs no node.
+    Restamp,
 }
 
 #[tokio::main]
@@ -126,6 +131,20 @@ async fn main() -> Result<()> {
             let store = open_store(&cli)?;
             store.backup_to(out)?;
             eprintln!("backed up {} index to {}", cli.network, out.display());
+            Ok(())
+        }
+        Command::Restamp => {
+            let mut store = open_store(&cli)?;
+            let t0 = std::time::Instant::now();
+            let restamped = store.restamp_kcc20_if_stale()?;
+            let t1 = t0.elapsed();
+            let derived = store.derive_tokens_if_stale()?;
+            eprintln!(
+                "{}: restamped {restamped} reveals in {:.1}s, then derived {derived} tokens in {:.1}s",
+                cli.network,
+                t1.as_secs_f64(),
+                (t0.elapsed() - t1).as_secs_f64()
+            );
             Ok(())
         }
     }
