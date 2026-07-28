@@ -71,30 +71,117 @@ impl TokenState {
 /// identifier_type 1 byte) — a partial or misshapen decode yields `None`.
 pub fn decode_token_state(registry: &Registry, spk_version: u16, program: &[u8]) -> Option<TokenState> {
     let d = registry.decode(spk_version, program);
-    if d.template != Some(TOKEN_TEMPLATE) {
-        return None;
+    if d.template == Some(TOKEN_TEMPLATE) {
+        let field = |name: &str| d.fields.iter().find(|f| f.name == name).map(|f| f.value.clone());
+        let owner: [u8; 32] = field("owner_identifier")?.try_into().ok()?;
+        let id_type = field("identifier_type")?;
+        let [identifier_type] = id_type.as_slice() else { return None };
+        return Some(TokenState {
+            owner,
+            identifier_type: *identifier_type,
+            amount_raw: field("amount")?,
+            minter_raw: field("is_minter")?,
+        });
     }
-    let field = |name: &str| d.fields.iter().find(|f| f.name == name).map(|f| f.value.clone());
-    let owner: [u8; 32] = field("owner_identifier")?.try_into().ok()?;
-    let id_type = field("identifier_type")?;
-    let [identifier_type] = id_type.as_slice() else { return None };
+    // No registered skeleton matched. A skeleton is one WAY to recognize a
+    // token, not the definition of one: a build the fixtures never captured
+    // still carries the same state block, and requiring the pinned name is
+    // exactly what hid a live mainnet token behind "p2sh commitment". Read the
+    // fields from the located block instead. This is a CANDIDATE only, and
+    // callers that touch supply must put it through `prove_output_state`,
+    // which fails closed unless the spliced program hashes to the on-chain
+    // commitment. That makes this path strictly harder to fool than a
+    // shape-only skeleton match, not easier.
+    decode_state_block(program)
+}
+
+/// Read the four state fields straight from a located block, with no registry
+/// involved. Unproven on its own: see [`prove_output_state`].
+pub fn decode_state_block(program: &[u8]) -> Option<TokenState> {
+    let b = locate_state_block(program)?;
     Some(TokenState {
-        owner,
-        identifier_type: *identifier_type,
-        amount_raw: field("amount")?,
-        minter_raw: field("is_minter")?,
+        owner: program.get(b.owner())?.try_into().ok()?,
+        identifier_type: *program.get(b.identifier_type())?,
+        amount_raw: program.get(b.amount())?.to_vec(),
+        minter_raw: vec![*program.get(b.is_minter())?],
     })
 }
 
-/// Does `program` open with the fixed KCC20 state block (see module docs)?
-pub fn has_state_block(program: &[u8]) -> bool {
-    program.len() >= 48
+/// Where a KCC20 state block sits in a program, and how it is framed.
+///
+/// The four state fields always appear in the same order with the same widths;
+/// builds differ only in whether the block is wrapped in the alt-stack guards
+/// (`OpToAltStack` / `OpFromAltStack`). One `start` offset therefore describes
+/// every build seen on chain, and every accessor below is derived from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StateBlock {
+    /// Offset of the push32 opcode that opens the block.
+    pub start: usize,
+    /// True when the block is wrapped in alt-stack guards. Guarded and
+    /// unguarded builds are distinct templates and must not be conflated: the
+    /// KCC-1 template hash covers the surrounding bytes, so the two hash apart.
+    pub guarded: bool,
+}
+
+impl StateBlock {
+    /// owner_identifier, 32 bytes.
+    pub fn owner(&self) -> std::ops::Range<usize> {
+        self.start + 1..self.start + 33
+    }
+    /// identifier_type, 1 byte.
+    pub fn identifier_type(&self) -> usize {
+        self.start + 34
+    }
+    /// amount, 8 bytes little-endian.
+    pub fn amount(&self) -> std::ops::Range<usize> {
+        self.start + 36..self.start + 44
+    }
+    /// is_minter, 1 byte.
+    pub fn is_minter(&self) -> usize {
+        self.start + 45
+    }
+    /// One past the last byte of the block.
+    pub fn end(&self) -> usize {
+        self.start + 46
+    }
+}
+
+/// Locate the KCC20 state block in `program`, accepting every build observed
+/// on chain rather than one pinned compiled shape.
+///
+/// kascov originally required the guarded build byte-for-byte at fixed offsets.
+/// Mainnet carries a second build that emits the identical field layout with no
+/// alt-stack guards, shifted by exactly one byte; under the old predicate all
+/// 1,888 programs of a live token failed every check and the token fell through
+/// to the generic "p2sh commitment" bucket. Identity is located here, then
+/// PROVEN by hash in [`prove_output_state`] before any accounting trusts it.
+pub fn locate_state_block(program: &[u8]) -> Option<StateBlock> {
+    // Guarded build: 0x6b … 0x6c wrapping the block at offset 1.
+    if program.len() >= 48
         && program[0] == 0x6b
         && program[1] == 0x20
         && program[34] == 0x01
         && program[36] == 0x08
         && program[45] == 0x01
         && program[47] == 0x6c
+    {
+        return Some(StateBlock { start: 1, guarded: true });
+    }
+    // Unguarded build: the same pushes with no guards, block at offset 0.
+    if program.len() >= 46
+        && program[0] == 0x20
+        && program[33] == 0x01
+        && program[35] == 0x08
+        && program[44] == 0x01
+    {
+        return Some(StateBlock { start: 0, guarded: false });
+    }
+    None
+}
+
+/// Does `program` carry a KCC20 state block in any known build?
+pub fn has_state_block(program: &[u8]) -> bool {
+    locate_state_block(program).is_some()
 }
 
 /// KCC-1 draft §8.3 TemplateHash of a program carrying the verified KCC20
@@ -104,7 +191,8 @@ pub fn has_state_block(program: &[u8]) -> bool {
 /// state range is proven, never guessed. Derivation pinned to spec commit
 /// 55b28d8; recompute is gated by the store's `kcc1_abi_version` meta.
 pub fn kcc1_template_hash(program: &[u8]) -> Option<[u8; 32]> {
-    has_state_block(program).then(|| crate::kcc1::template_hash(&program[..1], &program[47..]))
+    let b = locate_state_block(program)?;
+    Some(crate::kcc1::template_hash(&program[..b.start], &program[b.end()..]))
 }
 
 /// Splice a candidate state into a same-build program at the fixed state
@@ -117,14 +205,12 @@ pub fn splice_token_state(
     amount: &[u8; 8],
     is_minter: u8,
 ) -> Option<Vec<u8>> {
-    if !has_state_block(program) {
-        return None;
-    }
+    let b = locate_state_block(program)?;
     let mut p = program.to_vec();
-    p[2..34].copy_from_slice(owner);
-    p[35] = identifier_type;
-    p[37..45].copy_from_slice(amount);
-    p[46] = is_minter;
+    p[b.owner()].copy_from_slice(owner);
+    p[b.identifier_type()] = identifier_type;
+    p[b.amount()].copy_from_slice(amount);
+    p[b.is_minter()] = is_minter;
     Some(p)
 }
 
@@ -169,6 +255,68 @@ mod tests {
             include_bytes!("../fixtures/kcc20_b_a.bin").as_slice(),
             include_bytes!("../fixtures/kcc20_c_a.bin").as_slice(),
         ]
+    }
+
+    /// A real mainnet program from a live token whose build carries NO
+    /// alt-stack guards. Under the old fixed-offset predicate every one of the
+    /// 1,888 programs in this covenant failed all six checks, so the token was
+    /// filed as a generic "p2sh commitment" and never appeared as a token.
+    const UNGUARDED_KRON: &[u8] = include_bytes!("../fixtures/kcc20_unguarded_kron.bin");
+
+    #[test]
+    fn locates_the_state_block_in_both_builds() {
+        // Guarded: the build kascov shipped fixtures for.
+        for base in builds() {
+            let b = locate_state_block(base).expect("guarded build must locate");
+            assert_eq!(b, StateBlock { start: 1, guarded: true });
+        }
+        // Unguarded: the same field layout with the guards removed, shifted by
+        // exactly one byte. This is the case that hid a live mainnet token.
+        let b = locate_state_block(UNGUARDED_KRON).expect("unguarded build must locate");
+        assert_eq!(b, StateBlock { start: 0, guarded: false });
+        assert_eq!(UNGUARDED_KRON.len(), 2433);
+        // The old predicate's very first byte check is what failed.
+        assert_ne!(UNGUARDED_KRON[0], 0x6b, "this fixture exists because it is not guarded");
+    }
+
+    #[test]
+    fn decodes_the_unguarded_build_without_a_registered_skeleton() {
+        let registry = Registry::default();
+        // No skeleton matches this build, so the registry cannot name it...
+        assert_ne!(registry.decode(1, UNGUARDED_KRON).template, Some(TOKEN_TEMPLATE));
+        // ...yet the state block is present and decodes to the real on-chain
+        // values, which is precisely the token kascov used to miss.
+        let st = decode_token_state(&registry, 1, UNGUARDED_KRON)
+            .expect("an unregistered build must still decode from its located block");
+        assert_eq!(
+            hex::encode(st.owner),
+            "005f70b2d4ca0ff5b9106778a24e5c3551f1e36a61399faadd2a68de592132a0"
+        );
+        assert_eq!(st.identifier_type, 3);
+        assert_eq!(st.amount_i64(), Some(5_000_000));
+        assert_eq!(st.is_minter(), Some(false));
+    }
+
+    #[test]
+    fn unguarded_build_splices_proves_and_hashes_apart_from_guarded() {
+        // Splicing must respect the located offsets, not the guarded ones.
+        let owner = [0x5au8; 32];
+        let amount = 123_456i64.to_le_bytes();
+        let spliced = splice_token_state(UNGUARDED_KRON, &owner, 2, &amount, 1).unwrap();
+        assert_eq!(spliced.len(), UNGUARDED_KRON.len());
+        let st = decode_state_block(&spliced).expect("spliced unguarded program must decode");
+        assert_eq!(st.owner, owner);
+        assert_eq!(st.identifier_type, 2);
+        assert_eq!(st.amount_i64(), Some(123_456));
+        assert_eq!(st.is_minter(), Some(true));
+
+        // Everything outside the state block is untouched, so the two builds
+        // are distinct templates and must NOT collide on the KCC-1 hash.
+        let guarded_hash = kcc1_template_hash(builds()[0]).unwrap();
+        let unguarded_hash = kcc1_template_hash(UNGUARDED_KRON).unwrap();
+        assert_ne!(guarded_hash, unguarded_hash);
+        // The hash is state-independent: re-splicing changes no template bytes.
+        assert_eq!(kcc1_template_hash(&spliced).unwrap(), unguarded_hash);
     }
 
     #[test]
