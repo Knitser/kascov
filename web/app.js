@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-pools3';
+} from './core/format.js?v=20260729-pools4';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-pools3';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-pools3';
-import { createPendingModel } from './core/pending.js?v=20260729-pools3';
+} from './core/state.js?v=20260729-pools4';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-pools4';
+import { createPendingModel } from './core/pending.js?v=20260729-pools4';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-pools3';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-pools3';
-import { createRefreshGate } from './core/refresh.js?v=20260729-pools3';
-import { networkRouteHash } from './core/routing.js?v=20260729-pools3';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-pools3';
+} from './core/data.js?v=20260729-pools4';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-pools4';
+import { createRefreshGate } from './core/refresh.js?v=20260729-pools4';
+import { networkRouteHash } from './core/routing.js?v=20260729-pools4';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-pools4';
 
 
 
@@ -4694,6 +4694,14 @@ function renderPools() {
     `<p class="page-sub">where a token trades once its launch curve has finished. every figure is read out of ` +
     `the pool covenant's own committed state block, never from a launchpad's API. ` +
     `<a href="#/labels">what these labels mean →</a></p></header>`;
+  /* the listed names are a second, slower source; warm once and repaint.
+     Guarded on the cache SLOT, not the promise: loadRegistry resolves
+     instantly once cached, so an unguarded repaint would loop forever. */
+  if (!state.registry[network]) {
+    loadRegistry(network).then(() => {
+      if (state.network === network && parseRoute().view === 'pools') renderPools();
+    });
+  }
   const cached = tokenPages.get(network);
   if (!cached) {
     view.innerHTML = head + routeLoading('reading this network’s pools…');
@@ -4721,8 +4729,14 @@ function renderPools() {
     const name = friendlyName(t.covenant_id);
     const listed = state.registry[network] && registryEntry(network, t.covenant_id);
     const label = (listed && listed.ticker) ? `${name} <span class="dim">$${esc(listed.ticker)}</span>` : esc(name);
+    /* the directory payload is the shallow scan, which carries the last
+       executed price but not the marginal one; prefer spot where it exists
+       and say which is being shown rather than silently mixing them */
     const price = (t.market.spot_num_sompi != null && t.market.spot_den)
-      ? `${esc(fmtPriceKas(Number(t.market.spot_num_sompi), t.market.spot_den))} KAS` : '<span class="dim">—</span>';
+      ? `<span title="the pool’s marginal next-trade price">${esc(fmtPriceKas(Number(t.market.spot_num_sompi), t.market.spot_den))} KAS</span>`
+      : (t.market.last_quote_sompi != null && t.market.last_base_amount)
+        ? `<span title="the newest verified trade’s executed price; open the pool for its marginal price">${esc(fmtPriceKas(t.market.last_quote_sompi, t.market.last_base_amount))} KAS</span>`
+        : '<span class="dim">—</span>';
     return `<tr>` +
       `<td><a class="token-coin" href="#/${esc(network)}/pool/${esc(pid)}">${label}</a></td>` +
       `<td class="mono">${price}</td>` +
