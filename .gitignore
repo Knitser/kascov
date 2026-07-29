@@ -27,3 +27,4 @@ web/ops/traffic/traffic.json
 # is locked down, which is intel an attacker would want and nobody else needs.
 # Kept on the machine and on the VPS, never published.
 scripts/ops/harden-*.ps1
+scripts/ops/RUNBOOK.md
