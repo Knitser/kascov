@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-verify2';
+} from './core/format.js?v=20260729-cap';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-verify2';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-verify2';
-import { createPendingModel } from './core/pending.js?v=20260729-verify2';
+} from './core/state.js?v=20260729-cap';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-cap';
+import { createPendingModel } from './core/pending.js?v=20260729-cap';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,12 +35,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-verify2';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-verify2';
-import { createRefreshGate } from './core/refresh.js?v=20260729-verify2';
-import { networkRouteHash } from './core/routing.js?v=20260729-verify2';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-verify2';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-verify2';
+} from './core/data.js?v=20260729-cap';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-cap';
+import { createRefreshGate } from './core/refresh.js?v=20260729-cap';
+import { networkRouteHash } from './core/routing.js?v=20260729-cap';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-cap';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-cap';
 
 
 
@@ -4984,8 +4984,21 @@ function renderVerify() {
       `<td><a class="mono" href="#/${esc(network)}/c/${esc(u.sample_covenant)}">${esc(shortHex(u.sample_covenant, 8, 6))}</a></td>` +
       `</tr>`;
   }).join('');
+  /* Never a silent cap. A page about what kascov could not verify must not
+     itself hide part of the answer behind a LIMIT. */
+  const progTotal = d.unknown_programs_total;
+  const covTotal = d.unknown_covenants_total;
+  const capNote = (progTotal != null && progTotal > unknown.length)
+    ? `<p class="dim">showing the ${esc(fmtInt(unknown.length))} with the most riding on them, ` +
+      `of <strong>${esc(fmtInt(progTotal))}</strong> distinct unmatched programs across ` +
+      `${esc(fmtInt(covTotal || 0))} covenants. the rest are not hidden because they are fine; ` +
+      `they are simply smaller.</p>`
+    : (progTotal != null && progTotal > 0)
+      ? `<p class="dim">all ${esc(fmtInt(progTotal))} unmatched programs on this network are listed, ` +
+        `across ${esc(fmtInt(covTotal || 0))} covenants.</p>`
+      : '';
   const unknownHtml = unknown.length
-    ? `<div class="tokens-tablewrap"><table class="tokens-table">` +
+    ? capNote + `<div class="tokens-tablewrap"><table class="tokens-table">` +
       `<thead><tr><th>program</th><th>covenants</th><th>trades</th><th>volume through it</th><th>inspect one</th></tr></thead>` +
       `<tbody>${unknownRows}</tbody></table></div>`
     : `<p class="dim">every market program on ${esc(net.label)} matched an audited build.</p>`;

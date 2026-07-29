@@ -4525,12 +4525,15 @@ async fn verification_handler(
         let store = kascov_core::store::Store::open(&db, network)?;
         let runs = store.derivation_runs(50)?;
         let unknown = store.unknown_builds(50)?;
+        let (unknown_programs, unknown_covenants) = store.unknown_build_totals()?;
         Ok(Some(serde_json::to_string(&serde_json::json!({
             "network": network.to_string(),
             "generated_at_ms": now_ms(),
             "note": "a record of what ran, not an authority on what may be published: every figure on this site is re-proved from chain each time it is served",
             "runs": runs,
             "unknown_builds": unknown,
+            "unknown_programs_total": unknown_programs,
+            "unknown_covenants_total": unknown_covenants,
             "unknown_note": "programs kascov could not match to an audited build. a to-audit list ranked by how much activity rides on each, never a trust ranking: nothing here has proven anything, and none of it is priced.",
         }))?))
     })

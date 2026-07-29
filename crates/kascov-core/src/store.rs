@@ -4137,6 +4137,20 @@ impl Store {
         Ok(rows)
     }
 
+    /// How many unknown builds exist in total, so a capped list can say what
+    /// it is not showing. A page about what kascov could not verify must not
+    /// itself quietly hide part of the answer.
+    pub fn unknown_build_totals(&self) -> Result<(i64, i64)> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(DISTINCT program_hash), COUNT(*)
+                 FROM market_programs WHERE skeleton GLOB 'unmatched*'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(db_err)
+    }
+
     /// Market programs kascov could not match, grouped by the exact bytes it
     /// could not match, ranked by how much activity rides on each.
     ///
