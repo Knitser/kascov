@@ -415,18 +415,26 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
 
     // Skip gate: same program, already judged — nothing to redo but the
     // incremental replay below.
-    let known: Option<(Vec<u8>, String, i64)> = conn
+    let known: Option<(Vec<u8>, String, i64, Option<i64>)> = conn
         .query_row(
-            "SELECT program_hash, skeleton, v_kas_units FROM market_programs WHERE covenant_id = ?1",
+            "SELECT program_hash, skeleton, v_kas_units, program_len
+             FROM market_programs WHERE covenant_id = ?1",
             [covenant_id.as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .map_err(db_err)?;
     let unmatched_tag = unmatched_tag();
     let params_known = match &known {
-        Some((h, skel, v)) if h.as_slice() == program_hash && skel == "KRON curve v1" => Some(*v),
-        Some((h, skel, _)) if h.as_slice() == program_hash && *skel == unmatched_tag => {
+        Some((h, skel, v, _)) if h.as_slice() == program_hash && skel == "KRON curve v1" => Some(*v),
+        // Give up again on the same bytes ONLY if the stored row is complete.
+        // A row written before the structural fingerprint existed has no shape,
+        // and skipping it would leave it blank forever — so it falls through
+        // once, gets rewritten with its shape, and is skipped ever after.
+        Some((h, skel, _, len)) if h.as_slice() == program_hash
+            && *skel == unmatched_tag
+            && len.is_some() =>
+        {
             return Ok(()); // this matcher already gave up on these exact bytes
         }
         _ => None,
