@@ -220,10 +220,106 @@ CREATE TABLE IF NOT EXISTS token_balances (
     PRIMARY KEY (token_id, owner)
 );
 CREATE INDEX IF NOT EXISTS bal_top ON token_balances(token_id, balance DESC);
+
+-- The verification log: one row per derivation PASS over this network's
+-- database. A pass is either a rebuild of the derived token tables ('full')
+-- or a re-verification of every linked market program ('markets'). The
+-- per-block incremental path is deliberately NOT logged: it runs on every
+-- block that touches a token and would drown the record it exists to keep.
+--
+-- This table is a RECORD, never an authority. Nothing may read a counter
+-- here to decide whether a figure may be published — the publish gate stays
+-- market_programs' own committed bytes, re-read every time. A cached verdict
+-- is exactly the kind of trust kascov refuses.
+CREATE TABLE IF NOT EXISTS derivation_runs (
+    -- AUTOINCREMENT, not a bare rowid alias: pruning deletes the oldest rows,
+    -- and a log whose ids could be reused would renumber its own history.
+    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,                   -- 'full' | 'markets'
+    -- NULL while in flight. 'ok' | 'degraded' (finished, market verification
+    -- errored) | 'failed' (the pass itself errored) | 'interrupted' (the row
+    -- was still open when a later pass started, so the process is gone).
+    outcome TEXT,
+    started_ms INTEGER NOT NULL,          -- host wall clock, never chain time
+    finished_ms INTEGER,
+    processed_daa INTEGER,                -- chain anchor at the start
+    stamp TEXT NOT NULL,                  -- the composite stamp in force
+    tokens_examined INTEGER NOT NULL DEFAULT 0,
+    tokens_verified INTEGER NOT NULL DEFAULT 0,
+    tokens_unvalidated INTEGER NOT NULL DEFAULT 0,
+    tokens_invalid INTEGER NOT NULL DEFAULT 0,
+    tokens_added INTEGER NOT NULL DEFAULT 0,
+    tokens_removed INTEGER NOT NULL DEFAULT 0,
+    verdicts_changed INTEGER NOT NULL DEFAULT 0,
+    markets_examined INTEGER NOT NULL DEFAULT 0,
+    markets_matched INTEGER NOT NULL DEFAULT 0,
+    markets_unmatched INTEGER NOT NULL DEFAULT 0,
+    -- No market_programs row at all: the covenant has never been spent with a
+    -- proof-grade reveal, so its bytes have never been read. Deliberately NOT
+    -- folded into markets_unmatched: did-not-match and was-never-seen are
+    -- different states and the log must not collapse them.
+    markets_unrevealed INTEGER NOT NULL DEFAULT 0,
+    markets_invariant_failed INTEGER NOT NULL DEFAULT 0,
+    changes_json TEXT,                    -- capped; counters above stay exact
+    error TEXT
+);
+
+-- The unknown-build queue reads this. GLOB, never LIKE: with
+-- case_sensitive_like ON, SQLite treats like() as non-deterministic and
+-- REFUSES TO PARSE a schema containing it in a partial-index WHERE, which
+-- fails every query on that connection, not just this table's. GLOB is
+-- always binary and therefore always deterministic.
+CREATE INDEX IF NOT EXISTS mp_unknown ON market_programs(program_hash, covenant_id)
+    WHERE skeleton GLOB 'unmatched*';
 ";
 
 pub struct Store {
     conn: Connection,
+}
+
+/// One derivation pass, as published. A record of what ran, never an
+/// authority on what may be published.
+#[derive(Clone, Debug, Serialize)]
+pub struct DerivationRunRow {
+    pub run_id: i64,
+    pub kind: String,
+    pub outcome: Option<String>,
+    pub started_ms: i64,
+    pub finished_ms: Option<i64>,
+    pub processed_daa: Option<i64>,
+    pub stamp: String,
+    pub tokens_examined: i64,
+    pub tokens_verified: i64,
+    pub tokens_unvalidated: i64,
+    pub tokens_invalid: i64,
+    pub tokens_added: i64,
+    pub tokens_removed: i64,
+    pub verdicts_changed: i64,
+    pub markets_examined: i64,
+    pub markets_matched: i64,
+    pub markets_unmatched: i64,
+    pub markets_unrevealed: i64,
+    pub markets_invariant_failed: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A program kascov could not match, and how much rides on it. A to-audit
+/// entry: nothing here has proven anything.
+#[derive(Clone, Debug, Serialize)]
+pub struct UnknownBuildRow {
+    pub program_hash: String,
+    pub covenants: i64,
+    pub trades: i64,
+    pub volume_sompi: i64,
+    pub tokens: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_daa: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_daa: Option<i64>,
+    pub sample_covenant: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3807,6 +3903,296 @@ impl Store {
         Ok(restamped)
     }
 
+    /// Every token's current verdict. Taken before the derived tables are
+    /// dropped, so a pass can report what it CHANGED rather than only what it
+    /// ended up with.
+    fn token_status_snapshot(&self) -> Result<std::collections::BTreeMap<[u8; 32], String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT token_id, status FROM tokens")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, [u8; 32]>(0)?, r.get::<_, String>(1)?)))
+            .map_err(db_err)?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Open a run row. Also stamps any row a previous process left open as
+    /// `interrupted` and prunes the log to its retention window.
+    ///
+    /// "Interrupted" is inferred, not observed, and the inference is only
+    /// sound because passes are serialised: a still-open row means whoever
+    /// wrote it is not writing any more. `Command::Restamp` opens the same
+    /// database file and can run while the follower is mid-pass, so a manual
+    /// restamp can mark a live run interrupted. That is a wrong label on a
+    /// real event, not an invented event, and the page says so.
+    fn begin_derivation_run(&mut self, kind: &str, stamp: &str) -> Result<i64> {
+        let now = now_ms() as i64;
+        self.conn
+            .execute(
+                "UPDATE derivation_runs SET outcome = 'interrupted', finished_ms = ?1
+                 WHERE outcome IS NULL",
+                params![now],
+            )
+            .map_err(db_err)?;
+        self.conn
+            .execute(
+                "DELETE FROM derivation_runs WHERE run_id <= (
+                     SELECT MAX(run_id) - 200 FROM derivation_runs)",
+                [],
+            )
+            .map_err(db_err)?;
+        let daa = self.processed_daa()?.map(|d| d as i64);
+        self.conn
+            .execute(
+                "INSERT INTO derivation_runs (kind, started_ms, processed_daa, stamp)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![kind, now, daa, stamp],
+            )
+            .map_err(db_err)?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Tally the state of the derived tables and close the run row.
+    ///
+    /// `markets_matched` and `markets_invariant_failed` read an ALLOWLIST of
+    /// audited skeletons. A denylist (`skeleton NOT LIKE 'unmatched%'`) would
+    /// count every give-up row as matched the moment the tag changes, and —
+    /// because market.rs's 3-column unmatched INSERT OR REPLACE lets
+    /// `invariant_ok` fall back to its DEFAULT 0 — would report every one of
+    /// testnet's 227 unmatched programs as "its own formula failed on its own
+    /// trades". That is not an unproven figure, it is a false one.
+    fn finish_derivation_run(
+        &mut self,
+        run_id: i64,
+        kind: &str,
+        examined: u64,
+        before: &std::collections::BTreeMap<[u8; 32], String>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let allow = crate::market::MATCHED_SKELETONS;
+        let (verified, unvalidated, invalid) = self
+            .conn
+            .query_row(
+                "SELECT
+                     SUM(CASE WHEN status = 'verified' THEN 1 ELSE 0 END),
+                     SUM(CASE WHEN status = 'unvalidated' THEN 1 ELSE 0 END),
+                     SUM(CASE WHEN status NOT IN ('verified','unvalidated') THEN 1 ELSE 0 END)
+                 FROM tokens",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                        r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                        r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    ))
+                },
+            )
+            .map_err(db_err)?;
+
+        let after: std::collections::BTreeMap<[u8; 32], String> = self
+            .conn
+            .prepare("SELECT token_id, status FROM tokens")
+            .map_err(db_err)?
+            .query_map([], |r| Ok((r.get::<_, [u8; 32]>(0)?, r.get::<_, String>(1)?)))
+            .map_err(db_err)?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(db_err)?;
+        let added = after.keys().filter(|k| !before.contains_key(*k)).count() as i64;
+        let removed = before.keys().filter(|k| !after.contains_key(*k)).count() as i64;
+        let mut changes: Vec<serde_json::Value> = Vec::new();
+        for (id, now_status) in &after {
+            if let Some(was) = before.get(id) {
+                if was != now_status {
+                    changes.push(serde_json::json!({
+                        "token": hex::encode(id), "from": was, "to": now_status,
+                    }));
+                }
+            }
+        }
+        let changed = changes.len() as i64;
+        changes.truncate(64);
+
+        // Market composition, allowlisted. A token whose market covenant has
+        // no market_programs row at all is 'unrevealed', never 'unmatched'.
+        let (m_examined, matched, unmatched, unrevealed, inv_failed) = self
+            .conn
+            .query_row(
+                "SELECT
+                    COUNT(*),
+                    SUM(CASE WHEN mp.skeleton IN (?1, ?2) THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN mp.skeleton IS NOT NULL AND mp.skeleton NOT IN (?1, ?2)
+                             THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN mp.skeleton IS NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN mp.skeleton IN (?1, ?2) AND mp.invariant_ok = 0
+                             THEN 1 ELSE 0 END)
+                 FROM (SELECT DISTINCT market_covenant_id AS c FROM tokens
+                       WHERE market_covenant_id IS NOT NULL) t
+                 LEFT JOIN market_programs mp ON mp.covenant_id = t.c",
+                params![allow[0], allow[1]],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                        r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                        r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                        r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    ))
+                },
+            )
+            .map_err(db_err)?;
+
+        let outcome = if error.is_some() { "degraded" } else { "ok" };
+        self.conn
+            .execute(
+                "UPDATE derivation_runs SET outcome = ?1, finished_ms = ?2,
+                     tokens_examined = ?3, tokens_verified = ?4, tokens_unvalidated = ?5,
+                     tokens_invalid = ?6, tokens_added = ?7, tokens_removed = ?8,
+                     verdicts_changed = ?9, markets_examined = ?10, markets_matched = ?11,
+                     markets_unmatched = ?12, markets_unrevealed = ?13,
+                     markets_invariant_failed = ?14, changes_json = ?15, error = ?16
+                 WHERE run_id = ?17",
+                params![
+                    outcome,
+                    now_ms() as i64,
+                    examined as i64,
+                    verified,
+                    unvalidated,
+                    invalid,
+                    if kind == "full" { added } else { 0 },
+                    if kind == "full" { removed } else { 0 },
+                    if kind == "full" { changed } else { 0 },
+                    m_examined,
+                    matched,
+                    unmatched,
+                    unrevealed,
+                    inv_failed,
+                    if changes.is_empty() { None } else { Some(serde_json::Value::from(changes).to_string()) },
+                    error,
+                    run_id,
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Close a run row that died on an error. Without this the row stays open
+    /// and the NEXT pass mislabels a failure as `interrupted` — "the process
+    /// died" when in fact it ran and returned an error that was discarded.
+    fn fail_derivation_run(&mut self, run_id: i64, err: &str) {
+        let _ = self.conn.execute(
+            "UPDATE derivation_runs SET outcome = 'failed', finished_ms = ?1, error = ?2
+             WHERE run_id = ?3",
+            params![now_ms() as i64, err, run_id],
+        );
+    }
+
+    /// The newest runs, newest first. A reverse walk of the integer primary
+    /// key — no index needed.
+    pub fn derivation_runs(&self, limit: u32) -> Result<Vec<DerivationRunRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT run_id, kind, outcome, started_ms, finished_ms, processed_daa, stamp,
+                        tokens_examined, tokens_verified, tokens_unvalidated, tokens_invalid,
+                        tokens_added, tokens_removed, verdicts_changed,
+                        markets_examined, markets_matched, markets_unmatched,
+                        markets_unrevealed, markets_invariant_failed, changes_json, error
+                 FROM derivation_runs ORDER BY run_id DESC LIMIT ?1",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![limit], |r| {
+                Ok(DerivationRunRow {
+                    run_id: r.get(0)?,
+                    kind: r.get(1)?,
+                    outcome: r.get(2)?,
+                    started_ms: r.get(3)?,
+                    finished_ms: r.get(4)?,
+                    processed_daa: r.get(5)?,
+                    stamp: r.get(6)?,
+                    tokens_examined: r.get(7)?,
+                    tokens_verified: r.get(8)?,
+                    tokens_unvalidated: r.get(9)?,
+                    tokens_invalid: r.get(10)?,
+                    tokens_added: r.get(11)?,
+                    tokens_removed: r.get(12)?,
+                    verdicts_changed: r.get(13)?,
+                    markets_examined: r.get(14)?,
+                    markets_matched: r.get(15)?,
+                    markets_unmatched: r.get(16)?,
+                    markets_unrevealed: r.get(17)?,
+                    markets_invariant_failed: r.get(18)?,
+                    changes: r
+                        .get::<_, Option<String>>(19)?
+                        .and_then(|s| serde_json::from_str(&s).ok()),
+                    error: r.get(20)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Market programs kascov could not match, grouped by the exact bytes it
+    /// could not match, ranked by how much activity rides on each.
+    ///
+    /// This is a TO-AUDIT list. A build appearing here has proven nothing; a
+    /// high rank means more is at stake if it is never audited, never that it
+    /// is more likely to be sound.
+    pub fn unknown_builds(&self, limit: u32) -> Result<Vec<UnknownBuildRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                // GLOB, not LIKE: see the mp_unknown index comment. Also note
+                // covenants.last_activity_daa is NOT NULL DEFAULT 0, so a
+                // COALESCE fallback to trade DAA would never fire and could
+                // publish a "last seen" older than "first seen"; take the max
+                // of both and let 0 mean unknown.
+                "SELECT hex(mp.program_hash) AS h,
+                        COUNT(DISTINCT mp.covenant_id) AS covenants,
+                        COALESCE(SUM(tr.trades), 0) AS trades,
+                        COALESCE(SUM(tr.volume), 0) AS volume,
+                        COALESCE(MAX(tr.tokens), 0) AS tokens,
+                        MIN(NULLIF(c.genesis_daa, 0)) AS first_daa,
+                        MAX(MAX(COALESCE(c.last_activity_daa, 0), COALESCE(tr.last_daa, 0))) AS last_daa,
+                        MIN(hex(mp.covenant_id)) AS sample
+                 FROM market_programs mp
+                 LEFT JOIN covenants c ON c.covenant_id = mp.covenant_id
+                 LEFT JOIN (
+                     SELECT market_covenant_id AS m, COUNT(*) AS trades,
+                            SUM(quote_sompi) AS volume, COUNT(DISTINCT token_id) AS tokens,
+                            MAX(accepting_daa) AS last_daa
+                     FROM token_trades GROUP BY market_covenant_id
+                 ) tr ON tr.m = mp.covenant_id
+                 WHERE mp.skeleton GLOB 'unmatched*'
+                 GROUP BY mp.program_hash
+                 ORDER BY volume DESC, trades DESC, covenants DESC
+                 LIMIT ?1",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![limit], |r| {
+                Ok(UnknownBuildRow {
+                    program_hash: r.get::<_, String>(0)?.to_lowercase(),
+                    covenants: r.get(1)?,
+                    trades: r.get(2)?,
+                    volume_sompi: r.get(3)?,
+                    tokens: r.get(4)?,
+                    first_daa: r.get(5)?,
+                    last_daa: r.get::<_, Option<i64>>(6)?.filter(|d| *d > 0),
+                    sample_covenant: r.get::<_, String>(7)?.to_lowercase(),
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
     pub fn derive_tokens_if_stale(&mut self) -> Result<u64> {
         use crate::tokens::{token_derivation_stamp, TOKEN_DERIVATION_META};
         // The stamp is a COMPOSITE of the derivation, classifier and restamp
@@ -3837,88 +4223,126 @@ impl Store {
                     .map_err(db_err)?
                     .collect::<std::result::Result<_, _>>()
                     .map_err(db_err)?;
-                crate::market::rederive_market_programs(&self.conn, &markets)?;
-                self.set_meta(MARKET_META, market_version.as_str())?;
+                // A markets-only pass gets its own row, but ONLY when it has
+                // work: the follower calls this on every restart, and a
+                // zero-everything row per restart would push real passes out
+                // of the retention window.
+                let run_id = self.begin_derivation_run("markets", &stamp)?;
+                let before = self.token_status_snapshot()?;
+                match crate::market::rederive_market_programs(&self.conn, &markets) {
+                    Ok(()) => {
+                        self.set_meta(MARKET_META, market_version.as_str())?;
+                        self.finish_derivation_run(run_id, "markets", 0, &before, None)?;
+                    }
+                    Err(err) => {
+                        // The gate is NOT advanced: a failed re-verification
+                        // must run again next boot rather than being recorded
+                        // as done.
+                        let msg = err.to_string();
+                        self.fail_derivation_run(run_id, &msg);
+                        return Err(err);
+                    }
+                }
             }
             return Ok(0);
         }
-        let tx = self.conn.transaction().map_err(db_err)?;
-        for sql in [
-            "DELETE FROM token_events",
-            "DELETE FROM token_balances",
-            "DELETE FROM token_minters",
-            "DELETE FROM token_trades",
-            "DELETE FROM tokens",
-        ] {
-            tx.execute(sql, []).map_err(db_err)?;
-        }
-        tx.commit().map_err(db_err)?;
-        // Candidate enumeration — the WHERE must stay verbatim-identical to
-        // the utxo_kcc20 partial-index predicate so this is an index walk,
-        // not a utxo-table scan.
-        let candidates: Vec<([u8; 32], bool, bool)> = {
-            let mut stmt = self
-                .conn
-                .prepare(
-                    "SELECT covenant_id,
-                            MAX(CASE WHEN template = 'KCC20 token' OR revealed_template = 'KCC20 token' THEN 1 ELSE 0 END),
-                            MAX(CASE WHEN template = 'KCC20 minter' OR revealed_template = 'KCC20 minter' THEN 1 ELSE 0 END)
-                     FROM covenant_utxos
-                     WHERE template IN ('KCC20 token','KCC20 minter')
-                        OR revealed_template IN ('KCC20 token','KCC20 minter')
-                     GROUP BY covenant_id",
-                )
-                .map_err(db_err)?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, i64>(2)? != 0)))
-                .map_err(db_err)?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(db_err)?;
-            rows
-        };
-        let mut token_set: std::collections::BTreeSet<[u8; 32]> = Default::default();
-        // Minters first: their pinned ids join the token set (a pinned id
-        // with no KCC20 evidence of its own still gets an honest
-        // 'unvalidated' row).
-        {
+        // Snapshot the verdicts BEFORE the DELETE: this is the only moment
+        // the previous pass's answers still exist, and the difference between
+        // them and the new ones is the narrative this log exists to keep.
+        let before = self.token_status_snapshot()?;
+        let run_id = self.begin_derivation_run("full", &stamp)?;
+        let outcome = (|| -> Result<u64> {
             let tx = self.conn.transaction().map_err(db_err)?;
-            for (id, _, minter_ev) in &candidates {
-                if *minter_ev {
-                    token_set.extend(crate::tokens::derive_minter(&tx, id)?);
+            for sql in [
+                "DELETE FROM token_events",
+                "DELETE FROM token_balances",
+                "DELETE FROM token_minters",
+                "DELETE FROM token_trades",
+                "DELETE FROM tokens",
+            ] {
+                tx.execute(sql, []).map_err(db_err)?;
+            }
+            tx.commit().map_err(db_err)?;
+            // Candidate enumeration — the WHERE must stay verbatim-identical to
+            // the utxo_kcc20 partial-index predicate so this is an index walk,
+            // not a utxo-table scan.
+            let candidates: Vec<([u8; 32], bool, bool)> = {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT covenant_id,
+                                MAX(CASE WHEN template = 'KCC20 token' OR revealed_template = 'KCC20 token' THEN 1 ELSE 0 END),
+                                MAX(CASE WHEN template = 'KCC20 minter' OR revealed_template = 'KCC20 minter' THEN 1 ELSE 0 END)
+                         FROM covenant_utxos
+                         WHERE template IN ('KCC20 token','KCC20 minter')
+                            OR revealed_template IN ('KCC20 token','KCC20 minter')
+                         GROUP BY covenant_id",
+                    )
+                    .map_err(db_err)?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, i64>(2)? != 0)))
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?;
+                rows
+            };
+            let mut token_set: std::collections::BTreeSet<[u8; 32]> = Default::default();
+            // Minters first: their pinned ids join the token set (a pinned id
+            // with no KCC20 evidence of its own still gets an honest
+            // 'unvalidated' row).
+            {
+                let tx = self.conn.transaction().map_err(db_err)?;
+                for (id, _, minter_ev) in &candidates {
+                    if *minter_ev {
+                        token_set.extend(crate::tokens::derive_minter(&tx, id)?);
+                    }
+                }
+                tx.commit().map_err(db_err)?;
+            }
+            token_set.extend(candidates.iter().filter(|(_, token_ev, _)| *token_ev).map(|(id, _, _)| *id));
+            let ids: Vec<[u8; 32]> = token_set.into_iter().collect();
+            for chunk in ids.chunks(32) {
+                let tx = self.conn.transaction().map_err(db_err)?;
+                for id in chunk {
+                    crate::tokens::derive_token(&tx, id)?;
+                }
+                tx.commit().map_err(db_err)?;
+            }
+            // Verify every market covenant the derivation just linked: read its
+            // program constants out of committed bytes and replay its trades.
+            // A failure here downgrades that covenant's figures, never the pass.
+            {
+                let markets: std::collections::BTreeSet<[u8; 32]> = self
+                    .conn
+                    .prepare(
+                        "SELECT DISTINCT market_covenant_id FROM tokens
+                         WHERE market_covenant_id IS NOT NULL",
+                    )
+                    .map_err(db_err)?
+                    .query_map([], |r| r.get::<_, [u8; 32]>(0))
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(db_err)?;
+                if let Err(err) = crate::market::rederive_market_programs(&self.conn, &markets) {
+                    tracing::warn!("market-program verification failed: {err}");
                 }
             }
-            tx.commit().map_err(db_err)?;
-        }
-        token_set.extend(candidates.iter().filter(|(_, token_ev, _)| *token_ev).map(|(id, _, _)| *id));
-        let ids: Vec<[u8; 32]> = token_set.into_iter().collect();
-        for chunk in ids.chunks(32) {
-            let tx = self.conn.transaction().map_err(db_err)?;
-            for id in chunk {
-                crate::tokens::derive_token(&tx, id)?;
+            self.set_meta(TOKEN_DERIVATION_META, &stamp)?;
+            Ok(ids.len() as u64)
+        })();
+        match outcome {
+            Ok(n) => {
+                self.finish_derivation_run(run_id, "full", n, &before, None)?;
+                Ok(n)
             }
-            tx.commit().map_err(db_err)?;
-        }
-        // Verify every market covenant the derivation just linked: read its
-        // program constants out of committed bytes and replay its trades.
-        // A failure here downgrades that covenant's figures, never the pass.
-        {
-            let markets: std::collections::BTreeSet<[u8; 32]> = self
-                .conn
-                .prepare(
-                    "SELECT DISTINCT market_covenant_id FROM tokens
-                     WHERE market_covenant_id IS NOT NULL",
-                )
-                .map_err(db_err)?
-                .query_map([], |r| r.get::<_, [u8; 32]>(0))
-                .map_err(db_err)?
-                .collect::<std::result::Result<_, _>>()
-                .map_err(db_err)?;
-            if let Err(err) = crate::market::rederive_market_programs(&self.conn, &markets) {
-                tracing::warn!("market-program verification failed: {err}");
+            Err(err) => {
+                // Close it as FAILED. Leaving it open would let the next pass
+                // stamp it 'interrupted', which claims the process died when in
+                // fact it ran and returned an error nobody kept.
+                self.fail_derivation_run(run_id, &err.to_string());
+                Err(err)
             }
         }
-        self.set_meta(TOKEN_DERIVATION_META, &stamp)?;
-        Ok(ids.len() as u64)
     }
 
     /// The last completed token-derivation version, if any — serves as the

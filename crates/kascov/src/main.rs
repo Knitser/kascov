@@ -1360,6 +1360,7 @@ async fn serve(
         .route("/data/{network}/digest.json", get(digest_handler))
         .route("/data/{network}/templates.json", get(templates_handler))
         .route("/data/{network}/tokens.json", get(tokens_handler))
+        .route("/data/{network}/verification.json", get(verification_handler))
         .route("/data/{network}/token/{id}", get(token_handler))
         .route("/data/{network}/consistency.json", get(consistency_handler))
         .route("/data/{network}/events", get(events_handler))
@@ -4502,6 +4503,40 @@ fn token_row_json(
 /// provable, plus the minter/vault covenants (legacy row shape, no verdict)
 /// with the token ids they pin. Reads only the precomputed token tables —
 /// no per-request registry decodes, no utxo-table scan.
+/// GET /data/{network}/verification.json — the verification log and the
+/// queue of programs kascov could not match.
+///
+/// The queue is a TO-AUDIT list, ranked by how much activity rides on each
+/// unknown build. Nothing in it has proven anything, and a high rank means
+/// more is at stake if it stays unaudited, never that it is more trustworthy.
+async fn verification_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/verification");
+    let cc = "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
+    serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let runs = store.derivation_runs(50)?;
+        let unknown = store.unknown_builds(50)?;
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "note": "a record of what ran, not an authority on what may be published: every figure on this site is re-proved from chain each time it is served",
+            "runs": runs,
+            "unknown_builds": unknown,
+            "unknown_note": "programs kascov could not match to an audited build. a to-audit list ranked by how much activity rides on each, never a trust ranking: nothing here has proven anything, and none of it is priced.",
+        }))?))
+    })
+    .await
+}
+
 async fn tokens_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path(net_name): axum::extract::Path<String>,
