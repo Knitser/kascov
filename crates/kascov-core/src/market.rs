@@ -472,10 +472,20 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
             })
         });
     let Some(p) = matched else {
+        // The bytes are in hand right here — this is the only moment their
+        // shape is free. Recording it turns the unknown queue from a list of
+        // byte-unique strangers into families that can be audited together.
         conn.execute(
-            "INSERT OR REPLACE INTO market_programs (covenant_id, program_hash, skeleton)
-             VALUES (?1, ?2, ?3)",
-            params![covenant_id.as_slice(), program_hash.as_slice(), unmatched_tag],
+            "INSERT OR REPLACE INTO market_programs
+                 (covenant_id, program_hash, skeleton, program_len, program_pushes)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                covenant_id.as_slice(),
+                program_hash.as_slice(),
+                unmatched_tag,
+                program.len() as i64,
+                push_units(&program).len() as i64,
+            ],
         )
         .map_err(db_err)?;
         tracing::warn!(
@@ -542,8 +552,8 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
              v_kas_units, token_reserve, token_covenant_id, graduation_kas_sompi,
              fee_owners_json, kas_reserve_sompi, lp_token_covenant_id, shares,
              invariant_checked_through_seq, invariant_trades,
-             invariant_ok, exercised_trades)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             invariant_ok, exercised_trades, program_len, program_pushes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             covenant_id.as_slice(),
             program_hash.as_slice(),
@@ -560,6 +570,8 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
             exercised,
             ok as i64,
             exercised,
+            program.len() as i64,
+            push_units(&program).len() as i64,
         ],
     )
     .map_err(db_err)?;

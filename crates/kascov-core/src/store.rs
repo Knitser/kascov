@@ -209,9 +209,24 @@ CREATE TABLE IF NOT EXISTS market_programs (
     invariant_ok INTEGER NOT NULL DEFAULT 0,
     exercised_trades INTEGER NOT NULL DEFAULT 0,
     wedge_bps INTEGER,
-    derived_at_daa INTEGER
+    derived_at_daa INTEGER,
+    -- STRUCTURAL FINGERPRINT. A curve program embeds its own token's constants
+    -- (covenant id, reserve, creator, vKas) directly in its bytes, so every
+    -- deployment is byte-unique and program_hash can never group two of them.
+    -- These two numbers are what deployments of one build DO share, so they
+    -- cluster a launchpad's family the way an exact hash cannot.
+    --
+    -- They are a WEAK signal by construction: matching structure means it is
+    -- worth looking at these together, never that they are the same audited
+    -- build. Only the byte-for-byte matcher may license a price. Appended at
+    -- the END because these r.get indices are positional.
+    program_len INTEGER,
+    program_pushes INTEGER
 );
 CREATE INDEX IF NOT EXISTS mp_by_token ON market_programs(token_covenant_id);
+-- Cluster the unknowns by shape. GLOB, never LIKE (see mp_unknown).
+CREATE INDEX IF NOT EXISTS mp_shape ON market_programs(program_len, program_pushes)
+    WHERE skeleton GLOB 'unmatched*';
 CREATE TABLE IF NOT EXISTS token_balances (
     token_id BLOB NOT NULL,
     owner TEXT NOT NULL,                  -- hex(identifier_type || owner_identifier)
@@ -310,6 +325,14 @@ pub struct DerivationRunRow {
 /// entry: nothing here has proven anything.
 #[derive(Clone, Debug, Serialize)]
 pub struct UnknownBuildRow {
+    /// The shape these deployments share: byte length and push count. This is
+    /// what clusters a launchpad's family, because each deployment's BYTES are
+    /// unique (its own constants are baked in) while its SHAPE is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program_len: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program_pushes: Option<i64>,
+    /// One member's hash, so a reader can go fetch and check actual bytes.
     pub program_hash: String,
     pub covenants: i64,
     pub trades: i64,
@@ -4165,8 +4188,13 @@ impl Store {
     pub fn unknown_build_totals(&self) -> Result<(i64, i64)> {
         self.conn
             .query_row(
-                "SELECT COUNT(DISTINCT program_hash), COUNT(*)
-                 FROM market_programs WHERE skeleton GLOB 'unmatched*'",
+                // families, then covenants — the page reports both
+                "SELECT COUNT(*), COALESCE(SUM(n), 0) FROM (
+                     SELECT COUNT(*) AS n FROM market_programs
+                     WHERE skeleton GLOB 'unmatched*'
+                     GROUP BY COALESCE(program_len, -1), COALESCE(program_pushes, -1),
+                              CASE WHEN program_len IS NULL
+                                   THEN hex(program_hash) ELSE '' END)",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -4188,14 +4216,15 @@ impl Store {
                 // COALESCE fallback to trade DAA would never fire and could
                 // publish a "last seen" older than "first seen"; take the max
                 // of both and let 0 mean unknown.
-                "SELECT hex(mp.program_hash) AS h,
+                "SELECT MIN(hex(mp.program_hash)) AS h,
                         COUNT(DISTINCT mp.covenant_id) AS covenants,
                         COALESCE(SUM(tr.trades), 0) AS trades,
                         COALESCE(SUM(tr.volume), 0) AS volume,
                         COALESCE(MAX(tr.tokens), 0) AS tokens,
                         MIN(NULLIF(c.genesis_daa, 0)) AS first_daa,
                         MAX(MAX(COALESCE(c.last_activity_daa, 0), COALESCE(tr.last_daa, 0))) AS last_daa,
-                        MIN(hex(mp.covenant_id)) AS sample
+                        MIN(hex(mp.covenant_id)) AS sample,
+                        mp.program_len, mp.program_pushes
                  FROM market_programs mp
                  LEFT JOIN covenants c ON c.covenant_id = mp.covenant_id
                  LEFT JOIN (
@@ -4205,7 +4234,19 @@ impl Store {
                      FROM token_trades GROUP BY market_covenant_id
                  ) tr ON tr.m = mp.covenant_id
                  WHERE mp.skeleton GLOB 'unmatched*'
-                 GROUP BY mp.program_hash
+                 -- Group by SHAPE, not by hash. Grouping on program_hash
+                 -- clusters nothing: a curve program bakes its own token's
+                 -- constants into its bytes, so 222 deployments produced 222
+                 -- unique hashes and 222 rows of one. Programs whose length
+                 -- and push count agree are the same build with different
+                 -- constants, which is the family an auditor wants.
+                 -- COALESCE so rows written before this column existed fall
+                 -- back to per-hash grouping rather than merging into one
+                 -- bogus NULL family.
+                 GROUP BY COALESCE(mp.program_len, -1),
+                          COALESCE(mp.program_pushes, -1),
+                          CASE WHEN mp.program_len IS NULL
+                               THEN hex(mp.program_hash) ELSE '' END
                  ORDER BY volume DESC, trades DESC, covenants DESC
                  LIMIT ?1",
             )
@@ -4221,6 +4262,8 @@ impl Store {
                     first_daa: r.get(5)?,
                     last_daa: r.get::<_, Option<i64>>(6)?.filter(|d| *d > 0),
                     sample_covenant: r.get::<_, String>(7)?.to_lowercase(),
+                    program_len: r.get(8)?,
+                    program_pushes: r.get(9)?,
                 })
             })
             .map_err(db_err)?
