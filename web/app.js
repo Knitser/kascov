@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260728-scoped';
+} from './core/format.js?v=20260729-pools';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260728-scoped';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260728-scoped';
-import { createPendingModel } from './core/pending.js?v=20260728-scoped';
+} from './core/state.js?v=20260729-pools';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-pools';
+import { createPendingModel } from './core/pending.js?v=20260729-pools';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260728-scoped';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260728-scoped';
-import { createRefreshGate } from './core/refresh.js?v=20260728-scoped';
-import { networkRouteHash } from './core/routing.js?v=20260728-scoped';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260728-scoped';
+} from './core/data.js?v=20260729-pools';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-pools';
+import { createRefreshGate } from './core/refresh.js?v=20260729-pools';
+import { networkRouteHash } from './core/routing.js?v=20260729-pools';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-pools';
 
 
 
@@ -4613,6 +4613,7 @@ function tokenFieldChips(fields) {
    out, and kascov does not publish numbers it can prove wrong. */
 function marketSectionHtml(m, trades, network, toMs) {
   if (!m) return '';
+  if (m.phase === 'lp shares') return lpSharesSectionHtml(m, network);
   const tiles = [];
   if (m.last_quote_sompi != null && m.last_base_amount) {
     tiles.push(['last price', `${fmtPriceKas(m.last_quote_sompi, m.last_base_amount)} KAS`,
@@ -4634,6 +4635,14 @@ function marketSectionHtml(m, trades, network, toMs) {
   if (m.exit_value_sompi != null) {
     tiles.push(['exit value', fmtAmount(Number(m.exit_value_sompi), network),
       'what selling ALL circulating supply into this curve would return, capped by the reserve — the honest cousin of market cap, which kascov deliberately does not publish']);
+  }
+  if (m.program && m.program.shares != null) {
+    tiles.push(['pool shares', fmtInt(m.program.shares),
+      'the share count the pool states in its own committed state block, as of its newest proven reveal']);
+  }
+  if (m.program && m.program.token_reserve != null && m.program.skeleton === 'KRON pool v1') {
+    tiles.push(['token reserve', fmtInt(m.program.token_reserve),
+      'tokens the pool held when it last committed its state — one spend behind the live cell, which is why the price above uses the covenant’s current balance instead']);
   }
   const spotLine = (m.spot_num_sompi != null && m.spot_den)
     ? `<p class="dim market-spot">spot (next small trade): ${esc(fmtPriceKas(Number(m.spot_num_sompi) - 0, m.spot_den * 1))} KAS — a marginal price; real fills land below or above it with size.</p>`
@@ -4668,6 +4677,45 @@ function marketSectionHtml(m, trades, network, toMs) {
   return `<section aria-label="Market"><h2>market ${marketPhaseChip(m)}</h2>` +
     `<p class="dim">every figure below is derived from chain and checked against the curve program's own formula — nothing comes from any launchpad's API.</p>` +
     tilesHtml + spotLine + whyLine + progLine + tradesHtml + `</section>`;
+}
+
+/* A pool's share token is not a coin with a price, and showing it in the
+   ordinary market layout invites exactly that misreading. It gets its own
+   section: what the thing is, which pool issued it, and how much of that
+   pool's liquidity no share can ever redeem.
+
+   The locked figure is DERIVED, never assumed: the pool's own share counter
+   minus the shares actually issued as tokens. Both halves are proven from
+   chain, so the gap is proven too — kascov does not hardcode a launchpad's
+   published constant and call it verified. */
+function lpSharesSectionHtml(m, network) {
+  const pool = m.lp_of_pool;
+  const poolLink = pool
+    ? `<a href="#/${esc(network)}/c/${esc(pool)}" class="mono">${esc(shortHex(pool, 10, 8))}</a>`
+    : 'a pool';
+  let lockedHtml = '';
+  if (m.locked_shares != null && m.pool_shares != null) {
+    const pct = m.locked_bps != null ? (m.locked_bps / 100).toFixed(1) : null;
+    const issued = m.pool_shares - m.locked_shares;
+    lockedHtml =
+      `<div class="lane-stats token-stats">` +
+      `<div class="stat"><span class="stat-n" title="the share count the pool states in its own committed state block">${esc(fmtInt(m.pool_shares))}</span><span class="stat-label">shares the pool counts</span></div>` +
+      `<div class="stat"><span class="stat-n" title="shares that exist as this token and can be redeemed against the pool">${esc(fmtInt(issued))}</span><span class="stat-label">issued as tokens</span></div>` +
+      `<div class="stat"><span class="stat-n" title="shares the pool counts that no token backs — liquidity nobody holds a claim on, so it can never be withdrawn">${esc(fmtInt(m.locked_shares))}</span><span class="stat-label">locked forever</span></div>` +
+      (pct ? `<div class="stat"><span class="stat-n" title="the locked share of this pool's liquidity, derived from the two counts beside it rather than taken from any published figure">${esc(pct)}%</span><span class="stat-label">of the pool locked</span></div>` : '') +
+      `</div>` +
+      `<p class="dim">the pool's own state block counts <strong>${esc(fmtInt(m.pool_shares))}</strong> shares, ` +
+      `and <strong>${esc(fmtInt(issued))}</strong> of them exist as this token. the remaining ` +
+      `<strong>${esc(fmtInt(m.locked_shares))}</strong> are backed by no token at all, so nothing can redeem them ` +
+      `and that liquidity cannot leave the pool. kascov derives this from the two counts, both proven from chain — ` +
+      `it is not a number anyone published.</p>`;
+  }
+  return `<section aria-label="Pool shares"><h2>pool shares ${marketPhaseChip(m)}</h2>` +
+    `<p class="dim">this token is not priced here, and that is deliberate. it is a receipt for a share of ` +
+    `${poolLink}'s liquidity, named as such by that pool's own committed bytecode. what a share is worth is the ` +
+    `pool's holdings divided by the shares outstanding, which moves with every trade — a different instrument from ` +
+    `a traded price, so kascov does not print one.</p>` +
+    lockedHtml;
 }
 
 /* The market lifecycle, in plain words rather than launchpad slang — each

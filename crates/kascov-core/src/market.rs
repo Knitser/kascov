@@ -611,6 +611,18 @@ pub struct MarketSummary {
     /// capped by the reserve. Decimal string: the product overflows i64.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_value_sompi: Option<String>,
+    /// When this token IS a pool's share token: the pool that names it, and
+    /// how its shares split. `locked_shares` is what the pool counts that no
+    /// LP token backs — liquidity nobody can ever withdraw. Derived, never
+    /// assumed: the pool's own share counter minus the shares actually issued.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lp_of_pool: Option<crate::CovenantId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_shares: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked_shares: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked_bps: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub program: Option<MarketProgramRow>,
 }
@@ -641,10 +653,29 @@ pub(crate) fn market_summary(
         )
         .optional()
         .map_err(db_err)?;
-    if lp_of.is_some() {
+    if let Some(pool) = lp_of {
         out.phase = Some("lp shares".into());
         out.unpriced_reason =
             Some("this token is a pool's LP share token; kascov does not price LP shares".into());
+        out.lp_of_pool = Some(crate::CovenantId(pool));
+        // The pool counts shares its own state block states; the LP token
+        // records which of those were actually issued. The difference is
+        // liquidity no share can redeem, so it can never leave the pool.
+        // Both halves are proven, so the gap is proven too — nothing here is
+        // a protocol constant taken on faith.
+        if let Some(prog) = market_program_row(conn, &pool)? {
+            if let Some(shares) = prog.shares {
+                out.pool_shares = Some(shares);
+                let issued = held_wallet.unwrap_or(0) + held_script.unwrap_or(0);
+                if shares > 0 && issued >= 0 && issued <= shares {
+                    let locked = shares - issued;
+                    out.locked_shares = Some(locked);
+                    out.locked_bps =
+                        Some(((locked as i128 * 10_000) / shares as i128) as i64);
+                }
+            }
+            out.program = Some(prog);
+        }
         return Ok(out);
     }
     let Some(market) = market_covenant_id else {
@@ -829,6 +860,18 @@ pub struct MarketProgramRow {
     pub graduation_kas_sompi: Option<i64>,
     pub invariant_ok: bool,
     pub exercised_trades: i64,
+    /// Pool builds only: the rest of the state block this program committed.
+    /// These are the figures AS OF the newest proven reveal, which is one
+    /// spend behind the live cell — a pool page must say so rather than call
+    /// them current.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shares: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kas_reserve_sompi: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_covenant_id: Option<crate::CovenantId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lp_token_covenant_id: Option<crate::CovenantId>,
 }
 
 pub(crate) fn market_program_row(
@@ -836,11 +879,17 @@ pub(crate) fn market_program_row(
     covenant_id: &[u8; 32],
 ) -> Result<Option<MarketProgramRow>> {
     conn.query_row(
+        // New columns append at the end: these r.get indices are positional,
+        // so inserting mid-list silently mis-maps every field after it.
         "SELECT covenant_id, program_hash, skeleton, v_kas_units, token_reserve,
-                graduation_kas_sompi, invariant_ok, exercised_trades
+                graduation_kas_sompi, invariant_ok, exercised_trades,
+                shares, kas_reserve_sompi, token_covenant_id, lp_token_covenant_id
          FROM market_programs WHERE covenant_id = ?1",
         [covenant_id.as_slice()],
         |r| {
+            let cid = |v: Option<Vec<u8>>| -> Option<crate::CovenantId> {
+                v.and_then(|b| b.as_slice().try_into().ok()).map(crate::CovenantId)
+            };
             Ok(MarketProgramRow {
                 covenant_id: crate::CovenantId(r.get(0)?),
                 program_hash: hex::encode(r.get::<_, Vec<u8>>(1)?),
@@ -850,6 +899,10 @@ pub(crate) fn market_program_row(
                 graduation_kas_sompi: r.get(5)?,
                 invariant_ok: r.get::<_, i64>(6)? == 1,
                 exercised_trades: r.get(7)?,
+                shares: r.get(8)?,
+                kas_reserve_sompi: r.get(9)?,
+                token_covenant_id: cid(r.get(10)?),
+                lp_token_covenant_id: cid(r.get(11)?),
             })
         },
     )
