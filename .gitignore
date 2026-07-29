@@ -19,3 +19,11 @@ HANDOFF-AUDIT.md
 
 # Remotion promo-video project — rendered locally, not tracked
 video/
+
+# generated aggregate for the private traffic dashboard
+web/ops/traffic/traffic.json
+
+# Remote-access hardening scripts. They describe how admin access to the box
+# is locked down, which is intel an attacker would want and nobody else needs.
+# Kept on the machine and on the VPS, never published.
+scripts/ops/harden-*.ps1

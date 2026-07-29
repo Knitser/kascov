@@ -143,6 +143,11 @@ The state to keep true, and the scripts that restore it:
 | 17110/17210 RPC | 172.16.0.0/12 | WSL worker only |
 | 80/443 | anyone | there is no proxy in front; see above |
 
+The three `scripts/ops/harden-*.ps1` scripts restore this state. They are
+**deliberately gitignored**: they map how admin access is locked down, which is
+intel an attacker wants and nobody else needs. They live on the workstation and
+on the VPS admin home, never in the repo.
+
 - `harden-1-ssh-keyonly.ps1` — key-only SSH. Validates with `sshd -T` and
   self-restores its backup on a bad parse. Run this first; RDP is the fallback
   while it runs.
