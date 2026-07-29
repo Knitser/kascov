@@ -4355,3 +4355,58 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
   .together-graph.together-graph-medium { height: min(260px, 66dvh); }
   .together-graph.together-graph-compact { height: min(210px, 58dvh); }
 }
+
+/* ---- owner kind tag on holder rows ---- */
+.owner-kind {
+  font-size: .72rem;
+  letter-spacing: .04em;
+  color: var(--dim);
+  margin-right: .4rem;
+  text-transform: lowercase;
+}
+
+/* ---- pool wiring diagram: token -> pool -> shares ---- */
+.pool-wiring { margin: 1.1rem 0 1.4rem; }
+.pool-wiring svg { width: 100%; height: auto; max-width: 720px; display: block; }
+.pw-box {
+  fill: rgba(112, 199, 186, .05);
+  stroke: rgba(112, 199, 186, .3);
+  stroke-width: 1.2;
+  transition: fill .16s ease, stroke .16s ease;
+}
+.pool-wiring a:hover .pw-box { fill: rgba(112, 199, 186, .13); stroke: rgba(112, 199, 186, .65); }
+.pw-here { fill: rgba(112, 199, 186, .14); stroke: rgba(112, 199, 186, .7); }
+.pw-label { fill: #dfeeeb; font-size: 15px; font-weight: 700; text-anchor: middle; }
+.pw-sub   { fill: var(--dim); font-size: 11.5px; text-anchor: middle; }
+.pw-id    { fill: rgba(112, 199, 186, .8); font-size: 10.5px; text-anchor: middle; font-family: var(--mono, monospace); }
+.pw-arrow { stroke: rgba(112, 199, 186, .4); stroke-width: 1.4; }
+.pw-head  { fill: rgba(112, 199, 186, .55); }
+.pw-edge  { fill: var(--dim); font-size: 11px; text-anchor: middle; }
+.pool-wiring a { text-decoration: none; }
+
+/* ---- holders as area: one circle per holder ---- */
+.holders-bubbles { margin: .9rem 0 1.1rem; }
+.holders-bubbles svg { width: 100%; height: auto; display: block; }
+.hb-dot {
+  stroke: rgba(0, 0, 0, .35);
+  stroke-width: .8;
+  transition: opacity .14s ease, stroke .14s ease;
+  opacity: .82;
+}
+.holders-bubbles a { cursor: pointer; }
+.holders-bubbles a:hover .hb-dot { opacity: 1; stroke: #dfeeeb; stroke-width: 1.6; }
+.hb-presence { fill: #70C7BA; }
+.hb-covenant { fill: #7f8ce0; }
+.hb-pubkey   { fill: #5be49b; }
+.hb-script,
+.hb-other    { fill: #6b7f7a; }
+.hb-pct { fill: #0a100f; font-size: 11px; font-weight: 700; text-anchor: middle; pointer-events: none; }
+.hb-key { margin-top: .5rem; font-size: .82rem; }
+.hb-swatch {
+  display: inline-block;
+  width: .62rem; height: .62rem;
+  border-radius: 50%;
+  margin: 0 .25rem 0 .7rem;
+  vertical-align: baseline;
+}
+.hb-key .hb-swatch:first-child { margin-left: 0; }

@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-nav';
+} from './core/format.js?v=20260729-bubbles';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-nav';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-nav';
-import { createPendingModel } from './core/pending.js?v=20260729-nav';
+} from './core/state.js?v=20260729-bubbles';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-bubbles';
+import { createPendingModel } from './core/pending.js?v=20260729-bubbles';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-nav';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-nav';
-import { createRefreshGate } from './core/refresh.js?v=20260729-nav';
-import { networkRouteHash } from './core/routing.js?v=20260729-nav';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-nav';
+} from './core/data.js?v=20260729-bubbles';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-bubbles';
+import { createRefreshGate } from './core/refresh.js?v=20260729-bubbles';
+import { networkRouteHash } from './core/routing.js?v=20260729-bubbles';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-bubbles';
 
 
 
@@ -4679,6 +4679,78 @@ function marketSectionHtml(m, trades, network, toMs) {
     tilesHtml + spotLine + whyLine + progLine + tradesHtml + `</section>`;
 }
 
+/* How the three covenants wire together, drawn rather than described. A
+   launch curve sells inventory until it hits its target, then hands the
+   liquidity to a pool, which issues share tokens against it. Each box is a
+   real covenant on this chain, so every one of them is a link. */
+function poolWiringSvg(network, opts = {}) {
+  const { tokenId = null, poolId = null, lpId = null, here = null } = opts;
+  const box = (x, label, sub, id, isHere) => {
+    const cls = `pw-box${isHere ? ' pw-here' : ''}`;
+    const inner =
+      `<rect x="${x}" y="34" rx="10" ry="10" width="150" height="76" class="${cls}"></rect>` +
+      `<text x="${x + 75}" y="63" class="pw-label">${esc(label)}</text>` +
+      `<text x="${x + 75}" y="82" class="pw-sub">${esc(sub)}</text>` +
+      (id ? `<text x="${x + 75}" y="99" class="pw-id">${esc(shortHex(id, 6, 4))}</text>` : '');
+    return id && !isHere ? `<a href="#/${esc(network)}/${label === 'pool' ? 'pool' : 'token'}/${esc(id)}">${inner}</a>` : inner;
+  };
+  const arrow = (x1, x2, label) =>
+    `<line x1="${x1}" y1="72" x2="${x2 - 7}" y2="72" class="pw-arrow"></line>` +
+    `<polygon points="${x2 - 7},68 ${x2},72 ${x2 - 7},76" class="pw-head"></polygon>` +
+    `<text x="${(x1 + x2) / 2}" y="26" class="pw-edge">${esc(label)}</text>`;
+  return `<div class="pool-wiring"><svg viewBox="0 0 700 130" role="img" ` +
+    `aria-label="a launch curve graduates into a pool, which issues share tokens">` +
+    box(10, 'token', 'the coin itself', tokenId, here === 'token') +
+    arrow(160, 275, 'sold by a curve') +
+    box(275, 'pool', 'holds the liquidity', poolId, here === 'pool') +
+    arrow(425, 540, 'issues') +
+    box(540, 'shares', 'a claim on the pool', lpId, here === 'lp') +
+    `</svg></div>`;
+}
+
+/* Who holds a coin, as area rather than a list: one circle per holder, sized
+   by balance so concentration is visible at a glance instead of having to
+   read down a table. Packed greedily on a spiral, which is deterministic —
+   the same holders always draw the same picture. */
+function holdersBubbleSvg(network, balances, base) {
+  const rows = balances.filter((b) => typeof b.balance === 'number' && b.balance > 0).slice(0, 60);
+  if (rows.length < 3) return '';
+  const W = 700, H = 320;
+  const max = rows[0].balance;
+  const placed = [];
+  for (const b of rows) {
+    const r = Math.max(5, 58 * Math.sqrt(b.balance / max));
+    let put = null;
+    /* spiral out from the middle until this circle clears every earlier one */
+    for (let step = 0; step < 4000 && !put; step += 1) {
+      const a = step * 0.42;
+      const rad = 3 * Math.sqrt(step);
+      const x = W / 2 + rad * Math.cos(a);
+      const y = H / 2 + rad * Math.sin(a) * 0.62;
+      if (x - r < 2 || x + r > W - 2 || y - r < 2 || y + r > H - 2) continue;
+      if (placed.every((p) => (p.x - x) ** 2 + (p.y - y) ** 2 >= (p.r + r + 2) ** 2)) put = { x, y, r };
+    }
+    if (put) placed.push({ ...put, b });
+  }
+  if (!placed.length) return '';
+  const circles = placed.map(({ x, y, r, b }) => {
+    const { kind, hex } = ownerParts(b.owner);
+    const share = base > 0 ? (b.balance / base) * 100 : null;
+    const title = `${kind || 'owner'} ${shortHex(hex, 8, 6)} — ${fmtInt(b.balance)}` +
+      (share != null ? ` (${share >= 9.95 ? share.toFixed(0) : share.toFixed(1)}%)` : '');
+    const c = `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}" ` +
+      `class="hb-dot hb-${esc(kind || 'other')}"><title>${esc(title)}</title></circle>` +
+      (r > 22 && share != null ? `<text x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}" class="hb-pct">${esc(share >= 9.95 ? share.toFixed(0) : share.toFixed(1))}%</text>` : '');
+    const href = ownerHref(network, b.owner);
+    return href ? `<a href="${esc(href)}">${c}</a>` : c;
+  }).join('');
+  return `<div class="holders-bubbles"><svg viewBox="0 0 ${W} ${H}" role="img" ` +
+    `aria-label="holders drawn as circles, area proportional to balance">${circles}</svg>` +
+    `<p class="dim hb-key"><span class="hb-swatch hb-presence"></span> presence ` +
+    `<span class="hb-swatch hb-covenant"></span> covenant ` +
+    `<span class="hb-swatch hb-pubkey"></span> pubkey — area is balance; click a circle to open that owner</p></div>`;
+}
+
 /* Every graduated pool on this network. A pool is not its own record here:
    it is the market covenant a graduated token names, so the directory is
    derived from the token list rather than from a second endpoint that could
@@ -4746,7 +4818,16 @@ function renderPools() {
       `<td><a href="#/${esc(network)}/token/${esc(t.covenant_id)}">token →</a></td>` +
       `</tr>`;
   }).join('');
+  /* the first pool doubles as the worked example for what a pool even is */
+  const first = rows[0];
   view.innerHTML = head +
+    `<p class="dim">a launch curve sells a coin until it reaches its target, then hands the liquidity to a pool ` +
+    `covenant and closes. the pool holds both sides from then on, and issues share tokens against what it holds:</p>` +
+    poolWiringSvg(network, {
+      tokenId: first.covenant_id,
+      poolId: first.market.program.covenant_id,
+      lpId: first.market.program.lp_token_covenant_id || null,
+    }) +
     `<div class="tokens-tablewrap"><table class="tokens-table">` +
     `<thead><tr><th>pool</th><th>price (KAS)</th><th>KAS reserve</th><th>shares</th><th>vol 24h</th><th></th></tr></thead>` +
     `<tbody>${body}</tbody></table></div>`;
@@ -4802,16 +4883,21 @@ function renderPoolPage(route) {
         `<div class="stat"><span class="stat-n" title="${esc(tip)}">${esc(v)}</span><span class="stat-label">${esc(l)}</span></div>`).join('') + `</div>`
     : '';
   /* the state block, field by field, in the order the bytes appear */
+  /* the two covenant ids in the state block are the pool's own wiring: follow
+     them rather than making the reader copy hex out of a table */
+  const covLink = (id) => id
+    ? `<a class="mono" href="#/${esc(network)}/token/${esc(id)}" title="${esc(id)}">${esc(shortHex(id, 10, 8))}</a>`
+    : '<span class="dim">—</span>';
   const fields = [
-    ['KAS reserve', p.kas_reserve_sompi != null ? `${fmtAmount(p.kas_reserve_sompi, network)}` : '—', 'bytes 2 to 10'],
-    ['token reserve', p.token_reserve != null ? fmtInt(p.token_reserve) : '—', 'bytes 11 to 19'],
-    ['token covenant', p.token_covenant_id ? shortHex(p.token_covenant_id, 10, 8) : '—', 'bytes 20 to 52'],
-    ['shares', p.shares != null ? fmtInt(p.shares) : '—', 'bytes 53 to 61'],
-    ['LP token covenant', p.lp_token_covenant_id ? shortHex(p.lp_token_covenant_id, 10, 8) : '—', 'bytes 62 to 94'],
+    ['KAS reserve', p.kas_reserve_sompi != null ? `<span class="mono">${esc(fmtAmount(p.kas_reserve_sompi, network))}</span>` : '<span class="dim">—</span>', 'bytes 2 to 10'],
+    ['token reserve', p.token_reserve != null ? `<span class="mono">${esc(fmtInt(p.token_reserve))}</span>` : '<span class="dim">—</span>', 'bytes 11 to 19'],
+    ['token covenant', covLink(p.token_covenant_id), 'bytes 20 to 52'],
+    ['shares', p.shares != null ? `<span class="mono">${esc(fmtInt(p.shares))}</span>` : '<span class="dim">—</span>', 'bytes 53 to 61'],
+    ['LP token covenant', covLink(p.lp_token_covenant_id), 'bytes 62 to 94'],
   ];
   const stateHtml = `<div class="tokens-tablewrap"><table class="tokens-table">` +
     `<thead><tr><th>field</th><th>value</th><th>where in the state block</th></tr></thead><tbody>` +
-    fields.map(([k, v, w]) => `<tr><td>${esc(k)}</td><td class="mono">${esc(v)}</td><td class="dim mono">${esc(w)}</td></tr>`).join('') +
+    fields.map(([k, v, w]) => `<tr><td>${esc(k)}</td><td>${v}</td><td class="dim mono">${esc(w)}</td></tr>`).join('') +
     `</tbody></table></div>`;
   const repro = p.program_hash
     ? `<p class="audit-repro"><span class="audit-repro-label">reproduce it:</span> fetch the newest transaction that spends ` +
@@ -4825,6 +4911,10 @@ function renderPoolPage(route) {
     `it trades <a href="#/${esc(network)}/token/${esc(tok.covenant_id)}">${esc(friendlyName(tok.covenant_id))}</a>` +
     (lp ? ` and issues <a href="#/${esc(network)}/token/${esc(lp.covenant_id)}">${esc(friendlyName(lp.covenant_id))}</a> as its share token` : '') +
     `. <a href="#/labels">what these labels mean →</a></p></header>` +
+    poolWiringSvg(network, {
+      tokenId: tok.covenant_id, poolId: pid,
+      lpId: p.lp_token_covenant_id || null, here: 'pool',
+    }) +
     tilesHtml +
     `<section aria-label="State block"><h2>its own committed state</h2>` +
     `<p class="dim">these five fields are parsed at fixed offsets from the program the chain hash-checked, ` +
@@ -5219,13 +5309,39 @@ const TOKEN_EVENTS_SHOWN = 6000;
 
 /* an owner pubkey as a compact link to its address page (plain text when it
    isn't a pubkey shape we can route) */
+/* An owner arrives as "<kind>:<64 hex>" — the identifier_type the coin's own
+   state block declares. Each kind points somewhere different, and the ones
+   that point nowhere say so rather than pretending to be a dead link:
+   a script owner is a hash, not an address, and nothing on kascov can show it. */
+function ownerParts(owner) {
+  const s = String(owner || '');
+  const i = s.indexOf(':');
+  if (i === -1) return { kind: null, hex: s.toLowerCase() };
+  return { kind: s.slice(0, i).toLowerCase(), hex: s.slice(i + 1).toLowerCase() };
+}
+
+function ownerHref(network, owner) {
+  const { kind, hex } = ownerParts(owner);
+  if (!/^[0-9a-f]{6,64}$/.test(hex)) return null;
+  if (kind === 'covenant') return `#/${network}/c/${hex}`;
+  /* pubkey and presence owners are both keys: presence-ownership proves the
+     key co-signed the spend, so the same address page answers "who is this" */
+  if (kind === 'presence' || kind === 'pubkey' || kind === null) {
+    return PUBKEY_RE.test(hex) || kind ? `#/${network}/addr/${hex}` : null;
+  }
+  return null; /* script owners are a hash with no page of their own */
+}
+
 function tokenOwnerLink(network, pk) {
   const s = String(pk || '');
   if (!s) return '';
-  const inner = `${esc(shortHex(s.toLowerCase(), 8, 6))}`;
-  return PUBKEY_RE.test(s)
-    ? `<a class="mono" href="#/${esc(network)}/addr/${esc(s.toLowerCase())}" title="${esc(s)}">${inner}</a>`
-    : `<span class="mono" title="${esc(s)}">${inner}</span>`;
+  const { kind, hex } = ownerParts(s);
+  const inner = esc(shortHex(hex, 8, 6));
+  const tag = kind ? `<span class="owner-kind" title="the identifier type this coin's own state block declares">${esc(kind)}</span> ` : '';
+  const href = ownerHref(network, s);
+  return href
+    ? `${tag}<a class="mono" href="${esc(href)}" title="${esc(hex)}">${inner}</a>`
+    : `${tag}<span class="mono" title="${esc(hex)}">${inner}</span>`;
 }
 
 function tokenEventItem(ev, network, toMs) {
@@ -5374,7 +5490,8 @@ function auditSectionHtml(t, d, network) {
     `<ul class="audit-list">${rows.join('')}<span id="audit-registry-rows"><li class="audit-row audit-unknown"><span class="audit-mark">…</span><span class="audit-name">17-19 · listing checks</span><span class="audit-detail">comparing the published listing against chain…</span></li></span></ul>` +
     `<p class="dim audit-foot">three states only: proven means a hash or an equality held on chain; ` +
     `failed means the violation is itself hash-proven; not provable means kascov will not guess. ` +
-    `derivation ${esc(String(v.derivation_version || ''))} at DAA ${esc(fmtInt(v.derived_at_daa || 0))}.</p>` +
+    `derivation ${esc(String(v.derivation_version || ''))} at DAA ${esc(fmtInt(v.derived_at_daa || 0))}. ` +
+    `<a href="#/labels">what every badge on this page had to prove →</a></p>` +
     auditMethodHtml(t, v, m) +
     `</details></section>`;
 }
@@ -5594,6 +5711,7 @@ function renderTokenPage(route) {
       ? ` — the ${esc(fmtInt(balances.length))} largest of ${esc(fmtInt(t.holders))} holders` : '';
     holdersSection = `<section class="token-balances" aria-label="Top holders"><h2>top holders</h2>` +
       `<p class="dim">who holds this token right now${moreNote}</p>` +
+      holdersBubbleSvg(network, balances, base) +
       `<div class="tokens-tablewrap"><table class="tokens-table token-balances-table">` +
       `<thead><tr><th>owner</th><th>balance</th><th>share</th></tr></thead>` +
       `<tbody>${holderRows}</tbody></table></div></section>`;
