@@ -6,7 +6,7 @@
 # RDP has no key auth, so the only real fix is to stop strangers reaching it.
 #
 # Lockout safety: this scopes RDP to the IP you are CURRENTLY SSH'd in from,
-# read live off the established connection rather than typed in — so it cannot
+# read live off the established connection rather than typed in - so it cannot
 # be wrong. Your ISP hands out dynamic addresses (two different ranges seen in
 # two weeks), so when it changes, RDP stops answering. That is expected: SSH is
 # key-only and still open, so you SSH in and run harden-3-allow-rdp-from.ps1.
@@ -37,7 +37,7 @@ $eff = & "C:\Windows\System32\OpenSSH\sshd.exe" -T 2>&1 |
        Where-Object { $_ -match '^passwordauthentication' }
 if ($eff -notmatch 'no') {
   "ABORT: SSH still accepts passwords ($eff)."
-  "Run harden-1-ssh-keyonly.ps1 first — otherwise locking RDP leaves a"
+  "Run harden-1-ssh-keyonly.ps1 first - otherwise locking RDP leaves a"
   "brute-forceable path as your only fallback."
   exit 1
 }

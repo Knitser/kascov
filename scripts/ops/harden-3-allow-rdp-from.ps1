@@ -1,7 +1,7 @@
 # The un-lock-yourself-out helper.
 #
 # Your ISP rotates your address, so the RDP allowlist from step 2 goes stale.
-# When RDP stops answering, SSH in (key-only, still open) and run this — it
+# When RDP stops answering, SSH in (key-only, still open) and run this - it
 # re-points the RDP rules at wherever you are now, read off the live SSH
 # connection so it cannot be typed wrong.
 #

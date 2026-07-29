@@ -2,7 +2,7 @@
 #
 # Why first: SSH becomes the permanent safety net. A key cannot be brute-forced
 # in practice, so SSH can stay open to the internet while RDP gets locked down
-# in step 2 — and if a future IP change ever locks you out of RDP, SSH is how
+# in step 2 - and if a future IP change ever locks you out of RDP, SSH is how
 # you get back in to fix it.
 #
 # Safe by construction: refuses to run without a working key installed,
