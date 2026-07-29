@@ -3903,6 +3903,28 @@ impl Store {
         Ok(restamped)
     }
 
+    /// Re-verify everything from scratch, ignoring the version gates.
+    ///
+    /// The gates exist so ordinary boots are cheap: nothing is re-derived
+    /// while the rules that produced it are unchanged. This clears them, so
+    /// the next pass walks every token's whole event history again and
+    /// re-reads every market program's committed bytes. Expensive on purpose.
+    ///
+    /// It cannot recover the PAST. Runs that happened before this log existed
+    /// left no record, and kascov will not manufacture one. What this gives
+    /// you is a fresh, complete, honestly-recorded verification of the state
+    /// as it is now — which is the thing an auditor can actually check.
+    pub fn force_reverify(&mut self) -> Result<u64> {
+        use crate::tokens::TOKEN_DERIVATION_META;
+        self.conn
+            .execute(
+                "DELETE FROM meta WHERE key IN (?1, 'market_program_version')",
+                params![TOKEN_DERIVATION_META],
+            )
+            .map_err(db_err)?;
+        self.derive_tokens_if_stale()
+    }
+
     /// Every token's current verdict. Taken before the derived tables are
     /// dropped, so a pass can report what it CHANGED rather than only what it
     /// ended up with.

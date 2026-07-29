@@ -107,6 +107,9 @@ enum Command {
     /// so it can be rehearsed against a COPY of a database before the real one,
     /// and timed. Needs no node.
     Restamp,
+    /// Re-verify every token and market program from scratch, ignoring the
+    /// version gates, and record the pass in the verification log.
+    Reverify,
 }
 
 #[tokio::main]
@@ -133,6 +136,19 @@ async fn main() -> Result<()> {
             let store = open_store(&cli)?;
             store.backup_to(out)?;
             eprintln!("backed up {} index to {}", cli.network, out.display());
+            Ok(())
+        }
+        Command::Reverify => {
+            let mut store = open_store(&cli)?;
+            let t0 = std::time::Instant::now();
+            let n = store.force_reverify()?;
+            eprintln!(
+                "{}: re-verified {n} tokens from scratch in {:.1}s — see \
+/data/{}/verification.json for the recorded run",
+                cli.network,
+                t0.elapsed().as_secs_f64(),
+                cli.network
+            );
             Ok(())
         }
         Command::Restamp => {
