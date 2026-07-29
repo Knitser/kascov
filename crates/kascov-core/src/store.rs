@@ -3820,8 +3820,12 @@ impl Store {
             // and without this a quiet token's market would stay unverified
             // until its next trade happened to touch it.
             const MARKET_META: &str = "market_program_version";
-            const MARKET_VERSION: &str = "3-pool-fee-model";
-            if self.meta(MARKET_META)?.as_deref() != Some(MARKET_VERSION) {
+            // Composite with the matcher version (see market::market_stamp):
+            // teaching the matcher a new build has to invalidate this gate, or
+            // the stored 'unmatched:N' rows are never retried and the new build
+            // stays invisible until each covenant happens to trade again.
+            let market_version = crate::market::market_stamp();
+            if self.meta(MARKET_META)?.as_deref() != Some(market_version.as_str()) {
                 let markets: std::collections::BTreeSet<[u8; 32]> = self
                     .conn
                     .prepare(
@@ -3834,7 +3838,7 @@ impl Store {
                     .collect::<std::result::Result<_, _>>()
                     .map_err(db_err)?;
                 crate::market::rederive_market_programs(&self.conn, &markets)?;
-                self.set_meta(MARKET_META, MARKET_VERSION)?;
+                self.set_meta(MARKET_META, market_version.as_str())?;
             }
             return Ok(0);
         }

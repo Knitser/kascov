@@ -197,6 +197,35 @@ pub fn match_kron_curve(program: &[u8]) -> Option<CurveParams> {
 /// creator slots vary per deployment, and only the two reserves vary per
 /// state.
 const POOL_FIXTURE: &[u8] = include_bytes!("../../kascov-decode/fixtures/kron_pool_v1.bin");
+/// "unmatched" is a verdict of a particular MATCHER, not of the program: when
+/// the matcher learns a new build, old unmatched rows must be retried even
+/// though neither the program nor its hash moved. The tag records which
+/// matcher gave up.
+///
+/// This is module-level and not a local const for a reason that cost a real
+/// bug: the retry only ever happens if something invalidates the market gate
+/// in `derive_tokens_if_stale`. While this lived inside the matcher, bumping
+/// it re-tagged nothing, because the gate never noticed and returned early —
+/// the tag existed but the retry it promised could not fire. `market_stamp()`
+/// folds it into that gate so a bump mechanically forces re-verification.
+pub(crate) const MATCHER_VERSION: &str = "2";
+
+/// The only skeletons that mean "this program byte-matched an audited build".
+/// Every tally and every publish gate reads this ALLOWLIST rather than testing
+/// `!= unmatched`: a denylist silently promotes a future give-up tag (say
+/// `unmatched:3`) into "matched", which is match-widening by accident.
+pub(crate) const MATCHED_SKELETONS: [&str; 2] = ["KRON curve v1", "KRON pool v1"];
+
+pub(crate) fn unmatched_tag() -> String {
+    format!("unmatched:{MATCHER_VERSION}")
+}
+
+/// The market verification gate, composite so that either half moving forces
+/// every stored market program to be read again.
+pub(crate) fn market_stamp() -> String {
+    format!("3-pool-fee-model/{MATCHER_VERSION}")
+}
+
 const POOL_STATE_LEN: usize = 94;
 const POOL_TEMPLATE_CREATOR_SLOTS: [usize; 2] = [159, 345];
 
@@ -394,12 +423,7 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
         )
         .optional()
         .map_err(db_err)?;
-    // "unmatched" is a verdict of a particular MATCHER, not of the program:
-    // when the matcher learns a new build, old unmatched rows must be retried
-    // even though neither the program nor its hash moved. The tag says which
-    // matcher gave up.
-    const MATCHER_VERSION: &str = "2";
-    let unmatched_tag = format!("unmatched:{MATCHER_VERSION}");
+    let unmatched_tag = unmatched_tag();
     let params_known = match &known {
         Some((h, skel, v)) if h.as_slice() == program_hash && skel == "KRON curve v1" => Some(*v),
         Some((h, skel, _)) if h.as_slice() == program_hash && *skel == unmatched_tag => {
@@ -694,7 +718,9 @@ pub(crate) fn market_summary(
         "KRON pool v1" => "graduated".into(),
         _ => "unknown".into(),
     });
-    if prog.skeleton != "KRON curve v1" && prog.skeleton != "KRON pool v1" {
+    // Allowlist, never a denylist: testing `!= unmatched` would promote a
+    // future give-up tag into "priceable", which is match-widening by accident.
+    if !MATCHED_SKELETONS.contains(&prog.skeleton.as_str()) {
         out.unpriced_reason = Some(
             "the covenant holding the inventory runs a program kascov does not recognise,              so no exchange rate it produces can be verified"
                 .into(),
@@ -913,6 +939,31 @@ pub(crate) fn market_program_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The retry promise the 'unmatched:N' tag makes is only kept if bumping
+    /// the matcher also invalidates the market gate. While MATCHER_VERSION was
+    /// a local const inside the matcher, a bump re-tagged nothing: the gate in
+    /// derive_tokens_if_stale never noticed and returned early, so every stored
+    /// unmatched row kept its old verdict and the newly-taught build stayed
+    /// invisible. Pin the relationship so that cannot regress.
+    #[test]
+    fn the_market_gate_moves_when_the_matcher_does() {
+        assert!(
+            market_stamp().ends_with(&format!("/{MATCHER_VERSION}")),
+            "market_stamp must carry MATCHER_VERSION or a matcher bump re-verifies nothing"
+        );
+        assert!(unmatched_tag().ends_with(MATCHER_VERSION));
+    }
+
+    /// A give-up tag must never be mistaken for a match. This is the exact
+    /// shape a denylist gets wrong.
+    #[test]
+    fn a_give_up_tag_is_not_a_match() {
+        assert!(!MATCHED_SKELETONS.contains(&unmatched_tag().as_str()));
+        assert!(!MATCHED_SKELETONS.contains(&"unmatched:3"));
+        assert!(MATCHED_SKELETONS.contains(&"KRON curve v1"));
+        assert!(MATCHED_SKELETONS.contains(&"KRON pool v1"));
+    }
 
     #[test]
     fn the_fixture_matches_itself_and_reads_its_own_constants() {
