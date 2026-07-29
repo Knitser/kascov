@@ -372,6 +372,7 @@
     <section id="view-pools" class="view-fade" aria-label="Pool directory" hidden></section>
     <section id="view-pool" class="view-fade" aria-label="Pool" hidden></section>
     <section id="view-labels" class="view-fade" aria-label="What the labels mean" hidden></section>
+    <section id="view-verify" class="view-fade" aria-label="Verification log" hidden></section>
 
     <!-- ============ TOKEN PAGE ============ -->
     <section id="view-token" class="view-fade" aria-label="Token page" hidden></section>
@@ -1550,7 +1551,7 @@ the amount committed in the input: used=100000, limit=9999</span></code></pre></
   <footer class="site-footer">
     <div class="container footer-inner">
       <p class="footer-motto">Kaspa nodes forget after roughly 30 hours. <strong>kascov remembers.</strong></p>
-      <p class="footer-nav"><a class="footer-link" href="#/explore" data-network-route="explore">explorer</a> · <a class="footer-link" href="#/pools" data-network-route="pools">pools</a> · <a class="footer-link" href="#/labels">what the labels mean</a> · <a class="footer-link" href="#/decode" data-network-route="decode">playground</a> · <a class="footer-link" href="#/dev" data-network-route="dev">JSON API &amp; docs</a> · <a class="footer-link" href="#/guide">the 15-minute guide</a> · <a class="footer-link" href="#/changelog">what&rsquo;s new</a> · <a class="footer-link" href="/feed.xml">feed</a></p>
+      <p class="footer-nav"><a class="footer-link" href="#/explore" data-network-route="explore">explorer</a> · <a class="footer-link" href="#/pools" data-network-route="pools">pools</a> · <a class="footer-link" href="#/labels">what the labels mean</a> · <a class="footer-link" href="#/verify" data-network-route="verify">verification log</a> · <a class="footer-link" href="#/decode" data-network-route="decode">playground</a> · <a class="footer-link" href="#/dev" data-network-route="dev">JSON API &amp; docs</a> · <a class="footer-link" href="#/guide">the 15-minute guide</a> · <a class="footer-link" href="#/changelog">what&rsquo;s new</a> · <a class="footer-link" href="/feed.xml">feed</a></p>
       <p class="footer-nav footer-siblings">also built here: <a class="footer-link" href="https://fees.kascov.io" target="_blank" rel="noopener">fees.kas</a> <span class="footer-dim">your lifetime Kaspa fees</span> · <a class="footer-link" href="https://rewind.kascov.io" target="_blank" rel="noopener">rewind</a> <span class="footer-dim">your wallet&rsquo;s story</span></p>
       <p><a class="footer-link" href="https://github.com/Knitser/kascov" target="_blank" rel="noopener noreferrer">github.com/Knitser/kascov</a> · <a class="footer-link" href="https://x.com/0xKnitser" target="_blank" rel="noopener noreferrer">@0xKnitser on X</a></p>
       <p class="footer-dim">data streams live from the kascov indexer — it never stops watching</p>
@@ -1563,13 +1564,13 @@ the amount committed in the input: used=100000, limit=9999</span></code></pre></
        defer preserves document order so app.js still runs after its deps.
        galaxy.js is absent on purpose — app.js lazy-loads it the first time
        the galaxy section is actually opened (it's the largest optional lib). -->
-  <script src="/dag.js?v=20260729-tidy" defer></script>
-  <script src="/blake2b.js?v=20260729-tidy" defer></script>
-  <script src="/disasm.js?v=20260729-tidy" defer></script>
-  <script src="/vm.js?v=20260729-tidy" defer></script>
-  <script src="/graph.js?v=20260729-tidy" defer></script>
-  <script src="/gen.js?v=20260729-tidy" defer></script>
-  <script src="/decode-payload.js?v=20260729-tidy" defer></script>
+  <script src="/dag.js?v=20260729-verify" defer></script>
+  <script src="/blake2b.js?v=20260729-verify" defer></script>
+  <script src="/disasm.js?v=20260729-verify" defer></script>
+  <script src="/vm.js?v=20260729-verify" defer></script>
+  <script src="/graph.js?v=20260729-verify" defer></script>
+  <script src="/gen.js?v=20260729-verify" defer></script>
+  <script src="/decode-payload.js?v=20260729-verify" defer></script>
   <script type="module" src="/app.js?v=20260729-bubbles"></script>
 </body>
 </html>

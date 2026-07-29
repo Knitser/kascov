@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-tidy';
+} from './core/format.js?v=20260729-verify';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-tidy';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-tidy';
-import { createPendingModel } from './core/pending.js?v=20260729-tidy';
+} from './core/state.js?v=20260729-verify';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-verify';
+import { createPendingModel } from './core/pending.js?v=20260729-verify';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -28,18 +28,18 @@ import {
   loadActivity, loadReorgs, loadDigest,
   galaxyCache, loadGalaxy,
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,
-  TOKENS_TTL_MS, tokenPages, loadTokens,
+  TOKENS_TTL_MS, tokenPages, loadTokens, loadVerification, verifyPages,
   tokenDetails, loadTokenDetail, loadOlderTokenEvents,
   txDetails, loadTxDetail,
   loadChangelog,
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-tidy';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-tidy';
-import { createRefreshGate } from './core/refresh.js?v=20260729-tidy';
-import { networkRouteHash } from './core/routing.js?v=20260729-tidy';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-tidy';
+} from './core/data.js?v=20260729-verify';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-verify';
+import { createRefreshGate } from './core/refresh.js?v=20260729-verify';
+import { networkRouteHash } from './core/routing.js?v=20260729-verify';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-verify';
 import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-bubbles';
 
 
@@ -4911,6 +4911,100 @@ function renderPoolPage(route) {
     `<p><a href="#/${esc(network)}/c/${esc(pid)}">open the raw covenant history →</a></p>`;
 }
 
+/* The verification log: what the deriver actually ran, and the queue of
+   programs it could not match. Two halves of one honesty claim — kascov
+   verifies continuously, and it says out loud what it has NOT verified. */
+function renderVerify() {
+  const network = state.network;
+  const view = $('#view-verify');
+  if (!view) return; /* stale cached index.html */
+  const net = NETWORKS[network];
+  document.title = `verification log on ${net.label} — kascov`;
+  const head = `<a class="back" href="#/${esc(network)}/tokens">← all tokens</a>` +
+    `<header class="page-head"><h1>verification log</h1>` +
+    `<p class="page-sub">kascov re-derives every token from chain and records what each pass found. ` +
+    `below that: the programs it could not match, which is the part most explorers never show you.</p></header>`;
+  const cached = verifyPages.get(network);
+  if (!cached) {
+    view.innerHTML = head + routeLoading('reading the log…');
+    loadVerification(network).then(() => {
+      if (state.network === network && parseRoute().view === 'verify') renderVerify();
+    }).catch(() => {
+      if (state.network === network && parseRoute().view === 'verify') {
+        view.innerHTML = head + `<div class="empty-card"><h2>couldn’t load the log.</h2></div>`;
+      }
+    });
+    return;
+  }
+  const d = cached.data || {};
+  const runs = Array.isArray(d.runs) ? d.runs : [];
+  const unknown = Array.isArray(d.unknown_builds) ? d.unknown_builds : [];
+
+  const OUTCOME = {
+    ok: ['proven', 'flag-grad'],
+    degraded: ['finished with an error', 'flag-warn'],
+    failed: ['failed', 'flag-warn'],
+    interrupted: ['interrupted', 'flag-warn'],
+  };
+  const runRows = runs.map((r) => {
+    const [word, cls] = OUTCOME[r.outcome] || ['in flight', ''];
+    const secs = r.finished_ms && r.started_ms
+      ? `${((r.finished_ms - r.started_ms) / 1000).toFixed(1)}s` : '—';
+    const when = r.started_ms ? relTimeShort(r.started_ms) : '—';
+    const moved = r.verdicts_changed || r.tokens_added || r.tokens_removed
+      ? `${fmtInt(r.tokens_added)} new · ${fmtInt(r.verdicts_changed)} changed · ${fmtInt(r.tokens_removed)} gone`
+      : 'nothing moved';
+    return `<tr>` +
+      `<td>${esc(when)}</td>` +
+      `<td>${esc(r.kind)}</td>` +
+      `<td><span class="flag ${esc(cls)}">${esc(word)}</span></td>` +
+      `<td class="mono">${esc(fmtInt(r.tokens_verified))} / ${esc(fmtInt(r.tokens_verified + r.tokens_unvalidated + r.tokens_invalid))}</td>` +
+      `<td class="mono" title="matched an audited build / did not match / never revealed their bytes">` +
+        `${esc(fmtInt(r.markets_matched))} · ${esc(fmtInt(r.markets_unmatched))} · ${esc(fmtInt(r.markets_unrevealed))}</td>` +
+      `<td class="dim">${esc(moved)}</td>` +
+      `<td class="mono dim">${esc(secs)}</td>` +
+      `</tr>`;
+  }).join('');
+  const runsHtml = runs.length
+    ? `<div class="tokens-tablewrap"><table class="tokens-table">` +
+      `<thead><tr><th>when</th><th>pass</th><th>outcome</th><th>verified</th>` +
+      `<th title="matched · unmatched · unrevealed">markets</th><th>what moved</th><th>took</th></tr></thead>` +
+      `<tbody>${runRows}</tbody></table></div>`
+    : `<p class="dim">no pass has been recorded on ${esc(net.label)} yet. the log starts empty and fills ` +
+      `from the next pass — kascov has no record of passes it did not log, and will not invent one. ` +
+      `a full pass runs when the derivation rules change; a market pass when the matcher learns a new build.</p>`;
+
+  const unknownRows = unknown.map((u) => {
+    const vol = u.volume_sompi ? fmtAmount(u.volume_sompi, network) : '—';
+    return `<tr>` +
+      `<td class="mono" title="${esc(u.program_hash)}">${esc(shortHex(u.program_hash, 10, 6))}</td>` +
+      `<td class="mono">${esc(fmtInt(u.covenants))}</td>` +
+      `<td class="mono">${esc(fmtInt(u.trades))}</td>` +
+      `<td class="mono">${esc(vol)}</td>` +
+      `<td><a class="mono" href="#/${esc(network)}/c/${esc(u.sample_covenant)}">${esc(shortHex(u.sample_covenant, 8, 6))}</a></td>` +
+      `</tr>`;
+  }).join('');
+  const unknownHtml = unknown.length
+    ? `<div class="tokens-tablewrap"><table class="tokens-table">` +
+      `<thead><tr><th>program</th><th>covenants</th><th>trades</th><th>volume through it</th><th>inspect one</th></tr></thead>` +
+      `<tbody>${unknownRows}</tbody></table></div>`
+    : `<p class="dim">every market program on ${esc(net.label)} matched an audited build.</p>`;
+
+  view.innerHTML = head +
+    `<section aria-label="Passes"><h2>what ran</h2>` +
+    `<p class="dim">a record of what the deriver did, never an authority on what may be published: ` +
+    `every figure on this site is re-proved from chain each time it is served. ` +
+    `an interrupted row means a pass was still open when a later one started — usually a restart, ` +
+    `and occasionally a manual re-derive racing the follower.</p>` +
+    runsHtml + `</section>` +
+    `<section aria-label="Unknown builds"><h2>what kascov could not match</h2>` +
+    `<p class="dim">these covenants hold token inventory and move KAS against it, but their programs ` +
+    `do not byte-match any audited build, so kascov prices none of them and never will until one is ` +
+    `audited and pinned. ranked by how much activity rides on each — <strong>that is what is at stake ` +
+    `if a build stays unaudited, not a measure of how trustworthy it is</strong>. nothing here has proven anything.</p>` +
+    unknownHtml + `</section>`;
+}
+
 /* What every badge on this site has to prove before it is shown. The right
    column is the point: what kascov refuses to say, even when a launchpad
    says it. */
@@ -6178,6 +6272,9 @@ function parseRoute() {
   /* '#/labels' — what every badge on this site has to prove to be shown */
   m = path.match(/^#\/labels\/?$/);
   if (m) return { view: 'labels', network: null };
+  /* '#/verify' — the derivation log and the queue of unknown builds */
+  m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?verify\/?$/);
+  if (m) return { view: 'verify', network: m[1] || null };
   /* '#/<network>/tx/<txid>' and bare '#/tx/<txid>' — one transaction's page */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?tx\/([0-9a-fA-F]{64})\/?$/);
   if (m) return { view: 'tx', network: m[1] || null, id: m[2].toLowerCase() };
@@ -6319,6 +6416,7 @@ async function render() {
     pools: $('#view-pools'),
     pool: $('#view-pool'),
     labels: $('#view-labels'),
+    verify: $('#view-verify'),
     tx: $('#view-tx'),
     decode: $('#view-decode'),
     build: $('#view-build'),
@@ -6364,6 +6462,7 @@ async function render() {
     else if (route.view === 'pools') renderPools();
     else if (route.view === 'pool') renderPoolPage(route);
     else if (route.view === 'labels') renderLabels();
+    else if (route.view === 'verify') renderVerify();
     else if (route.view === 'tx') renderTxPage(route);
     else if (route.view === 'build') renderBuild();
     else if (route.view === 'preflight') renderPreflight();

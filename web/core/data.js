@@ -5,11 +5,11 @@
    galaxy, lane pages, changelog). No DOM — everything here returns data
    and fills the caches in core/state; rendering stays in app.js. */
 
-import { friendlyName } from './format.js?v=20260729-tidy';
+import { friendlyName } from './format.js?v=20260729-verify';
 import {
   GRID_PAGE, ACTIVITY_TTL_MS, ACTIVITY_MISS_TTL_MS,
   makeAnchor, daaToMs, state,
-} from './state.js?v=20260729-tidy';
+} from './state.js?v=20260729-verify';
 
 /* the wire says 'active'/'burned'; the UI speaks alive/retired — the one
    place that mapping happens (grid rows, detail coins, search results and
@@ -584,6 +584,26 @@ async function loadTokens(network) {
   return rec;
 }
 
+/* the verification log and the unknown-build queue. A 404 means an older
+   worker without the route, remembered as missing and reprobed after the ttl,
+   so the page can say so honestly rather than showing an empty log. */
+const verifyPages = new Map(); // network -> { data|missing, at }
+
+async function loadVerification(network) {
+  const t = verifyPages.get(network);
+  if (t && Date.now() - t.at < TOKENS_TTL_MS) return t;
+  const res = await fetch(`data/${network}/verification.json`, { cache: 'no-cache' });
+  if (res.status === 404) {
+    const rec = { missing: true, at: Date.now() };
+    verifyPages.set(network, rec);
+    return rec;
+  }
+  if (!res.ok) throw new Error(`verification ${res.status}`);
+  const rec = { data: await res.json(), at: Date.now() };
+  verifyPages.set(network, rec);
+  return rec;
+}
+
 /* one decoded token's page — its directory row, top balances, classified
    mint/transfer/burn events and the validation verdict, served by its own
    worker endpoint. Feature-detected like the directory: a 404 (older worker
@@ -721,7 +741,7 @@ export {
   loadActivity, loadReorgs, loadDigest,
   galaxyCache, loadGalaxy,
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,
-  TOKENS_TTL_MS, tokenPages, loadTokens,
+  TOKENS_TTL_MS, tokenPages, loadTokens, loadVerification, verifyPages,
   tokenDetails, loadTokenDetail, loadOlderTokenEvents,
   txDetails, loadTxDetail,
   loadChangelog,

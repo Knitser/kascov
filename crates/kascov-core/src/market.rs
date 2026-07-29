@@ -223,7 +223,7 @@ pub(crate) fn unmatched_tag() -> String {
 /// The market verification gate, composite so that either half moving forces
 /// every stored market program to be read again.
 pub(crate) fn market_stamp() -> String {
-    format!("3-pool-fee-model/{MATCHER_VERSION}")
+    format!("4-logged/{MATCHER_VERSION}")
 }
 
 const POOL_STATE_LEN: usize = 94;
