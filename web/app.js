@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-pools2';
+} from './core/format.js?v=20260729-pools3';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-pools2';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-pools2';
-import { createPendingModel } from './core/pending.js?v=20260729-pools2';
+} from './core/state.js?v=20260729-pools3';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-pools3';
+import { createPendingModel } from './core/pending.js?v=20260729-pools3';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-pools2';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-pools2';
-import { createRefreshGate } from './core/refresh.js?v=20260729-pools2';
-import { networkRouteHash } from './core/routing.js?v=20260729-pools2';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-pools2';
+} from './core/data.js?v=20260729-pools3';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-pools3';
+import { createRefreshGate } from './core/refresh.js?v=20260729-pools3';
+import { networkRouteHash } from './core/routing.js?v=20260729-pools3';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-pools3';
 
 
 
@@ -4679,6 +4679,188 @@ function marketSectionHtml(m, trades, network, toMs) {
     tilesHtml + spotLine + whyLine + progLine + tradesHtml + `</section>`;
 }
 
+/* Every graduated pool on this network. A pool is not its own record here:
+   it is the market covenant a graduated token names, so the directory is
+   derived from the token list rather than from a second endpoint that could
+   disagree with it. */
+function renderPools() {
+  const network = state.network;
+  const view = $('#view-pools');
+  if (!view) return; /* stale cached index.html */
+  const net = NETWORKS[network];
+  document.title = `pools on ${net.label} — kascov`;
+  const head = `<a class="back" href="#/${esc(network)}/tokens">← all tokens</a>` +
+    `<header class="page-head"><h1>pools</h1>` +
+    `<p class="page-sub">where a token trades once its launch curve has finished. every figure is read out of ` +
+    `the pool covenant's own committed state block, never from a launchpad's API. ` +
+    `<a href="#/labels">what these labels mean →</a></p></header>`;
+  const cached = tokenPages.get(network);
+  if (!cached) {
+    view.innerHTML = head + routeLoading('reading this network’s pools…');
+    loadTokens(network).then(() => {
+      if (state.network === network && parseRoute().view === 'pools') renderPools();
+    }).catch(() => {
+      if (state.network === network && parseRoute().view === 'pools') {
+        view.innerHTML = head + `<div class="empty-card"><h2>couldn’t load the pools.</h2>` +
+          `<p class="dim">the lookup didn’t answer — the worker may be busy. it’s not you.</p></div>`;
+      }
+    });
+    return;
+  }
+  const rows = ((cached.data && cached.data.tokens) || [])
+    .filter((t) => t.market && t.market.phase === 'graduated' && t.market.program)
+    .sort((a, b) => Number(b.market.reserve_sompi || 0) - Number(a.market.reserve_sompi || 0));
+  if (!rows.length) {
+    view.innerHTML = head + `<div class="empty-card"><h2>no pool has opened on ${esc(net.label)} yet.</h2>` +
+      `<p class="dim">a pool appears the moment a launch curve reaches its target and hands its liquidity over. ` +
+      `until then every token here is still selling from its curve.</p></div>`;
+    return;
+  }
+  const body = rows.map((t) => {
+    const pid = t.market.program.covenant_id;
+    const name = friendlyName(t.covenant_id);
+    const listed = state.registry[network] && registryEntry(network, t.covenant_id);
+    const label = (listed && listed.ticker) ? `${name} <span class="dim">$${esc(listed.ticker)}</span>` : esc(name);
+    const price = (t.market.spot_num_sompi != null && t.market.spot_den)
+      ? `${esc(fmtPriceKas(Number(t.market.spot_num_sompi), t.market.spot_den))} KAS` : '<span class="dim">—</span>';
+    return `<tr>` +
+      `<td><a class="token-coin" href="#/${esc(network)}/pool/${esc(pid)}">${label}</a></td>` +
+      `<td class="mono">${price}</td>` +
+      `<td class="mono">${t.market.reserve_sompi != null ? esc(fmtAmount(t.market.reserve_sompi, network)) : '<span class="dim">—</span>'}</td>` +
+      `<td class="mono">${t.market.program.shares != null ? esc(fmtInt(t.market.program.shares)) : '<span class="dim">—</span>'}</td>` +
+      `<td class="mono">${t.market.volume_24h_sompi != null ? esc(fmtAmount(t.market.volume_24h_sompi, network)) : '<span class="dim">—</span>'}</td>` +
+      `<td><a href="#/${esc(network)}/token/${esc(t.covenant_id)}">token →</a></td>` +
+      `</tr>`;
+  }).join('');
+  view.innerHTML = head +
+    `<div class="tokens-tablewrap"><table class="tokens-table">` +
+    `<thead><tr><th>pool</th><th>price (KAS)</th><th>KAS reserve</th><th>shares</th><th>vol 24h</th><th></th></tr></thead>` +
+    `<tbody>${body}</tbody></table></div>`;
+}
+
+/* One pool, shown as what it actually is: a covenant whose committed bytes
+   state its own reserves and share count. Everything here is read out of the
+   state block the chain checked, and the page says plainly that those figures
+   are as of the newest proven reveal rather than the live cell. */
+function renderPoolPage(route) {
+  const network = route.network || state.network;
+  const view = $('#view-pool');
+  if (!view) return; /* stale cached index.html */
+  const pid = route.id;
+  const head = `<a class="back" href="#/${esc(network)}/pools">← all pools</a>`;
+  const cached = tokenPages.get(network);
+  if (!cached) {
+    view.innerHTML = head + routeLoading('reading this pool…');
+    loadTokens(network).then(() => {
+      if (parseRoute().view === 'pool') renderPoolPage(parseRoute());
+    }).catch(() => {
+      if (parseRoute().view === 'pool') {
+        view.innerHTML = head + `<div class="empty-card"><h2>couldn’t load this pool.</h2></div>`;
+      }
+    });
+    return;
+  }
+  const all = (cached.data && cached.data.tokens) || [];
+  const tok = all.find((t) => t.market && t.market.program && t.market.program.covenant_id === pid);
+  if (!tok) {
+    document.title = `pool — kascov`;
+    view.innerHTML = head + `<div class="empty-card"><h2>no verified pool with this id.</h2>` +
+      `<p class="dim">kascov only calls a covenant a pool when its program byte-matches an audited pool build. ` +
+      `if this id is a covenant, its raw history is still here: ` +
+      `<a href="#/${esc(network)}/c/${esc(pid)}">open the covenant →</a></p></div>`;
+    return;
+  }
+  const m = tok.market, p = m.program;
+  const name = friendlyName(tok.covenant_id);
+  document.title = `pool ${name} — kascov`;
+  const lp = p.lp_token_covenant_id
+    ? all.find((t) => t.covenant_id === p.lp_token_covenant_id) : null;
+  const tiles = [];
+  if (m.spot_num_sompi != null && m.spot_den) {
+    tiles.push(['price', `${fmtPriceKas(Number(m.spot_num_sompi), m.spot_den)} KAS`,
+      'the pool’s marginal price: its live KAS balance over its live token balance']);
+  }
+  if (m.reserve_sompi != null) tiles.push(['KAS reserve', fmtAmount(m.reserve_sompi, network), GLOSSARY.market_reserve]);
+  if (p.shares != null) tiles.push(['shares', fmtInt(p.shares), 'the share count the pool states in its own committed state block']);
+  if (m.volume_24h_sompi != null) tiles.push(['vol 24h', fmtAmount(m.volume_24h_sompi, network), `${fmtInt(m.trades_24h || 0)} verified trades in the last 24 hours`]);
+  const tilesHtml = tiles.length
+    ? `<div class="lane-stats token-stats">` + tiles.map(([l, v, tip]) =>
+        `<div class="stat"><span class="stat-n" title="${esc(tip)}">${esc(v)}</span><span class="stat-label">${esc(l)}</span></div>`).join('') + `</div>`
+    : '';
+  /* the state block, field by field, in the order the bytes appear */
+  const fields = [
+    ['KAS reserve', p.kas_reserve_sompi != null ? `${fmtAmount(p.kas_reserve_sompi, network)}` : '—', 'bytes 2 to 10'],
+    ['token reserve', p.token_reserve != null ? fmtInt(p.token_reserve) : '—', 'bytes 11 to 19'],
+    ['token covenant', p.token_covenant_id ? shortHex(p.token_covenant_id, 10, 8) : '—', 'bytes 20 to 52'],
+    ['shares', p.shares != null ? fmtInt(p.shares) : '—', 'bytes 53 to 61'],
+    ['LP token covenant', p.lp_token_covenant_id ? shortHex(p.lp_token_covenant_id, 10, 8) : '—', 'bytes 62 to 94'],
+  ];
+  const stateHtml = `<div class="tokens-tablewrap"><table class="tokens-table">` +
+    `<thead><tr><th>field</th><th>value</th><th>where in the state block</th></tr></thead><tbody>` +
+    fields.map(([k, v, w]) => `<tr><td>${esc(k)}</td><td class="mono">${esc(v)}</td><td class="dim mono">${esc(w)}</td></tr>`).join('') +
+    `</tbody></table></div>`;
+  const repro = p.program_hash
+    ? `<p class="audit-repro"><span class="audit-repro-label">reproduce it:</span> fetch the newest transaction that spends ` +
+      `<span class="mono">${esc(shortHex(pid, 10, 8))}</span>, take the final push of its input’s signature script, blake2b-256 it, ` +
+      `and compare with <span class="mono">${esc(p.program_hash)}</span> — the digest kascov verified and the chain committed. ` +
+      `the first 94 bytes of that program are the table above.</p>`
+    : '';
+  view.innerHTML = head +
+    `<header class="page-head"><h1>${esc(name)} <span class="flag flag-phase flag-grad">pool</span></h1>` +
+    `<p class="page-sub"><span class="mono">${esc(shortHex(pid, 10, 8))}</span> — a constant-product pool covenant. ` +
+    `it trades <a href="#/${esc(network)}/token/${esc(tok.covenant_id)}">${esc(friendlyName(tok.covenant_id))}</a>` +
+    (lp ? ` and issues <a href="#/${esc(network)}/token/${esc(lp.covenant_id)}">${esc(friendlyName(lp.covenant_id))}</a> as its share token` : '') +
+    `. <a href="#/labels">what these labels mean →</a></p></header>` +
+    tilesHtml +
+    `<section aria-label="State block"><h2>its own committed state</h2>` +
+    `<p class="dim">these five fields are parsed at fixed offsets from the program the chain hash-checked, ` +
+    `as of its newest proven reveal — one spend behind the live cell, which is why the price above uses the ` +
+    `covenant’s current balance instead. ${esc(fmtInt(p.exercised_trades || 0))} trades were replayed against ` +
+    `this program’s own formula${p.invariant_ok ? '' : ' — INVARIANT VIOLATION'}.</p>` +
+    stateHtml + repro + `</section>` +
+    `<p><a href="#/${esc(network)}/c/${esc(pid)}">open the raw covenant history →</a></p>`;
+}
+
+/* What every badge on this site has to prove before it is shown. The right
+   column is the point: what kascov refuses to say, even when a launchpad
+   says it. */
+function renderLabels() {
+  const view = $('#view-labels');
+  if (!view) return; /* stale cached index.html */
+  document.title = 'what the labels mean — kascov';
+  const rows = [
+    ['KCC20 token', 'the coin’s state block parses at the KCC20 shape: a 32-byte owner, an identifier type, an 8-byte amount, a minter flag.',
+      'that the token is safe, or that the name it goes by is real.'],
+    ['verified', 'every event in the coin’s history was replayed under the KCC20 rules, supply conserved end to end, no violation found.',
+      'anything about price, quality or intent — a verified token can still be worthless.'],
+    ['bonding · N%', 'the market program byte-matches an audited launch-curve build outside its declared slots, and the completion target is read from those slots.',
+      'a target, or a percentage, when the program does not match that build.'],
+    ['bonding complete', 'the curve’s own committed state carries its finished flag.',
+      'that a pool exists yet, or where the liquidity went.'],
+    ['pool shares', 'this coin is the LP token named inside a matched pool program’s state block, at bytes 62 to 94.',
+      'a price. a share is a claim on a pool’s holdings, not a traded instrument.'],
+    ['locked forever', 'the pool counts more shares than exist as tokens; the difference is derived from those two proven counts.',
+      'a launchpad’s published lock constant, taken on faith. kascov derives the figure and ignores the claim.'],
+    ['unmatched', 'the revealed program did not byte-match any audited build.',
+      'a price, ever. matching is never widened to make a program fit.'],
+    ['listed as X', 'a launchpad’s registry claim, cross-checked field by field against the chain — genesis transaction, inventory covenant, creator key.',
+      'that the claim is true merely because it was published. a mismatch is shown as a mismatch.'],
+  ];
+  view.innerHTML =
+    `<a class="back" href="#/${esc(state.network)}/tokens">← all tokens</a>` +
+    `<header class="page-head"><h1>what the labels mean</h1>` +
+    `<p class="page-sub">kascov puts a badge on a coin only when the chain can be made to prove it. ` +
+    `each row below is a test, not a definition — and the last column is the part that matters, ` +
+    `because a label is only worth anything if it can be withheld.</p></header>` +
+    `<div class="tokens-tablewrap"><table class="tokens-table">` +
+    `<thead><tr><th>label</th><th>what it had to prove</th><th>what kascov still will not say</th></tr></thead><tbody>` +
+    rows.map(([l, proof, refuse]) =>
+      `<tr><td><span class="flag flag-phase">${esc(l)}</span></td><td>${esc(proof)}</td><td class="dim">${esc(refuse)}</td></tr>`).join('') +
+    `</tbody></table></div>` +
+    `<p class="dim">none of this comes from a launchpad’s API. where a launchpad publishes something kascov can test, ` +
+    `it is tested and the result is shown either way.</p>`;
+}
+
 /* A pool's share token is not a coin with a price, and showing it in the
    ordinary market layout invites exactly that misreading. It gets its own
    section: what the thing is, which pool issued it, and how much of that
@@ -4744,6 +4926,19 @@ function marketPhaseCell(m) {
 function marketCellsHtml(m, network) {
   const dash = (why) => `<td class="dim" title="${esc(why || 'not derivable from chain yet')}">—</td>`;
   if (!m) return dash('no market figures for this token') + dash('') + dash('');
+  /* A share token has no price, reserve or volume of its own, so those three
+     columns would be three dashes. They carry what a share token actually has
+     instead: how many shares exist, and how much of the pool no share can
+     redeem. Labelled in the cell, since the column headers say otherwise. */
+  if (m.phase === 'lp shares') {
+    const noPrice = dash(m.unpriced_reason || 'LP shares are not priced');
+    if (m.pool_shares == null || m.locked_shares == null) return noPrice + dash('') + dash('');
+    const issued = m.pool_shares - m.locked_shares;
+    const pct = m.locked_bps != null ? `${(m.locked_bps / 100).toFixed(0)}% locked` : '';
+    return noPrice +
+      `<td class="mono" title="shares that exist as this token and can be redeemed against the pool, out of ${esc(fmtInt(m.pool_shares))} the pool counts">${esc(fmtInt(issued))} issued</td>` +
+      `<td class="mono" title="${esc(fmtInt(m.locked_shares))} shares the pool counts that no token backs, so that liquidity can never be withdrawn — derived from the two counts, not from any published figure">${esc(pct)}</td>`;
+  }
   const why = m.unpriced_reason || '';
   const price = (m.last_quote_sompi != null && m.last_base_amount)
     ? `<td class="mono" title="last executed trade: ${esc(fmtInt(m.last_quote_sompi))} sompi for ${esc(fmtInt(m.last_base_amount))} tokens, before launchpad fees">${esc(fmtPriceKas(m.last_quote_sompi, m.last_base_amount))}</td>`
@@ -4780,6 +4975,7 @@ function renderTokens() {
     `<header class="page-head tokens-head"><h1>tokens</h1>` +
     `<p class="page-sub">covenant tokens on ${esc(net.label)} — every KCC20-shaped coin the indexer decoded, ` +
     `read straight from the chain’s bytes ${usdToggleHtml()}</p>` +
+    `<p class="page-sub"><a href="#/${esc(network)}/pools">pools →</a> · <a href="#/labels">what the labels mean →</a></p>` +
     (validated
       ? `<p class="tokens-note tokens-note-info">${esc((d && d.note) || TOKEN_NOTE_VALIDATED)}</p>`
       : `<p class="tokens-note">⚠ ${esc((d && d.note) || TOKEN_NOTE_FALLBACK)}</p>`) +
@@ -4927,7 +5123,8 @@ function renderTokens() {
       `<td><a class="token-coin" href="${href}">${rowArt} ${nameHtml}</a></td>` +
       `<td>${t.template ? `<span class="flag flag-tpl">${esc(t.template)}</span>` : '<span class="dim">—</span>'}</td>` +
       (validated
-        ? `<td class="tokens-supply">${t.supply != null ? esc(fmtTokenAmount(t.supply)) : '<span class="dim">—</span>'}</td>` +
+        ? `<td class="tokens-supply"${t.market && t.market.phase === 'lp shares' && t.held_by_wallet != null
+              ? ` title="minted supply. only ${esc(fmtInt(t.held_by_wallet))} of these are issued shares; the rest sit unissued in the pool's own covenant"` : ''}>${t.supply != null ? esc(fmtTokenAmount(t.supply)) : '<span class="dim">—</span>'}</td>` +
           `<td class="tokens-holders">${t.holders != null ? esc(fmtInt(t.holders)) : '<span class="dim">—</span>'}</td>` +
           marketPhaseCell(t.market) +
           marketCellsHtml(t.market, network)
@@ -5826,6 +6023,16 @@ function parseRoute() {
   /* '#/<network>/token/<covenant id>' — one decoded token's page */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?token\/([0-9a-fA-F]{6,64})\/?$/);
   if (m) return { view: 'token', network: m[1] || null, id: m[2].toLowerCase() };
+  /* '#/pools' — every graduated pool. Matched before the singular form so
+     '#/pools' can never be read as a pool whose id is empty. */
+  m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?pools\/?$/);
+  if (m) return { view: 'pools', network: m[1] || null };
+  /* '#/<network>/pool/<market covenant id>' — one pool's decoded state block */
+  m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?pool\/([0-9a-fA-F]{6,64})\/?$/);
+  if (m) return { view: 'pool', network: m[1] || null, id: m[2].toLowerCase() };
+  /* '#/labels' — what every badge on this site has to prove to be shown */
+  m = path.match(/^#\/labels\/?$/);
+  if (m) return { view: 'labels', network: null };
   /* '#/<network>/tx/<txid>' and bare '#/tx/<txid>' — one transaction's page */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?tx\/([0-9a-fA-F]{64})\/?$/);
   if (m) return { view: 'tx', network: m[1] || null, id: m[2].toLowerCase() };
@@ -5963,6 +6170,9 @@ async function render() {
     lane: $('#view-lane'),
     tokens: $('#view-tokens'),
     token: $('#view-token'),
+    pools: $('#view-pools'),
+    pool: $('#view-pool'),
+    labels: $('#view-labels'),
     tx: $('#view-tx'),
     decode: $('#view-decode'),
     build: $('#view-build'),
@@ -6004,6 +6214,9 @@ async function render() {
     else if (route.view === 'lane') renderLane(route);
     else if (route.view === 'tokens') renderTokens();
     else if (route.view === 'token') renderTokenPage(route);
+    else if (route.view === 'pools') renderPools();
+    else if (route.view === 'pool') renderPoolPage(route);
+    else if (route.view === 'labels') renderLabels();
     else if (route.view === 'tx') renderTxPage(route);
     else if (route.view === 'build') renderBuild();
     else if (route.view === 'preflight') renderPreflight();
