@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-pools';
+} from './core/format.js?v=20260729-pools2';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-pools';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-pools';
-import { createPendingModel } from './core/pending.js?v=20260729-pools';
+} from './core/state.js?v=20260729-pools2';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-pools2';
+import { createPendingModel } from './core/pending.js?v=20260729-pools2';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-pools';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-pools';
-import { createRefreshGate } from './core/refresh.js?v=20260729-pools';
-import { networkRouteHash } from './core/routing.js?v=20260729-pools';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-pools';
+} from './core/data.js?v=20260729-pools2';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-pools2';
+import { createRefreshGate } from './core/refresh.js?v=20260729-pools2';
+import { networkRouteHash } from './core/routing.js?v=20260729-pools2';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-pools2';
 
 
 
@@ -4710,7 +4710,7 @@ function lpSharesSectionHtml(m, network) {
       `and that liquidity cannot leave the pool. kascov derives this from the two counts, both proven from chain — ` +
       `it is not a number anyone published.</p>`;
   }
-  return `<section aria-label="Pool shares"><h2>pool shares ${marketPhaseChip(m)}</h2>` +
+  return `<section aria-label="Pool shares"><h2>pool shares</h2>` +
     `<p class="dim">this token is not priced here, and that is deliberate. it is a receipt for a share of ` +
     `${poolLink}'s liquidity, named as such by that pool's own committed bytecode. what a share is worth is the ` +
     `pool's holdings divided by the shares outstanding, which moves with every trade — a different instrument from ` +
