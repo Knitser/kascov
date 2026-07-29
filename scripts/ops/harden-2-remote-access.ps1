@@ -12,7 +12,7 @@
 # key-only and still open, so you SSH in and run harden-3-allow-rdp-from.ps1.
 #
 # Run AFTER step 1 is verified working:
-#   powershell -ExecutionPolicy Bypass -File C:\Users\Administrator\harden-2-remote-access.ps1
+#   powershell -ExecutionPolicy Bypass -File <admin-home>\harden-2-remote-access.ps1
 # Undo:
 #   Get-NetFirewallRule -DisplayName 'Remote Desktop*' | Set-NetFirewallRule -RemoteAddress Any
 

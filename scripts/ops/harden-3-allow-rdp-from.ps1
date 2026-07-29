@@ -5,8 +5,8 @@
 # re-points the RDP rules at wherever you are now, read off the live SSH
 # connection so it cannot be typed wrong.
 #
-#   ssh Administrator@157.90.7.39
-#   powershell -ExecutionPolicy Bypass -File C:\Users\Administrator\harden-3-allow-rdp-from.ps1
+#   ssh <admin>@<vps>
+#   powershell -ExecutionPolicy Bypass -File <admin-home>\harden-3-allow-rdp-from.ps1
 #
 # To allow an extra address as well (e.g. a phone hotspot you are about to
 # switch to), pass it explicitly:

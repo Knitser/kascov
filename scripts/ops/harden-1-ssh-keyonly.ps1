@@ -10,7 +10,7 @@
 # backup automatically if the parse fails. RDP stays open while you run this,
 # so you always have a second way in.
 #
-# Run:  powershell -ExecutionPolicy Bypass -File C:\Users\Administrator\harden-1-ssh-keyonly.ps1
+# Run:  powershell -ExecutionPolicy Bypass -File <admin-home>\harden-1-ssh-keyonly.ps1
 # Undo: copy C:\ProgramData\ssh\sshd_config.bak-keyonly over sshd_config, then
 #       Restart-Service sshd
 
@@ -56,6 +56,11 @@ Restart-Service sshd
 Start-Sleep -Seconds 3
 "sshd status: {0}" -f (Get-Service sshd).Status
 ""
-"NEXT: from your Mac, open a NEW terminal and run"
-"  ssh Administrator@157.90.7.39 whoami"
+# Compose the verify hint from the live connection rather than hardcoding the
+# box's address and admin name into a public repo.
+$here = Get-NetTCPConnection -LocalPort 22 -State Established -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty LocalAddress -Unique | Select-Object -First 1
+"NEXT: from your workstation, open a NEW terminal and run"
+if ($here) { "  ssh {0}@{1} whoami" -f $env:USERNAME, $here }
+else       { "  ssh <admin>@<this-box> whoami" }
 "Do not close your current session until that succeeds."
