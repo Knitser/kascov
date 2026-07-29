@@ -224,9 +224,6 @@ CREATE TABLE IF NOT EXISTS market_programs (
     program_pushes INTEGER
 );
 CREATE INDEX IF NOT EXISTS mp_by_token ON market_programs(token_covenant_id);
--- Cluster the unknowns by shape. GLOB, never LIKE (see mp_unknown).
-CREATE INDEX IF NOT EXISTS mp_shape ON market_programs(program_len, program_pushes)
-    WHERE skeleton GLOB 'unmatched*';
 CREATE TABLE IF NOT EXISTS token_balances (
     token_id BLOB NOT NULL,
     owner TEXT NOT NULL,                  -- hex(identifier_type || owner_identifier)
@@ -919,6 +916,14 @@ impl Store {
         // Only ignore SQLITE_ERROR (1) with "duplicate column" — re-raise
         // genuine failures like disk-full, I/O errors, or database corruption.
         let migrations = [
+            // Structural fingerprint of a market program. New columns in
+            // SCHEMA only reach FRESH databases: CREATE TABLE IF NOT EXISTS is
+            // a no-op on an existing one, so every deployed database needs the
+            // ALTER too, and any index over them must come AFTER it.
+            "ALTER TABLE market_programs ADD COLUMN program_len INTEGER",
+            "ALTER TABLE market_programs ADD COLUMN program_pushes INTEGER",
+            "CREATE INDEX IF NOT EXISTS mp_shape ON market_programs(program_len, program_pushes)
+                 WHERE skeleton GLOB 'unmatched*'",
             "ALTER TABLE covenant_utxos ADD COLUMN spent_sig BLOB",
             "ALTER TABLE covenant_utxos ADD COLUMN spent_budget INTEGER",
             "ALTER TABLE covenant_events ADD COLUMN payload BLOB",
