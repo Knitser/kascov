@@ -40,6 +40,7 @@ import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=202
 import { createRefreshGate } from './core/refresh.js?v=20260729-tidy';
 import { networkRouteHash } from './core/routing.js?v=20260729-tidy';
 import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-tidy';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-bubbles';
 
 
 
@@ -4708,47 +4709,33 @@ function poolWiringSvg(network, opts = {}) {
     `</svg></div>`;
 }
 
-/* Who holds a coin, as area rather than a list: one circle per holder, sized
-   by balance so concentration is visible at a glance instead of having to
-   read down a table. Packed greedily on a spiral, which is deterministic —
-   the same holders always draw the same picture. */
-function holdersBubbleSvg(network, balances, base) {
-  const rows = balances.filter((b) => typeof b.balance === 'number' && b.balance > 0).slice(0, 60);
-  if (rows.length < 3) return '';
-  const W = 700, H = 320;
-  const max = rows[0].balance;
-  const placed = [];
-  for (const b of rows) {
-    const r = Math.max(5, 58 * Math.sqrt(b.balance / max));
-    let put = null;
-    /* spiral out from the middle until this circle clears every earlier one */
-    for (let step = 0; step < 4000 && !put; step += 1) {
-      const a = step * 0.42;
-      const rad = 3 * Math.sqrt(step);
-      const x = W / 2 + rad * Math.cos(a);
-      const y = H / 2 + rad * Math.sin(a) * 0.62;
-      if (x - r < 2 || x + r > W - 2 || y - r < 2 || y + r > H - 2) continue;
-      if (placed.every((p) => (p.x - x) ** 2 + (p.y - y) ** 2 >= (p.r + r + 2) ** 2)) put = { x, y, r };
-    }
-    if (put) placed.push({ ...put, b });
-  }
-  if (!placed.length) return '';
-  const circles = placed.map(({ x, y, r, b }) => {
-    const { kind, hex } = ownerParts(b.owner);
-    const share = base > 0 ? (b.balance / base) * 100 : null;
-    const title = `${kind || 'owner'} ${shortHex(hex, 8, 6)} — ${fmtInt(b.balance)}` +
-      (share != null ? ` (${share >= 9.95 ? share.toFixed(0) : share.toFixed(1)}%)` : '');
-    const c = `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r.toFixed(1)}" ` +
-      `class="hb-dot hb-${esc(kind || 'other')}"><title>${esc(title)}</title></circle>` +
-      (r > 22 && share != null ? `<text x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}" class="hb-pct">${esc(share >= 9.95 ? share.toFixed(0) : share.toFixed(1))}%</text>` : '');
-    const href = ownerHref(network, b.owner);
-    return href ? `<a href="${esc(href)}">${c}</a>` : c;
-  }).join('');
-  return `<div class="holders-bubbles"><svg viewBox="0 0 ${W} ${H}" role="img" ` +
-    `aria-label="holders drawn as circles, area proportional to balance">${circles}</svg>` +
+/* A live balance map rather than a static SVG. The canvas owns the moving
+   pixels; the holder table below remains the complete accessible fallback. */
+let holderBubbleCtrl = null;
+
+function stopHolderBubbleMap() {
+  if (holderBubbleCtrl) holderBubbleCtrl.destroy();
+  holderBubbleCtrl = null;
+}
+
+function holdersBubbleMapHtml(count) {
+  if (count < 3) return '';
+  return `<div class="holders-bubbles" data-holder-bubbles>` +
+    `<div class="hb-toolbar"><span class="hb-live"><i></i> live balance map</span>` +
+    `<button type="button" class="hb-motion" data-holder-motion aria-pressed="false">pause motion</button></div>` +
+    `<canvas class="holders-bubbles-canvas" tabindex="0" role="img" ` +
+    `aria-label="${esc(fmtInt(count))} top holders drawn as bubbles. Area follows proven balance. ` +
+    `Faint lines are observed moves between current holders in the loaded history. ` +
+    `Use arrow keys to inspect holders and Enter to open one."></canvas>` +
+    `<a class="hb-inspector" data-holder-inspector hidden>` +
+    `<span class="hb-inspector-kind" data-hb-kind></span>` +
+    `<strong class="mono" data-hb-owner></strong>` +
+    `<span><b data-hb-share></b> · <span data-hb-balance></span></span>` +
+    `<span class="hb-open">open owner →</span></a>` +
     `<p class="dim hb-key"><span class="hb-swatch hb-presence"></span> presence ` +
     `<span class="hb-swatch hb-covenant"></span> covenant ` +
-    `<span class="hb-swatch hb-pubkey"></span> pubkey — area is balance; click a circle to open that owner</p></div>`;
+    `<span class="hb-swatch hb-pubkey"></span> pubkey ` +
+    `<span class="hb-key-rule">area = proven balance · lines = observed moves · drift is visual</span></p></div>`;
 }
 
 /* Every graduated pool on this network. A pool is not its own record here:
@@ -5544,6 +5531,7 @@ function tokenValidationHtml(t, validation) {
 }
 
 function renderTokenPage(route) {
+  stopHolderBubbleMap();
   const network = state.network;
   const view = $('#view-token');
   if (!view) return; /* stale cached index.html */
@@ -5691,6 +5679,21 @@ function renderTokenPage(route) {
   /* top holders: balance share against the live supply when the worker gave
      one, else against the sum of what it listed — never a made-up total */
   const balances = Array.isArray(d.balances) ? d.balances : [];
+  const events = Array.isArray(d.events) ? d.events : [];
+  const holderMapRows = balances
+    .filter((b) => typeof b.balance === 'number' && b.balance > 0)
+    .slice(0, 100)
+    .map((b) => {
+      const { kind, hex } = ownerParts(b.owner);
+      return {
+        owner: b.owner,
+        balance: b.balance,
+        kind: kind || 'other',
+        href: ownerHref(network, b.owner),
+        ownerLabel: shortHex(hex, 8, 6),
+        balanceLabel: tokenAmountDisplay(b.balance, dec).text,
+      };
+    });
   let holdersSection = '';
   if (balances.length) {
     const listed = balances.reduce((s, b) => s + (typeof b.balance === 'number' ? b.balance : 0), 0);
@@ -5710,7 +5713,7 @@ function renderTokenPage(route) {
       ? ` — the ${esc(fmtInt(balances.length))} largest of ${esc(fmtInt(t.holders))} holders` : '';
     holdersSection = `<section class="token-balances" aria-label="Top holders"><h2>top holders</h2>` +
       `<p class="dim">who holds this token right now${moreNote}</p>` +
-      holdersBubbleSvg(network, balances, base) +
+      holdersBubbleMapHtml(holderMapRows.length) +
       `<div class="tokens-tablewrap"><table class="tokens-table token-balances-table">` +
       `<thead><tr><th>owner</th><th>balance</th><th>share</th></tr></thead>` +
       `<tbody>${holderRows}</tbody></table></div></section>`;
@@ -5722,7 +5725,6 @@ function renderTokenPage(route) {
      tip page; older pages are appended on demand. `checked` is the count the
      validator actually walked, so the note can say how much of the whole is on
      screen rather than only how much of what was fetched. */
-  const events = Array.isArray(d.events) ? d.events : [];
   let timelineSection = '';
   if (events.length) {
     const shown = events.slice(0, TOKEN_EVENTS_SHOWN);
@@ -5747,6 +5749,18 @@ function renderTokenPage(route) {
     auditSectionHtml(t, d, network) +
     holdersSection +
     timelineSection;
+
+  const holderCanvas = view.querySelector('.holders-bubbles-canvas');
+  if (holderCanvas && holderMapRows.length >= 3) {
+    const listed = holderMapRows.reduce((sum, row) => sum + row.balance, 0);
+    const bubbleBase = typeof t.supply === 'number' && t.supply > 0 ? t.supply : listed;
+    holderBubbleCtrl = createHolderBubbleMap(holderCanvas, {
+      rows: holderMapRows,
+      events,
+      base: bubbleBase,
+      onOpen: (href) => { location.hash = href; },
+    });
+  }
 
   /* A launchpad publishes a name this token never wrote on chain. kascov shows
      it, and shows what it was able to test: the list also states which
@@ -6277,6 +6291,7 @@ function enterView(view, viewName) {
 async function render() {
   const token = ++renderToken;
   const route = parseRoute();
+  if (route.view !== 'token') stopHolderBubbleMap();
   if (route.network) selectNetwork(route.network);
   if (state.watchNet !== state.network) {
     state.watch = loadWatch(state.network);

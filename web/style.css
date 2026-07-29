@@ -3402,6 +3402,7 @@ a.lane-ns-link:hover, a.lane-ns-link:focus-visible { color: var(--accent); text-
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .holders-bubbles .hb-live i { box-shadow: 0 0 0 4px rgba(91, 228, 155, .08); }
   /* The global reduced-motion rule pins every duration to 0.01ms
      !important, so an animated end state becomes the resting state instantly —
      which is why a confirm used to snap to 55% opacity and look broken. Name
@@ -4384,29 +4385,180 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
 .pw-edge  { fill: var(--faint); font-size: 11px; text-anchor: middle; }
 .pool-wiring a { text-decoration: none; }
 
-/* ---- holders as area: one circle per holder ---- */
-.holders-bubbles { margin: .9rem 0 1.1rem; }
-.holders-bubbles svg { width: 100%; height: auto; display: block; }
-.hb-dot {
-  stroke: rgba(0, 0, 0, .35);
-  stroke-width: .8;
-  transition: opacity .14s ease, stroke .14s ease;
-  opacity: .82;
+/* ---- holder bubble map: balance as area, observed moves as threads ---- */
+.holders-bubbles {
+  position: relative;
+  min-width: 0;
+  margin: .9rem 0 1.1rem;
+  overflow: hidden;
+  border: 1px solid rgba(112, 199, 186, .2);
+  border-radius: var(--radius);
+  background:
+    radial-gradient(85% 120% at 50% 48%, rgba(20, 65, 54, .36), transparent 67%),
+    linear-gradient(145deg, #06130f, #040b09 72%);
+  box-shadow: inset 0 1px 0 rgba(231, 255, 249, .025);
+  contain: layout paint style;
 }
-.holders-bubbles a { cursor: pointer; }
-.holders-bubbles a:hover .hb-dot { opacity: 1; stroke: #dfeeeb; stroke-width: 1.6; }
-.hb-presence { fill: #70C7BA; }
-.hb-covenant { fill: #7f8ce0; }
-.hb-pubkey   { fill: #5be49b; }
-.hb-script,
-.hb-other    { fill: #6b7f7a; }
-.hb-pct { fill: #0a100f; font-size: 11px; font-weight: 700; text-anchor: middle; pointer-events: none; }
-.hb-key { margin-top: .5rem; font-size: .82rem; }
+.holders-bubbles::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(1px 1px at 12% 22%, rgba(226, 255, 248, .26), transparent),
+    radial-gradient(1px 1px at 76% 18%, rgba(112, 199, 186, .3), transparent),
+    radial-gradient(1px 1px at 88% 66%, rgba(127, 140, 224, .3), transparent),
+    radial-gradient(1px 1px at 28% 78%, rgba(91, 228, 155, .22), transparent);
+  opacity: .7;
+}
+.holders-bubbles-canvas {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: clamp(340px, 48vw, 460px);
+  touch-action: pan-y;
+  outline: none;
+}
+.holders-bubbles-canvas:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.hb-toolbar {
+  position: absolute;
+  z-index: 3;
+  top: .72rem;
+  left: .8rem;
+  right: .8rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .7rem;
+  pointer-events: none;
+}
+.hb-live {
+  display: inline-flex;
+  align-items: center;
+  gap: .48rem;
+  color: #b9d8d2;
+  font: 600 .68rem/1 var(--mono, monospace);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.hb-live i {
+  width: .45rem;
+  height: .45rem;
+  border-radius: 50%;
+  background: var(--born);
+  box-shadow: 0 0 0 4px rgba(91, 228, 155, .08), 0 0 12px rgba(91, 228, 155, .65);
+}
+.hb-motion {
+  min-height: 32px;
+  padding: .3rem .65rem;
+  border: 1px solid rgba(112, 199, 186, .22);
+  border-radius: 999px;
+  color: #a9c7c1;
+  background: rgba(4, 13, 10, .72);
+  font: 600 .68rem/1 var(--mono, monospace);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.hb-motion:hover,
+.hb-motion:focus-visible {
+  color: var(--text);
+  border-color: rgba(112, 199, 186, .55);
+}
+.hb-motion:disabled {
+  cursor: default;
+  opacity: .55;
+}
+.hb-inspector {
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  bottom: 1.05rem;
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: .18rem .75rem;
+  min-width: min(330px, calc(100% - 2rem));
+  padding: .72rem .85rem;
+  border: 1px solid rgba(112, 199, 186, .42);
+  border-radius: 12px;
+  color: var(--text);
+  background: rgba(3, 13, 10, .9);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .38);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  transform: translateX(-50%);
+  text-decoration: none;
+}
+.hb-inspector[hidden] { display: none; }
+.hb-inspector-kind {
+  color: var(--accent);
+  font: 600 .67rem/1.2 var(--mono, monospace);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.hb-inspector > strong {
+  overflow: hidden;
+  color: #eef8f5;
+  font-size: .82rem;
+  text-overflow: ellipsis;
+}
+.hb-inspector > span:nth-child(3) {
+  grid-column: 1;
+  color: var(--muted);
+  font-size: .76rem;
+}
+.hb-inspector > span:nth-child(3) b { color: #dff8f1; }
+.hb-open {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  color: var(--accent);
+  font-size: .75rem;
+  white-space: nowrap;
+}
+.hb-inspector[aria-disabled="true"] .hb-open { display: none; }
+.hb-key {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .35rem;
+  margin: 0;
+  padding: .62rem .8rem .7rem;
+  border-top: 1px solid rgba(112, 199, 186, .12);
+  background: rgba(3, 11, 9, .68);
+  font-size: .78rem;
+}
 .hb-swatch {
   display: inline-block;
   width: .62rem; height: .62rem;
   border-radius: 50%;
-  margin: 0 .25rem 0 .7rem;
+  margin-left: .45rem;
   vertical-align: baseline;
 }
 .hb-key .hb-swatch:first-child { margin-left: 0; }
+.hb-presence { background: #70c7ba; }
+.hb-covenant { background: #7f8ce0; }
+.hb-pubkey   { background: #5be49b; }
+.hb-key-rule {
+  margin-left: auto;
+  color: var(--faint);
+}
+@media (max-width: 640px) {
+  .holders-bubbles-canvas { height: clamp(300px, 90vw, 390px); }
+  .hb-toolbar { top: .58rem; left: .65rem; right: .65rem; }
+  .hb-motion { min-height: 36px; }
+  .hb-inspector {
+    bottom: .75rem;
+    min-width: calc(100% - 1.3rem);
+  }
+  .hb-key { padding-inline: .65rem; }
+  .hb-key-rule {
+    flex-basis: 100%;
+    margin: .2rem 0 0;
+  }
+}
