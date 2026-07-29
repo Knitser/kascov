@@ -4417,17 +4417,11 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
   display: block;
   width: 100%;
   height: clamp(340px, 48vw, 460px);
-  touch-action: pan-y pinch-zoom;
+  touch-action: pan-y;
   outline: none;
 }
 .holders-bubbles-canvas:focus-visible {
   box-shadow: inset 0 0 0 2px var(--accent);
-}
-.holders-bubbles-canvas.is-dragging {
-  cursor: grabbing !important;
-  touch-action: none;
-  -webkit-user-select: none;
-  user-select: none;
 }
 .hb-toolbar {
   position: absolute;

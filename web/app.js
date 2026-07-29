@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-holder-drag';
+} from './core/format.js?v=20260729-rollback';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-holder-drag';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-holder-drag';
-import { createPendingModel } from './core/pending.js?v=20260729-holder-drag';
+} from './core/state.js?v=20260729-rollback';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-rollback';
+import { createPendingModel } from './core/pending.js?v=20260729-rollback';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,12 +35,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-holder-drag';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-holder-drag';
-import { createRefreshGate } from './core/refresh.js?v=20260729-holder-drag';
-import { networkRouteHash } from './core/routing.js?v=20260729-holder-drag';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-holder-drag';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-holder-drag';
+} from './core/data.js?v=20260729-rollback';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-rollback';
+import { createRefreshGate } from './core/refresh.js?v=20260729-rollback';
+import { networkRouteHash } from './core/routing.js?v=20260729-rollback';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-rollback';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-rollback';
 
 
 
@@ -4726,8 +4726,7 @@ function holdersBubbleMapHtml(count) {
     `<canvas class="holders-bubbles-canvas" tabindex="0" role="img" ` +
     `aria-label="${esc(fmtInt(count))} top holders drawn as bubbles. Area follows proven balance. ` +
     `Faint lines are observed moves between current holders in the loaded history. ` +
-    `Drag a bubble to rearrange the map. Use arrow keys to inspect holders, ` +
-    `Shift plus arrow keys to move one, and Enter to open it."></canvas>` +
+    `Use arrow keys to inspect holders and Enter to open one."></canvas>` +
     `<a class="hb-inspector" data-holder-inspector hidden>` +
     `<span class="hb-inspector-kind" data-hb-kind></span>` +
     `<strong class="mono" data-hb-owner></strong>` +
@@ -4736,7 +4735,7 @@ function holdersBubbleMapHtml(count) {
     `<p class="dim hb-key"><span class="hb-swatch hb-presence"></span> presence ` +
     `<span class="hb-swatch hb-covenant"></span> covenant ` +
     `<span class="hb-swatch hb-pubkey"></span> pubkey ` +
-    `<span class="hb-key-rule">drag a bubble to rearrange · area = proven balance · lines = observed moves · drift is visual</span></p></div>`;
+    `<span class="hb-key-rule">area = proven balance · lines = observed moves · drift is visual</span></p></div>`;
 }
 
 /* Every graduated pool on this network. A pool is not its own record here:
