@@ -4360,7 +4360,7 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
 .owner-kind {
   font-size: .72rem;
   letter-spacing: .04em;
-  color: var(--dim);
+  color: var(--faint);
   margin-right: .4rem;
   text-transform: lowercase;
 }
@@ -4377,11 +4377,11 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
 .pool-wiring a:hover .pw-box { fill: rgba(112, 199, 186, .13); stroke: rgba(112, 199, 186, .65); }
 .pw-here { fill: rgba(112, 199, 186, .14); stroke: rgba(112, 199, 186, .7); }
 .pw-label { fill: #dfeeeb; font-size: 15px; font-weight: 700; text-anchor: middle; }
-.pw-sub   { fill: var(--dim); font-size: 11.5px; text-anchor: middle; }
-.pw-id    { fill: rgba(112, 199, 186, .8); font-size: 10.5px; text-anchor: middle; font-family: var(--mono, monospace); }
+.pw-sub   { fill: var(--faint); font-size: 11.5px; text-anchor: middle; }
+.pw-id    { fill: #8fd9cd; font-size: 10.5px; text-anchor: middle; font-family: var(--mono, monospace); }
 .pw-arrow { stroke: rgba(112, 199, 186, .4); stroke-width: 1.4; }
 .pw-head  { fill: rgba(112, 199, 186, .55); }
-.pw-edge  { fill: var(--dim); font-size: 11px; text-anchor: middle; }
+.pw-edge  { fill: var(--faint); font-size: 11px; text-anchor: middle; }
 .pool-wiring a { text-decoration: none; }
 
 /* ---- holders as area: one circle per holder ---- */
