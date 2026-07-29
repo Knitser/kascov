@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-pools4';
+} from './core/format.js?v=20260729-nav';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-pools4';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-pools4';
-import { createPendingModel } from './core/pending.js?v=20260729-pools4';
+} from './core/state.js?v=20260729-nav';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-nav';
+import { createPendingModel } from './core/pending.js?v=20260729-nav';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-pools4';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-pools4';
-import { createRefreshGate } from './core/refresh.js?v=20260729-pools4';
-import { networkRouteHash } from './core/routing.js?v=20260729-pools4';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-pools4';
+} from './core/data.js?v=20260729-nav';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-nav';
+import { createRefreshGate } from './core/refresh.js?v=20260729-nav';
+import { networkRouteHash } from './core/routing.js?v=20260729-nav';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-nav';
 
 
 
@@ -4989,9 +4989,9 @@ function renderTokens() {
     `<header class="page-head tokens-head"><h1>tokens</h1>` +
     `<p class="page-sub">covenant tokens on ${esc(net.label)} — every KCC20-shaped coin the indexer decoded, ` +
     `read straight from the chain’s bytes ${usdToggleHtml()}</p>` +
-    `<p class="page-sub"><a href="#/${esc(network)}/pools">pools →</a> · <a href="#/labels">what the labels mean →</a></p>` +
     (validated
-      ? `<p class="tokens-note tokens-note-info">${esc((d && d.note) || TOKEN_NOTE_VALIDATED)}</p>`
+      ? `<p class="tokens-note tokens-note-info">${esc((d && d.note) || TOKEN_NOTE_VALIDATED)} ` +
+        `<a href="#/labels">what every label has to prove →</a></p>`
       : `<p class="tokens-note">⚠ ${esc((d && d.note) || TOKEN_NOTE_FALLBACK)}</p>`) +
     `</header>`;
   /* The checked launchpad list is a second, slower source of display names.
@@ -6207,7 +6207,8 @@ async function render() {
   /* decode + build + preflight are the modes of the unified "playground" nav
      entry; a token page lives under the "tokens" nav entry */
   const navFor = route.view === 'decode' || route.view === 'build' || route.view === 'preflight' ? 'playground'
-    : route.view === 'token' ? 'tokens' : route.view;
+    : route.view === 'token' ? 'tokens'
+    : route.view === 'pool' ? 'pools' : route.view;
   document.querySelectorAll('.nav-link').forEach((a) => {
     if (a.dataset.nav === navFor) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
