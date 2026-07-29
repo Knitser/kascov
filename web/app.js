@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-verify';
+} from './core/format.js?v=20260729-verify2';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-verify';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-verify';
-import { createPendingModel } from './core/pending.js?v=20260729-verify';
+} from './core/state.js?v=20260729-verify2';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-verify2';
+import { createPendingModel } from './core/pending.js?v=20260729-verify2';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,12 +35,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-verify';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-verify';
-import { createRefreshGate } from './core/refresh.js?v=20260729-verify';
-import { networkRouteHash } from './core/routing.js?v=20260729-verify';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-verify';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-bubbles';
+} from './core/data.js?v=20260729-verify2';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-verify2';
+import { createRefreshGate } from './core/refresh.js?v=20260729-verify2';
+import { networkRouteHash } from './core/routing.js?v=20260729-verify2';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-verify2';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-verify2';
 
 
 
