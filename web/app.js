@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-cap';
+} from './core/format.js?v=20260729-findlog';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-cap';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-cap';
-import { createPendingModel } from './core/pending.js?v=20260729-cap';
+} from './core/state.js?v=20260729-findlog';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-findlog';
+import { createPendingModel } from './core/pending.js?v=20260729-findlog';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,12 +35,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-cap';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-cap';
-import { createRefreshGate } from './core/refresh.js?v=20260729-cap';
-import { networkRouteHash } from './core/routing.js?v=20260729-cap';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-cap';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-cap';
+} from './core/data.js?v=20260729-findlog';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-findlog';
+import { createRefreshGate } from './core/refresh.js?v=20260729-findlog';
+import { networkRouteHash } from './core/routing.js?v=20260729-findlog';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-findlog';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-findlog';
 
 
 
@@ -5055,7 +5055,8 @@ function renderLabels() {
       `<tr><td><span class="flag flag-phase">${esc(l)}</span></td><td>${esc(proof)}</td><td class="dim">${esc(refuse)}</td></tr>`).join('') +
     `</tbody></table></div>` +
     `<p class="dim">none of this comes from a launchpad’s API. where a launchpad publishes something kascov can test, ` +
-    `it is tested and the result is shown either way.</p>`;
+    `it is tested and the result is shown either way. the other half of that promise is the ` +
+    `<a href="#/${esc(state.network)}/verify">verification log</a>, which lists every program kascov could NOT verify.</p>`;
 }
 
 /* A pool's share token is not a coin with a price, and showing it in the
