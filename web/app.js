@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-contrast';
+} from './core/format.js?v=20260729-tidy';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-contrast';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-contrast';
-import { createPendingModel } from './core/pending.js?v=20260729-contrast';
+} from './core/state.js?v=20260729-tidy';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-tidy';
+import { createPendingModel } from './core/pending.js?v=20260729-tidy';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,11 +35,11 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-contrast';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-contrast';
-import { createRefreshGate } from './core/refresh.js?v=20260729-contrast';
-import { networkRouteHash } from './core/routing.js?v=20260729-contrast';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-contrast';
+} from './core/data.js?v=20260729-tidy';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-tidy';
+import { createRefreshGate } from './core/refresh.js?v=20260729-tidy';
+import { networkRouteHash } from './core/routing.js?v=20260729-tidy';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-tidy';
 
 
 
@@ -4764,8 +4764,7 @@ function renderPools() {
   const head = `<a class="back" href="#/${esc(network)}/tokens">← all tokens</a>` +
     `<header class="page-head"><h1>pools</h1>` +
     `<p class="page-sub">where a token trades once its launch curve has finished. every figure is read out of ` +
-    `the pool covenant's own committed state block, never from a launchpad's API. ` +
-    `<a href="#/labels">what these labels mean →</a></p></header>`;
+    `the pool covenant's own committed state block, never from a launchpad's API.</p></header>`;
   /* the listed names are a second, slower source; warm once and repaint.
      Guarded on the cache SLOT, not the promise: loadRegistry resolves
      instantly once cached, so an unguarded repaint would loop forever. */
@@ -4910,7 +4909,7 @@ function renderPoolPage(route) {
     `<p class="page-sub"><span class="mono">${esc(shortHex(pid, 10, 8))}</span> — a constant-product pool covenant. ` +
     `it trades <a href="#/${esc(network)}/token/${esc(tok.covenant_id)}">${esc(friendlyName(tok.covenant_id))}</a>` +
     (lp ? ` and issues <a href="#/${esc(network)}/token/${esc(lp.covenant_id)}">${esc(friendlyName(lp.covenant_id))}</a> as its share token` : '') +
-    `. <a href="#/labels">what these labels mean →</a></p></header>` +
+    `.</p></header>` +
     poolWiringSvg(network, {
       tokenId: tok.covenant_id, poolId: pid,
       lpId: p.lp_token_covenant_id || null, here: 'pool',
