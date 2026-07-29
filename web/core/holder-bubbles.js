@@ -54,12 +54,13 @@ function linkCurrentHolders(nodes, events) {
   return [...links.values()];
 }
 
-function stepModel(model, phase = 0, settling = false) {
+function stepModel(model, phase = 0, settling = false, pinned = null) {
   const { nodes, links, width, height } = model;
   const homePull = settling ? 0.012 : 0.0007;
   const damping = settling ? 0.72 : 0.965;
 
   for (const node of nodes) {
+    if (node === pinned) continue;
     node.vx += (node.homeX - node.x) * homePull;
     node.vy += (node.homeY - node.y) * homePull;
     if (!settling) {
@@ -83,13 +84,18 @@ function stepModel(model, phase = 0, settling = false) {
       Math.min(2.2, 1 + Math.log2(link.count + 1) * 0.25);
     const fx = dx / distance * force;
     const fy = dy / distance * force;
-    a.vx += fx;
-    a.vy += fy;
-    b.vx -= fx;
-    b.vy -= fy;
+    if (a !== pinned) {
+      a.vx += fx;
+      a.vy += fy;
+    }
+    if (b !== pinned) {
+      b.vx -= fx;
+      b.vy -= fy;
+    }
   }
 
   for (const node of nodes) {
+    if (node === pinned) continue;
     node.x += node.vx;
     node.y += node.vy;
     node.vx *= damping;
@@ -117,16 +123,22 @@ function stepModel(model, phase = 0, settling = false) {
       const nx = dx / distance;
       const ny = dy / distance;
       const total = a.r + b.r;
-      const moveA = b.r / total;
-      const moveB = a.r / total;
+      const moveA = a === pinned ? 0 : (b === pinned ? 1 : b.r / total);
+      const moveB = b === pinned ? 0 : (a === pinned ? 1 : a.r / total);
       a.x -= nx * overlap * moveA;
       a.y -= ny * overlap * moveA;
       b.x += nx * overlap * moveB;
       b.y += ny * overlap * moveB;
-      a.vx -= nx * 0.015;
-      a.vy -= ny * 0.015;
-      b.vx += nx * 0.015;
-      b.vy += ny * 0.015;
+      const draggedSpeed = pinned ? Math.hypot(pinned.vx, pinned.vy) : 0;
+      const impulse = 0.015 + Math.min(0.42, draggedSpeed * 0.035);
+      if (a !== pinned) {
+        a.vx -= nx * impulse;
+        a.vy -= ny * impulse;
+      }
+      if (b !== pinned) {
+        b.vx += nx * impulse;
+        b.vy += ny * impulse;
+      }
     }
   }
 
@@ -141,6 +153,22 @@ function stepModel(model, phase = 0, settling = false) {
     if (node.y < minY) { node.y = minY; node.vy = Math.abs(node.vy) * 0.45; }
     if (node.y > maxY) { node.y = maxY; node.vy = -Math.abs(node.vy) * 0.45; }
   }
+}
+
+export function moveHolderBubble(model, node, x, y, vx = 0, vy = 0) {
+  if (!model || !node || !Array.isArray(model.nodes) || !model.nodes.includes(node)) return null;
+  const pad = 7;
+  node.x = clamp(Number(x) || 0, pad + node.r, model.width - pad - node.r);
+  node.y = clamp(Number(y) || 0, pad + node.r, model.height - pad - node.r);
+  node.vx = clamp(Number(vx) || 0, -18, 18);
+  node.vy = clamp(Number(vy) || 0, -18, 18);
+
+  /* Resolve twice while the grabbed node stays pinned. The direct pair pass
+     remains bounded by HOLDER_BUBBLE_LIMIT and makes neighbours visibly yield
+     during the gesture rather than popping away after release. */
+  stepModel(model, 0, false, node);
+  stepModel(model, 0, false, node);
+  return node;
 }
 
 export function buildHolderBubbleModel(rows, base, events, width = 900, height = 420) {
@@ -333,7 +361,7 @@ export function createHolderBubbleMap(canvas, options = {}) {
 
     for (const node of nodes) {
       const sprite = getSprite(node);
-      const active = node === hovered || node === selected;
+      const active = node === hovered || node === selected || node === down?.node;
       context.save();
       context.globalAlpha = active ? 1 : 0.88;
       context.drawImage(
@@ -355,10 +383,11 @@ export function createHolderBubbleMap(canvas, options = {}) {
       }
 
       if (active) {
-        context.strokeStyle = node === selected ? '#eefcf8' : 'rgba(238, 252, 248, .75)';
-        context.lineWidth = node === selected ? 2.4 : 1.5;
+        const grabbed = node === down?.node && down.dragging;
+        context.strokeStyle = grabbed || node === selected ? '#eefcf8' : 'rgba(238, 252, 248, .75)';
+        context.lineWidth = grabbed ? 3 : (node === selected ? 2.4 : 1.5);
         context.beginPath();
-        context.arc(node.x, node.y, node.r + 2.5, 0, Math.PI * 2);
+        context.arc(node.x, node.y, node.r + (grabbed ? 4 : 2.5), 0, Math.PI * 2);
         context.stroke();
       }
 
@@ -386,7 +415,7 @@ export function createHolderBubbleMap(canvas, options = {}) {
     if (!lastPaintAt || now - lastPaintAt >= frameInterval) {
       lastPaintAt = now;
       phase += 0.018;
-      stepModel(model, phase, false);
+      stepModel(model, phase, false, down?.node || null);
       draw();
     }
     frame = requestAnimationFrame(animate);
@@ -437,17 +466,45 @@ export function createHolderBubbleMap(canvas, options = {}) {
   };
 
   const onPointerMove = (event) => {
-    if (!model || event.pointerType === 'touch') return;
+    if (!model) return;
     const point = localPoint(event);
+    if (down && down.pointerId === event.pointerId && down.node) {
+      const distance = Math.hypot(point.x - down.startX, point.y - down.startY);
+      if (!down.dragging && distance >= 4) {
+        down.dragging = true;
+        canvas.classList.add('is-dragging');
+      }
+      if (down.dragging) {
+        event.preventDefault();
+        const now = performance.now();
+        const elapsed = clamp(now - down.lastAt, 8, 48);
+        const x = point.x - down.offsetX;
+        const y = point.y - down.offsetY;
+        const vx = (x - down.lastX) * 16.67 / elapsed;
+        const vy = (y - down.lastY) * 16.67 / elapsed;
+        moveHolderBubble(model, down.node, x, y, vx, vy);
+        down.lastX = down.node.x;
+        down.lastY = down.node.y;
+        down.lastAt = now;
+        hovered = down.node;
+        selected = down.node;
+        canvas.style.cursor = 'grabbing';
+        showInspector(down.node);
+        draw();
+      }
+      return;
+    }
+    if (event.pointerType === 'touch') return;
     const next = hitHolderBubble(model, point.x, point.y);
     if (next === hovered) return;
     hovered = next;
-    canvas.style.cursor = hovered && hovered.href ? 'pointer' : 'default';
+    canvas.style.cursor = hovered ? 'grab' : 'default';
     showInspector(hovered || selected);
     draw();
   };
 
   const onPointerLeave = () => {
+    if (down?.dragging) return;
     hovered = null;
     canvas.style.cursor = 'default';
     showInspector(selected);
@@ -455,17 +512,65 @@ export function createHolderBubbleMap(canvas, options = {}) {
   };
 
   const onPointerDown = (event) => {
+    if (!model || event.button > 0) return;
     const point = localPoint(event);
-    down = { ...point, at: performance.now(), pointerType: event.pointerType };
+    const node = hitHolderBubble(model, point.x, point.y);
+    const now = performance.now();
+    down = {
+      node,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      startX: point.x,
+      startY: point.y,
+      lastX: node ? node.x : point.x,
+      lastY: node ? node.y : point.y,
+      offsetX: node ? point.x - node.x : 0,
+      offsetY: node ? point.y - node.y : 0,
+      at: now,
+      lastAt: now,
+      dragging: false,
+    };
+    if (node) {
+      event.preventDefault();
+      selected = node;
+      hovered = node;
+      canvas.setPointerCapture?.(event.pointerId);
+      canvas.style.cursor = 'grab';
+      showInspector(node);
+      draw();
+    }
   };
 
-  const onPointerUp = (event) => {
+  const finishPointer = (event, cancelled = false) => {
     if (!down || !model) return;
+    if (event.pointerId !== down.pointerId) return;
     const point = localPoint(event);
-    const wasTap = Math.hypot(point.x - down.x, point.y - down.y) < 8 &&
+    const wasTap = !down.dragging &&
+      Math.hypot(point.x - down.startX, point.y - down.startY) < 8 &&
       performance.now() - down.at < 700;
     const pointerType = down.pointerType;
+    const dragged = down.dragging ? down.node : null;
+    if (canvas.hasPointerCapture?.(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    canvas.classList.remove('is-dragging');
     down = null;
+    if (dragged) {
+      dragged.homeX = dragged.x;
+      dragged.homeY = dragged.y;
+      if (cancelled || reduceMotion || manuallyPaused) {
+        dragged.vx = 0;
+        dragged.vy = 0;
+      }
+      selected = dragged;
+      hovered = event.pointerType === 'touch' ? null : dragged;
+      canvas.style.cursor = hovered ? 'grab' : 'default';
+      showInspector(dragged);
+      draw();
+      return;
+    }
+    if (cancelled) {
+      canvas.style.cursor = 'default';
+      return;
+    }
     if (!wasTap) return;
     const node = hitHolderBubble(model, point.x, point.y);
     if (!node) {
@@ -490,12 +595,25 @@ export function createHolderBubbleMap(canvas, options = {}) {
       options.onOpen?.(node.href, node);
     }
   };
+  const onPointerUp = (event) => finishPointer(event, false);
+  const onPointerCancel = (event) => finishPointer(event, true);
 
   const onKeyDown = (event) => {
     if (!model || !model.nodes.length) return;
     const keys = ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'];
     if (keys.includes(event.key)) {
       event.preventDefault();
+      if (event.shiftKey && selected) {
+        const distance = 18;
+        const dx = event.key === 'ArrowLeft' ? -distance : (event.key === 'ArrowRight' ? distance : 0);
+        const dy = event.key === 'ArrowUp' ? -distance : (event.key === 'ArrowDown' ? distance : 0);
+        moveHolderBubble(model, selected, selected.x + dx, selected.y + dy, dx * 0.16, dy * 0.16);
+        selected.homeX = selected.x;
+        selected.homeY = selected.y;
+        showInspector(selected);
+        draw();
+        return;
+      }
       const current = selected ? model.nodes.indexOf(selected) : -1;
       const step = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1;
       const next = (current + step + model.nodes.length) % model.nodes.length;
@@ -529,6 +647,7 @@ export function createHolderBubbleMap(canvas, options = {}) {
   canvas.addEventListener('pointerleave', onPointerLeave);
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointerup', onPointerUp);
+  canvas.addEventListener('pointercancel', onPointerCancel);
   canvas.addEventListener('keydown', onKeyDown);
   motionButton?.addEventListener('click', onMotion);
   document.addEventListener('visibilitychange', onVisibility);
@@ -556,6 +675,7 @@ export function createHolderBubbleMap(canvas, options = {}) {
       canvas.removeEventListener('pointerleave', onPointerLeave);
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointerup', onPointerUp);
+      canvas.removeEventListener('pointercancel', onPointerCancel);
       canvas.removeEventListener('keydown', onKeyDown);
       motionButton?.removeEventListener('click', onMotion);
       document.removeEventListener('visibilitychange', onVisibility);

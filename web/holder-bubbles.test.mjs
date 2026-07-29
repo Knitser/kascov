@@ -5,6 +5,7 @@ import {
   HOLDER_BUBBLE_LIMIT,
   buildHolderBubbleModel,
   hitHolderBubble,
+  moveHolderBubble,
 } from './core/holder-bubbles.js';
 
 const owner = (kind, digit) => `${kind}:${String(digit).repeat(64)}`;
@@ -63,12 +64,34 @@ test('the render cap and hit target keep the hot path bounded', () => {
   assert.equal(hitHolderBubble(model, -100, -100), null);
 });
 
+test('dragging pins the grabbed holder, pushes neighbours, and stays in bounds', () => {
+  const model = buildHolderBubbleModel(rows, 1930, events, 900, 420);
+  const grabbed = model.nodes[0];
+  const neighbour = model.nodes[1];
+  const targetX = 10 + grabbed.r;
+  const targetY = model.height / 2;
+  neighbour.x = targetX + grabbed.r * 0.4;
+  neighbour.y = targetY;
+  neighbour.vx = 0;
+  neighbour.vy = 0;
+  const before = neighbour.x;
+
+  moveHolderBubble(model, grabbed, -200, targetY, 12, 0);
+
+  assert.equal(grabbed.x, 7 + grabbed.r);
+  assert.equal(grabbed.y, targetY);
+  assert.ok(neighbour.x > before, 'the neighbour should yield to the grabbed bubble');
+  assert.ok(neighbour.vx > 0, 'the neighbour should inherit some drag momentum');
+});
+
 test('token pages mount the canvas map and explain what motion and links mean', () => {
   const app = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
   const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
   assert.match(app, /createHolderBubbleMap\(holderCanvas/);
+  assert.match(app, /drag a bubble to rearrange/);
   assert.match(app, /lines = observed moves · drift is visual/);
   assert.match(app, /route\.view !== 'token'\) stopHolderBubbleMap\(\)/);
   assert.match(css, /\.holders-bubbles-canvas\s*\{[\s\S]*?touch-action:\s*pan-y/);
+  assert.match(css, /\.holders-bubbles-canvas\.is-dragging/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.hb-live i/);
 });
