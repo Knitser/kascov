@@ -58,7 +58,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700;12..96,800&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/style.css?v=20260730-chips">
+  <link rel="stylesheet" href="/style.css?v=20260730-ui">
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -197,6 +197,7 @@
 
     <!-- ============ EXPLORER ============ -->
     <section id="view-explore" class="view-fade" hidden>
+      <h1 class="sr-only">Explore Kaspa smart coins</h1>
       <div class="explore-top">
         <p class="stats-strip" id="explore-stats"></p>
         <a class="howto-link" href="#/">new here? how to read this →</a>
@@ -1559,18 +1560,27 @@ the amount committed in the input: used=100000, limit=9999</span></code></pre></
     </div>
   </footer>
 
+  <dialog id="manual-copy-dialog" class="manual-copy-dialog" aria-labelledby="manual-copy-title">
+    <div class="manual-copy-head">
+      <h2 id="manual-copy-title">Copy manually</h2>
+      <form method="dialog"><button type="submit" class="copy-btn">close</button></form>
+    </div>
+    <p>Clipboard access is blocked. The text below is selected and ready to copy.</p>
+    <textarea id="manual-copy-value" class="mono" readonly aria-label="Text to copy manually"></textarea>
+  </dialog>
+
   <noscript><div class="container panel"><p>kascov needs JavaScript to show its smart coins.</p></div></noscript>
   <!-- all deferred: parsing never blocks on script download/execution, and
        defer preserves document order so app.js still runs after its deps.
        galaxy.js is absent on purpose — app.js lazy-loads it the first time
        the galaxy section is actually opened (it's the largest optional lib). -->
-  <script src="/dag.js?v=20260730-chips" defer></script>
-  <script src="/blake2b.js?v=20260730-chips" defer></script>
-  <script src="/disasm.js?v=20260730-chips" defer></script>
-  <script src="/vm.js?v=20260730-chips" defer></script>
-  <script src="/graph.js?v=20260730-chips" defer></script>
-  <script src="/gen.js?v=20260730-chips" defer></script>
-  <script src="/decode-payload.js?v=20260730-chips" defer></script>
-  <script type="module" src="/app.js?v=20260730-chips"></script>
+  <script src="/dag.js?v=20260730-ui" defer></script>
+  <script src="/blake2b.js?v=20260730-ui" defer></script>
+  <script src="/disasm.js?v=20260730-ui" defer></script>
+  <script src="/vm.js?v=20260730-ui" defer></script>
+  <script src="/graph.js?v=20260730-ui" defer></script>
+  <script src="/gen.js?v=20260730-ui" defer></script>
+  <script src="/decode-payload.js?v=20260730-ui" defer></script>
+  <script type="module" src="/app.js?v=20260730-ui"></script>
 </body>
 </html>

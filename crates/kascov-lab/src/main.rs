@@ -184,18 +184,39 @@ async fn main() -> Result<()> {
             let client = kascov_labkit::connect(cli.rpc.as_deref()).await?;
             kascov_labkit::demo(&client, &keypair, transitions).await
         }
-        Command::Deploy { ref program_hex, value } => {
-            let program = hex::decode(program_hex.trim()).context("--program-hex is not valid hex")?;
+        Command::Deploy {
+            ref program_hex,
+            value,
+        } => {
+            let program =
+                hex::decode(program_hex.trim()).context("--program-hex is not valid hex")?;
             let keypair = kascov_labkit::load_or_create_key(&cli.key, false)?;
             let client = kascov_labkit::connect(cli.rpc.as_deref()).await?;
-            kascov_labkit::deploy(&client, &keypair, &program, value).await.map(|_| ())
+            kascov_labkit::deploy(&client, &keypair, &program, value)
+                .await
+                .map(|_| ())
         }
-        Command::Spend { ref program_hex, ref entrypoint, ref covenant, ref to, compute_budget, dry_run } => {
-            let program = hex::decode(program_hex.trim()).context("--program-hex is not valid hex")?;
+        Command::Spend {
+            ref program_hex,
+            ref entrypoint,
+            ref covenant,
+            ref to,
+            compute_budget,
+            dry_run,
+        } => {
+            let program =
+                hex::decode(program_hex.trim()).context("--program-hex is not valid hex")?;
             let keypair = kascov_labkit::load_or_create_key(&cli.key, false)?;
             let client = kascov_labkit::connect(cli.rpc.as_deref()).await?;
             kascov_labkit::spend(
-                &client, &keypair, &program, entrypoint, covenant.as_deref(), to.as_deref(), compute_budget, dry_run,
+                &client,
+                &keypair,
+                &program,
+                entrypoint,
+                covenant.as_deref(),
+                to.as_deref(),
+                compute_budget,
+                dry_run,
             )
             .await
         }
@@ -204,27 +225,61 @@ async fn main() -> Result<()> {
             let client = kascov_labkit::connect(cli.rpc.as_deref()).await?;
             kascov_labkit::contract_demo(&client, &keypair, &cli.key, value).await
         }
-        Command::SettleEscrow { ref program_hex, ref release_to, ref covenant, dry_run } => {
-            let program = hex::decode(program_hex.trim()).context("--program-hex is not valid hex")?;
+        Command::SettleEscrow {
+            ref program_hex,
+            ref release_to,
+            ref covenant,
+            dry_run,
+        } => {
+            let program =
+                hex::decode(program_hex.trim()).context("--program-hex is not valid hex")?;
             let keypair = kascov_labkit::load_or_create_key(&cli.key, false)?;
             let client = kascov_labkit::connect(cli.rpc.as_deref()).await?;
-            kascov_labkit::settle_escrow(&client, &keypair, &program, release_to, covenant.as_deref(), dry_run).await
+            kascov_labkit::settle_escrow(
+                &client,
+                &keypair,
+                &program,
+                release_to,
+                covenant.as_deref(),
+                dry_run,
+            )
+            .await
         }
         Command::EscrowDemo { value } => {
             let keypair = kascov_labkit::load_or_create_key(&cli.key, true)?;
             let client = kascov_labkit::connect(cli.rpc.as_deref()).await?;
             kascov_labkit::escrow_demo(&client, &keypair, value).await
         }
-        Command::RecoverGap { ref db_dir, ref network, from_daa, to_daa, min_gap_daa, ref anchor_block } => {
+        Command::RecoverGap {
+            ref db_dir,
+            ref network,
+            from_daa,
+            to_daa,
+            min_gap_daa,
+            ref anchor_block,
+        } => {
             let anchor = anchor_block
                 .as_deref()
-                .map(|h| h.parse::<kascov_core::BlockHash>().map_err(|_| anyhow::anyhow!("bad anchor block hash: {h}")))
+                .map(|h| {
+                    h.parse::<kascov_core::BlockHash>()
+                        .map_err(|_| anyhow::anyhow!("bad anchor block hash: {h}"))
+                })
                 .transpose()?;
-            recover_gap(cli.rpc.as_deref(), db_dir, network, from_daa, to_daa, min_gap_daa, anchor).await
+            recover_gap(
+                cli.rpc.as_deref(),
+                db_dir,
+                network,
+                from_daa,
+                to_daa,
+                min_gap_daa,
+                anchor,
+            )
+            .await
         }
         Command::ProbeBlock { ref hash } => {
-            let block_hash: kascov_core::BlockHash =
-                hash.parse().map_err(|_| anyhow::anyhow!("bad block hash: {hash}"))?;
+            let block_hash: kascov_core::BlockHash = hash
+                .parse()
+                .map_err(|_| anyhow::anyhow!("bad block hash: {hash}"))?;
             let network = "testnet-10".parse().expect("network");
             let node = kascov_core::node::NodeHandle::connect(network, cli.rpc.as_deref()).await?;
             match node.block_with_txs(block_hash).await {
@@ -265,14 +320,22 @@ async fn recover_gap(
 ) -> Result<()> {
     use kascov_core::sync::{recover_gap, GapRecoveryOptions};
 
-    let network: kascov_core::Network =
-        network.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let network: kascov_core::Network = network.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
     let db = db_dir.join(format!("{network}.db"));
-    anyhow::ensure!(db.exists(), "no index at {} — copy the production DB there first", db.display());
+    anyhow::ensure!(
+        db.exists(),
+        "no index at {} — copy the production DB there first",
+        db.display()
+    );
     let mut store = kascov_core::store::Store::open(&db, network)
         .with_context(|| format!("open {}", db.display()))?;
 
-    let opts = GapRecoveryOptions { from_daa, to_daa, min_gap_daa, anchor_block };
+    let opts = GapRecoveryOptions {
+        from_daa,
+        to_daa,
+        min_gap_daa,
+        anchor_block,
+    };
     // The walk is ~1000 batched RPC calls over ~15 min; public resolver nodes
     // routinely drop a long-lived WebSocket. recover_gap persists a walk cursor
     // and dedups every merge, so a dropped connection just means: reconnect
@@ -285,20 +348,28 @@ async fn recover_gap(
             let node = match kascov_core::node::NodeHandle::connect(network, rpc).await {
                 Ok(n) => n,
                 Err(e) if attempt < MAX_ATTEMPTS => {
-                    eprintln!("recover-gap: node connect failed (attempt {attempt}): {e} — reconnecting");
+                    eprintln!(
+                        "recover-gap: node connect failed (attempt {attempt}): {e} — reconnecting"
+                    );
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     continue;
                 }
                 Err(e) => return Err(anyhow::anyhow!(e)).context("node connect"),
             };
-            match recover_gap(&node, &mut store, &opts, |line| eprintln!("recover-gap: {line}")).await {
+            match recover_gap(&node, &mut store, &opts, |line| {
+                eprintln!("recover-gap: {line}")
+            })
+            .await
+            {
                 Ok(r) => break r,
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     eprintln!("recover-gap: pass failed (attempt {attempt}): {e} — reconnecting and resuming from saved cursor");
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     continue;
                 }
-                Err(e) => return Err(anyhow::anyhow!(e)).context("gap recovery (all attempts exhausted)"),
+                Err(e) => {
+                    return Err(anyhow::anyhow!(e)).context("gap recovery (all attempts exhausted)")
+                }
             }
         }
     };
@@ -310,23 +381,34 @@ async fn recover_gap(
         );
         return Ok(());
     }
-    println!("recovered gap [{}, {}] on {network}:", report.gap_lo, report.gap_hi);
+    println!(
+        "recovered gap [{}, {}] on {network}:",
+        report.gap_lo, report.gap_hi
+    );
     println!("  chain blocks walked      {}", report.chain_blocks_walked);
     println!("  blocks captured (in-gap) {}", report.blocks_captured);
     println!("  events merged            {}", report.events_added);
     println!("  state cells merged       {}", report.utxos_added);
     println!("  spends repaired          {}", report.spends_repaired);
     println!("  covenants refreshed      {}", report.covenants_refreshed);
-    println!("  covenants re-sequenced   {}", report.covenants_resequenced);
+    println!(
+        "  covenants re-sequenced   {}",
+        report.covenants_resequenced
+    );
     println!("  tokens re-derived        {}", report.tokens_rederived);
     if report.residual_txs > 0 {
         println!(
             "  RESIDUAL (unrecoverable) {} txs / {} blocks, DAA {}–{} — bodies pruned from this node",
             report.residual_txs, report.residual_blocks, report.residual_daa_lo, report.residual_daa_hi
         );
-        println!("  → re-run recover-gap (lands on another node; merges dedup) to shrink the residual");
+        println!(
+            "  → re-run recover-gap (lands on another node; merges dedup) to shrink the residual"
+        );
     }
-    println!("verify, then hand {} to ops for upload/restore", db.display());
+    println!(
+        "verify, then hand {} to ops for upload/restore",
+        db.display()
+    );
     Ok(())
 }
 

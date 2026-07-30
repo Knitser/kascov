@@ -2,6 +2,8 @@
 
 *Written July 4, 2026 — two days after mainnet's first smart coins, one day after launch (325 likes, 6.8k views, real traffic). TN10 at 42k coins / 191k events and accelerating.*
 
+> **Outcome note (July 25):** nearly every concrete item below shipped: address pages, SSE, template analytics, digest, families/galaxy, payload decoding, webhooks, OG cards, and JS/Python clients. This document remains the historical prioritization record. See [[Feature-Roadmap]] for remaining product work and [[Web Explorer]] / [[Operations]] for the current implementation.
+
 ## Where we stand
 
 Shipped and proven: acceptance-driven indexer (reorg-safe, self-healing), KIP-20 genesis validation, spend-time reveals, SilverScript recognition (server + browser), the explorer UI (live feed, life stories, watchlist, records, search+suggest), in-browser decoder with example gallery, JSON API, GCS-backed durability, and — today — the scale rework (grid/detail split, single-flight builds, pre-compressed responses, CDN absorption) that survived the first traffic spike and a 40× data explosion.

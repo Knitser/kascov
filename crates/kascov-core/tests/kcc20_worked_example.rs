@@ -53,11 +53,11 @@ fn h32(s: &str) -> [u8; 32] {
 
 #[test]
 fn worked_example_replays_and_verifies() {
-    let fixture: Fixture = serde_json::from_str(include_str!("fixtures/kcc20_worked_example.json")).unwrap();
+    let fixture: Fixture =
+        serde_json::from_str(include_str!("fixtures/kcc20_worked_example.json")).unwrap();
     let cov = CovenantId(h32(&fixture.covenant_id));
 
-    let db = std::env::temp_dir()
-        .join(format!("kascov-worked-example-{}.db", std::process::id()));
+    let db = std::env::temp_dir().join(format!("kascov-worked-example-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&db);
     let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
 
@@ -71,16 +71,26 @@ fn worked_example_replays_and_verifies() {
         block.accepting_blue_score = ev.accepting_daa;
         for u in fixture.utxos.iter().filter(|u| u.txid == ev.txid) {
             block.created_utxos.push(NewUtxo {
-                outpoint: Outpoint { txid: TxId(h32(&u.txid)), index: u.output_index },
+                outpoint: Outpoint {
+                    txid: TxId(h32(&u.txid)),
+                    index: u.output_index,
+                },
                 covenant_id: cov,
                 value: u.value,
                 spk_version: u.spk_version,
                 spk_script: hex::decode(&u.spk_script).unwrap(),
             });
         }
-        for u in fixture.utxos.iter().filter(|u| u.spent_txid.as_deref() == Some(ev.txid.as_str())) {
+        for u in fixture
+            .utxos
+            .iter()
+            .filter(|u| u.spent_txid.as_deref() == Some(ev.txid.as_str()))
+        {
             block.spent_utxos.push((
-                Outpoint { txid: TxId(h32(&u.txid)), index: u.output_index },
+                Outpoint {
+                    txid: TxId(h32(&u.txid)),
+                    index: u.output_index,
+                },
                 TxId(h32(&ev.txid)),
                 hex::decode(u.spent_sig.as_deref().expect("fixture spends carry sigs")).unwrap(),
                 0,
@@ -106,11 +116,18 @@ fn worked_example_replays_and_verifies() {
     // The apply hook derived incrementally; the arithmetic must match the
     // hand audit exactly.
     let t = store.token_row(&cov).unwrap().expect("token derived");
-    assert_eq!(t.validation, STATUS_VERIFIED, "reason: {:?}", t.invalid_reason);
+    assert_eq!(
+        t.validation, STATUS_VERIFIED,
+        "reason: {:?}",
+        t.invalid_reason
+    );
     assert_eq!(t.supply, Some(997_347_000));
     assert_eq!(t.minted, Some(997_347_000), "5 × 199,469,400");
     assert_eq!(t.burned, Some(0));
-    assert_eq!(t.unresolved_cells, 0, "frontier fully recovered via splice-and-hash");
+    assert_eq!(
+        t.unresolved_cells, 0,
+        "frontier fully recovered via splice-and-hash"
+    );
     assert_eq!(t.holders, 2, "minter branch + the single holder");
     assert_eq!(t.template.as_deref(), Some("KCC20 token"));
 
@@ -119,9 +136,15 @@ fn worked_example_replays_and_verifies() {
     let balances = store.token_balances(&cov, 10).unwrap();
     assert_eq!(balances.len(), 2);
     assert_eq!(balances[0].balance, 997_347_000);
-    assert!(balances[0].owner.starts_with("00"), "top holder is a pubkey owner");
+    assert!(
+        balances[0].owner.starts_with("00"),
+        "top holder is a pubkey owner"
+    );
     assert_eq!(balances[1].balance, 0);
-    assert!(balances[1].owner.starts_with("02"), "minter branch is covenant-owned");
+    assert!(
+        balances[1].owner.starts_with("02"),
+        "minter branch is covenant-owned"
+    );
 
     // Classification: genesis, then five mints of the constant quantum.
     let events = store.token_events_page(&cov, None, 100).unwrap();
@@ -145,7 +168,11 @@ fn worked_example_replays_and_verifies() {
             .filter(|e| e.seq == seq && e.owner_to.as_deref().is_some_and(|o| o.starts_with("00")))
             .map(|e| e.amount.unwrap())
             .sum();
-        assert_eq!(holder_amount, 199_469_400 * seq as i64, "constant mint quantum × {seq}");
+        assert_eq!(
+            holder_amount,
+            199_469_400 * seq as i64,
+            "constant mint quantum × {seq}"
+        );
     }
 
     // The from-scratch boot pass must agree with the incremental hook.

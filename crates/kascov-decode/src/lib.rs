@@ -94,7 +94,10 @@ fn zk_system_from(instructions: &[Instruction]) -> Option<&'static str> {
     if !instructions.iter().any(|i| i.group == OpGroup::Zk) {
         return None;
     }
-    let sizes: Vec<usize> = instructions.iter().filter_map(|i| i.data.as_ref().map(|d| d.len())).collect();
+    let sizes: Vec<usize> = instructions
+        .iter()
+        .filter_map(|i| i.data.as_ref().map(|d| d.len()))
+        .collect();
     // STARK-scale seal → RISC Zero.
     if sizes.iter().any(|&n| n >= 1024) {
         return Some("risc0");
@@ -139,7 +142,10 @@ impl StateDecoder for P2pkStateDecoder {
         }
         let mut d = base_decode(self.name(), script);
         d.template = Some("p2pk state");
-        d.fields = vec![Field { name: "owner_pubkey", value: script[1..script.len() - 1].to_vec() }];
+        d.fields = vec![Field {
+            name: "owner_pubkey",
+            value: script[1..script.len() - 1].to_vec(),
+        }];
         Some(d)
     }
 }
@@ -156,7 +162,10 @@ impl StateDecoder for P2shCommitmentDecoder {
         let hash = p2sh_hash(script)?.to_vec();
         let mut d = base_decode(self.name(), script);
         d.template = Some("p2sh commitment");
-        d.fields = vec![Field { name: "program_hash", value: hash }];
+        d.fields = vec![Field {
+            name: "program_hash",
+            value: hash,
+        }];
         Some(d)
     }
 }
@@ -203,7 +212,13 @@ pub fn encode_push(value: &[u8]) -> Vec<u8> {
         }
         _ => {
             let n = value.len() as u32;
-            let mut out = vec![0x4e, (n & 0xff) as u8, (n >> 8 & 0xff) as u8, (n >> 16 & 0xff) as u8, (n >> 24) as u8];
+            let mut out = vec![
+                0x4e,
+                (n & 0xff) as u8,
+                (n >> 8 & 0xff) as u8,
+                (n >> 16 & 0xff) as u8,
+                (n >> 24) as u8,
+            ];
             out.extend_from_slice(value);
             out
         }
@@ -267,7 +282,10 @@ impl Skeleton {
                     if vx == vy {
                         // raw span of this push in dump A, for byte-perfect emit
                         let end = ia.get(i + 1).map_or(a.len(), |n| n.offset);
-                        items.push(SkelItem::ConstPush { value: vx, raw: a[x.offset..end].to_vec() });
+                        items.push(SkelItem::ConstPush {
+                            value: vx,
+                            raw: a[x.offset..end].to_vec(),
+                        });
                     } else {
                         let (label, _) = sentinels.iter().find(|(_, s)| *s == vx)?;
                         items.push(SkelItem::Slot(label));
@@ -303,7 +321,11 @@ impl Skeleton {
         let mut streams = Vec::with_capacity(instances.len());
         for bytes in instances {
             let (insts, truncated) = disassemble(bytes);
-            if truncated || streams.first().is_some_and(|f: &Vec<Instruction>| f.len() != insts.len()) {
+            if truncated
+                || streams
+                    .first()
+                    .is_some_and(|f: &Vec<Instruction>| f.len() != insts.len())
+            {
                 return None;
             }
             streams.push(insts);
@@ -314,7 +336,10 @@ impl Skeleton {
         let mut slots: Vec<Vec<Vec<u8>>> = Vec::new();
         for (i, inst) in first.iter().enumerate() {
             if !is_push(inst) {
-                if streams.iter().any(|s| is_push(&s[i]) || s[i].opcode != inst.opcode) {
+                if streams
+                    .iter()
+                    .any(|s| is_push(&s[i]) || s[i].opcode != inst.opcode)
+                {
                     return None;
                 }
                 items.push(SkelItem::Op(inst.opcode));
@@ -346,7 +371,11 @@ impl Skeleton {
         if slots.len() != labels.len() {
             return None;
         }
-        Some(Skeleton { name, items, param_order: labels.to_vec() })
+        Some(Skeleton {
+            name,
+            items,
+            param_order: labels.to_vec(),
+        })
     }
 
     /// Constructor parameter labels, in order.
@@ -402,7 +431,9 @@ fn match_skel_item(
         SkelItem::Op(op) => !is_push(inst) && inst.opcode == *op,
         SkelItem::ConstPush { value, .. } => push_value(inst).as_ref() == Some(value),
         SkelItem::Slot(label) => {
-            let Some(v) = push_value(inst) else { return false };
+            let Some(v) = push_value(inst) else {
+                return false;
+            };
             match values.iter().find(|(l, _)| l == label) {
                 Some((_, prev)) => *prev == v,
                 None => {
@@ -418,7 +449,10 @@ fn fields_in_order(order: &[&'static str], values: &[(&'static str, Vec<u8>)]) -
     order
         .iter()
         .filter_map(|label| {
-            values.iter().find(|(l, _)| l == label).map(|(_, v)| Field { name: label, value: v.clone() })
+            values.iter().find(|(l, _)| l == label).map(|(_, v)| Field {
+                name: label,
+                value: v.clone(),
+            })
         })
         .collect()
 }
@@ -474,7 +508,11 @@ impl RepeatSkeleton {
             let mut streams = Vec::with_capacity(set.len());
             for bytes in set {
                 let (insts, truncated) = disassemble(bytes);
-                if truncated || streams.first().is_some_and(|f: &Vec<Instruction>| f.len() != insts.len()) {
+                if truncated
+                    || streams
+                        .first()
+                        .is_some_and(|f: &Vec<Instruction>| f.len() != insts.len())
+                {
                     return None;
                 }
                 streams.push(insts);
@@ -511,43 +549,48 @@ impl RepeatSkeleton {
         // Fixed parts: const/slot decided across every instance of both
         // arities (suffix positions aligned from the end).
         let mut slots: Vec<Vec<Vec<u8>>> = Vec::new();
-        let mut build = |positions: &mut dyn Iterator<Item = (usize, usize)>| -> Option<Vec<SkelItem>> {
-            let mut items = Vec::new();
-            for (ia, ib) in positions {
-                let inst = &a0[ia];
-                if !is_push(inst) {
-                    let ok = la.iter().all(|x| !is_push(&x[ia]) && x[ia].opcode == inst.opcode)
-                        && lb.iter().all(|x| !is_push(&x[ib]) && x[ib].opcode == inst.opcode);
-                    if !ok {
-                        return None;
-                    }
-                    items.push(SkelItem::Op(inst.opcode));
-                    continue;
-                }
-                let vector = la
-                    .iter()
-                    .map(|x| push_value(&x[ia]))
-                    .chain(lb.iter().map(|x| push_value(&x[ib])))
-                    .collect::<Option<Vec<_>>>()?;
-                if vector.iter().all(|v| *v == vector[0]) {
-                    let end = a0.get(ia + 1).map_or(long[0].len(), |n| n.offset);
-                    items.push(SkelItem::ConstPush {
-                        value: vector[0].clone(),
-                        raw: long[0][inst.offset..end].to_vec(),
-                    });
-                } else {
-                    let slot = match slots.iter().position(|x| *x == vector) {
-                        Some(idx) => idx,
-                        None => {
-                            slots.push(vector);
-                            slots.len() - 1
+        let mut build =
+            |positions: &mut dyn Iterator<Item = (usize, usize)>| -> Option<Vec<SkelItem>> {
+                let mut items = Vec::new();
+                for (ia, ib) in positions {
+                    let inst = &a0[ia];
+                    if !is_push(inst) {
+                        let ok = la
+                            .iter()
+                            .all(|x| !is_push(&x[ia]) && x[ia].opcode == inst.opcode)
+                            && lb
+                                .iter()
+                                .all(|x| !is_push(&x[ib]) && x[ib].opcode == inst.opcode);
+                        if !ok {
+                            return None;
                         }
-                    };
-                    items.push(SkelItem::Slot(labels.get(slot).copied()?));
+                        items.push(SkelItem::Op(inst.opcode));
+                        continue;
+                    }
+                    let vector = la
+                        .iter()
+                        .map(|x| push_value(&x[ia]))
+                        .chain(lb.iter().map(|x| push_value(&x[ib])))
+                        .collect::<Option<Vec<_>>>()?;
+                    if vector.iter().all(|v| *v == vector[0]) {
+                        let end = a0.get(ia + 1).map_or(long[0].len(), |n| n.offset);
+                        items.push(SkelItem::ConstPush {
+                            value: vector[0].clone(),
+                            raw: long[0][inst.offset..end].to_vec(),
+                        });
+                    } else {
+                        let slot = match slots.iter().position(|x| *x == vector) {
+                            Some(idx) => idx,
+                            None => {
+                                slots.push(vector);
+                                slots.len() - 1
+                            }
+                        };
+                        items.push(SkelItem::Slot(labels.get(slot).copied()?));
+                    }
                 }
-            }
-            Some(items)
-        };
+                Some(items)
+            };
         let prefix = build(&mut (0..p).map(|i| (i, i)))?;
         let suffix = build(&mut (0..s).map(|j| (a0.len() - s + j, b0.len() - s + j)))?;
         if slots.len() != labels.len() {
@@ -654,7 +697,10 @@ pub struct TemplateDecoder {
 
 impl TemplateDecoder {
     pub fn new(skeletons: Vec<Skeleton>) -> Self {
-        Self { skeletons, repeats: vec![] }
+        Self {
+            skeletons,
+            repeats: vec![],
+        }
     }
 
     pub fn with_repeats(skeletons: Vec<Skeleton>, repeats: Vec<RepeatSkeleton>) -> Self {
@@ -676,7 +722,9 @@ impl StateDecoder for TemplateDecoder {
             .iter()
             .find_map(|s| s.match_script(&instructions).map(|f| (s.name, f)))
             .or_else(|| {
-                self.repeats.iter().find_map(|s| s.match_script(&instructions).map(|f| (s.name, f)))
+                self.repeats
+                    .iter()
+                    .find_map(|s| s.match_script(&instructions).map(|f| (s.name, f)))
             });
         let (name, fields) = hit?;
         let mut d = base_decode("template", script);
@@ -687,10 +735,10 @@ impl StateDecoder for TemplateDecoder {
 }
 
 /* ------------------------------------------------ SilverScript templates
-   The example contracts from kaspanet/silverscript
-   (silverscript-lang/tests/examples), each compiled twice with sentinel
-   constructor arguments via `compile_contract` — skeletons derive at
-   registration and stay aligned with these exact dumps. */
+The example contracts from kaspanet/silverscript
+(silverscript-lang/tests/examples), each compiled twice with sentinel
+constructor arguments via `compile_contract` — skeletons derive at
+registration and stay aligned with these exact dumps. */
 
 const SENT_A32: [u8; 32] = [0x11; 32];
 const SENT_B32: [u8; 32] = [0x22; 32];
@@ -772,8 +820,7 @@ pub fn silverscript_skeletons() -> Vec<Skeleton> {
 /// The committed hash of a canonical Kaspa P2SH script-public-key
 /// (`OpBlake2b OpData32 <hash> OpEqual`), if `spk` has that shape.
 pub fn p2sh_hash(spk: &[u8]) -> Option<&[u8]> {
-    (spk.len() == 35 && spk[0] == 0xaa && spk[1] == 0x20 && spk[34] == 0x87)
-        .then(|| &spk[2..34])
+    (spk.len() == 35 && spk[0] == 0xaa && spk[1] == 0x20 && spk[34] == 0x87).then(|| &spk[2..34])
 }
 
 /// Spend-time reveal: when a P2SH state UTXO is spent, the signature
@@ -801,7 +848,10 @@ impl Default for Registry {
         skeletons.extend(observed::observed_skeletons());
         Self {
             decoders: vec![
-                Box::new(TemplateDecoder::with_repeats(skeletons, observed::observed_repeat_skeletons())),
+                Box::new(TemplateDecoder::with_repeats(
+                    skeletons,
+                    observed::observed_repeat_skeletons(),
+                )),
                 Box::new(P2pkStateDecoder),
                 Box::new(P2shCommitmentDecoder),
             ],
@@ -871,7 +921,12 @@ mod tests {
         // Mecenas instance B: sentinel args flipped vs A
         let d = reg.decode(0, &hex::decode(MECENAS_B).unwrap());
         assert_eq!(d.template, Some("SilverScript · Mecenas"));
-        let get = |n: &str| d.fields.iter().find(|f| f.name == n).map(|f| f.value.clone());
+        let get = |n: &str| {
+            d.fields
+                .iter()
+                .find(|f| f.name == n)
+                .map(|f| f.value.clone())
+        };
         assert_eq!(get("recipient"), Some(vec![0x22; 32]));
         assert_eq!(get("funder_hash"), Some(vec![0x44; 32]));
         assert_eq!(get("pledge"), Some(snum(250_000_000)));
@@ -881,7 +936,12 @@ mod tests {
         // buyer/seller swap between the two builds
         let d = reg.decode(0, &hex::decode(ESCROW_A).unwrap());
         assert_eq!(d.template, Some("SilverScript · Escrow"));
-        let get = |n: &str| d.fields.iter().find(|f| f.name == n).map(|f| f.value.clone());
+        let get = |n: &str| {
+            d.fields
+                .iter()
+                .find(|f| f.name == n)
+                .map(|f| f.value.clone())
+        };
         assert_eq!(get("arbiter_hash"), Some(vec![0x33; 32]));
         assert_eq!(get("buyer"), Some(vec![0x11; 32]));
         assert_eq!(get("seller"), Some(vec![0x22; 32]));
@@ -915,18 +975,27 @@ mod tests {
             (
                 "SilverScript · Escrow",
                 ESCROW_A,
-                &[("arbiter_hash", vec![0x33; 32]), ("buyer", vec![0x11; 32]), ("seller", vec![0x22; 32])],
+                &[
+                    ("arbiter_hash", vec![0x33; 32]),
+                    ("buyer", vec![0x11; 32]),
+                    ("seller", vec![0x22; 32]),
+                ],
             ),
             (
                 "SilverScript · LastWill",
                 LASTWILL_A,
-                &[("inheritor_hash", vec![0x33; 32]), ("cold_hash", vec![0x44; 32]), ("hot_hash", vec![0x11; 32])],
+                &[
+                    ("inheritor_hash", vec![0x33; 32]),
+                    ("cold_hash", vec![0x44; 32]),
+                    ("hot_hash", vec![0x11; 32]),
+                ],
             ),
         ];
         let skels = silverscript_skeletons();
         for (name, dump, args) in cases {
             let skel = skels.iter().find(|s| s.name == *name).expect("skeleton");
-            let args_ref: Vec<(&str, &[u8])> = args.iter().map(|(l, v)| (*l, v.as_slice())).collect();
+            let args_ref: Vec<(&str, &[u8])> =
+                args.iter().map(|(l, v)| (*l, v.as_slice())).collect();
             let emitted = skel.emit(&args_ref).expect("emit");
             assert_eq!(hex::encode(&emitted), *dump, "{name} emit != dump");
         }
@@ -936,7 +1005,10 @@ mod tests {
     fn emit_round_trips_fresh_args_including_small_int_selector() {
         let reg = Registry::default();
         let skels = silverscript_skeletons();
-        let mecenas = skels.iter().find(|s| s.name == "SilverScript · Mecenas").unwrap();
+        let mecenas = skels
+            .iter()
+            .find(|s| s.name == "SilverScript · Mecenas")
+            .unwrap();
         // fresh args, pledge with a sign-guard byte (180 -> b4 00), period a small int (6 -> Op6)
         let recipient = vec![0xab; 32];
         let funder = vec![0xcd; 32];
@@ -951,7 +1023,12 @@ mod tests {
         let emitted = mecenas.emit(&args).expect("emit");
         let d = reg.decode(0, &emitted);
         assert_eq!(d.template, Some("SilverScript · Mecenas"));
-        let get = |n: &str| d.fields.iter().find(|f| f.name == n).map(|f| f.value.clone());
+        let get = |n: &str| {
+            d.fields
+                .iter()
+                .find(|f| f.name == n)
+                .map(|f| f.value.clone())
+        };
         assert_eq!(get("recipient"), Some(recipient));
         assert_eq!(get("funder_hash"), Some(funder));
         assert_eq!(get("pledge"), Some(snum(180)));
@@ -976,7 +1053,10 @@ mod tests {
         groth.push(0xa6);
         assert_eq!(zk_system(&groth), Some("groth16"));
         assert!(Registry::default().decode(0, &groth).uses_zk_ops);
-        assert_eq!(Registry::default().decode(0, &groth).zk_system, Some("groth16"));
+        assert_eq!(
+            Registry::default().decode(0, &groth).zk_system,
+            Some("groth16")
+        );
 
         // A 2 KiB seal push → STARK scale → risc0 (wins over any small push).
         let mut risc0 = encode_push(&vec![0xab; 2048]);
@@ -992,7 +1072,10 @@ mod tests {
 
     #[test]
     fn observed_skeletons_all_derive() {
-        let names: Vec<_> = observed::observed_skeletons().iter().map(|s| s.name).collect();
+        let names: Vec<_> = observed::observed_skeletons()
+            .iter()
+            .map(|s| s.name)
+            .collect();
         assert_eq!(
             names,
             [
@@ -1009,7 +1092,10 @@ mod tests {
             ],
             "every on-chain fixture pair must derive a skeleton"
         );
-        let repeats: Vec<_> = observed::observed_repeat_skeletons().iter().map(|s| s.name).collect();
+        let repeats: Vec<_> = observed::observed_repeat_skeletons()
+            .iter()
+            .map(|s| s.name)
+            .collect();
         assert_eq!(repeats, ["genesis0 · slot-mint"]);
     }
 
@@ -1017,7 +1103,10 @@ mod tests {
     fn observed_families_match_their_fixture_programs() {
         let reg = Registry::default();
         let get = |d: &Decoded, n: &str| {
-            d.fields.iter().find(|f| f.name == n).map(|f| f.value.clone())
+            d.fields
+                .iter()
+                .find(|f| f.name == n)
+                .map(|f| f.value.clone())
         };
 
         // PURE: the one inlined argument is the CheckSigFromStack key.
@@ -1041,7 +1130,10 @@ mod tests {
         let d = reg.decode(0, include_bytes!("../fixtures/kcc20_a_a.bin"));
         assert_eq!(d.template, Some("KCC20 token"));
         assert_eq!(get(&d, "identifier_type"), Some(vec![0x00]));
-        assert_eq!(get(&d, "amount").map(hex::encode).as_deref(), Some("a00f000000000000"));
+        assert_eq!(
+            get(&d, "amount").map(hex::encode).as_deref(),
+            Some("a00f000000000000")
+        );
         assert_eq!(get(&d, "is_minter"), Some(vec![0x00]));
 
         // KCC20 minter: the input-side and output-side covenant-id pins fold
@@ -1053,13 +1145,32 @@ mod tests {
 
         // Marketplace stages + collection registry.
         for (fixture, want) in [
-            (include_bytes!("../fixtures/g0_list_v1_a.bin").as_slice(), "genesis0 · list"),
-            (include_bytes!("../fixtures/g0_buy_v1_a.bin").as_slice(), "genesis0 · buy"),
-            (include_bytes!("../fixtures/g0_list_v2_b.bin").as_slice(), "genesis0 · list"),
-            (include_bytes!("../fixtures/g0_buy_v2_b.bin").as_slice(), "genesis0 · buy"),
-            (include_bytes!("../fixtures/g0_col_a.bin").as_slice(), "genesis0 · collection"),
+            (
+                include_bytes!("../fixtures/g0_list_v1_a.bin").as_slice(),
+                "genesis0 · list",
+            ),
+            (
+                include_bytes!("../fixtures/g0_buy_v1_a.bin").as_slice(),
+                "genesis0 · buy",
+            ),
+            (
+                include_bytes!("../fixtures/g0_list_v2_b.bin").as_slice(),
+                "genesis0 · list",
+            ),
+            (
+                include_bytes!("../fixtures/g0_buy_v2_b.bin").as_slice(),
+                "genesis0 · buy",
+            ),
+            (
+                include_bytes!("../fixtures/g0_col_a.bin").as_slice(),
+                "genesis0 · collection",
+            ),
         ] {
-            assert_eq!(reg.decode(0, fixture).template, Some(want), "fixture for {want}");
+            assert_eq!(
+                reg.decode(0, fixture).template,
+                Some(want),
+                "fixture for {want}"
+            );
         }
         // The list program embeds the follow-up buy state's template bytes.
         let d = reg.decode(0, include_bytes!("../fixtures/g0_list_v1_a.bin"));
@@ -1071,7 +1182,11 @@ mod tests {
     fn slot_mint_repeat_matcher_covers_all_arities() {
         let reg = Registry::default();
         let get_all = |d: &Decoded, n: &str| {
-            d.fields.iter().filter(|f| f.name == n).map(|f| f.value.clone()).collect::<Vec<_>>()
+            d.fields
+                .iter()
+                .filter(|f| f.name == n)
+                .map(|f| f.value.clone())
+                .collect::<Vec<_>>()
         };
 
         // DI4M2 build: two per-collection output checks.
@@ -1104,7 +1219,11 @@ mod tests {
         three.extend_from_slice(&di4m[start..end]);
         three.extend_from_slice(&di4m[end..]);
         let d = reg.decode(0, &three);
-        assert_eq!(d.template, Some("genesis0 · slot-mint"), "extra repeat must still match");
+        assert_eq!(
+            d.template,
+            Some("genesis0 · slot-mint"),
+            "extra repeat must still match"
+        );
         assert_eq!(get_all(&d, "output_spk_hash").len(), 3);
 
         // A partial copy breaks group divisibility → no template.
@@ -1141,7 +1260,11 @@ mod tests {
         assert_eq!(probe(127), None);
         assert_eq!(probe(128), Some("groth16"));
         assert_eq!(probe(256), Some("groth16"));
-        assert_eq!(probe(257), None, "gap above the Groth16 band stays unattributed");
+        assert_eq!(
+            probe(257),
+            None,
+            "gap above the Groth16 band stays unattributed"
+        );
         assert_eq!(probe(299), None);
         assert_eq!(probe(300), Some("succinct proof (inferred)"));
         assert_eq!(probe(1023), Some("succinct proof (inferred)"));

@@ -6,7 +6,7 @@ const css = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 const index = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 
 test('phone header and navigation remain reachable without page overflow', () => {
-  assert.match(css, /@media \(max-width: 720px\)[\s\S]*?\.header-inner\s*\{[\s\S]*?display:\s*grid/);
+  assert.match(css, /@media \(max-width: 840px\)[\s\S]*?\.header-inner\s*\{[\s\S]*?display:\s*grid/);
   assert.match(css, /\.site-nav\s*\{[\s\S]*?overflow-x:\s*auto/);
   assert.match(css, /\.nav-link\s*\{[\s\S]*?min-height:\s*44px/);
 });
@@ -42,6 +42,14 @@ test('coarse pointers get accessible controls and a scroll-releasing galaxy', ()
   assert.match(css, /\.galaxy-camera button\s*\{[^}]*min-width:\s*44px;[^}]*height:\s*44px/);
   assert.match(css, /\.galaxy-canvas\s*\{\s*touch-action:\s*pan-y/);
   assert.match(css, /@media \(pointer: coarse\) and \(max-height: 500px\)/);
+});
+
+test('responsive CSS uses current visibility, wrapping and scrolling primitives', () => {
+  assert.doesNotMatch(css, /clip:\s*rect\(/);
+  assert.match(css, /clip-path:\s*inset\(50%\)/);
+  assert.doesNotMatch(css, /word-break:\s*break-word/);
+  assert.match(css, /overflow-wrap:\s*anywhere/);
+  assert.doesNotMatch(css, /-webkit-overflow-scrolling/);
 });
 
 test('phone forms, playground modes, transaction cells and API tables have responsive contracts', () => {

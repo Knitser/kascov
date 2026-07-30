@@ -13,7 +13,7 @@ Global flags: `--network mainnet|testnet-10` (default mainnet) · `--rpc ws://�
 | `trace <covenant-id>` | Full lineage with txid, DAA, accepting block — plus the revealed state **payload per event and the payload Δ** between consecutive reveals. |
 | `watch` | Live covenant event feed (`--json` = line-delimited JSON, pipe to `jq`). |
 | `export [--out <file>] [--max-events N]` | Write the web snapshot (`web/data/<network>.json`) **and** the small live feed (`…-live.json`): stats, tip anchor, newest events. |
-| `serve --listen <addr> [--networks a,b] [--db-dir <dir>]` | The always-on worker: follows each network and serves the whole JSON API over HTTP (CORS `*`, gzip/brotli). What runs on Cloud Run ([[Architecture#Deployment topology (live since July 2)]]). |
+| `serve --listen <addr> [--networks a,b] [--db-dir <dir>]` | The always-on worker: follows each network and serves the whole JSON API over HTTP (CORS `*`, gzip/brotli). Production runs in WSL2 on the dedicated server ([[Architecture#Deployment topology (live since July 22)]]). |
 | `backup --out <file>` | Consistent DB copy (`VACUUM INTO`), safe while syncing — used for GCS continuity. |
 | `reset --yes` | Drop the index DB. |
 
@@ -60,3 +60,14 @@ kascov --network testnet-10 trace <covenant-id>     # payload Δ appears on P2SH
 # the hosted API (same data, no local setup):
 curl -s https://kascov.io/data/testnet-10-live.json | jq .stats
 ```
+
+## Operational command rules
+
+- `scan` is observational and stateless; it is not a substitute for continuous history.
+- `sync --from` only chooses the initial cursor of a fresh store.
+- `reset --yes` is destructive and appropriate only when continuity is intentionally discarded.
+- `backup` uses SQLite's own consistent-copy mechanism; copying a live DB file directly is not equivalent.
+- Recovery commands should operate on a backup/copy first. Validate counts and health before promoting a healed database.
+- Machine consumers should use `--json`; human formatting is not an API contract.
+
+For production procedures see [[Operations]]. For correctness semantics see [[Sync Engine]].

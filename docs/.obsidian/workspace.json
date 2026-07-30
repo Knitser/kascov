@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Architecture.md",
+                "file": "Traffic Analytics.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Architecture"
+              "title": "Traffic Analytics"
             }
           }
         ]
@@ -185,15 +185,20 @@
   },
   "active": "160954a3fcd92743",
   "lastOpenFiles": [
-    "firebase-debug.log",
+    "Testing Strategy.md",
+    "System Map.md",
+    "Toccata-Audit.md",
     "Toccata Protocol Notes.md",
     "Sync Engine.md",
     "Storage Schema.md",
-    "Roadmap.md",
+    "Roadmap-v2.md",
+    "Novel-Features-Plan.md",
     "Home.md",
-    "Decoding.md",
     "Covenant Lab.md",
     "Architecture.md",
+    "firebase-debug.log",
+    "Roadmap.md",
+    "Decoding.md",
     "CLI Reference.md"
   ]
 }
