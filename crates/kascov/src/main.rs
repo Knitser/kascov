@@ -7495,7 +7495,7 @@ async fn addr_handler(
             .into_iter()
             .map(|h| {
                 let id_hex = h.token_id.to_string();
-                serde_json::json!({
+                let mut row = serde_json::json!({
                     "token_id": id_hex,
                     "name": og::friendly_name(&id_hex),
                     "owner_kind": h.owner_kind,
@@ -7503,7 +7503,18 @@ async fn addr_handler(
                     "cells": h.cells,
                     "status": h.status,
                     "supply": h.supply,
-                })
+                });
+                // Art tier: a genesis-committed image hash means kascov can
+                // serve bytes it PROVED against that hash, so it may replace
+                // the identicon outright. Absent it, the page falls back to a
+                // launchpad's witnessed logo (a claim, shown ringed) or the
+                // identicon derived from the coin id.
+                if let Ok(Some(c)) = store.claimed_token_meta(&h.token_id) {
+                    if let Some(ih) = &c.image_hash {
+                        row["claimed_image_hash"] = serde_json::json!(ih);
+                    }
+                }
+                row
             })
             .collect();
         let mut covenants = Vec::with_capacity(rows.len().min(ADDR_MAX_COVENANTS));

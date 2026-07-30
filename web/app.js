@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-nav2';
+} from './core/format.js?v=20260729-art';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-nav2';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-nav2';
-import { createPendingModel } from './core/pending.js?v=20260729-nav2';
+} from './core/state.js?v=20260729-art';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-art';
+import { createPendingModel } from './core/pending.js?v=20260729-art';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,12 +35,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-nav2';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-nav2';
-import { createRefreshGate } from './core/refresh.js?v=20260729-nav2';
-import { networkRouteHash } from './core/routing.js?v=20260729-nav2';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-nav2';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-nav2';
+} from './core/data.js?v=20260729-art';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-art';
+import { createRefreshGate } from './core/refresh.js?v=20260729-art';
+import { networkRouteHash } from './core/routing.js?v=20260729-art';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-art';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-art';
 
 
 
@@ -4342,7 +4342,14 @@ function renderAddress(route) {
   const heldCount = Array.isArray(data.token_holdings) ? data.token_holdings.length : 0;
   const bits = [];
   if (heldCount) bits.push(`${fmtInt(heldCount)} token${heldCount === 1 ? '' : 's'} held`);
-  bits.push(`${fmtInt(data.covenants_total)} smart coin${data.covenants_total === 1 ? '' : 's'} touched`);
+  /* Two DIFFERENT relationships, and "14 tokens held · 0 smart coins touched"
+     reads as a contradiction unless the line says so. Holding a token means
+     owning cells INSIDE that token's covenant; touching a smart coin means
+     being the key a covenant's own script pays to. A big holder can easily
+     have never owned a covenant outright. */
+  bits.push(heldCount && !data.covenants_total
+    ? 'no covenant owned outright'
+    : `${fmtInt(data.covenants_total)} smart coin${data.covenants_total === 1 ? '' : 's'} touched`);
   if (controls) bits.push(`${fmtInt(controls)} controlled right now`);
   if (data.covenants_total > rows.length) bits.push(`showing the ${fmtInt(rows.length)} most recent`);
   const cards = rows.map((c) => {
@@ -4375,6 +4382,20 @@ function renderAddress(route) {
       const pct = share != null ? (share >= 9.95 ? share.toFixed(0) : share.toFixed(1)) : null;
       const chainName = h.name || friendlyName(h.token_id);
       const listed = state.registry[network] && registryEntry(network, h.token_id);
+      /* Three tiers, weakest never dressed as strongest — the same rule the
+         tokens directory uses. Art proven against a hash committed on chain
+         replaces the identicon; a launchpad's witnessed logo renders inside a
+         dashed ring with the identicon behind it; everything else stays the
+         identicon derived from the coin id. */
+      const art = h.claimed_image_hash
+        ? `<span class="token-art-wrap token-art-wrap-sm">${avatarSvg(h.token_id, 26)}` +
+          `<img class="token-art token-art-sm" src="img/${esc(network)}/${esc(h.token_id)}" alt="" ` +
+          `onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`
+        : (listed && listed.logo)
+          ? `<span class="token-art-wrap token-art-wrap-sm token-art-listed" title="${esc(GLOSSARY.listed_logo)}">${avatarSvg(h.token_id, 26)}` +
+            `<img class="token-art token-art-sm" src="listed-img/${esc(network)}/${esc(h.token_id)}" alt="" loading="lazy" ` +
+            `onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`
+          : avatarSvg(h.token_id, 26);
       /* A launchpad's name is a CLAIM; the coin id is the identity. Show the
          claim first because it is what a reader recognises, and keep the
          chain-derived name beside it so the two are never confused. */
@@ -4384,7 +4405,7 @@ function renderAddress(route) {
           ` <span class="dim token-alias">${esc(chainName)}</span>`
         : esc(chainName);
       return `<tr>` +
-        `<td><a class="token-coin" href="#/${esc(network)}/token/${esc(h.token_id)}">${label}</a></td>` +
+        `<td><a class="token-coin" href="#/${esc(network)}/token/${esc(h.token_id)}">${art} ${label}</a></td>` +
         `<td class="mono tokens-supply">${esc(fmtTokenAmount(h.balance))}</td>` +
         `<td class="token-share">${pct != null
           ? `<span class="lane-track token-share-track"><span class="lane-fill" style="width:${Math.max(Math.min(share, 100), 1).toFixed(1)}%"></span></span> ${esc(pct)}%`
@@ -4395,7 +4416,8 @@ function renderAddress(route) {
     }).join('');
     holdHtml = `<section aria-label="Tokens held"><h2>tokens held</h2>` +
       `<p class="dim">covenant tokens this key owns right now, summed over its live hash-proven cells. ` +
-      `this is a different index from the covenant states below: holding a token does not require owning a covenant.</p>` +
+      `holding a token means owning cells <em>inside</em> that token's covenant, which is a different thing ` +
+      `from owning a covenant outright — so a large holder can show no smart coins of their own.</p>` +
       `<div class="tokens-tablewrap"><table class="tokens-table">` +
       `<thead><tr><th>token</th><th>balance</th><th>share of supply</th><th>cells</th><th>as</th></tr></thead>` +
       `<tbody>${rowsHtml}</tbody></table></div></section>`;
