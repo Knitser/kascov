@@ -7510,6 +7510,9 @@ fn trade_json(
 ) -> std::result::Result<serde_json::Value, serde_json::Error> {
     let mut v = serde_json::to_value(tr)?;
     if let Some(cp) = &tr.counterparty {
+        // Normalise to the same "presence:<hex>" display the balances use, so
+        // one frontend helper renders both.
+        v["counterparty"] = serde_json::json!(kascov_core::tokens::owner_display(cp));
         if let Some(a) = owner_address(cp, network) {
             v["counterparty_address"] = serde_json::json!(a);
         }
@@ -7518,9 +7521,18 @@ fn trade_json(
 }
 
 fn owner_address(display: &str, network: Network) -> Option<String> {
+    // Two shapes reach this. The DISPLAY form ("presence:<64 hex>") is what the
+    // balances rows carry; the RAW form is hex(identifier_type || key), i.e. 66
+    // hex chars with the type byte still on the front, which is how a trade's
+    // counterparty is stored. Handle both, and only for the two types that are
+    // actually keys: 0x00 pubkey and 0x03 presence.
     let hex_key = match display.split_once(':') {
         Some(("presence" | "pubkey", k)) => k,
         Some(_) => return None,
+        None if display.len() == 66 => match &display[..2] {
+            "00" | "03" => &display[2..],
+            _ => return None,
+        },
         None => display,
     };
     let bytes = hex::decode(hex_key).ok()?;
