@@ -28,3 +28,7 @@ web/ops/traffic/traffic.json
 # Kept on the machine and on the VPS, never published.
 scripts/ops/harden-*.ps1
 scripts/ops/RUNBOOK.md
+
+# price-bot state: the id of the message it keeps updating. Local runtime, and
+# the webhook itself is never stored here (env only).
+.kascov-price-bot.json
