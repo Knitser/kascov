@@ -7629,6 +7629,14 @@ async fn addr_handler(
                 let id_hex = token_id.to_string();
                 v["token_id"] = serde_json::json!(id_hex);
                 v["token_name"] = serde_json::json!(og::friendly_name(&id_hex));
+                // Same art tier as the holdings rows: hash-proven art may
+                // replace the identicon outright, so the row needs to know
+                // whether such a hash exists.
+                if let Ok(Some(c)) = store.claimed_token_meta(token_id) {
+                    if let Some(ih) = &c.image_hash {
+                        v["claimed_image_hash"] = serde_json::json!(ih);
+                    }
+                }
                 Ok(v)
             })
             .collect::<std::result::Result<Vec<_>, serde_json::Error>>()?;

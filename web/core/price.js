@@ -5,7 +5,7 @@
    route must leave zero trace in the UI. Testnet never fetches and never
    shows a dollar sign (play money). */
 
-import { fmtAmount, state } from './state.js?v=20260730-addrtrades';
+import { fmtAmount, state } from './state.js?v=20260730-chips';
 
 const PRICE_TTL_MS = 5 * 60_000;
 const PRICE_MISS_COOLDOWN_MS = 10 * 60_000; /* a miss goes quiet, then reprobes */

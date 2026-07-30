@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260730-addrtrades';
+} from './core/format.js?v=20260730-chips';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260730-addrtrades';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-addrtrades';
-import { createPendingModel } from './core/pending.js?v=20260730-addrtrades';
+} from './core/state.js?v=20260730-chips';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-chips';
+import { createPendingModel } from './core/pending.js?v=20260730-chips';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -36,12 +36,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260730-addrtrades';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-addrtrades';
-import { createRefreshGate } from './core/refresh.js?v=20260730-addrtrades';
-import { networkRouteHash } from './core/routing.js?v=20260730-addrtrades';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-addrtrades';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-addrtrades';
+} from './core/data.js?v=20260730-chips';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-chips';
+import { createRefreshGate } from './core/refresh.js?v=20260730-chips';
+import { networkRouteHash } from './core/routing.js?v=20260730-chips';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-chips';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-chips';
 
 
 
@@ -4381,32 +4381,9 @@ function renderAddress(route) {
     const rowsHtml = holdings.map((h) => {
       const share = h.supply ? (h.balance / h.supply) * 100 : null;
       const pct = share != null ? (share >= 9.95 ? share.toFixed(0) : share.toFixed(1)) : null;
-      const chainName = h.name || friendlyName(h.token_id);
-      const listed = state.registry[network] && registryEntry(network, h.token_id);
-      /* Three tiers, weakest never dressed as strongest — the same rule the
-         tokens directory uses. Art proven against a hash committed on chain
-         replaces the identicon; a launchpad's witnessed logo renders inside a
-         dashed ring with the identicon behind it; everything else stays the
-         identicon derived from the coin id. */
-      const art = h.claimed_image_hash
-        ? `<span class="token-art-wrap token-art-wrap-sm">${avatarSvg(h.token_id, 26)}` +
-          `<img class="token-art token-art-sm" src="img/${esc(network)}/${esc(h.token_id)}" alt="" ` +
-          `onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`
-        : (listed && listed.logo)
-          ? `<span class="token-art-wrap token-art-wrap-sm token-art-listed" title="${esc(GLOSSARY.listed_logo)}">${avatarSvg(h.token_id, 26)}` +
-            `<img class="token-art token-art-sm" src="listed-img/${esc(network)}/${esc(h.token_id)}" alt="" loading="lazy" ` +
-            `onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`
-          : avatarSvg(h.token_id, 26);
-      /* A launchpad's name is a CLAIM; the coin id is the identity. Show the
-         claim first because it is what a reader recognises, and keep the
-         chain-derived name beside it so the two are never confused. */
-      const label = listed && (listed.name || listed.ticker)
-        ? `${esc(listed.name || chainName)}` +
-          (listed.ticker ? ` <span class="dim">$${esc(listed.ticker)}</span>` : '') +
-          ` <span class="dim token-alias">${esc(chainName)}</span>`
-        : esc(chainName);
       return `<tr>` +
-        `<td><a class="token-coin" href="#/${esc(network)}/token/${esc(h.token_id)}">${art} ${label}</a></td>` +
+        `<td><a class="token-coin" href="#/${esc(network)}/token/${esc(h.token_id)}">` +
+          `${tokenChipHtml(network, h.token_id, h.name, h.claimed_image_hash || null)}</a></td>` +
         `<td class="mono tokens-supply">${esc(fmtTokenAmount(h.balance))}</td>` +
         `<td class="token-share">${pct != null
           ? `<span class="lane-track token-share-track"><span class="lane-fill" style="width:${Math.max(Math.min(share, 100), 1).toFixed(1)}%"></span></span> ${esc(pct)}%`
@@ -4434,7 +4411,8 @@ function renderAddress(route) {
       const ms = t.accepting_time_ms != null ? t.accepting_time_ms : toMs(t.accepting_daa);
       return `<tr>` +
         `<td class="${t.side === 'buy' ? 'trade-buy' : 'trade-sell'}">${esc(t.side)}</td>` +
-        `<td><a class="token-coin" href="#/${esc(network)}/token/${esc(t.token_id)}">${esc(t.token_name || friendlyName(t.token_id))}</a></td>` +
+        `<td><a class="token-coin" href="#/${esc(network)}/token/${esc(t.token_id)}">` +
+          `${tokenChipHtml(network, t.token_id, t.token_name, t.claimed_image_hash || null)}</a></td>` +
         `<td class="mono">${esc(fmtAmount(t.quote_sompi, network))}</td>` +
         `<td class="mono">${esc(fmtInt(t.base_amount))}</td>` +
         `<td class="mono">${esc(fmtPriceKas(t.quote_sompi, t.base_amount))}</td>` +
@@ -4899,6 +4877,32 @@ function routeLabel(route) {
     case 'guide': return 'the guide';
     default: return 'where you were';
   }
+}
+
+/* A token as a reader recognises it: art, the launchpad's claimed name and
+   ticker, and the chain-derived nickname beside them. Three art tiers, weakest
+   never dressed as strongest — art proven against a hash committed on chain
+   replaces the identicon, a launchpad's witnessed logo renders ringed, and
+   everything else keeps the identicon derived from the coin id. One helper so a
+   token looks identical in holdings, in trades, and anywhere else it lands. */
+function tokenChipHtml(network, tokenId, chainName, claimedImageHash = null, size = 26) {
+  const name = chainName || friendlyName(tokenId);
+  const listed = state.registry[network] && registryEntry(network, tokenId);
+  const art = claimedImageHash
+    ? `<span class="token-art-wrap token-art-wrap-sm">${avatarSvg(tokenId, size)}` +
+      `<img class="token-art token-art-sm" src="img/${esc(network)}/${esc(tokenId)}" alt="" ` +
+      `onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`
+    : (listed && listed.logo)
+      ? `<span class="token-art-wrap token-art-wrap-sm token-art-listed" title="${esc(GLOSSARY.listed_logo)}">${avatarSvg(tokenId, size)}` +
+        `<img class="token-art token-art-sm" src="listed-img/${esc(network)}/${esc(tokenId)}" alt="" loading="lazy" ` +
+        `onload="this.parentElement.classList.add('art-loaded')" onerror="this.remove()"></span>`
+      : avatarSvg(tokenId, size);
+  const label = listed && (listed.name || listed.ticker)
+    ? `${esc(listed.name || name)}` +
+      (listed.ticker ? ` <span class="dim">$${esc(listed.ticker)}</span>` : '') +
+      ` <span class="dim token-alias">${esc(name)}</span>`
+    : esc(name);
+  return `${art} ${label}`;
 }
 
 /* Which networks have already had their registry warm-up scheduled. The
