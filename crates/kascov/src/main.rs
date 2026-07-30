@@ -9373,6 +9373,27 @@ mod prove_holding_tests {
         assert!(!verify_kaspa_message(&pk.serialize(), "Hello Kaspa!", &sig[..63]));
     }
 
+
+    /// Prints a real (address, message, signature) triple for a throwaway key,
+    /// so the live endpoint can be exercised end to end without anyone's real
+    /// key. Ignored by default; this is an ops tool, not a test.
+    ///   cargo test -p kascov emit_live_proof -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn emit_live_proof() {
+        use kaspa_addresses::{Address, Prefix, Version};
+        let mut sk = [0u8; 32];
+        sk[31] = 7;
+        let kp = Keypair::from_seckey_slice(SECP256K1, &sk).unwrap();
+        let xonly = kp.x_only_public_key().0.serialize();
+        let addr = Address::new(Prefix::Mainnet, Version::PubKey, &xonly).to_string();
+        let msg = "kascov verify: live-check";
+        let sig = sign(&kp, msg);
+        println!("{}", serde_json::json!({
+            "address": addr, "message": msg, "signature": hex::encode(sig),
+        }));
+    }
+
     #[test]
     fn unicode_signs_as_its_utf8_bytes() {
         // rusty-kaspa pins a kanji vector; the digest must be over UTF-8 bytes,
