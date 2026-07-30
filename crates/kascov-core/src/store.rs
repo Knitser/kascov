@@ -937,6 +937,7 @@ impl Store {
             "ALTER TABLE market_programs ADD COLUMN program_pushes INTEGER",
             "CREATE INDEX IF NOT EXISTS mp_shape ON market_programs(program_len, program_pushes)
                  WHERE skeleton GLOB 'unmatched*'",
+            "CREATE INDEX IF NOT EXISTS tt_by_txid ON token_trades(txid)",
             "ALTER TABLE covenant_utxos ADD COLUMN spent_sig BLOB",
             "ALTER TABLE covenant_utxos ADD COLUMN spent_budget INTEGER",
             "ALTER TABLE covenant_events ADD COLUMN payload BLOB",
@@ -3964,6 +3965,45 @@ impl Store {
             )
             .map_err(db_err)?;
         self.derive_tokens_if_stale()
+    }
+
+    /// How kascov reads one transaction as a trade, if it admitted one.
+    ///
+    /// This is what makes a tx permalink answerable: a reader comparing two
+    /// indexers wants to see the reading, not infer it from cell values. The
+    /// pool balances before and after are included precisely because they are
+    /// what a disagreement is settled with.
+    pub fn trade_by_txid(&self, txid: &[u8; 32]) -> Result<Option<(CovenantId, crate::tokens::TokenTradeRow)>> {
+        self.conn
+            .query_row(
+                "SELECT token_id, seq, txid, market_covenant_id, side, base_amount, quote_sompi,
+                        kas_before_sompi, kas_after_sompi, base_before, base_after,
+                        co_covenants, accepting_daa, accepting_time_ms
+                 FROM token_trades WHERE txid = ?1 LIMIT 1",
+                [txid.as_slice()],
+                |r| {
+                    Ok((
+                        CovenantId(r.get(0)?),
+                        crate::tokens::TokenTradeRow {
+                            seq: r.get::<_, i64>(1)? as u64,
+                            txid: crate::TxId(r.get(2)?),
+                            market_covenant_id: CovenantId(r.get(3)?),
+                            side: r.get(4)?,
+                            base_amount: r.get(5)?,
+                            quote_sompi: r.get(6)?,
+                            kas_before_sompi: r.get(7)?,
+                            kas_after_sompi: r.get(8)?,
+                            base_before: r.get(9)?,
+                            base_after: r.get(10)?,
+                            co_covenants: r.get(11)?,
+                            accepting_daa: r.get::<_, i64>(12)? as u64,
+                            accepting_time_ms: r.get(13)?,
+                        },
+                    ))
+                },
+            )
+            .optional()
+            .map_err(db_err)
     }
 
     /// Which decoded tokens this key holds, and how much of each.

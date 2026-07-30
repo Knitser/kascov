@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-art';
+} from './core/format.js?v=20260730-txtrade';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-art';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-art';
-import { createPendingModel } from './core/pending.js?v=20260729-art';
+} from './core/state.js?v=20260730-txtrade';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-txtrade';
+import { createPendingModel } from './core/pending.js?v=20260730-txtrade';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,12 +35,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-art';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-art';
-import { createRefreshGate } from './core/refresh.js?v=20260729-art';
-import { networkRouteHash } from './core/routing.js?v=20260729-art';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-art';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-art';
+} from './core/data.js?v=20260730-txtrade';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-txtrade';
+import { createRefreshGate } from './core/refresh.js?v=20260730-txtrade';
+import { networkRouteHash } from './core/routing.js?v=20260730-txtrade';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-txtrade';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-txtrade';
 
 
 
@@ -4686,6 +4686,13 @@ function tokenFieldChips(fields) {
    a stated reason, never a blank — and there is deliberately NO market cap
    here: a marginal price times supply overstates what could actually be taken
    out, and kascov does not publish numbers it can prove wrong. */
+/* How many verified trades the market table shows. V asked for a bigger list
+   than the last handful, so it starts at 12 and expands to everything the
+   payload carries. The cap is stated rather than hidden: older trades exist,
+   they are simply not in this page's payload yet. */
+const TRADES_COLLAPSED = 12;
+let tradesExpanded = false;
+
 function marketSectionHtml(m, trades, network, toMs) {
   if (!m) return '';
   if (m.phase === 'lp shares') return lpSharesSectionHtml(m, network);
@@ -4730,7 +4737,8 @@ function marketSectionHtml(m, trades, network, toMs) {
       ? `<p class="dim market-prog">pool program verified from its own committed bytes: ${esc(fmtInt(m.program.exercised_trades))} trades replayed against its constant-product formula, reserves read from its own state block${m.program.invariant_ok ? '' : ' — INVARIANT VIOLATION, nothing priced'}.</p>`
       : '';
   let tradesHtml = '';
-  const rows = Array.isArray(trades) ? trades.filter((t) => t.co_covenants === 0).slice(0, 12) : [];
+  const publishable = Array.isArray(trades) ? trades.filter((t) => t.co_covenants === 0) : [];
+  const rows = tradesExpanded ? publishable : publishable.slice(0, TRADES_COLLAPSED);
   if (rows.length) {
     tradesHtml = `<div class="tokens-tablewrap"><table class="tokens-table market-trades">` +
       `<thead><tr><th>side</th><th>KAS</th><th>tokens</th><th>price (KAS)</th><th>when</th></tr></thead><tbody>` +
@@ -4742,6 +4750,14 @@ function marketSectionHtml(m, trades, network, toMs) {
           `<td class="mono">${esc(fmtPriceKas(t.quote_sompi, t.base_amount))}</td>` +
           `<td>${ms != null ? esc(relTimeShort(ms)) : `DAA ${esc(fmtInt(t.accepting_daa))}`}</td></tr>`;
       }).join('') + `</tbody></table></div>`;
+    if (publishable.length > TRADES_COLLAPSED) {
+      tradesHtml += tradesExpanded
+        ? `<p class="timeline-more"><button type="button" class="btn btn-quiet" data-action="trades-less">` +
+          `show fewer</button> <span class="dim">all ${esc(fmtInt(publishable.length))} trades in this page’s payload; ` +
+          `older ones exist on chain and are not loaded here.</span></p>`
+        : `<p class="timeline-more"><button type="button" class="btn btn-quiet" data-action="trades-more">` +
+          `show all ${esc(fmtInt(publishable.length))} trades</button></p>`;
+    }
   }
   if (!tiles.length && !whyLine && !tradesHtml) return '';
   const tilesHtml = tiles.length
@@ -6289,6 +6305,47 @@ function renderTxPage(route) {
 
   /* token actions — the same conservative wording as token-page timelines:
      amounts are the cells' full decoded state amounts, never net deltas */
+  /* How kascov reads this transaction as a trade, stated in plain words.
+     A tx permalink is what two indexers settle a disagreement with, so it has
+     to say the reading outright: which side, how much KAS, how many tokens,
+     and what the pool held before and after. Leaving a reader to infer that
+     from cell values is how disagreements stay unresolved. */
+  let tradeSection = '';
+  if (d.trade) {
+    const tr = d.trade;
+    const kas = Number(tr.quote_sompi) / 1e8;
+    const tok = Number(tr.base_amount);
+    const price = tok ? (kas / tok) : null;
+    const dir = tr.side === 'buy' ? 'bought' : 'sold';
+    const arrow = tr.side === 'buy'
+      ? `${fmtInt(kas.toFixed(2))} KAS in → ${fmtInt(tok)} tokens out`
+      : `${fmtInt(tok)} tokens in → ${fmtInt(kas.toFixed(2))} KAS out`;
+    tradeSection =
+      `<section aria-label="Trade"><h2>kascov reads this as a ${esc(tr.side)}</h2>` +
+      `<div class="lane-stats token-stats">` +
+      `<div class="stat"><span class="stat-n">${esc(tr.side)}</span><span class="stat-label">side</span></div>` +
+      `<div class="stat"><span class="stat-n">${esc(fmtAmount(tr.quote_sompi, network))}</span><span class="stat-label">KAS moved</span></div>` +
+      `<div class="stat"><span class="stat-n">${esc(fmtInt(tok))}</span><span class="stat-label">tokens moved</span></div>` +
+      (price ? `<div class="stat"><span class="stat-n">${esc(price < 1 ? price.toFixed(6) : price.toFixed(4))}</span><span class="stat-label">price in KAS</span></div>` : '') +
+      `</div>` +
+      `<p class="dim">someone ${esc(dir)} <a href="#/${esc(network)}/token/${esc(tr.token_id)}">${esc(tr.token_name || friendlyName(tr.token_id))}</a>: ` +
+      `${esc(arrow)}.</p>` +
+      `<div class="tokens-tablewrap"><table class="tokens-table">` +
+      `<thead><tr><th>the pool</th><th>before</th><th>after</th></tr></thead><tbody>` +
+      `<tr><td>KAS held</td><td class="mono">${esc(fmtAmount(tr.kas_before_sompi, network))}</td>` +
+        `<td class="mono">${esc(fmtAmount(tr.kas_after_sompi, network))}</td></tr>` +
+      `<tr><td>tokens held</td><td class="mono">${esc(fmtInt(tr.base_before))}</td>` +
+        `<td class="mono">${esc(fmtInt(tr.base_after))}</td></tr>` +
+      `</tbody></table></div>` +
+      `<p class="dim">both figures come from this transaction alone: the KAS the ` +
+      `<a href="#/${esc(network)}/pool/${esc(tr.market_covenant_id)}">market covenant</a> spent here against the KAS it ` +
+      `recreated here. kascov keeps no running reserve, so a deposit or withdrawal elsewhere cannot leak into this ` +
+      `trade's size or direction. it is admitted as a trade only because the KAS and the tokens moved in ` +
+      `<strong>opposite</strong> directions, which is what a swap is and what a liquidity change is not.` +
+      (tr.co_covenants ? ` ${esc(fmtInt(tr.co_covenants))} other covenant(s) moved in the same transaction.` : '') +
+      `</p></section>`;
+  }
+
   const acts = Array.isArray(d.token_actions) ? d.token_actions : [];
   let tokenSection = '';
   if (acts.length) {
@@ -6358,7 +6415,7 @@ function renderTxPage(route) {
       `<i aria-hidden="true">→</i><span><strong>${fmtInt(created.length)}</strong><small>created cell${created.length === 1 ? '' : 's'}</small></span>` +
       `</div>`
     : '';
-  view.innerHTML = back + header + story + flow + eventsSection + tokenSection + cellsSection;
+  view.innerHTML = back + header + story + flow + eventsSection + tradeSection + tokenSection + cellsSection;
 }
 
 /* ---------------------------------------------------------------- routing */
@@ -7657,6 +7714,16 @@ const ACTIONS = {
 
   'retry-lane'(el) {
     render(); /* failed lane loads are never cached — this refetches */
+  },
+
+  'trades-more'() {
+    tradesExpanded = true;
+    render();
+  },
+
+  'trades-less'() {
+    tradesExpanded = false;
+    render();
   },
 
   'nav-back'() {

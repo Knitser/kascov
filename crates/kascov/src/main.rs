@@ -4784,7 +4784,10 @@ async fn token_handler(
                 serde_json::Value::Null
             },
             "trades": store
-                .token_trades_page(&token_id, 100)?
+                // 250 keeps a busy token's recent history browsable without
+                // making every token page carry a huge payload. The UI states
+                // that older trades exist beyond this page.
+                .token_trades_page(&token_id, 250)?
                 .iter()
                 .map(|tr| serde_json::to_value(tr))
                 .collect::<std::result::Result<Vec<_>, _>>()?,
@@ -7305,7 +7308,7 @@ async fn tx_handler(
             .collect();
         // One tx is accepted by exactly one chain block, so every event row
         // shares the anchor — read it off the first.
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "txid": txid,
             "covenant_id": ids[0],
             "covenant_ids": ids,
@@ -7315,6 +7318,25 @@ async fn tx_handler(
             "cells": { "created": created, "spent": spent },
             "token_actions": token_actions,
         });
+        // How kascov reads this transaction as a trade, when it admitted one.
+        // The whole value of a tx permalink in a cross-indexer disagreement is
+        // that it states the reading plainly instead of leaving the reader to
+        // infer it from cell values.
+        if let Some((token_id, tr)) = store.trade_by_txid(&txid.0)? {
+            out["trade"] = serde_json::json!({
+                "token_id": token_id,
+                "token_name": og::friendly_name(&token_id.to_string()),
+                "market_covenant_id": tr.market_covenant_id,
+                "side": tr.side,
+                "quote_sompi": tr.quote_sompi,
+                "base_amount": tr.base_amount,
+                "kas_before_sompi": tr.kas_before_sompi,
+                "kas_after_sompi": tr.kas_after_sompi,
+                "base_before": tr.base_before,
+                "base_after": tr.base_after,
+                "co_covenants": tr.co_covenants,
+            });
+        }
         Ok(Some(serde_json::to_string(&out)?))
     })
     .await;
