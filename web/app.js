@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260730-kinds';
+} from './core/format.js?v=20260730-addrtrades';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260730-kinds';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-kinds';
-import { createPendingModel } from './core/pending.js?v=20260730-kinds';
+} from './core/state.js?v=20260730-addrtrades';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-addrtrades';
+import { createPendingModel } from './core/pending.js?v=20260730-addrtrades';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -36,12 +36,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260730-kinds';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-kinds';
-import { createRefreshGate } from './core/refresh.js?v=20260730-kinds';
-import { networkRouteHash } from './core/routing.js?v=20260730-kinds';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-kinds';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-kinds';
+} from './core/data.js?v=20260730-addrtrades';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-addrtrades';
+import { createRefreshGate } from './core/refresh.js?v=20260730-addrtrades';
+import { networkRouteHash } from './core/routing.js?v=20260730-addrtrades';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-addrtrades';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-addrtrades';
 
 
 
@@ -4423,16 +4423,43 @@ function renderAddress(route) {
       `<thead><tr><th>token</th><th>balance</th><th>share of supply</th><th>cells</th><th>as</th></tr></thead>` +
       `<tbody>${rowsHtml}</tbody></table></div></section>`;
   }
-  const nothingAtAll = !rows.length && !holdings.length;
+  /* What this key TRADED. Someone who bought and sold out holds nothing and
+     owns no covenant, so both sections above are empty and the page used to
+     read as "nothing here" for a wallet with dozens of trades. Trading is its
+     own index and gets its own section. */
+  const myTrades = Array.isArray(data.trades) ? data.trades : [];
+  let tradeHtml = '';
+  if (myTrades.length) {
+    const trs = myTrades.map((t) => {
+      const ms = t.accepting_time_ms != null ? t.accepting_time_ms : toMs(t.accepting_daa);
+      return `<tr>` +
+        `<td class="${t.side === 'buy' ? 'trade-buy' : 'trade-sell'}">${esc(t.side)}</td>` +
+        `<td><a class="token-coin" href="#/${esc(network)}/token/${esc(t.token_id)}">${esc(t.token_name || friendlyName(t.token_id))}</a></td>` +
+        `<td class="mono">${esc(fmtAmount(t.quote_sompi, network))}</td>` +
+        `<td class="mono">${esc(fmtInt(t.base_amount))}</td>` +
+        `<td class="mono">${esc(fmtPriceKas(t.quote_sompi, t.base_amount))}</td>` +
+        `<td><a href="#/${esc(network)}/tx/${esc(t.txid)}">${ms != null ? esc(relTimeShort(ms)) : `DAA ${esc(fmtInt(t.accepting_daa))}`}</a></td>` +
+        `</tr>`;
+    }).join('');
+    tradeHtml = `<section aria-label="Trades"><h2>trades</h2>` +
+      `<p class="dim">every trade this key took the other side of, newest first. ` +
+      `a key can trade without ever holding a balance afterwards, which is why this ` +
+      `can be full while the sections above are empty.</p>` +
+      `<div class="tokens-tablewrap"><table class="tokens-table">` +
+      `<thead><tr><th>side</th><th>token</th><th>KAS</th><th>tokens</th><th>price (KAS)</th><th>when</th></tr></thead>` +
+      `<tbody>${trs}</tbody></table></div></section>`;
+  }
+  if (myTrades.length) bits.push(`${fmtInt(myTrades.length)} trade${myTrades.length === 1 ? '' : 's'}`);
+  const nothingAtAll = !rows.length && !holdings.length && !myTrades.length;
   view.innerHTML = back + `<header class="page-head addr-head"><h1>address</h1>` +
     headChip(null, data.address) +
     (data.pubkey !== q.toLowerCase() ? headChip('pubkey', data.pubkey) : '') +
     `<p class="page-sub">${bits.map(esc).join(' · ')} <span class="dim">on ${esc(net.label)}</span> ${usdToggleHtml()}</p></header>` +
-    holdHtml +
+    holdHtml + tradeHtml +
     (rows.length ? `<div class="coin-grid">${cards}</div>` : '') +
     (nothingAtAll
       ? `<div class="empty-card"><h2>this address hasn’t touched any smart coins we’ve seen.</h2>` +
-        `<p class="dim">kascov matches p2pk covenant states and covenant-token balances — plain KAS payments to this address don’t appear here, and covenants with richer scripts may not name their owner.</p></div>`
+        `<p class="dim">kascov indexes three things against a key: covenant states it owns, covenant-token balances it holds, and trades it took the other side of. this key appears in none of them. plain KAS payments never appear here, and covenants with richer scripts may not name their owner.</p></div>`
       : '');
 }
 

@@ -939,6 +939,7 @@ impl Store {
             // a no-op on an existing one, so every deployed database needs the
             // ALTER too, and any index over them must come AFTER it.
             "ALTER TABLE token_trades ADD COLUMN counterparty TEXT",
+            "CREATE INDEX IF NOT EXISTS tt_by_counterparty ON token_trades(counterparty, seq DESC)",
             "ALTER TABLE market_programs ADD COLUMN program_len INTEGER",
             "ALTER TABLE market_programs ADD COLUMN program_pushes INTEGER",
             "CREATE INDEX IF NOT EXISTS mp_shape ON market_programs(program_len, program_pushes)
@@ -3971,6 +3972,64 @@ impl Store {
             )
             .map_err(db_err)?;
         self.derive_tokens_if_stale()
+    }
+
+    /// Every trade this key took the other side of, newest first.
+    ///
+    /// An address that bought and then sold out holds nothing, so a holdings
+    /// lookup finds nothing and the page looked empty for someone with real
+    /// history. Trading is a third index, alongside covenant ownership and
+    /// token balances, and a key can appear in any combination of them.
+    ///
+    /// Types 0x00 and 0x03 are the same x-only key, so both prefixes are asked
+    /// for; the counterparty is stored in the RAW hex(type || key) form.
+    pub fn trades_by_key(&self, pubkey: &[u8], limit: u32) -> Result<Vec<(CovenantId, crate::tokens::TokenTradeRow)>> {
+        let x_only = if pubkey.len() == 33 { &pubkey[1..] } else { pubkey };
+        if x_only.len() != 32 {
+            return Ok(Vec::new());
+        }
+        let hex_key = hex::encode(x_only);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT token_id, seq, txid, market_covenant_id, side, base_amount, quote_sompi,
+                        kas_before_sompi, kas_after_sompi, base_before, base_after,
+                        co_covenants, accepting_daa, accepting_time_ms, counterparty
+                 FROM token_trades
+                 WHERE counterparty IN (?1, ?2)
+                 ORDER BY accepting_daa DESC, seq DESC
+                 LIMIT ?3",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(
+                params![format!("00{hex_key}"), format!("03{hex_key}"), limit],
+                |r| {
+                    Ok((
+                        CovenantId(r.get(0)?),
+                        crate::tokens::TokenTradeRow {
+                            seq: r.get::<_, i64>(1)? as u64,
+                            txid: crate::TxId(r.get(2)?),
+                            market_covenant_id: CovenantId(r.get(3)?),
+                            side: r.get(4)?,
+                            base_amount: r.get(5)?,
+                            quote_sompi: r.get(6)?,
+                            kas_before_sompi: r.get(7)?,
+                            kas_after_sompi: r.get(8)?,
+                            base_before: r.get(9)?,
+                            base_after: r.get(10)?,
+                            co_covenants: r.get(11)?,
+                            accepting_daa: r.get::<_, i64>(12)? as u64,
+                            accepting_time_ms: r.get(13)?,
+                            counterparty: r.get(14)?,
+                        },
+                    ))
+                },
+            )
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
     }
 
     /// How many verified trades this token has, so a UI can offer "all of

@@ -7618,6 +7618,20 @@ async fn addr_handler(
         // can own millions of a token without ever being the p2pk owner of a
         // covenant cell, so an address that looks empty above may still hold
         // plenty here. Both are proven from chain.
+        // Trading is a THIRD index. A key that bought and sold out owns no
+        // covenant and holds no balance, so both lookups above come back empty
+        // and the page read as "nothing here" for someone with real history.
+        let trades: Vec<serde_json::Value> = store
+            .trades_by_key(&pubkey, 100)?
+            .iter()
+            .map(|(token_id, tr)| {
+                let mut v = trade_json(tr, network)?;
+                let id_hex = token_id.to_string();
+                v["token_id"] = serde_json::json!(id_hex);
+                v["token_name"] = serde_json::json!(og::friendly_name(&id_hex));
+                Ok(v)
+            })
+            .collect::<std::result::Result<Vec<_>, serde_json::Error>>()?;
         let holdings: Vec<serde_json::Value> = store
             .token_holdings_for_pubkey(&pubkey)?
             .into_iter()
@@ -7676,6 +7690,7 @@ async fn addr_handler(
             "covenants_total": total,
             "covenants": covenants,
             "token_holdings": holdings,
+            "trades": trades,
         }))?))
     })
     .await
