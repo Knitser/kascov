@@ -6,8 +6,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  buildEntryEmbed, pendingEntries, stampOf,
+  buildEntryEmbed, pendingEntries, postEmbed, stampOf,
 } from '../scripts/discord-changelog-bot.mjs';
+
+/* A fake Discord that answers with a scripted list of responses. */
+const fakeDiscord = (...statuses) => {
+  const calls = [];
+  const impl = async (url, opts) => {
+    calls.push({ url, body: opts.body });
+    const s = statuses[calls.length - 1] ?? 200;
+    if (s === 429) {
+      return { ok: false, status: 429, json: async () => ({ retry_after: 0.4 }), text: async () => '' };
+    }
+    return { ok: s < 300, status: s, json: async () => ({}), text: async () => 'boom' };
+  };
+  return { impl, calls };
+};
 
 /* newest first, exactly as changelog.json is served */
 const FEED = [
@@ -55,6 +69,41 @@ test('a body too long for Discord is truncated rather than rejected', () => {
   const e = buildEntryEmbed({ date: '2026-07-30', title: 't', body: 'x'.repeat(5000) });
   assert.ok(e.description.length <= 4000);
   assert.match(e.description, /\.\.\.$/);
+});
+
+test('a rate limit is waited out and the same message resent, not dropped', async () => {
+  const { impl, calls } = fakeDiscord(429, 200);
+  const waited = [];
+  await postEmbed({ title: 't' }, {
+    webhook: 'https://example.invalid/w',
+    fetchImpl: impl,
+    sleepImpl: async (ms) => { waited.push(ms); },
+  });
+  assert.equal(calls.length, 2);                 // it was resent
+  assert.equal(calls[0].body, calls[1].body);    // and it was the SAME message
+  assert.ok(waited[0] >= 400);                   // honoured retry_after (0.4s)
+});
+
+test('a 429 that never clears eventually gives up rather than looping', async () => {
+  const { impl, calls } = fakeDiscord(429, 429, 429, 429, 429);
+  await assert.rejects(
+    postEmbed({ title: 't' }, {
+      webhook: 'https://example.invalid/w', fetchImpl: impl, sleepImpl: async () => {},
+    }),
+    /kept rate limiting/,
+  );
+  assert.equal(calls.length, 4);
+});
+
+test('a real error is thrown, never retried into a double post', async () => {
+  const { impl, calls } = fakeDiscord(400);
+  await assert.rejects(
+    postEmbed({ title: 't' }, {
+      webhook: 'https://example.invalid/w', fetchImpl: impl, sleepImpl: async () => {},
+    }),
+    /discord POST 400/,
+  );
+  assert.equal(calls.length, 1);
 });
 
 test('a malformed feed is survived, never thrown on', () => {

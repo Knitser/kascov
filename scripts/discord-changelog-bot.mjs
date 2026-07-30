@@ -34,6 +34,10 @@ const STATE_PATH = process.env.KASCOV_CHANGELOG_STATE
   || new URL('../.kascov-changelog-bot.json', import.meta.url).pathname;
 const DRY = process.argv.includes('--dry-run');
 const REPLAY = Number((process.argv.find((a) => a.startsWith('--replay=')) || '').split('=')[1] || 0);
+/* Discord allows roughly 30 webhook messages a minute per channel. 2.5s is 24
+   a minute, which leaves headroom and matters only when back-filling history:
+   a normal run posts nothing or one thing, so a slower default costs nothing. */
+const DELAY_MS = Number(process.env.KASCOV_CHANGELOG_DELAY_MS || 2500);
 
 const MINT = 0x70c7ba;
 
@@ -97,6 +101,37 @@ async function retrying(label, attempt, { retryNetworkErrors = true } = {}) {
   throw last;
 }
 
+/**
+ * Send one embed, honouring Discord's rate limiter.
+ *
+ * A 429 is not a failure here, it is the server stating the pace. Retrying it
+ * is safe in a way that retrying a timeout is not: Discord explicitly REJECTED
+ * the message, so re-sending cannot double-post. A timed-out request has an
+ * unknown outcome, which is why those are still never retried.
+ */
+export async function postEmbed(embed, { webhook = WEBHOOK, fetchImpl = fetch, sleepImpl = sleep } = {}) {
+  const body = JSON.stringify({ embeds: [embed] });
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const res = await fetchImpl(webhook, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    if (res.ok) return;
+    if (res.status === 429) {
+      let wait = 5;
+      try {
+        wait = Number((await res.json())?.retry_after) || 5; /* seconds, may be fractional */
+      } catch { /* a non-JSON 429 body; the default stands */ }
+      console.error(`rate limited, waiting ${wait}s`);
+      await sleepImpl(Math.min(wait * 1000 + 250, 60_000));
+      continue;
+    }
+    throw new Error(`discord POST ${res.status}: ${String(await res.text()).slice(0, 200)}`);
+  }
+  throw new Error('discord kept rate limiting after 4 attempts');
+}
+
 async function loadState() {
   try {
     const raw = JSON.parse(await readFile(STATE_PATH, 'utf8'));
@@ -155,19 +190,12 @@ async function main() {
     if (DRY) {
       console.log(`[dry-run] ${embed.footer.text} — ${embed.title}`);
     } else {
-      // No retry on a send: a timeout leaves the outcome unknown and a repeat
-      // would double-post into a channel people are reading.
-      const post = await fetch(WEBHOOK, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ embeds: [embed] }),
-      });
-      if (!post.ok) {
-        throw new Error(`discord POST ${post.status}: ${(await post.text()).slice(0, 200)}`);
-      }
-      // Only mark it seen once Discord actually took it.
-      await sleep(1200); // stay well under the webhook rate limit
+      // A rejected send is retried; a timed-out one never is, because its
+      // outcome is unknown and a repeat lands twice in a channel people read.
+      await postEmbed(embed);
+      await sleep(DELAY_MS);
     }
+    // Only marked seen once Discord actually took it.
     seen.add(stampOf(e));
     await saveState(seen);
   }
