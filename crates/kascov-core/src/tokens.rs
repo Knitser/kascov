@@ -144,6 +144,9 @@ pub struct TokenTradeRow {
     pub accepting_daa: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepting_time_ms: Option<i64>,
+    /// Who took the other side, when exactly one key owner did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counterparty: Option<String>,
 }
 
 /// One holder of a token: aggregated over live hash-proven cells.
@@ -511,6 +514,8 @@ struct TradeRow {
     blue_score: Option<i64>,
     tx_index: Option<u64>,
     time_ms: Option<i64>,
+    /// Who took the other side, when exactly one key owner did.
+    counterparty: Option<String>,
 }
 
 /// D1-D4 of the trade design, over states that are ALREADY hash-proven.
@@ -553,6 +558,22 @@ fn extract_trade_candidate(
         .map(|(k, v)| (*k, *v))
         .collect();
     let [(market_key, d_tok)] = movers.as_slice() else { return Ok(None) };
+    // WHO traded. The market took one side; the counterparty is the single
+    // non-covenant owner that took the other. More than one and it is
+    // ambiguous (a batched settlement moves several), so it stays NULL rather
+    // than guessing: an identity column that is sometimes wrong is worse than
+    // one that is sometimes blank.
+    let counterparty: Option<String> = {
+        let others: Vec<&str> = delta
+            .iter()
+            .filter(|(k, v)| !k.starts_with("02") && **v != 0 && (**v > 0) != (*d_tok > 0))
+            .map(|(k, _)| *k)
+            .collect();
+        match others.as_slice() {
+            [one] => Some((*one).to_string()),
+            _ => None,
+        }
+    };
     let Ok(market_bytes) = hex::decode(&market_key[2..]) else { return Ok(None) };
     let Ok(market) = <[u8; 32]>::try_from(market_bytes.as_slice()) else { return Ok(None) };
 
@@ -637,6 +658,7 @@ fn extract_trade_candidate(
         blue_score,
         tx_index,
         time_ms,
+        counterparty,
     }))
 }
 
@@ -1261,8 +1283,8 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
                 "INSERT INTO token_trades (token_id, seq, txid, market_covenant_id, side,
                      base_amount, quote_sompi, kas_before_sompi, kas_after_sompi,
                      base_before, base_after, co_covenants, accepting_daa,
-                     accepting_blue_score, tx_index, accepting_time_ms)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                     accepting_blue_score, tx_index, accepting_time_ms, counterparty)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             )
             .map_err(db_err)?;
         for t in &trade_rows {
@@ -1284,6 +1306,7 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
                     t.blue_score,
                     t.tx_index,
                     t.time_ms,
+                    t.counterparty.as_deref(),
                 ])
                 .map_err(db_err)?;
         }
@@ -1509,7 +1532,7 @@ pub(crate) fn token_trades_page(
         .prepare(
             "SELECT seq, txid, market_covenant_id, side, base_amount, quote_sompi,
                     kas_before_sompi, kas_after_sompi, base_before, base_after,
-                    co_covenants, accepting_daa, accepting_time_ms
+                    co_covenants, accepting_daa, accepting_time_ms, counterparty
              FROM token_trades WHERE token_id = ?1 ORDER BY seq DESC LIMIT ?2",
         )
         .map_err(db_err)?;
@@ -1530,6 +1553,7 @@ pub(crate) fn token_trades_page(
                 co_covenants: r.get(10)?,
                 accepting_daa: r.get(11)?,
                 accepting_time_ms: r.get(12)?,
+                counterparty: r.get(13)?,
             })
         })
         .map_err(db_err)?

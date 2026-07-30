@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260730-wallets';
+} from './core/format.js?v=20260730-who';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260730-wallets';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-wallets';
-import { createPendingModel } from './core/pending.js?v=20260730-wallets';
+} from './core/state.js?v=20260730-who';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-who';
+import { createPendingModel } from './core/pending.js?v=20260730-who';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -36,12 +36,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260730-wallets';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-wallets';
-import { createRefreshGate } from './core/refresh.js?v=20260730-wallets';
-import { networkRouteHash } from './core/routing.js?v=20260730-wallets';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-wallets';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-wallets';
+} from './core/data.js?v=20260730-who';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-who';
+import { createRefreshGate } from './core/refresh.js?v=20260730-who';
+import { networkRouteHash } from './core/routing.js?v=20260730-who';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-who';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-who';
 
 
 
@@ -4747,13 +4747,18 @@ function marketSectionHtml(m, trades, network, toMs, tokenId = '', tradesTotal =
   const grandTotal = tradesTotal != null ? tradesTotal : publishable.length;
   if (rows.length) {
     tradesHtml = `<div class="tokens-tablewrap"><table class="tokens-table market-trades">` +
-      `<thead><tr><th>side</th><th>KAS</th><th>tokens</th><th>price (KAS)</th><th>when</th></tr></thead><tbody>` +
+      `<thead><tr><th>side</th><th>KAS</th><th>tokens</th><th>price (KAS)</th>` +
+      `<th title="the single key owner that took the other side of this trade. blank when several moved in one transaction, because naming the wrong trader is worse than naming none">who</th>` +
+      `<th>when</th></tr></thead><tbody>` +
       rows.map((t) => {
         const ms = t.accepting_time_ms != null ? t.accepting_time_ms : toMs(t.accepting_daa);
         return `<tr><td class="${t.side === 'buy' ? 'trade-buy' : 'trade-sell'}">${esc(t.side)}</td>` +
           `<td class="mono">${esc(fmtAmount(t.quote_sompi, network))}</td>` +
           `<td class="mono">${esc(fmtInt(t.base_amount))}</td>` +
           `<td class="mono">${esc(fmtPriceKas(t.quote_sompi, t.base_amount))}</td>` +
+          `<td>${t.counterparty
+              ? tokenOwnerLink(network, t.counterparty, t.counterparty_address || null)
+              : '<span class="dim" title="several key owners moved in this transaction, so kascov will not name one">—</span>'}</td>` +
           `<td>${ms != null ? esc(relTimeShort(ms)) : `DAA ${esc(fmtInt(t.accepting_daa))}`}</td></tr>`;
       }).join('') + `</tbody></table></div>`;
     if (grandTotal > TRADES_COLLAPSED) {

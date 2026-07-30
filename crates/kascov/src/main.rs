@@ -4679,7 +4679,11 @@ async fn token_trades_handler(
         let store = kascov_core::store::Store::open(&db, network)?;
         // Bounded, but far above any real token's history so "all" means all.
         // If a token ever exceeds this the count below still tells the truth.
-        let rows = store.token_trades_page(&token_id, 20_000)?;
+        let rows = store
+            .token_trades_page(&token_id, 20_000)?
+            .iter()
+            .map(|tr| trade_json(tr, network))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(Some(serde_json::to_string(&serde_json::json!({
             "network": network.to_string(),
             "token_id": token_id,
@@ -4752,37 +4756,8 @@ async fn token_handler(
                     "cells": b.cells,
                 });
                 // A holder wants to see kaspa:qpelx… , not 32 bytes of hex.
-                // Types 0x00 (pubkey) and 0x03 (presence) are both x-only keys
-                // and encode to a real address; 0x01 (script) and 0x02
-                // (covenant) are not addresses and get none, rather than a
-                // plausible-looking string that resolves to nothing.
-                if let Some((kind, hex_key)) = display.split_once(':') {
-                    if matches!(kind, "presence" | "pubkey") {
-                        if let Ok(bytes) = hex::decode(hex_key) {
-                            if bytes.len() == 32 {
-                                row["owner_address"] = serde_json::json!(
-                                    kaspa_addresses::Address::new(
-                                        addr_prefix(network),
-                                        kaspa_addresses::Version::PubKey,
-                                        &bytes,
-                                    )
-                                    .to_string()
-                                );
-                            }
-                        }
-                    }
-                } else if let Ok(bytes) = hex::decode(&display) {
-                    // bare hex with no prefix is a 0x00 pubkey owner
-                    if bytes.len() == 32 {
-                        row["owner_address"] = serde_json::json!(
-                            kaspa_addresses::Address::new(
-                                addr_prefix(network),
-                                kaspa_addresses::Version::PubKey,
-                                &bytes,
-                            )
-                            .to_string()
-                        );
-                    }
+                if let Some(a) = owner_address(&display, network) {
+                    row["owner_address"] = serde_json::json!(a);
                 }
                 row
             })
@@ -4869,7 +4844,7 @@ async fn token_handler(
                 // the real number rather than the size of this page.
                 .token_trades_page(&token_id, 100)?
                 .iter()
-                .map(|tr| serde_json::to_value(tr))
+                .map(|tr| trade_json(tr, network))
                 .collect::<std::result::Result<Vec<_>, _>>()?,
             "balances": balances,
             "events": events,
@@ -7521,6 +7496,45 @@ async fn activity_handler(
         Ok(Some(serde_json::to_string(&build_activity_snapshot(&store, network, range)?)?))
     })
     .await
+}
+
+/// `hex(identifier_type || key)` to a kaspa: address, when the owner IS a key.
+/// Covenant (0x02) and script (0x01) owners are not addresses and get None
+/// rather than a plausible string that resolves to nothing.
+/// One trade as published, with the counterparty resolved to an address so a
+/// reader can identify who traded without leaving the page. This is the column
+/// that removes the "open three explorers to analyse one pool" problem.
+fn trade_json(
+    tr: &kascov_core::tokens::TokenTradeRow,
+    network: Network,
+) -> std::result::Result<serde_json::Value, serde_json::Error> {
+    let mut v = serde_json::to_value(tr)?;
+    if let Some(cp) = &tr.counterparty {
+        if let Some(a) = owner_address(cp, network) {
+            v["counterparty_address"] = serde_json::json!(a);
+        }
+    }
+    Ok(v)
+}
+
+fn owner_address(display: &str, network: Network) -> Option<String> {
+    let hex_key = match display.split_once(':') {
+        Some(("presence" | "pubkey", k)) => k,
+        Some(_) => return None,
+        None => display,
+    };
+    let bytes = hex::decode(hex_key).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    Some(
+        kaspa_addresses::Address::new(
+            addr_prefix(network),
+            kaspa_addresses::Version::PubKey,
+            &bytes,
+        )
+        .to_string(),
+    )
 }
 
 fn addr_prefix(network: Network) -> kaspa_addresses::Prefix {

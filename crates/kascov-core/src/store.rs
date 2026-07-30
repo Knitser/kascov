@@ -175,6 +175,11 @@ CREATE TABLE IF NOT EXISTS token_trades (
     base_before INTEGER NOT NULL,
     base_after INTEGER NOT NULL,
     co_covenants INTEGER NOT NULL,        -- other covenants moved by this tx
+    -- WHO traded: hex(identifier_type || owner_identifier) of the single
+    -- non-covenant owner whose token delta opposed the market's. NULL when
+    -- that is ambiguous (several key owners moved, e.g. a batched settlement),
+    -- because naming the wrong trader is worse than naming none.
+    counterparty TEXT,
     accepting_daa INTEGER NOT NULL,
     accepting_blue_score INTEGER,
     tx_index INTEGER,
@@ -933,6 +938,7 @@ impl Store {
             // SCHEMA only reach FRESH databases: CREATE TABLE IF NOT EXISTS is
             // a no-op on an existing one, so every deployed database needs the
             // ALTER too, and any index over them must come AFTER it.
+            "ALTER TABLE token_trades ADD COLUMN counterparty TEXT",
             "ALTER TABLE market_programs ADD COLUMN program_len INTEGER",
             "ALTER TABLE market_programs ADD COLUMN program_pushes INTEGER",
             "CREATE INDEX IF NOT EXISTS mp_shape ON market_programs(program_len, program_pushes)
@@ -3990,7 +3996,7 @@ impl Store {
             .query_row(
                 "SELECT token_id, seq, txid, market_covenant_id, side, base_amount, quote_sompi,
                         kas_before_sompi, kas_after_sompi, base_before, base_after,
-                        co_covenants, accepting_daa, accepting_time_ms
+                        co_covenants, accepting_daa, accepting_time_ms, counterparty
                  FROM token_trades WHERE txid = ?1 LIMIT 1",
                 [txid.as_slice()],
                 |r| {
@@ -4010,6 +4016,7 @@ impl Store {
                             co_covenants: r.get(11)?,
                             accepting_daa: r.get::<_, i64>(12)? as u64,
                             accepting_time_ms: r.get(13)?,
+                            counterparty: r.get(14)?,
                         },
                     ))
                 },
