@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260730-who';
+} from './core/format.js?v=20260730-kinds';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260730-who';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-who';
-import { createPendingModel } from './core/pending.js?v=20260730-who';
+} from './core/state.js?v=20260730-kinds';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-kinds';
+import { createPendingModel } from './core/pending.js?v=20260730-kinds';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -36,12 +36,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260730-who';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-who';
-import { createRefreshGate } from './core/refresh.js?v=20260730-who';
-import { networkRouteHash } from './core/routing.js?v=20260730-who';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-who';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-who';
+} from './core/data.js?v=20260730-kinds';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-kinds';
+import { createRefreshGate } from './core/refresh.js?v=20260730-kinds';
+import { networkRouteHash } from './core/routing.js?v=20260730-kinds';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-kinds';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-kinds';
 
 
 
@@ -5557,7 +5557,12 @@ const TOKEN_EVENTS_SHOWN = 6000;
 function ownerParts(owner) {
   const s = String(owner || '');
   const i = s.indexOf(':');
-  if (i === -1) return { kind: null, hex: s.toLowerCase() };
+  if (i === -1) {
+    const hex = s.toLowerCase();
+    // 0x00 pubkey owners arrive as bare hex; name them rather than leaving
+    // them typeless, which also gets them the right bubble colour.
+    return { kind: /^[0-9a-f]{64}$/.test(hex) ? 'pubkey' : null, hex };
+  }
   return { kind: s.slice(0, i).toLowerCase(), hex: s.slice(i + 1).toLowerCase() };
 }
 
@@ -5587,7 +5592,14 @@ function tokenOwnerLink(network, pk, address = null) {
     ? esc(`${address.slice(0, 14)}…${address.slice(-6)}`)
     : esc(shortHex(hex, 8, 6));
   const title = address ? `${address}\n${hex}` : hex;
-  const tag = kind ? `<span class="owner-kind" title="the identifier type this coin's own state block declares">${esc(kind)}</span> ` : '';
+  /* Only tag what the address cannot say for itself. A kaspa: address already
+     announces a key, so printing "presence" beside every one of them is pure
+     width. A covenant or script owner has no address, and there the type is
+     the entire message. */
+  const isKey = kind === 'presence' || kind === 'pubkey' || (!kind && address);
+  const tag = (kind && !isKey)
+    ? `<span class="owner-kind" title="the identifier type this coin's own state block declares">${esc(kind)}</span> `
+    : '';
   const href = ownerHref(network, s);
   return href
     ? `${tag}<a class="mono" href="${esc(href)}" title="${esc(title)}">${label}</a>`

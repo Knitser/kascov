@@ -21,7 +21,12 @@ function ownerKey(owner) {
 function ownerKind(owner) {
   const key = ownerKey(owner);
   const split = key.indexOf(':');
-  return split === -1 ? 'other' : (key.slice(0, split) || 'other');
+  if (split !== -1) return key.slice(0, split) || 'other';
+  // A 0x00 pubkey owner is served as BARE hex with no prefix, unlike presence
+  // and covenant owners. Without this it fell through to 'other' and drew in
+  // the grey reserved for things kascov cannot identify, which is why a
+  // testnet token full of pubkey holders looked washed out next to mainnet.
+  return /^[0-9a-f]{64}$/.test(key) ? 'pubkey' : 'other';
 }
 
 function seedOf(text) {
