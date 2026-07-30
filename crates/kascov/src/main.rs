@@ -4745,11 +4745,46 @@ async fn token_handler(
             .token_balances(&token_id, limit)?
             .iter()
             .map(|b| {
-                serde_json::json!({
-                    "owner": kascov_core::tokens::owner_display(&b.owner),
+                let display = kascov_core::tokens::owner_display(&b.owner);
+                let mut row = serde_json::json!({
+                    "owner": display,
                     "balance": b.balance,
                     "cells": b.cells,
-                })
+                });
+                // A holder wants to see kaspa:qpelx… , not 32 bytes of hex.
+                // Types 0x00 (pubkey) and 0x03 (presence) are both x-only keys
+                // and encode to a real address; 0x01 (script) and 0x02
+                // (covenant) are not addresses and get none, rather than a
+                // plausible-looking string that resolves to nothing.
+                if let Some((kind, hex_key)) = display.split_once(':') {
+                    if matches!(kind, "presence" | "pubkey") {
+                        if let Ok(bytes) = hex::decode(hex_key) {
+                            if bytes.len() == 32 {
+                                row["owner_address"] = serde_json::json!(
+                                    kaspa_addresses::Address::new(
+                                        addr_prefix(network),
+                                        kaspa_addresses::Version::PubKey,
+                                        &bytes,
+                                    )
+                                    .to_string()
+                                );
+                            }
+                        }
+                    }
+                } else if let Ok(bytes) = hex::decode(&display) {
+                    // bare hex with no prefix is a 0x00 pubkey owner
+                    if bytes.len() == 32 {
+                        row["owner_address"] = serde_json::json!(
+                            kaspa_addresses::Address::new(
+                                addr_prefix(network),
+                                kaspa_addresses::Version::PubKey,
+                                &bytes,
+                            )
+                            .to_string()
+                        );
+                    }
+                }
+                row
             })
             .collect();
         // Over-fetch one delta row to learn whether another page exists, then

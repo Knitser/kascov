@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260730-alltrades';
+} from './core/format.js?v=20260730-wallets';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260730-alltrades';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-alltrades';
-import { createPendingModel } from './core/pending.js?v=20260730-alltrades';
+} from './core/state.js?v=20260730-wallets';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-wallets';
+import { createPendingModel } from './core/pending.js?v=20260730-wallets';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -36,12 +36,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260730-alltrades';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-alltrades';
-import { createRefreshGate } from './core/refresh.js?v=20260730-alltrades';
-import { networkRouteHash } from './core/routing.js?v=20260730-alltrades';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-alltrades';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-alltrades';
+} from './core/data.js?v=20260730-wallets';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-wallets';
+import { createRefreshGate } from './core/refresh.js?v=20260730-wallets';
+import { networkRouteHash } from './core/routing.js?v=20260730-wallets';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-wallets';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-wallets';
 
 
 
@@ -5568,16 +5568,25 @@ function ownerHref(network, owner) {
   return null; /* script owners are a hash with no page of their own */
 }
 
-function tokenOwnerLink(network, pk) {
+/* Show the wallet the way a holder recognises it. A raw 32-byte key is
+   unreadable and unsearchable anywhere else, so a reader had to bounce through
+   another explorer just to identify who they were looking at. When the owner is
+   a key, render its kaspa: address; when it is a covenant or a script hash,
+   there is no address and it keeps the hex rather than borrowing a format that
+   would resolve to nothing. */
+function tokenOwnerLink(network, pk, address = null) {
   const s = String(pk || '');
   if (!s) return '';
   const { kind, hex } = ownerParts(s);
-  const inner = esc(shortHex(hex, 8, 6));
+  const label = address
+    ? esc(`${address.slice(0, 14)}…${address.slice(-6)}`)
+    : esc(shortHex(hex, 8, 6));
+  const title = address ? `${address}\n${hex}` : hex;
   const tag = kind ? `<span class="owner-kind" title="the identifier type this coin's own state block declares">${esc(kind)}</span> ` : '';
   const href = ownerHref(network, s);
   return href
-    ? `${tag}<a class="mono" href="${esc(href)}" title="${esc(hex)}">${inner}</a>`
-    : `${tag}<span class="mono" title="${esc(hex)}">${inner}</span>`;
+    ? `${tag}<a class="mono" href="${esc(href)}" title="${esc(title)}">${label}</a>`
+    : `${tag}<span class="mono" title="${esc(title)}">${label}</span>`;
 }
 
 function tokenEventItem(ev, network, toMs) {
@@ -5952,7 +5961,7 @@ function renderTokenPage(route) {
       const share = base > 0 && typeof b.balance === 'number' ? (b.balance / base) * 100 : null;
       const pct = share != null ? (share >= 9.95 ? share.toFixed(0) : share.toFixed(1)) : null;
       return `<tr>` +
-        `<td>${tokenOwnerLink(network, b.owner)}</td>` +
+        `<td>${tokenOwnerLink(network, b.owner, b.owner_address || null)}</td>` +
         `<td class="tokens-supply" title="${esc(tokenAmountDisplay(b.balance, dec).title)}">${esc(tokenAmountDisplay(b.balance, dec).text)}</td>` +
         `<td class="token-share">${pct != null
           ? `<span class="lane-track token-share-track"><span class="lane-fill" style="width:${Math.max(Math.min(share, 100), 1).toFixed(1)}%"></span></span> ${esc(pct)}%`
