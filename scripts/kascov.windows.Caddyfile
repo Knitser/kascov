@@ -72,6 +72,14 @@ kascov.io {
 	handle @worker {
 		reverse_proxy 127.0.0.1:8080
 	}
+	# Discord interactions run as their own service on 8099, NOT in the worker,
+	# so the chain-facing process never holds a bot token. Discord signs every
+	# request and the service verifies it, so this being public is fine: an
+	# unsigned POST is answered 401 and nothing else happens.
+	@discord path /discord/*
+	handle @discord {
+		reverse_proxy 127.0.0.1:8099
+	}
 	handle {
 		root * C:/kascov/web
 		try_files {path} {path}.html {path}/ /index.html

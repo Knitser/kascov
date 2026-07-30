@@ -1,0 +1,12 @@
+[Unit]
+Description=Re-check verified holders every 6 hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+AccuracySec=5min
+Persistent=true
+Unit=kascov-holder-recheck.service
+
+[Install]
+WantedBy=timers.target

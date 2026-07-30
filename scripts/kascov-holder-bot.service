@@ -1,0 +1,26 @@
+[Unit]
+Description=kascov Discord holder verification (interactions endpoint)
+After=network-online.target kascov-worker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kascov
+WorkingDirectory=/home/kascov/kascov
+# Its own credential file, not the webhook one. A bot token can act as the bot
+# everywhere it is installed, so the price and changelog bots never load it.
+EnvironmentFile=/home/kascov/.discord-bot-env
+Environment=KASCOV_BOT_STATE=/home/kascov/kascov-holder-bot.json
+Environment=KASCOV_BOT_PORT=8099
+ExecStart=/usr/bin/node /home/kascov/kascov/scripts/discord-holder-bot.mjs
+# Discord retries an interaction that times out, so a crash must come back
+# fast or a member sees "the application did not respond".
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/kascov
+
+[Install]
+WantedBy=multi-user.target

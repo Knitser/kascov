@@ -1,0 +1,18 @@
+[Unit]
+Description=Re-prove every verified holder and drop anyone who sold out
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kascov
+WorkingDirectory=/home/kascov/kascov
+EnvironmentFile=/home/kascov/.discord-bot-env
+Environment=KASCOV_BOT_STATE=/home/kascov/kascov-holder-bot.json
+ExecStart=/usr/bin/node /home/kascov/kascov/scripts/discord-holder-bot.mjs --recheck
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/kascov
