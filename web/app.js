@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-owners';
+} from './core/format.js?v=20260729-tickers';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-owners';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-owners';
-import { createPendingModel } from './core/pending.js?v=20260729-owners';
+} from './core/state.js?v=20260729-tickers';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-tickers';
+import { createPendingModel } from './core/pending.js?v=20260729-tickers';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,12 +35,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-owners';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-owners';
-import { createRefreshGate } from './core/refresh.js?v=20260729-owners';
-import { networkRouteHash } from './core/routing.js?v=20260729-owners';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-owners';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-owners';
+} from './core/data.js?v=20260729-tickers';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-tickers';
+import { createRefreshGate } from './core/refresh.js?v=20260729-tickers';
+import { networkRouteHash } from './core/routing.js?v=20260729-tickers';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-tickers';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-tickers';
 
 
 
@@ -4356,14 +4356,29 @@ function renderAddress(route) {
      millions of a token and never be the p2pk owner of a covenant cell, which
      is why this page used to say "hasn't touched any smart coins" to someone
      holding 121M of one — the holder-bubble links landed here and dead-ended. */
+  /* The listed names and tickers come from the checked launchpad list, which
+     is a slower second source. Warm it once and repaint, so a holdings table
+     reads "Kron Token $KRON" rather than making the reader click through to
+     find out which coin they are looking at. */
+  warmRegistryOnce(network, 'address', () => renderAddress(route));
   const holdings = Array.isArray(data.token_holdings) ? data.token_holdings : [];
   let holdHtml = '';
   if (holdings.length) {
     const rowsHtml = holdings.map((h) => {
       const share = h.supply ? (h.balance / h.supply) * 100 : null;
       const pct = share != null ? (share >= 9.95 ? share.toFixed(0) : share.toFixed(1)) : null;
+      const chainName = h.name || friendlyName(h.token_id);
+      const listed = state.registry[network] && registryEntry(network, h.token_id);
+      /* A launchpad's name is a CLAIM; the coin id is the identity. Show the
+         claim first because it is what a reader recognises, and keep the
+         chain-derived name beside it so the two are never confused. */
+      const label = listed && (listed.name || listed.ticker)
+        ? `${esc(listed.name || chainName)}` +
+          (listed.ticker ? ` <span class="dim">$${esc(listed.ticker)}</span>` : '') +
+          ` <span class="dim token-alias">${esc(chainName)}</span>`
+        : esc(chainName);
       return `<tr>` +
-        `<td><a class="token-coin" href="#/${esc(network)}/token/${esc(h.token_id)}">${esc(h.name || friendlyName(h.token_id))}</a></td>` +
+        `<td><a class="token-coin" href="#/${esc(network)}/token/${esc(h.token_id)}">${label}</a></td>` +
         `<td class="mono tokens-supply">${esc(fmtTokenAmount(h.balance))}</td>` +
         `<td class="token-share">${pct != null
           ? `<span class="lane-track token-share-track"><span class="lane-fill" style="width:${Math.max(Math.min(share, 100), 1).toFixed(1)}%"></span></span> ${esc(pct)}%`
