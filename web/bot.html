@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>the kascov Discord bot — terms and privacy</title>
+  <meta name="description" content="What the kascov Discord bot does, what it stores, and what it will never ask you for.">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://kascov.io/bot">
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css?v=20260730-ui">
+  <style>
+    /* A standalone page, so it carries only what it needs on top of the
+       shared palette rather than pulling the app's whole layout. */
+    .doc { max-width: 780px; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+    .doc h1 { font-family: var(--display); font-size: clamp(1.9rem, 5vw, 2.6rem); margin: 0 0 .4rem; }
+    .doc h2 {
+      font-family: var(--display); font-size: 1.45rem; margin: 3rem 0 .75rem;
+      padding-top: 1.25rem; border-top: 1px solid var(--border);
+      /* the fragment links land here, so keep the heading clear of the top */
+      scroll-margin-top: 1.5rem;
+    }
+    .doc h3 { font-size: 1.05rem; margin: 1.75rem 0 .4rem; color: var(--text); }
+    .doc p, .doc li { color: var(--muted); line-height: 1.65; }
+    .doc li { margin: .35rem 0; }
+    .doc a { color: var(--accent); }
+    .doc code { font-family: var(--mono); font-size: .92em; color: var(--text); }
+    .lede { font-size: 1.08rem; color: var(--text); }
+    .updated { font-family: var(--mono); font-size: .82rem; color: var(--faint); letter-spacing: .04em; }
+    .never { border: 1px solid var(--burn); background: var(--burn-soft); border-radius: var(--radius-sm); padding: 1rem 1.25rem; margin: 1.5rem 0; }
+    .never strong { color: var(--burn); }
+    .keeps { border: 1px solid var(--border-strong); background: var(--accent-soft); border-radius: var(--radius-sm); padding: 1rem 1.25rem; margin: 1.5rem 0; }
+    .home { display: inline-flex; align-items: center; gap: .55rem; margin-bottom: 2rem; color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .85rem; }
+    .home:hover { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <main class="doc">
+    <a class="home" href="/">&larr; kascov.io</a>
+
+    <h1>the kascov Discord bot</h1>
+    <p class="lede">
+      It answers one question: does this Kaspa address really hold this token?
+      It checks a signature against the address&rsquo;s own key, reads the balance
+      from chain, and grants a role only if both hold up. Nothing is taken on
+      trust, including your word for it.
+    </p>
+    <p class="updated">last updated 2026-07-30</p>
+
+    <div class="never">
+      <p style="margin:0">
+        <strong>It will never ask you for a seed phrase, a private key, or a
+        wallet connection.</strong> Signing a message is free, moves nothing,
+        and cannot authorise a transaction. Anything asking for more is not us.
+        Check <a href="/">kascov.io</a> and the official links channel before
+        trusting any link that claims to be kascov.
+      </p>
+    </div>
+
+    <h2 id="terms">Terms</h2>
+
+    <h3>What it does</h3>
+    <p>
+      You ask the bot to verify an address. It gives you a one-time phrase
+      containing your Discord user id and a random nonce. You sign that phrase in
+      your own wallet and hand back the signature. The bot checks it against the
+      address you named, using the standard Kaspa personal-message scheme, then
+      reads that address&rsquo;s token balances from chain and grants the
+      <code>verified holder</code> role if a balance is there.
+    </p>
+    <p>
+      The check repeats on a schedule. The role reflects what you hold now, not
+      what you held once, so it is removed when the balance goes.
+    </p>
+
+    <h3>What it does not do</h3>
+    <ul>
+      <li>It does not move funds. It cannot: a signed message is not a transaction.</li>
+      <li>It does not read your messages, or anything in any other channel.</li>
+      <li>It does not give anyone influence over what kascov.io reports. Holding a
+          token buys a role, a vote on what gets audited next, and early access to
+          new tools. It does not buy a verdict, and asking for one is the fastest
+          way to lose the role.</li>
+    </ul>
+
+    <h3>No warranty</h3>
+    <p>
+      kascov is free, open source, and provided as is. It derives everything from
+      the Kaspa chain and publishes only what it can prove, but it is not
+      financial advice and it is not a guarantee. Verify anything that matters
+      yourself: every figure on the site links to the page that proves it, and the
+      source is at
+      <a href="https://github.com/Knitser/kascov" rel="noopener">github.com/Knitser/kascov</a>.
+    </p>
+
+    <h3>Losing access</h3>
+    <p>
+      The role can be removed if your balance goes, if you ask, or if you break
+      the server rules. Nothing else here is conditional on holding anything:
+      kascov.io stays free and open whether you hold a token or not.
+    </p>
+
+    <h2 id="privacy">Privacy</h2>
+
+    <div class="keeps">
+      <p style="margin:0 0 .5rem"><strong>Everything the bot stores about you:</strong></p>
+      <ul style="margin:0">
+        <li>your Discord user id</li>
+        <li>the Kaspa address you proved</li>
+        <li>the time you proved it</li>
+      </ul>
+    </div>
+
+    <p>
+      That is the whole record. It exists so the role can be re-checked later
+      without asking you to sign again, and so the same address cannot be claimed
+      by two different accounts.
+    </p>
+
+    <h3>What is not stored</h3>
+    <ul>
+      <li>No seed phrase, private key, or anything that could move funds. The bot
+          never receives one.</li>
+      <li>No message content. The bot only sees the commands you send it.</li>
+      <li>No email, no IP address, no analytics, no advertising identifiers.</li>
+      <li>The one-time phrase and its signature are used to check the proof and
+          then discarded. Neither is kept.</li>
+    </ul>
+
+    <h3>Who else sees it</h3>
+    <p>
+      Nobody. The record is not sold, shared, or sent anywhere. It lives on the
+      same server that runs kascov.io. Note that your Kaspa address and its
+      balances were already public on chain before any of this: the bot learns
+      which Discord account goes with an address, and that link is the only new
+      fact it holds.
+    </p>
+
+    <h3>Deleting it</h3>
+    <p>
+      Run <code>/unverify</code>. The row is deleted and the role removed, with
+      no record that it ever existed. You can verify again later with the same
+      address or a different one. Leaving the server has the same effect.
+    </p>
+
+    <h3>Analytics on the site</h3>
+    <p>
+      Separately from the bot: kascov.io measures its own traffic from its own
+      server logs. No analytics SDK, no cookie, no tracking pixel, no
+      third-party collector.
+    </p>
+
+    <h3>Contact</h3>
+    <p>
+      <a href="https://x.com/0xKnitser" rel="noopener">@0xKnitser</a> on X, or the
+      kascov Discord. Anything wrong on this page is a bug, so please say so.
+    </p>
+  </main>
+</body>
+</html>
