@@ -71,14 +71,32 @@ pub fn disassemble(script: &[u8]) -> (Vec<Instruction>, bool) {
         };
 
         match data_len {
-            None => out.push(Instruction { offset, opcode, name, group, data: None }),
+            None => out.push(Instruction {
+                offset,
+                opcode,
+                name,
+                group,
+                data: None,
+            }),
             Some(len) => {
                 let Some(data) = script.get(i..i + len) else {
-                    out.push(Instruction { offset, opcode, name, group, data: None });
+                    out.push(Instruction {
+                        offset,
+                        opcode,
+                        name,
+                        group,
+                        data: None,
+                    });
                     return (out, true);
                 };
                 i += len;
-                out.push(Instruction { offset, opcode, name, group, data: Some(data.to_vec()) });
+                out.push(Instruction {
+                    offset,
+                    opcode,
+                    name,
+                    group,
+                    data: Some(data.to_vec()),
+                });
             }
         }
     }
@@ -254,7 +272,16 @@ mod tests {
         let (instructions, truncated) = disassemble(&script);
         assert!(!truncated);
         let names: Vec<_> = instructions.iter().map(|i| i.name).collect();
-        assert_eq!(names, ["OpTxInputIndex", "OpInputCovenantId", "OpData", "OpEqualVerify", "OpTrue"]);
+        assert_eq!(
+            names,
+            [
+                "OpTxInputIndex",
+                "OpInputCovenantId",
+                "OpData",
+                "OpEqualVerify",
+                "OpTrue"
+            ]
+        );
         assert_eq!(instructions[1].group, OpGroup::Covenant);
         assert_eq!(instructions[2].data.as_deref(), Some([0x11; 32].as_slice()));
     }

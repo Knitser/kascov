@@ -7,15 +7,19 @@ use std::collections::{HashSet, VecDeque};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use futures::stream::{FuturesUnordered, StreamExt};
 use comfy_table::{presets::UTF8_FULL_CONDENSED, Table};
+use futures::stream::{FuturesUnordered, StreamExt};
 use kascov_core::detect::{covenant_sightings, CovenantSighting};
 use kascov_core::node::NodeHandle;
 use kascov_core::store::{ClaimedTokenMeta, Store};
 use kascov_core::{BlockHash, CovenantId, Network, TxId};
 
 #[derive(Parser)]
-#[command(name = "kascov", version, about = "Kaspa covenant explorer (Toccata / KIP-20)")]
+#[command(
+    name = "kascov",
+    version,
+    about = "Kaspa covenant explorer (Toccata / KIP-20)"
+)]
 struct Cli {
     /// wRPC (borsh) node url, e.g. ws://127.0.0.1:17210. Defaults to the public resolver.
     #[arg(long, global = true)]
@@ -114,23 +118,43 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info".into()),
-    ).with_writer(std::io::stderr).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
 
     let cli = Cli::parse();
     match cli.command {
         Command::Scan { last } => scan(&cli, last).await,
         Command::Sync { from, follow } => sync(&cli, from, follow, false).await,
         Command::List { limit } => list(&cli, limit),
-        Command::Show { covenant_id, decode } => show(&cli, covenant_id, decode),
+        Command::Show {
+            covenant_id,
+            decode,
+        } => show(&cli, covenant_id, decode),
         Command::Trace { covenant_id } => trace(&cli, covenant_id),
         Command::InspectTx { txid } => inspect_tx(&cli, txid).await,
         Command::Watch => sync(&cli, None, true, true).await,
-        Command::Export { ref out, max_events } => export(&cli, out.clone(), max_events),
-        Command::Serve { ref listen, ref networks, ref db_dir, max_events } => {
-            serve(&cli, listen.clone(), networks.clone(), db_dir.clone(), max_events).await
+        Command::Export {
+            ref out,
+            max_events,
+        } => export(&cli, out.clone(), max_events),
+        Command::Serve {
+            ref listen,
+            ref networks,
+            ref db_dir,
+            max_events,
+        } => {
+            serve(
+                &cli,
+                listen.clone(),
+                networks.clone(),
+                db_dir.clone(),
+                max_events,
+            )
+            .await
         }
         Command::Backup { ref out } => {
             let store = open_store(&cli)?;
@@ -174,7 +198,8 @@ fn export(cli: &Cli, out: Option<std::path::PathBuf>, max_events: u64) -> Result
     let covenants = snapshot["stats"]["covenants"].as_u64().unwrap_or(0);
     let events = snapshot["stats"]["events"].as_u64().unwrap_or(0);
 
-    let out = out.unwrap_or_else(|| std::path::PathBuf::from(format!("web/data/{}.json", cli.network)));
+    let out =
+        out.unwrap_or_else(|| std::path::PathBuf::from(format!("web/data/{}.json", cli.network)));
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -194,7 +219,10 @@ fn export(cli: &Cli, out: Option<std::path::PathBuf>, max_events: u64) -> Result
 
 /// `web/data/testnet-10.json` → `web/data/testnet-10-live.json`
 fn live_path(out: &std::path::Path) -> std::path::PathBuf {
-    let stem = out.file_stem().and_then(|s| s.to_str()).unwrap_or("snapshot");
+    let stem = out
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("snapshot");
     out.with_file_name(format!("{stem}-live.json"))
 }
 
@@ -293,8 +321,10 @@ fn build_activity_snapshot(
         let width = (anchor.saturating_sub(min) / 64).max(1);
         (width, (min / width) * width)
     } else {
-        let &(_, total, width) =
-            ACTIVITY_RANGES.iter().find(|(r, ..)| *r == range).expect("range is whitelisted");
+        let &(_, total, width) = ACTIVITY_RANGES
+            .iter()
+            .find(|(r, ..)| *r == range)
+            .expect("range is whitelisted");
         (width, (anchor.saturating_sub(total) / width) * width)
     };
     Ok(serde_json::json!({
@@ -333,7 +363,11 @@ fn build_grid_snapshot(
     let paged = after.is_some() || limit.is_some();
     let mut next_after_daa: Option<u64> = None;
     let mut next_after_id: Option<String> = None;
-    let page = if paged { limit.unwrap_or(DEFAULT_PAGE).max(1) } else { MAX_PAGE };
+    let page = if paged {
+        limit.unwrap_or(DEFAULT_PAGE).max(1)
+    } else {
+        MAX_PAGE
+    };
     // Over-fetch by one to detect whether another page exists.
     let mut covenants = store.list_page(after, page.saturating_add(1))?;
     if covenants.len() as u64 > page {
@@ -388,7 +422,10 @@ fn build_grid_snapshot(
 /// counts still ride along because compiled contracts (Mecenas, Escrow,
 /// LastWill) live behind p2sh commitments and only show themselves at spend
 /// time.
-fn build_templates_snapshot(store: &Store, network: kascov_core::Network) -> Result<serde_json::Value> {
+fn build_templates_snapshot(
+    store: &Store,
+    network: kascov_core::Network,
+) -> Result<serde_json::Value> {
     #[derive(Default)]
     struct Row {
         live_states: u64,
@@ -474,7 +511,9 @@ fn build_covenant_detail(
 ) -> Result<serde_json::Value> {
     let mut detail = covenant_json(store, registry, summary, max_events)?;
     let tip = store.tip()?;
-    let obj = detail.as_object_mut().context("covenant json is not an object")?;
+    let obj = detail
+        .as_object_mut()
+        .context("covenant json is not an object")?;
     obj.insert("network".into(), serde_json::json!(network.to_string()));
     obj.insert(
         "name".into(),
@@ -490,7 +529,10 @@ fn build_covenant_detail(
     // KCC-1 draft §8.3 identity — emitted only when the covenant's reveals
     // prove exactly one hash (more than one build stays ambiguous, absent).
     if let [hash] = store.covenant_kcc1_hashes(&summary.covenant_id)?.as_slice() {
-        obj.insert("kcc1_template_hash".into(), serde_json::json!(hex::encode(hash)));
+        obj.insert(
+            "kcc1_template_hash".into(),
+            serde_json::json!(hex::encode(hash)),
+        );
     }
     Ok(detail)
 }
@@ -512,14 +554,19 @@ fn covenant_json(
         // based-app payloads can be large; the snapshot inlines small ones only
         if let Some(p) = &e.payload {
             if p.len() > 512 {
-                v.as_object_mut().context("event json is not an object")?.remove("payload");
+                v.as_object_mut()
+                    .context("event json is not an object")?
+                    .remove("payload");
                 v["payload_len"] = serde_json::json!(p.len());
             }
         }
         // multi-covenant transactions: name the other coins this tx moved
         if let Ok(others) = store.covenants_by_txid(&e.txid) {
-            let with: Vec<_> =
-                others.into_iter().filter(|c| c != &summary.covenant_id).take(4).collect();
+            let with: Vec<_> = others
+                .into_iter()
+                .filter(|c| c != &summary.covenant_id)
+                .take(4)
+                .collect();
             if !with.is_empty() {
                 v["with_covenants"] = serde_json::json!(with);
             }
@@ -596,7 +643,11 @@ fn covenant_json(
     }))
 }
 
-fn build_snapshot(store: &Store, network: kascov_core::Network, max_events: u64) -> Result<serde_json::Value> {
+fn build_snapshot(
+    store: &Store,
+    network: kascov_core::Network,
+    max_events: u64,
+) -> Result<serde_json::Value> {
     let registry = kascov_decode::Registry::default();
     let covenants = store.list(u64::MAX)?;
 
@@ -620,7 +671,9 @@ fn build_snapshot(store: &Store, network: kascov_core::Network, max_events: u64)
 fn db_path(cli: &Cli) -> std::path::PathBuf {
     cli.db.clone().unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        std::path::PathBuf::from(home).join(".kascov").join(format!("{}.db", cli.network))
+        std::path::PathBuf::from(home)
+            .join(".kascov")
+            .join(format!("{}.db", cli.network))
     })
 }
 
@@ -635,11 +688,18 @@ async fn inspect_tx(cli: &Cli, txid: TxId) -> Result<()> {
         anyhow::bail!("{txid} is not in this index — kascov only knows blocks it has walked");
     };
     let node = NodeHandle::connect(cli.network, cli.rpc.as_deref()).await?;
-    let accepting = node.block_with_txs(block).await.context("accepting block no longer on the node (pruned?)")?;
+    let accepting = node
+        .block_with_txs(block)
+        .await
+        .context("accepting block no longer on the node (pruned?)")?;
     // the accepting chain block ACCEPTS the tx; its body lives in the
     // accepting block itself or one of its mergeset blocks (same walk the
     // sync engine does)
-    let mut found = accepting.transactions.iter().find(|t| t.txid == txid).cloned();
+    let mut found = accepting
+        .transactions
+        .iter()
+        .find(|t| t.txid == txid)
+        .cloned();
     if found.is_none() {
         for &hash in &accepting.mergeset {
             if let Ok(b) = node.block_with_txs(hash).await {
@@ -651,7 +711,9 @@ async fn inspect_tx(cli: &Cli, txid: TxId) -> Result<()> {
         }
     }
     let Some(tx) = found else {
-        anyhow::bail!("tx not found in accepting block or its mergeset (pruned or reorged since indexing)");
+        anyhow::bail!(
+            "tx not found in accepting block or its mergeset (pruned or reorged since indexing)"
+        );
     };
     let tx = &tx;
 
@@ -660,7 +722,10 @@ async fn inspect_tx(cli: &Cli, txid: TxId) -> Result<()> {
         // KIP-21 user lanes: 4-byte namespace + 16 zero bytes prefix
         let lane = tx.payload.len() >= 20 && tx.payload[4..20].iter().all(|&b| b == 0);
         let lane_note = if lane {
-            format!("  (KIP-21 lane, namespace 0x{})", hex::encode(&tx.payload[..4]))
+            format!(
+                "  (KIP-21 lane, namespace 0x{})",
+                hex::encode(&tx.payload[..4])
+            )
         } else {
             String::new()
         };
@@ -681,7 +746,12 @@ async fn inspect_tx(cli: &Cli, txid: TxId) -> Result<()> {
     for (i, o) in tx.outputs.iter().enumerate() {
         let bind = o
             .covenant
-            .map(|b| format!("  BOUND to {} (authorizing input #{})", b.covenant_id, b.authorizing_input))
+            .map(|b| {
+                format!(
+                    "  BOUND to {} (authorizing input #{})",
+                    b.covenant_id, b.authorizing_input
+                )
+            })
             .unwrap_or_default();
         println!(
             "  #{i} value {} script {}…{bind}",
@@ -731,17 +801,29 @@ async fn sync_session(
     loop {
         let stats = kascov_core::sync::sync_once(node, store, from, |update| match update {
             SyncUpdate::Progress(s) if !watch => {
-                eprintln!("… {} chain blocks, {} covenant events", s.chain_blocks, s.events);
+                eprintln!(
+                    "… {} chain blocks, {} covenant events",
+                    s.chain_blocks, s.events
+                );
             }
             SyncUpdate::Progress(_) => {}
             SyncUpdate::Reorg { rolled_back } => {
                 if json {
-                    println!("{}", serde_json::json!({"type": "reorg", "rolled_back": rolled_back}));
+                    println!(
+                        "{}",
+                        serde_json::json!({"type": "reorg", "rolled_back": rolled_back})
+                    );
                 } else {
                     println!("REORG      rolled back {rolled_back} chain blocks");
                 }
             }
-            SyncUpdate::Event { covenant_id, kind, txid, accepting_daa, tx_index } => {
+            SyncUpdate::Event {
+                covenant_id,
+                kind,
+                txid,
+                accepting_daa,
+                tx_index,
+            } => {
                 if json {
                     println!(
                         "{}",
@@ -751,7 +833,10 @@ async fn sync_session(
                         })
                     );
                 } else {
-                    println!("{:<10} {covenant_id}  tx {txid}  @ DAA {accepting_daa}", kind.as_str().to_uppercase());
+                    println!(
+                        "{:<10} {covenant_id}  tx {txid}  @ DAA {accepting_daa}",
+                        kind.as_str().to_uppercase()
+                    );
                 }
             }
         })
@@ -761,7 +846,11 @@ async fn sync_session(
                 "synced: {} chain blocks processed, {} covenant events{}",
                 stats.chain_blocks,
                 stats.events,
-                if stats.reorged_out > 0 { format!(", {} reorged out", stats.reorged_out) } else { String::new() }
+                if stats.reorged_out > 0 {
+                    format!(", {} reorged out", stats.reorged_out)
+                } else {
+                    String::new()
+                }
             );
             break;
         }
@@ -785,7 +874,13 @@ fn list(cli: &Cli, limit: u64) -> Result<()> {
     }
     let mut table = Table::new();
     table.load_preset(UTF8_FULL_CONDENSED).set_header([
-        "COVENANT ID", "STATUS", "EVENTS", "LIVE UTXOS", "VALUE (KAS)", "LAST DAA", "LINEAGE",
+        "COVENANT ID",
+        "STATUS",
+        "EVENTS",
+        "LIVE UTXOS",
+        "VALUE (KAS)",
+        "LAST DAA",
+        "LINEAGE",
     ]);
     for c in &covenants {
         table.add_row([
@@ -795,7 +890,12 @@ fn list(cli: &Cli, limit: u64) -> Result<()> {
             c.live_utxos.to_string(),
             format!("{:.8}", c.live_value as f64 / 100_000_000.0),
             c.last_activity_daa.to_string(),
-            if c.lineage_complete { "complete" } else { "truncated" }.to_string(),
+            if c.lineage_complete {
+                "complete"
+            } else {
+                "truncated"
+            }
+            .to_string(),
         ]);
     }
     println!("{table}");
@@ -813,7 +913,12 @@ fn show(cli: &Cli, covenant_id: CovenantId, decode: bool) -> Result<()> {
     let registry = kascov_decode::Registry::default();
     if cli.json {
         let decoded: Vec<_> = decode
-            .then(|| utxos.iter().map(|u| registry.decode(u.spk_version, &u.spk_script)).collect())
+            .then(|| {
+                utxos
+                    .iter()
+                    .map(|u| registry.decode(u.spk_version, &u.spk_script))
+                    .collect()
+            })
             .unwrap_or_default();
         println!(
             "{}",
@@ -824,9 +929,17 @@ fn show(cli: &Cli, covenant_id: CovenantId, decode: bool) -> Result<()> {
     println!("Covenant  {}", summary.covenant_id);
     println!(
         "Status    {} ({} events, lineage {})",
-        if summary.live_utxos > 0 { "active" } else { "burned" },
+        if summary.live_utxos > 0 {
+            "active"
+        } else {
+            "burned"
+        },
         summary.event_count,
-        if summary.lineage_complete { "complete" } else { "truncated — first seen mid-life" },
+        if summary.lineage_complete {
+            "complete"
+        } else {
+            "truncated — first seen mid-life"
+        },
     );
     if let (Some(txid), Some(daa)) = (summary.genesis_txid, summary.genesis_daa) {
         println!("Genesis   tx {txid} @ DAA {daa}");
@@ -840,12 +953,18 @@ fn show(cli: &Cli, covenant_id: CovenantId, decode: bool) -> Result<()> {
             utxo.spk_version,
             utxo.spk_script.len(),
             utxo.created_daa,
-            utxo.spent_budget.map(|b| format!("  [spent with budget {b}]")).unwrap_or_default(),
+            utxo.spent_budget
+                .map(|b| format!("  [spent with budget {b}]"))
+                .unwrap_or_default(),
         );
         if decode {
             let decoded = registry.decode(utxo.spk_version, &utxo.spk_script);
             for instruction in &decoded.instructions {
-                println!("    {:>4}  {}", format!("{:04x}", instruction.offset), instruction);
+                println!(
+                    "    {:>4}  {}",
+                    format!("{:04x}", instruction.offset),
+                    instruction
+                );
             }
             if decoded.truncated {
                 println!("    [script truncated / malformed tail]");
@@ -853,16 +972,27 @@ fn show(cli: &Cli, covenant_id: CovenantId, decode: bool) -> Result<()> {
             if decoded.uses_covenant_ops || decoded.uses_zk_ops {
                 println!(
                     "    uses: {}{}",
-                    if decoded.uses_covenant_ops { "covenant-ops " } else { "" },
+                    if decoded.uses_covenant_ops {
+                        "covenant-ops "
+                    } else {
+                        ""
+                    },
                     if decoded.uses_zk_ops { "zk-ops" } else { "" },
                 );
             }
             if let Some(sig) = &utxo.spent_sig {
                 if let Some(redeem) = kascov_decode::p2sh_reveal(&utxo.spk_script, sig) {
-                    println!("    revealed at spend (tx {}):", utxo.spent_txid.map(|t| t.to_string()).unwrap_or_default());
+                    println!(
+                        "    revealed at spend (tx {}):",
+                        utxo.spent_txid.map(|t| t.to_string()).unwrap_or_default()
+                    );
                     let d = registry.decode(utxo.spk_version, &redeem);
                     for instruction in &d.instructions {
-                        println!("      {:>4}  {}", format!("{:04x}", instruction.offset), instruction);
+                        println!(
+                            "      {:>4}  {}",
+                            format!("{:04x}", instruction.offset),
+                            instruction
+                        );
                     }
                 }
             }
@@ -885,7 +1015,10 @@ fn trace(cli: &Cli, covenant_id: CovenantId) -> Result<()> {
         }
         return Ok(());
     }
-    let truncated = store.summary(&covenant_id)?.map(|s| !s.lineage_complete).unwrap_or(false);
+    let truncated = store
+        .summary(&covenant_id)?
+        .map(|s| !s.lineage_complete)
+        .unwrap_or(false);
     if truncated {
         println!("[history truncated — covenant first seen mid-life]");
     }
@@ -894,8 +1027,12 @@ fn trace(cli: &Cli, covenant_id: CovenantId) -> Result<()> {
     // revealed P2SH program are the covenant's state payload.
     let mut reveal_by_tx: std::collections::HashMap<TxId, Vec<Vec<u8>>> = Default::default();
     for utxo in store.utxos(&covenant_id, false)? {
-        let (Some(spent_txid), Some(sig)) = (utxo.spent_txid, &utxo.spent_sig) else { continue };
-        let Some(redeem) = kascov_decode::p2sh_reveal(&utxo.spk_script, sig) else { continue };
+        let (Some(spent_txid), Some(sig)) = (utxo.spent_txid, &utxo.spent_sig) else {
+            continue;
+        };
+        let Some(redeem) = kascov_decode::p2sh_reveal(&utxo.spk_script, sig) else {
+            continue;
+        };
         let (instructions, _) = kascov_decode::disasm::disassemble(&redeem);
         let pushes: Vec<Vec<u8>> = instructions.into_iter().filter_map(|i| i.data).collect();
         reveal_by_tx.entry(spent_txid).or_insert(pushes);
@@ -903,7 +1040,16 @@ fn trace(cli: &Cli, covenant_id: CovenantId) -> Result<()> {
 
     let fmt_push = |bytes: &[u8]| {
         let hex = hex::encode(bytes);
-        if hex.len() > 40 { format!("{}…{} ({}B)", &hex[..16], &hex[hex.len() - 8..], bytes.len()) } else { hex }
+        if hex.len() > 40 {
+            format!(
+                "{}…{} ({}B)",
+                &hex[..16],
+                &hex[hex.len() - 8..],
+                bytes.len()
+            )
+        } else {
+            hex
+        }
     };
     let mut prev_payload: Option<Vec<Vec<u8>>> = None;
     for event in &events {
@@ -947,10 +1093,16 @@ async fn scan(cli: &Cli, last: usize) -> Result<()> {
         .await
         .context("failed to connect to node")?;
     let info = node.server_info().await?;
-    eprintln!("connected: kaspad {} on {} (synced: {})", info.version, info.network, info.is_synced);
+    eprintln!(
+        "connected: kaspad {} on {} (synced: {})",
+        info.version, info.network, info.is_synced
+    );
 
     let dag = node.dag_info().await?;
-    eprintln!("sink {} @ DAA {} — walking {} blocks backwards", dag.sink, dag.virtual_daa_score, last);
+    eprintln!(
+        "sink {} @ DAA {} — walking {} blocks backwards",
+        dag.sink, dag.virtual_daa_score, last
+    );
 
     // BFS backwards over direct parents from the sink until `last` blocks seen,
     // fetching blocks concurrently.
@@ -967,7 +1119,9 @@ async fn scan(cli: &Cli, last: usize) -> Result<()> {
             let Some(hash) = queue.pop_front() else { break };
             in_flight.push(async move { (hash, node.block_with_txs(hash).await) });
         }
-        let Some((hash, result)) = in_flight.next().await else { break };
+        let Some((hash, result)) = in_flight.next().await else {
+            break;
+        };
         let block = match result {
             Ok(block) => block,
             // Parents below the pruning point (or not yet synced) are simply skipped.
@@ -978,7 +1132,10 @@ async fn scan(cli: &Cli, last: usize) -> Result<()> {
         };
         visited += 1;
         if visited % 1000 == 0 {
-            eprintln!("… {visited}/{last} blocks scanned, {} covenant outputs so far", sightings.len());
+            eprintln!(
+                "… {visited}/{last} blocks scanned, {} covenant outputs so far",
+                sightings.len()
+            );
         }
         sightings.extend(covenant_sightings(&block));
         for parent in block.parents {
@@ -999,7 +1156,11 @@ async fn scan(cli: &Cli, last: usize) -> Result<()> {
     } else {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL_CONDENSED).set_header([
-            "COVENANT ID", "OUTPOINT", "VALUE (KAS)", "AUTH INPUT", "DAA",
+            "COVENANT ID",
+            "OUTPOINT",
+            "VALUE (KAS)",
+            "AUTH INPUT",
+            "DAA",
         ]);
         for s in &sightings {
             table.add_row([
@@ -1085,7 +1246,10 @@ struct LiveChannel {
 impl LiveChannel {
     fn new() -> Self {
         let (tx, _) = tokio::sync::broadcast::channel(STREAM_BUFFER);
-        Self { tx, subscribers: Default::default() }
+        Self {
+            tx,
+            subscribers: Default::default(),
+        }
     }
 }
 
@@ -1138,18 +1302,27 @@ struct ServeState {
     /// Latest cross-indexer consistency report per network (None until the
     /// day's first run lands). Same Vec-not-HashMap shape as `live`; a std
     /// Mutex because it's held only to store or clone, never across awaits.
-    consistency: Vec<(Network, std::sync::Arc<std::sync::Mutex<Option<ConsistencyReport>>>)>,
-    cache: tokio::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<CachedBody>)>>,
+    consistency: Vec<(
+        Network,
+        std::sync::Arc<std::sync::Mutex<Option<ConsistencyReport>>>,
+    )>,
+    cache: tokio::sync::Mutex<
+        std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<CachedBody>)>,
+    >,
     /// Per-key build locks: concurrent cold misses on the SAME key share one
     /// rebuild instead of stampeding (at 42k covenants, N parallel grid
     /// builds OOM-killed the container). Different keys still build in
     /// parallel, so one slow network can't starve the others.
-    build_locks: tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    build_locks: tokio::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+    >,
     /// Per-network search index (friendly names + templates), keyed by the
     /// network name. `(built_at, covenant_count, index)` — the count is the
     /// cheap staleness probe (ids are append-only). A std Mutex because it's
     /// taken inside spawn_blocking; held only for map lookups, never builds.
-    search_index: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, u64, std::sync::Arc<SearchIndex>)>>,
+    search_index: std::sync::Mutex<
+        std::collections::HashMap<String, (std::time::Instant, u64, std::sync::Arc<SearchIndex>)>,
+    >,
 }
 
 /// Parse a `{network}` path segment and require it to be a network this
@@ -1232,8 +1405,10 @@ async fn serve(
         pending.push((network, pending_set));
     }
 
-    let consistency =
-        networks.iter().map(|&network| (network, std::sync::Arc::default())).collect();
+    let consistency = networks
+        .iter()
+        .map(|&network| (network, std::sync::Arc::default()))
+        .collect();
     let state = std::sync::Arc::new(ServeState {
         base_dir,
         networks,
@@ -1282,21 +1457,29 @@ async fn serve(
                             core_only: tier == "core",
                             visual_only: tier == "visual",
                         };
-                        let built = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-                            let store = kascov_core::store::Store::open(&db, network)?;
-                            build_galaxy_json(&store, network, fmt)
-                        })
-                        .await;
+                        let built =
+                            tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+                                let store = kascov_core::store::Store::open(&db, network)?;
+                                build_galaxy_json(&store, network, fmt)
+                            })
+                            .await;
                         match built {
                             Ok(Ok(json)) => {
                                 let key = format!("{network}/galaxy?fmt=1&tier={tier}");
                                 state.cache.lock().await.insert(
                                     key,
-                                    (std::time::Instant::now(), std::sync::Arc::new(CachedBody::new(json))),
+                                    (
+                                        std::time::Instant::now(),
+                                        std::sync::Arc::new(CachedBody::new(json)),
+                                    ),
                                 );
                             }
-                            Ok(Err(e)) => tracing::warn!("{network}: galaxy keep-warm build failed: {e}"),
-                            Err(e) => tracing::warn!("{network}: galaxy keep-warm task failed: {e}"),
+                            Ok(Err(e)) => {
+                                tracing::warn!("{network}: galaxy keep-warm build failed: {e}")
+                            }
+                            Err(e) => {
+                                tracing::warn!("{network}: galaxy keep-warm task failed: {e}")
+                            }
                         }
                     }
                 }
@@ -1365,19 +1548,31 @@ async fn serve(
         .route("/data/price.json", get(price_handler))
         .route("/data/{file}", get(data_handler))
         .route("/data/{network}/c/{id}", get(detail_handler))
-        .route("/data/{network}/template/{hash}", get(kcc1_template_handler))
+        .route(
+            "/data/{network}/template/{hash}",
+            get(kcc1_template_handler),
+        )
         .route("/data/{network}/tx/{txid}", get(tx_handler))
         .route("/data/{network}/families.json", get(families_handler))
         .route("/data/{network}/reorgs.json", get(reorgs_handler))
         .route("/data/{network}/galaxy.json", get(galaxy_handler))
         .route("/data/{network}/lanes.json", get(lanes_handler))
-        .route("/data/{network}/inscriptions.json", get(inscriptions_handler))
+        .route(
+            "/data/{network}/inscriptions.json",
+            get(inscriptions_handler),
+        )
         .route("/data/{network}/lifespans.json", get(lifespans_handler))
         .route("/data/{network}/digest.json", get(digest_handler))
         .route("/data/{network}/templates.json", get(templates_handler))
         .route("/data/{network}/tokens.json", get(tokens_handler))
-        .route("/data/{network}/verification.json", get(verification_handler))
-        .route("/data/{network}/token/{id}/trades.json", get(token_trades_handler))
+        .route(
+            "/data/{network}/verification.json",
+            get(verification_handler),
+        )
+        .route(
+            "/data/{network}/token/{id}/trades.json",
+            get(token_trades_handler),
+        )
         .route("/data/{network}/token/{id}", get(token_handler))
         .route("/data/{network}/consistency.json", get(consistency_handler))
         .route("/data/{network}/events", get(events_handler))
@@ -1454,7 +1649,8 @@ async fn healthz_handler(
             .map(|(_, h)| {
                 (
                     h.last_sync_ok_ms.load(std::sync::atomic::Ordering::Relaxed),
-                    h.last_progress_ms.load(std::sync::atomic::Ordering::Relaxed),
+                    h.last_progress_ms
+                        .load(std::sync::atomic::Ordering::Relaxed),
                 )
             })
             .unwrap_or((0, 0));
@@ -1508,7 +1704,11 @@ async fn healthz_handler(
             }),
         );
     }
-    let code = if stalled { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::OK };
+    let code = if stalled {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
     (
         code,
         [
@@ -1541,7 +1741,10 @@ async fn recover_wedged_cursor(node: &NodeHandle, store: &mut Store, network: Ne
             let anchor_daa = store.processed_daa().ok().flatten().unwrap_or(0);
             let gap = match node.dag_info().await {
                 Ok(dag) => {
-                    format!("{} DAA to re-sync", dag.virtual_daa_score.saturating_sub(anchor_daa))
+                    format!(
+                        "{} DAA to re-sync",
+                        dag.virtual_daa_score.saturating_sub(anchor_daa)
+                    )
                 }
                 Err(_) => "gap unknown".into(),
             };
@@ -1551,8 +1754,12 @@ async fn recover_wedged_cursor(node: &NodeHandle, store: &mut Store, network: Ne
             true
         }
         Ok(ReAnchor::NothingWalkable) => {
-            let Ok(Some(cursor)) = store.cursor() else { return false };
-            let Ok(dag) = node.dag_info().await else { return false };
+            let Ok(Some(cursor)) = store.cursor() else {
+                return false;
+            };
+            let Ok(dag) = node.dag_info().await else {
+                return false;
+            };
             // Two signatures forfeit the gap: the cursor block is GONE (the
             // classic testnet reset), or its header survives while the node —
             // provably able to walk from its own sink — can walk from neither
@@ -1596,7 +1803,10 @@ async fn follow_forever(
     // The global --rpc can't express "TN10 on our node, mainnet on the
     // resolver", and connect() verifies the node's network, so a URL pasted
     // under the wrong variable fails loudly instead of cross-feeding.
-    let env_key = format!("KASCOV_RPC_{}", network.to_string().to_uppercase().replace('-', "_"));
+    let env_key = format!(
+        "KASCOV_RPC_{}",
+        network.to_string().to_uppercase().replace('-', "_")
+    );
     let rpc = match std::env::var(&env_key) {
         Ok(url) if !url.trim().is_empty() => {
             tracing::info!("{network}: following via {env_key}={url}");
@@ -1643,7 +1853,9 @@ async fn follow_forever(
         }
         match store.derive_tokens_if_stale() {
             Ok(0) => {}
-            Ok(n) => tracing::info!("{network}: token derivation pass complete — {n} tokens derived"),
+            Ok(n) => {
+                tracing::info!("{network}: token derivation pass complete — {n} tokens derived")
+            }
             Err(err) => tracing::warn!(
                 "{network}: token derivation failed ({err}) — will retry next session"
             ),
@@ -1671,66 +1883,79 @@ async fn follow_forever(
         match kascov_core::sync::backfill_tx_index(&node, &mut store).await {
             Ok(0) => {}
             Ok(n) => tracing::info!("{network}: tx_index backfill stamped {n} event rows"),
-            Err(err) => tracing::warn!("{network}: tx_index backfill interrupted ({err}) — will resume next session"),
+            Err(err) => tracing::warn!(
+                "{network}: tx_index backfill interrupted ({err}) — will resume next session"
+            ),
         }
         tracing::info!("{network}: following the chain");
         loop {
-            let result = kascov_core::sync::sync_once(&node, &mut store, None, |update| match update {
-                SyncUpdate::Event { covenant_id, kind, txid, accepting_daa, tx_index } => {
-                    tracing::info!("{network}: {} covenant {covenant_id}", kind.as_str());
-                    // Fan out to any open SSE streams; serialization is skipped
-                    // entirely when nobody is listening, and send() failing
-                    // (zero receivers) is fine.
-                    if live_tx.receiver_count() > 0 {
-                        let msg = serde_json::json!({
-                            "covenant_id": covenant_id,
-                            "kind": kind.as_str(),
-                            "txid": txid,
-                            "accepting_daa": accepting_daa,
-                            "tx_index": tx_index,
-                        })
-                        .to_string();
-                        let _ = live_tx.send(msg.into());
-                    }
-                    // Webhook queue: try_send so a slow/stalled delivery task
-                    // can never block the indexer — under backpressure (e.g.
-                    // the initial full sync) extra events are dropped, which
-                    // is fine: webhooks are hints, not a durable feed.
-                    let _ = hook_tx.try_send(HookEvent {
+            let result =
+                kascov_core::sync::sync_once(&node, &mut store, None, |update| match update {
+                    SyncUpdate::Event {
                         covenant_id,
-                        kind: kind.as_str(),
+                        kind,
                         txid,
                         accepting_daa,
                         tx_index,
-                    });
-                }
-                SyncUpdate::Reorg { rolled_back } => {
-                    tracing::info!("{network}: reorg — rolled back {rolled_back} chain blocks");
-                    // Same fire-and-forget fan-out as events; the "kind":"reorg"
-                    // tag lets subscribers distinguish it from covenant activity.
-                    if live_tx.receiver_count() > 0 {
-                        let msg = serde_json::json!({
-                            "kind": "reorg",
-                            "rolled_back": rolled_back,
-                        })
-                        .to_string();
-                        let _ = live_tx.send(msg.into());
+                    } => {
+                        tracing::info!("{network}: {} covenant {covenant_id}", kind.as_str());
+                        // Fan out to any open SSE streams; serialization is skipped
+                        // entirely when nobody is listening, and send() failing
+                        // (zero receivers) is fine.
+                        if live_tx.receiver_count() > 0 {
+                            let msg = serde_json::json!({
+                                "covenant_id": covenant_id,
+                                "kind": kind.as_str(),
+                                "txid": txid,
+                                "accepting_daa": accepting_daa,
+                                "tx_index": tx_index,
+                            })
+                            .to_string();
+                            let _ = live_tx.send(msg.into());
+                        }
+                        // Webhook queue: try_send so a slow/stalled delivery task
+                        // can never block the indexer — under backpressure (e.g.
+                        // the initial full sync) extra events are dropped, which
+                        // is fine: webhooks are hints, not a durable feed.
+                        let _ = hook_tx.try_send(HookEvent {
+                            covenant_id,
+                            kind: kind.as_str(),
+                            txid,
+                            accepting_daa,
+                            tx_index,
+                        });
                     }
-                }
-                SyncUpdate::Progress(_) => {}
-            })
-            .await;
+                    SyncUpdate::Reorg { rolled_back } => {
+                        tracing::info!("{network}: reorg — rolled back {rolled_back} chain blocks");
+                        // Same fire-and-forget fan-out as events; the "kind":"reorg"
+                        // tag lets subscribers distinguish it from covenant activity.
+                        if live_tx.receiver_count() > 0 {
+                            let msg = serde_json::json!({
+                                "kind": "reorg",
+                                "rolled_back": rolled_back,
+                            })
+                            .to_string();
+                            let _ = live_tx.send(msg.into());
+                        }
+                    }
+                    SyncUpdate::Progress(_) => {}
+                })
+                .await;
             match result {
                 Ok(_) => {
                     consecutive_errors = 0;
                     let now = now_ms() as i64;
-                    health.last_sync_ok_ms.store(now, std::sync::atomic::Ordering::Relaxed);
+                    health
+                        .last_sync_ok_ms
+                        .store(now, std::sync::atomic::Ordering::Relaxed);
                     let verdict = progress.observe(
                         store.processed_daa().ok().flatten(),
                         store.tip().ok().flatten().map(|(daa, _)| daa),
                     );
                     if verdict.advanced {
-                        health.last_progress_ms.store(now, std::sync::atomic::Ordering::Relaxed);
+                        health
+                            .last_progress_ms
+                            .store(now, std::sync::atomic::Ordering::Relaxed);
                     }
                     if verdict.demand_recovery {
                         tracing::warn!(
@@ -1746,7 +1971,9 @@ async fn follow_forever(
                 }
                 Err(err) => {
                     consecutive_errors += 1;
-                    tracing::warn!("{network}: sync interrupted ({err}), attempt {consecutive_errors}");
+                    tracing::warn!(
+                        "{network}: sync interrupted ({err}), attempt {consecutive_errors}"
+                    );
                     if consecutive_errors >= 3
                         && recover_wedged_cursor(&node, &mut store, network).await
                     {
@@ -1766,7 +1993,10 @@ async fn follow_forever(
 /// A millisecond tunable read from the environment, mirroring KASCOV_RPC_*:
 /// a plain integer, falling back to `default` on absent or garbage input.
 fn env_ms(key: &str, default: u64) -> u64 {
-    std::env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 /// The most a network's pending set may hold. A safety cap only — a healthy
@@ -1909,8 +2139,10 @@ impl PendingFeed {
         at: std::time::Instant,
     ) -> PendingInsert {
         if let Some(entry) = self.entries.get_mut(&txid) {
-            if let Some(existing) =
-                entry.events.iter_mut().find(|event| event.covenant_id == covenant_id)
+            if let Some(existing) = entry
+                .events
+                .iter_mut()
+                .find(|event| event.covenant_id == covenant_id)
             {
                 if existing.kind == kind {
                     return PendingInsert::AlreadyTracked;
@@ -1994,13 +2226,7 @@ fn track_pending_transaction(
     txid: TxId,
     events: Vec<kascov_core::sync::PendingTxEvent>,
 ) -> PendingInsert {
-    track_pending_transaction_at(
-        feed,
-        txid,
-        events,
-        now_ms(),
-        std::time::Instant::now(),
-    )
+    track_pending_transaction_at(feed, txid, events, now_ms(), std::time::Instant::now())
 }
 
 fn track_pending_transaction_at(
@@ -2016,9 +2242,7 @@ fn track_pending_transaction_at(
     events.sort_by_key(|event| event.covenant_id.0);
     let mut result = PendingInsert::AlreadyTracked;
     for event in events {
-        if feed.insert_at(txid, event.covenant_id, event.kind, at_ms, at)
-            == PendingInsert::Added
-        {
+        if feed.insert_at(txid, event.covenant_id, event.kind, at_ms, at) == PendingInsert::Added {
             result = PendingInsert::Added;
         }
     }
@@ -2038,10 +2262,7 @@ fn track_pending_transaction_at_ms(
 /// Only successfully classified/admitted txids enter the next poll's seen set.
 /// Failed classifications and capacity overflows remain "new", so a transient
 /// error cannot hide a tx for the rest of its mempool lifetime.
-fn pending_ids_to_remember(
-    mut current: HashSet<TxId>,
-    retry: &HashSet<TxId>,
-) -> HashSet<TxId> {
+fn pending_ids_to_remember(mut current: HashSet<TxId>, retry: &HashSet<TxId>) -> HashSet<TxId> {
     current.retain(|txid| !retry.contains(txid));
     current
 }
@@ -2064,7 +2285,9 @@ fn pending_events_json(entry: &PendingEntry) -> Vec<serde_json::Value> {
 /// event set. Reverse order makes a legacy txid-keyed map finish on the same
 /// stable primary event exposed by the snapshot's scalar fields.
 fn pending_sse_jsons(feed: &PendingFeed, txid: &TxId) -> Vec<serde_json::Value> {
-    let Some(entry) = feed.entries.get(txid) else { return vec![] };
+    let Some(entry) = feed.entries.get(txid) else {
+        return vec![];
+    };
     let events = pending_events_json(entry);
     entry
         .events
@@ -2137,7 +2360,10 @@ async fn poll_mempool_forever(
     }
     // Same per-network node override the follower honors, so the poller reads
     // the very node that will confirm these txs.
-    let env_key = format!("KASCOV_RPC_{}", network.to_string().to_uppercase().replace('-', "_"));
+    let env_key = format!(
+        "KASCOV_RPC_{}",
+        network.to_string().to_uppercase().replace('-', "_")
+    );
     let rpc = match std::env::var(&env_key) {
         Ok(url) if !url.trim().is_empty() => Some(url),
         _ => rpc,
@@ -2158,7 +2384,9 @@ async fn poll_mempool_forever(
             Ok(store) => store,
             Err(err) => {
                 pending.lock().await.mark_reconnecting();
-                tracing::warn!("{network}: pending poller cannot open store ({err}), retrying in 30s");
+                tracing::warn!(
+                    "{network}: pending poller cannot open store ({err}), retrying in 30s"
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 continue;
             }
@@ -2204,7 +2432,10 @@ async fn poll_mempool_forever(
                     Ok(events) => events,
                     Err(err) => {
                         retry_ids.insert(tx.txid);
-                        tracing::debug!("{network}: pending classify failed for {}: {err}", tx.txid);
+                        tracing::debug!(
+                            "{network}: pending classify failed for {}: {err}",
+                            tx.txid
+                        );
                         continue;
                     }
                 };
@@ -2229,7 +2460,10 @@ async fn poll_mempool_forever(
                     // track and resolve. Leaving it out of prev_ids retries it
                     // as soon as another row frees capacity.
                     retry_ids.insert(tx.txid);
-                    tracing::debug!("{network}: pending set full; retrying {} next poll", tx.txid);
+                    tracing::debug!(
+                        "{network}: pending set full; retrying {} next poll",
+                        tx.txid
+                    );
                     continue;
                 }
                 if live_tx.receiver_count() > 0 {
@@ -2268,8 +2502,10 @@ async fn poll_mempool_forever(
                         continue;
                     }
                     // Gone from the pool: did the follower index its events?
-                    let confirmed =
-                        store.events_by_txid(&txid).map(|r| !r.is_empty()).unwrap_or(false);
+                    let confirmed = store
+                        .events_by_txid(&txid)
+                        .map(|r| !r.is_empty())
+                        .unwrap_or(false);
                     if confirmed {
                         if let Some(entry) = set.remove(&txid) {
                             resolved.push((txid, entry, "confirmed", set.revision));
@@ -2353,12 +2589,7 @@ mod pending_feed_tests {
             PendingInsert::Added
         );
         assert_eq!(
-            feed.insert_at_ms(
-                txid,
-                CovenantId([0x11; 32]),
-                EventKind::Transition,
-                1_000,
-            ),
+            feed.insert_at_ms(txid, CovenantId([0x11; 32]), EventKind::Transition, 1_000,),
             PendingInsert::Added
         );
 
@@ -2375,9 +2606,15 @@ mod pending_feed_tests {
         assert_eq!(row["covenant_id"], CovenantId([0x11; 32]).to_string());
         assert_eq!(row["tx_kind"], "transition");
         // New clients get every touched covenant in stable id order.
-        assert_eq!(row["events"][0]["covenant_id"], CovenantId([0x11; 32]).to_string());
+        assert_eq!(
+            row["events"][0]["covenant_id"],
+            CovenantId([0x11; 32]).to_string()
+        );
         assert_eq!(row["events"][0]["tx_kind"], "transition");
-        assert_eq!(row["events"][1]["covenant_id"], CovenantId([0x22; 32]).to_string());
+        assert_eq!(
+            row["events"][1]["covenant_id"],
+            CovenantId([0x22; 32]).to_string()
+        );
         assert_eq!(row["events"][1]["tx_kind"], "burn");
     }
 
@@ -2442,7 +2679,10 @@ mod pending_feed_tests {
     fn pending_health_distinguishes_live_reconnecting_and_disabled() {
         let mut feed = PendingFeed::new();
         assert_eq!(feed.health_json_at(1_000)["status"], "starting");
-        assert_eq!(feed.health_json_at(1_000)["last_poll_ms"], serde_json::Value::Null);
+        assert_eq!(
+            feed.health_json_at(1_000)["last_poll_ms"],
+            serde_json::Value::Null
+        );
 
         feed.mark_live_at(2_000);
         assert_eq!(
@@ -2507,16 +2747,29 @@ mod pending_feed_tests {
         );
 
         let messages = pending_sse_jsons(&feed, &txid);
-        assert_eq!(messages.len(), 2, "legacy consumers still receive one hint per covenant");
+        assert_eq!(
+            messages.len(),
+            2,
+            "legacy consumers still receive one hint per covenant"
+        );
         // Reverse stable order means an old txid-keyed client finishes on the
         // same primary event the snapshot's scalar fields expose.
-        assert_eq!(messages[0]["covenant_id"], CovenantId([0x90; 32]).to_string());
-        assert_eq!(messages[1]["covenant_id"], CovenantId([0x10; 32]).to_string());
+        assert_eq!(
+            messages[0]["covenant_id"],
+            CovenantId([0x90; 32]).to_string()
+        );
+        assert_eq!(
+            messages[1]["covenant_id"],
+            CovenantId([0x10; 32]).to_string()
+        );
         for msg in messages {
             assert_eq!(msg["kind"], "pending");
             assert_eq!(msg["txid"], txid.to_string());
             assert_eq!(msg["events"].as_array().unwrap().len(), 2);
-            assert_eq!(msg["events"][1]["covenant_id"], CovenantId([0x90; 32]).to_string());
+            assert_eq!(
+                msg["events"][1]["covenant_id"],
+                CovenantId([0x90; 32]).to_string()
+            );
             assert_eq!(msg["revision"], feed.revision);
         }
     }
@@ -2584,10 +2837,17 @@ fn webhook_target_allowed(url: &str) -> std::result::Result<(), &'static str> {
     // Literal IPs (host_str keeps IPv6 brackets) skip DNS entirely.
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-        return if ip_is_forbidden(ip) { Err("address is private/internal") } else { Ok(()) };
+        return if ip_is_forbidden(ip) {
+            Err("address is private/internal")
+        } else {
+            Ok(())
+        };
     }
     use std::net::ToSocketAddrs;
-    let mut addrs = (bare, port).to_socket_addrs().map_err(|_| "host does not resolve")?.peekable();
+    let mut addrs = (bare, port)
+        .to_socket_addrs()
+        .map_err(|_| "host does not resolve")?
+        .peekable();
     if addrs.peek().is_none() {
         return Err("host does not resolve");
     }
@@ -2647,7 +2907,11 @@ async fn deliver_webhook(
         }
         match req.send().await {
             Ok(resp) if resp.status().is_success() => return true,
-            Ok(resp) => tracing::debug!("webhook {url}: attempt {} got {}", attempt + 1, resp.status()),
+            Ok(resp) => tracing::debug!(
+                "webhook {url}: attempt {} got {}",
+                attempt + 1,
+                resp.status()
+            ),
             Err(err) => tracing::debug!("webhook {url}: attempt {} failed: {err}", attempt + 1),
         }
     }
@@ -2680,7 +2944,8 @@ async fn webhook_delivery_forever(
     // (hundreds of thousands of events) doesn't open the DB once per event.
     let mut subs_probe: Option<(std::time::Instant, bool)> = None;
     while let Some(ev) = rx.recv().await {
-        let stale = subs_probe.is_none_or(|(at, _)| at.elapsed() > std::time::Duration::from_secs(10));
+        let stale =
+            subs_probe.is_none_or(|(at, _)| at.elapsed() > std::time::Duration::from_secs(10));
         if stale {
             let db = db.clone();
             let any = tokio::task::spawn_blocking(move || -> Result<bool> {
@@ -2846,7 +3111,10 @@ struct PolitenessGate {
 
 impl PolitenessGate {
     fn new() -> Self {
-        Self { spent: 0, denied: None }
+        Self {
+            spent: 0,
+            denied: None,
+        }
     }
 
     /// May another request go out? (Not after a denial, not past the cap.)
@@ -2868,7 +3136,9 @@ impl PolitenessGate {
     /// report instead of silently thinning out.
     fn stop_reason(&self) -> Option<String> {
         if let Some(code) = self.denied {
-            Some(format!("{CONSISTENCY_SOURCE} answered HTTP {code} — backing off for this run"))
+            Some(format!(
+                "{CONSISTENCY_SOURCE} answered HTTP {code} — backing off for this run"
+            ))
         } else if self.spent >= CONSISTENCY_REQUEST_CAP {
             Some("request budget for this run was reached".into())
         } else {
@@ -2901,7 +3171,9 @@ fn classify_pair(
         (Some(a), Some(b)) if a != b => {
             return (
                 "differ",
-                Some(format!("supply: kascov says {a}, {CONSISTENCY_SOURCE} says {b}")),
+                Some(format!(
+                    "supply: kascov says {a}, {CONSISTENCY_SOURCE} says {b}"
+                )),
             )
         }
         (None, _) => {
@@ -2913,7 +3185,9 @@ fn classify_pair(
         (_, None) => {
             return (
                 "not_comparable",
-                Some(format!("{CONSISTENCY_SOURCE} did not report a supply we could read")),
+                Some(format!(
+                    "{CONSISTENCY_SOURCE} did not report a supply we could read"
+                )),
             )
         }
         _ => {}
@@ -2922,7 +3196,9 @@ fn classify_pair(
         if a != b {
             return (
                 "differ",
-                Some(format!("holder count: kascov says {a}, {CONSISTENCY_SOURCE} says {b}")),
+                Some(format!(
+                    "holder count: kascov says {a}, {CONSISTENCY_SOURCE} says {b}"
+                )),
             );
         }
     }
@@ -2972,8 +3248,9 @@ fn normalize_owner(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.contains(':') {
         // Already our typed form?
-        if let Some(rest) =
-            trimmed.strip_prefix("script:").or_else(|| trimmed.strip_prefix("covenant:"))
+        if let Some(rest) = trimmed
+            .strip_prefix("script:")
+            .or_else(|| trimmed.strip_prefix("covenant:"))
         {
             if rest.len() == 64 && rest.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Some(trimmed.to_ascii_lowercase());
@@ -2988,7 +3265,10 @@ fn normalize_owner(raw: &str) -> Option<String> {
         }
         return Some(hex::encode(&addr.payload));
     }
-    let s = trimmed.strip_prefix("0x").unwrap_or(trimmed).to_ascii_lowercase();
+    let s = trimmed
+        .strip_prefix("0x")
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase();
     if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
@@ -3001,7 +3281,8 @@ fn normalize_owner(raw: &str) -> Option<String> {
 
 /// An integer that may arrive as a JSON number or a decimal string.
 fn json_int(v: &serde_json::Value) -> Option<i64> {
-    v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+    v.as_i64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
 /// Pull a token/covenant id (lowercase 64-hex) out of one of their JSON
@@ -3021,9 +3302,15 @@ fn json_covenant_id(item: &serde_json::Value) -> Option<String> {
 }
 
 fn json_supply(item: &serde_json::Value) -> Option<i64> {
-    ["supply", "totalSupply", "total_supply", "circulatingSupply", "currentSupply"]
-        .iter()
-        .find_map(|k| json_int(&item[*k]))
+    [
+        "supply",
+        "totalSupply",
+        "total_supply",
+        "circulatingSupply",
+        "currentSupply",
+    ]
+    .iter()
+    .find_map(|k| json_int(&item[*k]))
 }
 
 fn json_holders(item: &serde_json::Value) -> Option<u64> {
@@ -3050,7 +3337,9 @@ fn assemble_discovery(pages: &[serde_json::Value]) -> DiscoveryView {
         if out.blue_score.is_none() {
             out.blue_score = page["freshness"]["sourceBlueScore"].as_u64();
         }
-        let Some(items) = page["items"].as_array() else { continue };
+        let Some(items) = page["items"].as_array() else {
+            continue;
+        };
         for item in items {
             let Some(id) = json_covenant_id(item) else {
                 out.unreadable_items += 1;
@@ -3096,11 +3385,19 @@ fn parse_other_holders(
     let mut balances = std::collections::BTreeMap::new();
     let mut clean = true;
     for row in rows {
-        let owner = ["owner", "ownerIdentifier", "owner_identifier", "address", "holder"]
+        let owner = [
+            "owner",
+            "ownerIdentifier",
+            "owner_identifier",
+            "address",
+            "holder",
+        ]
+        .iter()
+        .find_map(|k| row[*k].as_str())
+        .and_then(normalize_owner);
+        let balance = ["balance", "amount", "value"]
             .iter()
-            .find_map(|k| row[*k].as_str())
-            .and_then(normalize_owner);
-        let balance = ["balance", "amount", "value"].iter().find_map(|k| json_int(&row[*k]));
+            .find_map(|k| json_int(&row[*k]));
         match (owner, balance) {
             // One owner may back several rows (cells) — sum them.
             (Some(owner), Some(balance)) => *balances.entry(owner).or_insert(0) += balance,
@@ -3113,7 +3410,9 @@ fn parse_other_holders(
 /// Fold their /kcc20/{id}/stats body into a view: supply/holders when the
 /// object carries them, at the top level or one level down.
 fn merge_other_stats(view: &mut TokenView, body: &str) {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else { return };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return;
+    };
     for node in [&v, &v["token"], &v["stats"]] {
         if view.supply.is_none() {
             view.supply = json_supply(node);
@@ -3167,8 +3466,12 @@ async fn fetch_discovery_pages(
         let url = format!(
             "{CONSISTENCY_BASE}/kcc20/discovery?limit={CONSISTENCY_PAGE_LIMIT}&offset={offset}&includeTotal=true"
         );
-        let Some(body) = polite_get(client, gate, &url).await else { break };
-        let Ok(page) = serde_json::from_str::<serde_json::Value>(&body) else { break };
+        let Some(body) = polite_get(client, gate, &url).await else {
+            break;
+        };
+        let Ok(page) = serde_json::from_str::<serde_json::Value>(&body) else {
+            break;
+        };
         let items_len = page["items"].as_array().map_or(0, |a| a.len());
         if total.is_none() {
             total = page["total"].as_u64();
@@ -3215,7 +3518,9 @@ fn read_our_top_balances(
     let store = kascov_core::store::Store::open(db, network)?;
     let mut out = std::collections::BTreeMap::new();
     for id in ids {
-        let Ok(token_id) = id.parse::<kascov_core::CovenantId>() else { continue };
+        let Ok(token_id) = id.parse::<kascov_core::CovenantId>() else {
+            continue;
+        };
         let balances = store
             .token_balances(&token_id, CONSISTENCY_TOP_HOLDERS)?
             .iter()
@@ -3227,7 +3532,10 @@ fn read_our_top_balances(
 }
 
 fn consistency_side(view: &TokenView) -> ConsistencySide {
-    ConsistencySide { supply: view.supply, holders: view.holders }
+    ConsistencySide {
+        supply: view.supply,
+        holders: view.holders,
+    }
 }
 
 /// Detail rows survive the cap by interest, not by id order.
@@ -3292,8 +3600,12 @@ async fn consistency_run(
         return Some(report);
     }
     let mut other_views = discovery.views.clone();
-    let intersection: Vec<String> =
-        ours.views.keys().filter(|id| other_views.contains_key(*id)).cloned().collect();
+    let intersection: Vec<String> = ours
+        .views
+        .keys()
+        .filter(|id| other_views.contains_key(*id))
+        .cloned()
+        .collect();
     report.intersection = intersection.len() as u64;
     // Both sides list tokens but none overlap: covenant ids are per-chain, so
     // this is the "their host serves some other network" signature — saying
@@ -3324,13 +3636,21 @@ async fn consistency_run(
         if !gate.may_request() {
             break;
         }
-        if let Some(body) =
-            polite_get(client, gate, &format!("{CONSISTENCY_BASE}/kcc20/{id}/stats")).await
+        if let Some(body) = polite_get(
+            client,
+            gate,
+            &format!("{CONSISTENCY_BASE}/kcc20/{id}/stats"),
+        )
+        .await
         {
             merge_other_stats(other_views.get_mut(id).expect("intersection key"), &body);
         }
-        if let Some(body) =
-            polite_get(client, gate, &format!("{CONSISTENCY_BASE}/kcc20/{id}/holders")).await
+        if let Some(body) = polite_get(
+            client,
+            gate,
+            &format!("{CONSISTENCY_BASE}/kcc20/{id}/holders"),
+        )
+        .await
         {
             if let Some((count, balances)) = parse_other_holders(&body) {
                 let view = other_views.get_mut(id).expect("intersection key");
@@ -3343,7 +3663,12 @@ async fn consistency_run(
         }
     }
     // Classify the union of both directories.
-    let mut union: Vec<String> = ours.views.keys().chain(other_views.keys()).cloned().collect();
+    let mut union: Vec<String> = ours
+        .views
+        .keys()
+        .chain(other_views.keys())
+        .cloned()
+        .collect();
     union.sort();
     union.dedup();
     for id in &union {
@@ -3397,23 +3722,30 @@ async fn consistency_forever(state: std::sync::Arc<ServeState>) {
         let mut gate = PolitenessGate::new();
         let pages = fetch_discovery_pages(&client, &mut gate).await;
         let discovery = assemble_discovery(&pages);
-        let base_reason: Option<String> = if pages.is_empty() {
-            Some(gate.stop_reason().unwrap_or_else(|| {
-                format!("{CONSISTENCY_SOURCE} could not be reached this run")
-            }))
-        } else if discovery.views.is_empty() {
-            Some(format!("no tokens listed on {CONSISTENCY_SOURCE} yet"))
-        } else {
-            None
-        };
+        let base_reason: Option<String> =
+            if pages.is_empty() {
+                Some(gate.stop_reason().unwrap_or_else(|| {
+                    format!("{CONSISTENCY_SOURCE} could not be reached this run")
+                }))
+            } else if discovery.views.is_empty() {
+                Some(format!("no tokens listed on {CONSISTENCY_SOURCE} yet"))
+            } else {
+                None
+            };
         for &network in &state.networks {
             let db = state.base_dir.join(format!("{network}.db"));
             if !db.exists() {
                 continue;
             }
-            let report =
-                consistency_run(network, &db, &client, &mut gate, &discovery, base_reason.clone())
-                    .await;
+            let report = consistency_run(
+                network,
+                &db,
+                &client,
+                &mut gate,
+                &discovery,
+                base_reason.clone(),
+            )
+            .await;
             if let Some(report) = report {
                 if let Some((_, slot)) = state.consistency.iter().find(|(n, _)| *n == network) {
                     *slot.lock().unwrap() = Some(report);
@@ -3478,7 +3810,8 @@ async fn consistency_handler(
 }
 
 /// The cache map: key -> (built_at, body).
-type BodyCache = std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<CachedBody>)>;
+type BodyCache =
+    std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<CachedBody>)>;
 
 /// How long past its TTL a body may still be served while a refresh runs
 /// behind it. Bounded on purpose: serving stale forever would turn a wedged
@@ -3526,7 +3859,10 @@ async fn serve_cached(
 
     let ttl = std::time::Duration::from_secs(ttl_secs);
     let fresh_body = |cache: &BodyCache| {
-        cache.get(&key).filter(|(at, _)| at.elapsed() < ttl).map(|(_, body)| body.clone())
+        cache
+            .get(&key)
+            .filter(|(at, _)| at.elapsed() < ttl)
+            .map(|(_, body)| body.clone())
     };
     // Past the TTL but still inside the stale window: serve it, refresh behind.
     let stale_body = |cache: &BodyCache| {
@@ -3549,8 +3885,17 @@ async fn serve_cached(
         let st = state.clone();
         let k = key.clone();
         tokio::spawn(async move {
-            let key_lock = { st.build_locks.lock().await.entry(k.clone()).or_default().clone() };
-            let Ok(_building) = key_lock.try_lock() else { return };
+            let key_lock = {
+                st.build_locks
+                    .lock()
+                    .await
+                    .entry(k.clone())
+                    .or_default()
+                    .clone()
+            };
+            let Ok(_building) = key_lock.try_lock() else {
+                return;
+            };
             match tokio::task::spawn_blocking(build).await {
                 Ok(Ok(Some(json))) => {
                     let built = std::sync::Arc::new(CachedBody::new(json));
@@ -3602,7 +3947,8 @@ async fn serve_cached(
                 }
                 Ok(Err(err)) => {
                     tracing::error!("{key}: build failed: {err}");
-                    return (StatusCode::SERVICE_UNAVAILABLE, "snapshot unavailable").into_response();
+                    return (StatusCode::SERVICE_UNAVAILABLE, "snapshot unavailable")
+                        .into_response();
                 }
                 Err(err) => {
                     tracing::error!("{key}: build task panicked: {err}");
@@ -3625,7 +3971,11 @@ fn cached_response(
     use axum::http::header;
     use axum::response::IntoResponse;
     let gzipped = gzip_ok && !body.gzip.is_empty();
-    let bytes = if gzipped { body.gzip.clone() } else { body.raw.clone() };
+    let bytes = if gzipped {
+        body.gzip.clone()
+    } else {
+        body.raw.clone()
+    };
     let mut resp = (
         [
             (header::CONTENT_TYPE, "application/json; charset=utf-8"),
@@ -3637,7 +3987,10 @@ fn cached_response(
     )
         .into_response();
     if gzipped {
-        resp.headers_mut().insert(header::CONTENT_ENCODING, axum::http::HeaderValue::from_static("gzip"));
+        resp.headers_mut().insert(
+            header::CONTENT_ENCODING,
+            axum::http::HeaderValue::from_static("gzip"),
+        );
     }
     resp
 }
@@ -3676,7 +4029,10 @@ fn parse_kraken_price(body: &str) -> Option<f64> {
     if v["error"].as_array().is_some_and(|e| !e.is_empty()) {
         return None;
     }
-    let price = v["result"].as_object()?.values().next()?["c"][0].as_str()?.parse::<f64>().ok()?;
+    let price = v["result"].as_object()?.values().next()?["c"][0]
+        .as_str()?
+        .parse::<f64>()
+        .ok()?;
     (price.is_finite() && price > 0.0).then_some(price)
 }
 
@@ -3698,7 +4054,18 @@ async fn fetch_price() -> Option<(f64, &'static str)> {
         .ok()?;
     let get = |url: &'static str| {
         let client = client.clone();
-        async move { client.get(url).send().await.ok()?.error_for_status().ok()?.text().await.ok() }
+        async move {
+            client
+                .get(url)
+                .send()
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()?
+                .text()
+                .await
+                .ok()
+        }
     };
     if let Some(body) = get("https://api.kraken.com/0/public/Ticker?pair=KASUSD").await {
         if let Some(price) = parse_kraken_price(&body) {
@@ -3727,7 +4094,11 @@ async fn price_handler() -> axum::response::Response {
     let mut cache = price_cache().lock().await;
     let stale = match &*cache {
         Some(state) => {
-            let ttl = if state.body.is_some() { PRICE_TTL_OK } else { PRICE_TTL_ERR };
+            let ttl = if state.body.is_some() {
+                PRICE_TTL_OK
+            } else {
+                PRICE_TTL_ERR
+            };
             state.fetched_at.elapsed() >= ttl
         }
         None => true,
@@ -3741,7 +4112,10 @@ async fn price_handler() -> axum::response::Response {
             })
             .to_string()
         });
-        *cache = Some(PriceState { fetched_at: std::time::Instant::now(), body });
+        *cache = Some(PriceState {
+            fetched_at: std::time::Instant::now(),
+            body,
+        });
     }
     let body = cache.as_ref().and_then(|state| state.body.clone());
     drop(cache);
@@ -3788,7 +4162,11 @@ fn registry_client() -> Option<&'static reqwest::Client> {
             reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .redirect(reqwest::redirect::Policy::limited(2))
-                .user_agent(concat!("kascov/", env!("CARGO_PKG_VERSION"), " (+https://kascov.io)"))
+                .user_agent(concat!(
+                    "kascov/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (+https://kascov.io)"
+                ))
                 .build()
                 .map_err(|err| tracing::error!("token-list client unavailable: {err}"))
                 .ok()
@@ -3851,11 +4229,16 @@ async fn registry_handler(
                 Some(client) => registry::fetch_list(client).await.ok(),
                 None => None,
             };
-            *cache = Some(ListState { fetched_at: std::time::Instant::now(), body: fetched });
+            *cache = Some(ListState {
+                fetched_at: std::time::Instant::now(),
+                body: fetched,
+            });
         }
         cache.as_ref().and_then(|s| s.body.clone())
     };
-    let Some(body) = body else { return fail("token list unavailable") };
+    let Some(body) = body else {
+        return fail("token list unavailable");
+    };
     let entries = match registry::parse_list(&body, &network.to_string()) {
         Ok(e) => e,
         // A list published for another network is a configuration mistake, not
@@ -3875,11 +4258,16 @@ async fn registry_handler(
                 let id = kascov_core::CovenantId(bytes);
                 facts.known = store.token_row(&id)?.is_some();
                 if facts.known {
-                    facts.owners =
-                        store.token_balances(&id, 512)?.into_iter().map(|b| b.owner).collect();
+                    facts.owners = store
+                        .token_balances(&id, 512)?
+                        .into_iter()
+                        .map(|b| b.owner)
+                        .collect();
                     for ev in store.token_events_page(&id, None, 512)? {
                         if ev.seq == 0 && ev.event_kind == "genesis" {
-                            facts.genesis_txid.get_or_insert_with(|| ev.txid.to_string());
+                            facts
+                                .genesis_txid
+                                .get_or_insert_with(|| ev.txid.to_string());
                             if let Some(owner) = ev.owner_to {
                                 facts.genesis_owners.push(owner);
                             }
@@ -3955,7 +4343,11 @@ fn witness_client() -> Option<&'static reqwest::Client> {
             reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .redirect(reqwest::redirect::Policy::none())
-                .user_agent(concat!("kascov/", env!("CARGO_PKG_VERSION"), " (+https://kascov.io)"))
+                .user_agent(concat!(
+                    "kascov/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (+https://kascov.io)"
+                ))
                 .build()
                 .map_err(|err| tracing::error!("witness client unavailable: {err}"))
                 .ok()
@@ -3999,7 +4391,10 @@ async fn fetch_logo(client: &reqwest::Client, url: &str) -> witness::Checked {
         if !resp.status().is_success() {
             return witness::Checked::Failed;
         }
-        if resp.content_length().is_some_and(|n| n as usize > witness::MAX_SOURCE_BYTES) {
+        if resp
+            .content_length()
+            .is_some_and(|n| n as usize > witness::MAX_SOURCE_BYTES)
+        {
             return witness::Checked::NotAnImage;
         }
         // Content-Length is a hint; the cap is enforced while reading.
@@ -4031,7 +4426,9 @@ async fn fetch_logo(client: &reqwest::Client, url: &str) -> witness::Checked {
 /// this is a courtesy crawler, not a scraper, and an anonymous page view must
 /// never be what triggers an outbound fetch.
 async fn witness_forever(network: Network, base_dir: std::path::PathBuf) {
-    let Some(client) = witness_client() else { return };
+    let Some(client) = witness_client() else {
+        return;
+    };
     let archive_path = base_dir.join(format!("{network}.db"));
     let media_path = witness::media_db_path(&base_dir, &network.to_string());
     loop {
@@ -4039,8 +4436,9 @@ async fn witness_forever(network: Network, base_dir: std::path::PathBuf) {
             Some(c) => registry::fetch_list(c).await.ok(),
             None => None,
         };
-        let entries =
-            body.as_deref().and_then(|b| registry::parse_list(b, &network.to_string()).ok());
+        let entries = body
+            .as_deref()
+            .and_then(|b| registry::parse_list(b, &network.to_string()).ok());
         let Some(entries) = entries else {
             // no list for this network (or unreachable): look again in an hour
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
@@ -4054,15 +4452,14 @@ async fn witness_forever(network: Network, base_dir: std::path::PathBuf) {
             }
             let cov = e.covenant_id.clone();
             let ap = archive_path.clone();
-            let loaded = tokio::task::spawn_blocking(
-                move || -> Result<Option<witness::WitnessRow>> {
+            let loaded =
+                tokio::task::spawn_blocking(move || -> Result<Option<witness::WitnessRow>> {
                     let conn = rusqlite::Connection::open(&ap)?;
                     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
                     witness::ensure_witness_schema(&conn)?;
                     witness::load_row(&conn, &cov)
-                },
-            )
-            .await;
+                })
+                .await;
             let row = match loaded {
                 Ok(Ok(r)) => r,
                 _ => continue,
@@ -4084,7 +4481,8 @@ async fn witness_forever(network: Network, base_dir: std::path::PathBuf) {
                     (r, replaced)
                 }
             };
-            let due = replaced || row.first_seen_ms.is_none() && row.last_checked_ms.is_none()
+            let due = replaced
+                || row.first_seen_ms.is_none() && row.last_checked_ms.is_none()
                 || now >= row.next_check_ms;
             if !due {
                 continue;
@@ -4116,10 +4514,12 @@ async fn witness_forever(network: Network, base_dir: std::path::PathBuf) {
             let conn = rusqlite::Connection::open(&ap)?;
             conn.busy_timeout(std::time::Duration::from_millis(5000))?;
             witness::ensure_witness_schema(&conn)?;
-            let mut stmt = conn
-                .prepare("SELECT covenant_id FROM listed_image_witness WHERE state = 'witnessed'")?;
-            let known: Vec<String> =
-                stmt.query_map([], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+            let mut stmt = conn.prepare(
+                "SELECT covenant_id FROM listed_image_witness WHERE state = 'witnessed'",
+            )?;
+            let known: Vec<String> = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
             for k in known {
                 if !ids.contains(&k) {
                     conn.execute(
@@ -4170,7 +4570,10 @@ async fn listed_img_handler(
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|t| t.trim().trim_start_matches("W/") == etag))
+        .is_some_and(|v| {
+            v.split(',')
+                .any(|t| t.trim().trim_start_matches("W/") == etag)
+        })
     {
         return StatusCode::NOT_MODIFIED.into_response();
     }
@@ -4198,7 +4601,9 @@ async fn data_handler(
     use axum::response::IntoResponse;
 
     let not_found = || (StatusCode::NOT_FOUND, "unknown network").into_response();
-    let Some(name) = file.strip_suffix(".json") else { return not_found() };
+    let Some(name) = file.strip_suffix(".json") else {
+        return not_found();
+    };
     // '<network>.json' is the explorer grid (summaries only), and
     // '<network>-live.json' the small fast-changing feed. Full timelines live
     // at /data/<network>/c/<id>.json, one covenant at a time.
@@ -4215,9 +4620,15 @@ async fn data_handler(
     let (ttl, cache_control) = if live {
         // s-maxage lets the hosting CDN absorb the polling herd; SWR keeps
         // pages responsive while the edge revalidates.
-        (5, "public, max-age=5, s-maxage=10, stale-while-revalidate=30")
+        (
+            5,
+            "public, max-age=5, s-maxage=10, stale-while-revalidate=30",
+        )
     } else {
-        (20, "public, max-age=15, s-maxage=60, stale-while-revalidate=300")
+        (
+            20,
+            "public, max-age=15, s-maxage=60, stale-while-revalidate=300",
+        )
     };
     // Grid paging: `?after_daa=` (exclusive cursor) and `?limit=` (page size,
     // capped) walk the grid newest-first. An unparseable limit is a 400 (a
@@ -4231,22 +4642,28 @@ async fn data_handler(
         // Compound cursor `(after_daa, after_id)`. A caller sending only
         // `after_daa` (older client) gets id = 0xFF..FF, which re-includes the
         // whole boundary DAA — the client dedups by id, so nothing is skipped.
-        let after = q.get("after_daa").and_then(|s| s.parse::<u64>().ok()).map(|daa| {
-            let id = q
-                .get("after_id")
-                .and_then(|s| {
-                    let mut b = [0u8; 32];
-                    hex::decode_to_slice(s.trim(), &mut b).ok().map(|_| b)
-                })
-                .unwrap_or([0xFF; 32]);
-            (daa, id)
-        });
+        let after = q
+            .get("after_daa")
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|daa| {
+                let id = q
+                    .get("after_id")
+                    .and_then(|s| {
+                        let mut b = [0u8; 32];
+                        hex::decode_to_slice(s.trim(), &mut b).ok().map(|_| b)
+                    })
+                    .unwrap_or([0xFF; 32]);
+                (daa, id)
+            });
         let limit = match q.get("limit") {
             None => None,
             Some(s) => match s.parse::<u64>() {
                 Ok(l) => Some(l.clamp(1, MAX_PAGE)),
                 Err(_) => {
-                    return (StatusCode::BAD_REQUEST, "limit must be a non-negative integer")
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "limit must be a non-negative integer",
+                    )
                         .into_response()
                 }
             },
@@ -4262,15 +4679,22 @@ async fn data_handler(
             l.map_or(0, |v| v)
         ),
     };
-    serve_cached(&state, key, ttl, cache_control, accepts_gzip(&headers), move || {
-        let store = kascov_core::store::Store::open(&db, network)?;
-        let snapshot = if live {
-            build_live_snapshot(&store, network)?
-        } else {
-            build_grid_snapshot(&store, network, after, limit)?
-        };
-        Ok(Some(serde_json::to_string(&snapshot)?))
-    })
+    serve_cached(
+        &state,
+        key,
+        ttl,
+        cache_control,
+        accepts_gzip(&headers),
+        move || {
+            let store = kascov_core::store::Store::open(&db, network)?;
+            let snapshot = if live {
+                build_live_snapshot(&store, network)?
+            } else {
+                build_grid_snapshot(&store, network, after, limit)?
+            };
+            Ok(Some(serde_json::to_string(&snapshot)?))
+        },
+    )
     .await
 }
 
@@ -4300,14 +4724,23 @@ async fn events_handler(
     // Same contract as the grid: a bad cursor degrades to the stream start,
     // an unparseable limit is a 400 (a silently ignored limit would serve a
     // page size the caller asked not to get).
-    let after_daa = q.get("after_daa").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-    let after_seq = q.get("after_seq").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let after_daa = q
+        .get("after_daa")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let after_seq = q
+        .get("after_seq")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
     let limit = match q.get("limit") {
         None => EVENTS_DEFAULT_PAGE,
         Some(s) => match s.parse::<u64>() {
             Ok(l) => l.clamp(1, EVENTS_MAX_PAGE),
             Err(_) => {
-                return (StatusCode::BAD_REQUEST, "limit must be a non-negative integer")
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "limit must be a non-negative integer",
+                )
                     .into_response()
             }
         },
@@ -4324,11 +4757,17 @@ async fn events_handler(
             events.truncate(limit as usize);
         }
         let next = events.last().filter(|_| more).map(|last| {
-            let in_group =
-                events.iter().filter(|e| e.accepting_daa == last.accepting_daa).count() as u64;
+            let in_group = events
+                .iter()
+                .filter(|e| e.accepting_daa == last.accepting_daa)
+                .count() as u64;
             (
                 last.accepting_daa,
-                if last.accepting_daa == after_daa { after_seq + in_group } else { in_group },
+                if last.accepting_daa == after_daa {
+                    after_seq + in_group
+                } else {
+                    in_group
+                },
             )
         });
         let tip = store.tip()?;
@@ -4485,8 +4924,10 @@ fn token_row_json(
             row["held_by_script"] = serde_json::json!(scr);
         }
     }
-    if let Some(fields) =
-        t.fields_json.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+    if let Some(fields) = t
+        .fields_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
     {
         row["fields"] = fields;
     }
@@ -4717,19 +5158,26 @@ async fn token_handler(
     };
     let parse_limit = |name: &str, default: u64, max: u64| match q.get(name) {
         None => Ok(default),
-        Some(s) => s.parse::<u64>().map(|l| l.clamp(1, max)).map_err(|_| name.to_string()),
+        Some(s) => s
+            .parse::<u64>()
+            .map(|l| l.clamp(1, max))
+            .map_err(|_| name.to_string()),
     };
     // `order=desc` (or a `before_seq` cursor) reads the history newest first.
     let before_seq = q.get("before_seq").and_then(|s| s.parse::<u64>().ok());
     let newest_first = before_seq.is_some()
-        || q.get("order").is_some_and(|o| o.eq_ignore_ascii_case("desc"));
+        || q.get("order")
+            .is_some_and(|o| o.eq_ignore_ascii_case("desc"));
     let (limit, events_limit) = match (
         parse_limit("limit", TOKEN_BALANCES_DEFAULT, TOKEN_BALANCES_MAX),
         parse_limit("events_limit", TOKEN_EVENTS_DEFAULT, TOKEN_EVENTS_MAX),
     ) {
         (Ok(l), Ok(e)) => (l, e),
         _ => {
-            return (StatusCode::BAD_REQUEST, "limit must be a non-negative integer")
+            return (
+                StatusCode::BAD_REQUEST,
+                "limit must be a non-negative integer",
+            )
                 .into_response()
         }
     };
@@ -4784,7 +5232,13 @@ async fn token_handler(
                 // descending: the straddled seq is the LOWEST one here
                 let complete: Vec<_> = rows
                     .iter()
-                    .filter(|r| if newest_first { r.seq > boundary } else { r.seq < boundary })
+                    .filter(|r| {
+                        if newest_first {
+                            r.seq > boundary
+                        } else {
+                            r.seq < boundary
+                        }
+                    })
                     .cloned()
                     .collect();
                 if !complete.is_empty() {
@@ -4795,8 +5249,11 @@ async fn token_handler(
         } else {
             None
         };
-        let (next_after_seq, next_before_seq) =
-            if newest_first { (None, boundary_seq) } else { (boundary_seq, None) };
+        let (next_after_seq, next_before_seq) = if newest_first {
+            (None, boundary_seq)
+        } else {
+            (boundary_seq, None)
+        };
         let events: Vec<serde_json::Value> = rows
             .iter()
             .map(|e| {
@@ -4910,8 +5367,10 @@ fn build_families(store: &Store, network: kascov_core::Network) -> Result<serde_
 
     // gather members per cluster root
     let members: Vec<kascov_core::CovenantId> = parent.keys().copied().collect();
-    let mut clusters: std::collections::HashMap<kascov_core::CovenantId, Vec<kascov_core::CovenantId>> =
-        std::collections::HashMap::new();
+    let mut clusters: std::collections::HashMap<
+        kascov_core::CovenantId,
+        Vec<kascov_core::CovenantId>,
+    > = std::collections::HashMap::new();
     for m in members {
         let root = find(&mut parent, m);
         clusters.entry(root).or_default().push(m);
@@ -5044,9 +5503,12 @@ fn build_galaxy_fmt(
         clusters.into_values().filter(|c| c.len() >= 2).collect();
     // biggest first (core), deterministic tiebreak by smallest member id
     cluster_list.sort_by(|a, b| {
-        b.len()
-            .cmp(&a.len())
-            .then_with(|| a.iter().map(|c| c.0).min().cmp(&b.iter().map(|c| c.0).min()))
+        b.len().cmp(&a.len()).then_with(|| {
+            a.iter()
+                .map(|c| c.0)
+                .min()
+                .cmp(&b.iter().map(|c| c.0).min())
+        })
     });
     for c in &mut cluster_list {
         c.sort_by(|a, b| a.0.cmp(&b.0));
@@ -5096,8 +5558,12 @@ fn build_galaxy_fmt(
     let mut recs: Vec<NodeRec> = Vec::new();
     let mut apps: Vec<AppRec> = Vec::new();
     let mut node_index: HashMap<CovenantId, usize> = HashMap::new();
-    let (mut min_x, mut min_y, mut max_x, mut max_y) =
-        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
 
     let mut cum_area = 0.0_f64;
     for (i, cluster) in cluster_list.iter().enumerate() {
@@ -5167,7 +5633,11 @@ fn build_galaxy_fmt(
             recs.push(NodeRec {
                 id: *m,
                 t: tpl_of(m),
-                s: if *active.get(m).unwrap_or(&false) { 1 } else { 0 },
+                s: if *active.get(m).unwrap_or(&false) {
+                    1
+                } else {
+                    0
+                },
                 x: x.round() as i64,
                 y: y.round() as i64,
                 r: nr as i64,
@@ -5183,7 +5653,10 @@ fn build_galaxy_fmt(
         *edge_w.entry(key).or_insert(0) += 1;
     };
     for (_txid, covs) in &edges_raw {
-        let idxs: Vec<usize> = covs.iter().filter_map(|c| node_index.get(c).copied()).collect();
+        let idxs: Vec<usize> = covs
+            .iter()
+            .filter_map(|c| node_index.get(c).copied())
+            .collect();
         if idxs.len() < 2 {
             continue;
         }
@@ -5337,14 +5810,47 @@ fn build_galaxy_fmt(
         if !fmt.visual_only {
             // Apps stay complete in core and full; the visual delta reuses
             // the controller's already-loaded app arrays.
-            obj.insert("acx".into(), apps.iter().map(|a| a.cx.into()).collect::<Vec<serde_json::Value>>().into());
-            obj.insert("acy".into(), apps.iter().map(|a| a.cy.into()).collect::<Vec<serde_json::Value>>().into());
-            obj.insert("ar".into(), apps.iter().map(|a| a.r.into()).collect::<Vec<serde_json::Value>>().into());
-            obj.insert("asz".into(), apps.iter().map(|a| a.size.into()).collect::<Vec<serde_json::Value>>().into());
-            obj.insert("at".into(), apps.iter().map(|a| a.t.into()).collect::<Vec<serde_json::Value>>().into());
+            obj.insert(
+                "acx".into(),
+                apps.iter()
+                    .map(|a| a.cx.into())
+                    .collect::<Vec<serde_json::Value>>()
+                    .into(),
+            );
+            obj.insert(
+                "acy".into(),
+                apps.iter()
+                    .map(|a| a.cy.into())
+                    .collect::<Vec<serde_json::Value>>()
+                    .into(),
+            );
+            obj.insert(
+                "ar".into(),
+                apps.iter()
+                    .map(|a| a.r.into())
+                    .collect::<Vec<serde_json::Value>>()
+                    .into(),
+            );
+            obj.insert(
+                "asz".into(),
+                apps.iter()
+                    .map(|a| a.size.into())
+                    .collect::<Vec<serde_json::Value>>()
+                    .into(),
+            );
+            obj.insert(
+                "at".into(),
+                apps.iter()
+                    .map(|a| a.t.into())
+                    .collect::<Vec<serde_json::Value>>()
+                    .into(),
+            );
             obj.insert(
                 "aalive".into(),
-                apps.iter().map(|a| a.alive.into()).collect::<Vec<serde_json::Value>>().into(),
+                apps.iter()
+                    .map(|a| a.alive.into())
+                    .collect::<Vec<serde_json::Value>>()
+                    .into(),
             );
         }
     } else {
@@ -5416,7 +5922,15 @@ struct CompileReq {
 fn json_resp(v: serde_json::Value) -> axum::response::Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
-    (StatusCode::OK, [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], v.to_string()).into_response()
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        v.to_string(),
+    )
+        .into_response()
 }
 
 /// json_resp with an explicit non-200 status (client errors that must be
@@ -5424,11 +5938,24 @@ fn json_resp(v: serde_json::Value) -> axum::response::Response {
 fn json_error(status: axum::http::StatusCode, v: serde_json::Value) -> axum::response::Response {
     use axum::http::header;
     use axum::response::IntoResponse;
-    (status, [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], v.to_string()).into_response()
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        v.to_string(),
+    )
+        .into_response()
 }
 
 fn blake2b32(bytes: &[u8]) -> [u8; 32] {
-    *blake2b_simd::Params::new().hash_length(32).hash(bytes).as_bytes().first_chunk::<32>().unwrap()
+    *blake2b_simd::Params::new()
+        .hash_length(32)
+        .hash(bytes)
+        .as_bytes()
+        .first_chunk::<32>()
+        .unwrap()
 }
 
 /// Wall-clock ceiling on one silverc run; at the deadline the child is killed.
@@ -5519,7 +6046,12 @@ async fn zk_verify_handler(
     if req.program_hex.len() > 8_000 {
         return json_resp(serde_json::json!({ "ok": false, "error": "program too large" }));
     }
-    if let Err(reason) = state.tool_limiter.lock().await.try_take(&client_ip(&headers)) {
+    if let Err(reason) = state
+        .tool_limiter
+        .lock()
+        .await
+        .try_take(&client_ip(&headers))
+    {
         return too_many(reason);
     }
     let Ok(bytes) = hex::decode(req.program_hex.trim().trim_start_matches("0x")) else {
@@ -5540,7 +6072,12 @@ async fn compile_handler(
     if req.source.len() > 40_000 || req.args.len() > 16 || req.args.iter().any(|a| a.len() > 200) {
         return json_resp(serde_json::json!({ "ok": false, "error": "input too large" }));
     }
-    if let Err(reason) = state.tool_limiter.lock().await.try_take(&client_ip(&headers)) {
+    if let Err(reason) = state
+        .tool_limiter
+        .lock()
+        .await
+        .try_take(&client_ip(&headers))
+    {
         return too_many(reason);
     }
     match run_silverc(req.source, req.args).await {
@@ -5578,7 +6115,11 @@ const DEPLOY_IP_MAP_MAX: usize = 50_000;
 
 impl DeployLimiter {
     fn new() -> Self {
-        Self { tokens: DEPLOY_BUCKET_CAP, last_refill: std::time::Instant::now(), per_ip: Default::default() }
+        Self {
+            tokens: DEPLOY_BUCKET_CAP,
+            last_refill: std::time::Instant::now(),
+            per_ip: Default::default(),
+        }
     }
 
     /// Charge one deploy to `ip`. Ok on success; Err(reason) when throttled.
@@ -5645,7 +6186,11 @@ const TOOL_PER_IP_PER_HOUR: u32 = 30;
 
 impl ToolLimiter {
     fn new() -> Self {
-        Self { tokens: TOOL_BUCKET_CAP, last_refill: std::time::Instant::now(), per_ip: Default::default() }
+        Self {
+            tokens: TOOL_BUCKET_CAP,
+            last_refill: std::time::Instant::now(),
+            per_ip: Default::default(),
+        }
     }
 
     /// Charge one run to `ip`. Ok on success; Err(reason) when throttled.
@@ -5686,7 +6231,10 @@ fn too_many(reason: &'static str) -> axum::response::Response {
     use axum::response::IntoResponse;
     (
         StatusCode::TOO_MANY_REQUESTS,
-        [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")],
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
         serde_json::json!({ "ok": false, "error": reason }).to_string(),
     )
         .into_response()
@@ -5701,7 +6249,12 @@ fn client_ip(headers: &axum::http::HeaderMap) -> String {
         .and_then(|v| v.split(',').next())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string()))
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+        })
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -5738,7 +6291,9 @@ async fn deploy_handler(
         return json_resp(serde_json::json!({ "ok": false, "error": "program too large" }));
     }
     let Ok(program) = hex::decode(req.program_hex.trim().trim_start_matches("0x")) else {
-        return json_resp(serde_json::json!({ "ok": false, "error": "program_hex is not valid hex" }));
+        return json_resp(
+            serde_json::json!({ "ok": false, "error": "program_hex is not valid hex" }),
+        );
     };
     if program.is_empty() {
         return json_resp(serde_json::json!({ "ok": false, "error": "empty program" }));
@@ -5758,7 +6313,10 @@ async fn deploy_handler(
     if let Err(reason) = state.deploy_limiter.lock().await.try_take(&ip) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")],
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
             serde_json::json!({ "ok": false, "error": reason }).to_string(),
         )
             .into_response();
@@ -5766,7 +6324,11 @@ async fn deploy_handler(
 
     let keypair = match kascov_labkit::keypair_from_hex(deploy_key.trim()) {
         Ok(k) => k,
-        Err(_) => return json_resp(serde_json::json!({ "ok": false, "error": "server deploy key misconfigured" })),
+        Err(_) => {
+            return json_resp(
+                serde_json::json!({ "ok": false, "error": "server deploy key misconfigured" }),
+            )
+        }
     };
     // Only one custodial deploy in flight — they share one funding wallet, so
     // parallel builds would select the same UTXO and collide as double-spends.
@@ -5809,7 +6371,9 @@ async fn deploy_handler(
         })),
         Err(e) => {
             tracing::warn!("deploy failed: {e:#}");
-            json_resp(serde_json::json!({ "ok": false, "error": "deploy failed — try again in a few minutes" }))
+            json_resp(
+                serde_json::json!({ "ok": false, "error": "deploy failed — try again in a few minutes" }),
+            )
         }
     }
 }
@@ -5830,14 +6394,23 @@ async fn publish_handler(
     if req.source.len() > 40_000 {
         return json_resp(serde_json::json!({ "ok": false, "error": "bad request" }));
     }
-    if let Err(reason) = state.tool_limiter.lock().await.try_take(&client_ip(&headers)) {
+    if let Err(reason) = state
+        .tool_limiter
+        .lock()
+        .await
+        .try_take(&client_ip(&headers))
+    {
         return too_many(reason);
     }
     let hex = match run_silverc(req.source.clone(), req.args.clone()).await {
         Ok(h) => h,
         Err(e) => return json_resp(serde_json::json!({ "ok": false, "error": e })),
     };
-    let Ok(bytes) = hex::decode(&hex) else { return json_resp(serde_json::json!({ "ok": false, "error": "compiler output wasn't hex" })) };
+    let Ok(bytes) = hex::decode(&hex) else {
+        return json_resp(
+            serde_json::json!({ "ok": false, "error": "compiler output wasn't hex" }),
+        );
+    };
     let hash = hex::encode(blake2b32(&bytes));
     let decoded = kascov_decode::Registry::default().decode(0, &bytes);
     let template = decoded.template.map(|t| t.to_string());
@@ -5851,7 +6424,9 @@ async fn publish_handler(
     })
     .await;
     match stored {
-        Ok(Ok(())) => json_resp(serde_json::json!({ "ok": true, "hash": hash, "template": template })),
+        Ok(Ok(())) => {
+            json_resp(serde_json::json!({ "ok": true, "hash": hash, "template": template }))
+        }
         _ => json_resp(serde_json::json!({ "ok": false, "error": "couldn't store the source" })),
     }
 }
@@ -5867,12 +6442,16 @@ async fn verified_handler(
     };
     let db = state.base_dir.join(format!("{network}.db"));
     let hash = hash.trim_end_matches(".json").to_lowercase();
-    let got = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<(String, String, Option<String>, u64)>> {
-        Ok(kascov_core::store::Store::open(&db, network)?.get_verified_source(&hash)?)
-    })
+    let got = tokio::task::spawn_blocking(
+        move || -> anyhow::Result<Option<(String, String, Option<String>, u64)>> {
+            Ok(kascov_core::store::Store::open(&db, network)?.get_verified_source(&hash)?)
+        },
+    )
     .await;
     match got {
-        Ok(Ok(Some((source, args, template, at)))) => json_resp(serde_json::json!({ "ok": true, "source": source, "args": args, "template": template, "verified_at": at })),
+        Ok(Ok(Some((source, args, template, at)))) => json_resp(
+            serde_json::json!({ "ok": true, "source": source, "args": args, "template": template, "verified_at": at }),
+        ),
         Ok(Ok(None)) => json_resp(serde_json::json!({ "ok": false })),
         _ => json_resp(serde_json::json!({ "ok": false })),
     }
@@ -5898,7 +6477,9 @@ async fn subscribe_handler(
         Err(resp) => return resp,
     };
     if req.url.len() > 500 || !req.url.starts_with("http") {
-        return json_resp(serde_json::json!({ "ok": false, "error": "a valid http(s) url is required" }));
+        return json_resp(
+            serde_json::json!({ "ok": false, "error": "a valid http(s) url is required" }),
+        );
     }
     // A kind filter must be a real event kind — anything else would register
     // a subscription that can never fire.
@@ -5939,7 +6520,13 @@ async fn subscribe_handler(
     let (kind, url, stored_secret) = (req.kind, req.url, secret.clone());
     let added = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
         let store = kascov_core::store::Store::open(&db, network)?;
-        Ok(store.add_subscription(cid.as_deref(), kind.as_deref(), &url, Some(&stored_secret), now_ms())?)
+        Ok(store.add_subscription(
+            cid.as_deref(),
+            kind.as_deref(),
+            &url,
+            Some(&stored_secret),
+            now_ms(),
+        )?)
     })
     .await;
     match added {
@@ -5975,8 +6562,12 @@ async fn unsubscribe_handler(
     })
     .await;
     match deleted {
-        Ok(Ok(UnsubscribeOutcome::Deleted)) => json_resp(serde_json::json!({ "ok": true, "deleted": true })),
-        Ok(Ok(UnsubscribeOutcome::NotFound)) => json_resp(serde_json::json!({ "ok": true, "deleted": false })),
+        Ok(Ok(UnsubscribeOutcome::Deleted)) => {
+            json_resp(serde_json::json!({ "ok": true, "deleted": true }))
+        }
+        Ok(Ok(UnsubscribeOutcome::NotFound)) => {
+            json_resp(serde_json::json!({ "ok": true, "deleted": false }))
+        }
         Ok(Ok(UnsubscribeOutcome::WrongSecret)) => json_error(
             axum::http::StatusCode::FORBIDDEN,
             serde_json::json!({ "ok": false, "error": "secret does not match" }),
@@ -6002,7 +6593,11 @@ async fn lane_handler(
     // else is a client error (and never reaches the cache/DB).
     let ns = ns.strip_suffix(".json").unwrap_or(&ns).to_ascii_lowercase();
     if ns.len() != 8 || !ns.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return (StatusCode::BAD_REQUEST, "namespace must be 8 hex characters").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "namespace must be 8 hex characters",
+        )
+            .into_response();
     }
     // 36_000 DAA ≈ 1 hour at 10 blocks/s — hour buckets over the lane's life.
     const LANE_BUCKET_DAA: u64 = 36_000;
@@ -6072,7 +6667,9 @@ async fn debug_handler(
         let store = kascov_core::store::Store::open(&db, network)?;
         let spent = store.spent_by_txid(&txid)?;
         // Prefer an input whose witness was captured (P2SH reveals).
-        let Some(row) = spent.iter().find(|r| r.spent_sig.as_ref().is_some_and(|s| !s.is_empty()))
+        let Some(row) = spent
+            .iter()
+            .find(|r| r.spent_sig.as_ref().is_some_and(|s| !s.is_empty()))
         else {
             let reason = if spent.is_empty() {
                 "this txid didn't spend any covenant state we track"
@@ -6128,7 +6725,10 @@ async fn simulate_handler(
     match tokio::task::spawn_blocking(move || kascov_sim::simulate(&req)).await {
         Ok(r) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")],
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
             serde_json::to_string(&r).unwrap_or_else(|_| "{}".into()),
         )
             .into_response(),
@@ -6164,7 +6764,12 @@ async fn preflight_handler(
             serde_json::json!({ "ok": false, "error": "transaction JSON too large (256KB cap)" }),
         );
     }
-    if let Err(reason) = state.tool_limiter.lock().await.try_take(&client_ip(&headers)) {
+    if let Err(reason) = state
+        .tool_limiter
+        .lock()
+        .await
+        .try_take(&client_ip(&headers))
+    {
         return too_many(reason);
     }
     match tokio::task::spawn_blocking(move || preflight::run(&body, network)).await {
@@ -6194,22 +6799,29 @@ async fn lifespans_handler(
     };
     let db = state.base_dir.join(format!("{network}.db"));
     let cc = "public, max-age=120, s-maxage=300, stale-while-revalidate=900";
-    serve_cached(&state, format!("{network}/lifespans"), 180, cc, accepts_gzip(&headers), move || {
-        let store = kascov_core::store::Store::open(&db, network)?;
-        let (buckets, median_daa, total) = store.lifespan_stats()?;
-        let items: Vec<_> = buckets
-            .into_iter()
-            .map(|(label, count)| serde_json::json!({ "label": label, "count": count }))
-            .collect();
-        Ok(Some(serde_json::to_string(&serde_json::json!({
-            "network": network.to_string(),
-            "generated_at_ms": now_ms(),
-            "buckets": items,
-            "median_daa": median_daa,
-            "median_ms": median_daa * 100, // 10 DAA ≈ 1 s
-            "total": total,
-        }))?))
-    })
+    serve_cached(
+        &state,
+        format!("{network}/lifespans"),
+        180,
+        cc,
+        accepts_gzip(&headers),
+        move || {
+            let store = kascov_core::store::Store::open(&db, network)?;
+            let (buckets, median_daa, total) = store.lifespan_stats()?;
+            let items: Vec<_> = buckets
+                .into_iter()
+                .map(|(label, count)| serde_json::json!({ "label": label, "count": count }))
+                .collect();
+            Ok(Some(serde_json::to_string(&serde_json::json!({
+                "network": network.to_string(),
+                "generated_at_ms": now_ms(),
+                "buckets": items,
+                "median_daa": median_daa,
+                "median_ms": median_daa * 100, // 10 DAA ≈ 1 s
+                "total": total,
+            }))?))
+        },
+    )
     .await
 }
 
@@ -6251,67 +6863,84 @@ async fn lanes_handler(
     };
     let db = state.base_dir.join(format!("{network}.db"));
     let cc = "public, max-age=30, s-maxage=120, stale-while-revalidate=600";
-    serve_cached(&state, format!("{network}/lanes"), 60, cc, accepts_gzip(&headers), move || {
-        let store = kascov_core::store::Store::open(&db, network)?;
-        let mut json_events = 0u64;
-        let mut json_coins = 0u64;
-        let mut lanes: Vec<serde_json::Value> = Vec::new();
-        // KIP-21 user lanes: payloads shaped <4-byte namespace><16 zero bytes>,
-        // stamped with their namespace at write time. Strict complement of the
-        // generic tag buckets below, so no event is counted twice. (Zero rows
-        // today — detection scaffolding that lights up when lane traffic lands.)
-        for (hex, events, coins) in store.lane_namespaces()? {
-            let bytes = hex::decode(&hex).unwrap_or_default();
-            let printable = !bytes.is_empty() && bytes.iter().all(|&b| (0x20..=0x7e).contains(&b));
-            let label = if printable { String::from_utf8_lossy(&bytes).into_owned() } else { format!("0x{hex}") };
-            lanes.push(serde_json::json!({
-                "label": label,
-                "hex": hex,
-                "ascii": printable,
-                "kind": "lane",
-                "events": events,
-                "covenants": coins,
-            }));
-        }
-        for (key, events, coins) in store.based_app_namespaces()? {
-            if key == "json" || key == "jsonhex" {
-                json_events += events;
-                json_coins += coins;
-                continue;
+    serve_cached(
+        &state,
+        format!("{network}/lanes"),
+        60,
+        cc,
+        accepts_gzip(&headers),
+        move || {
+            let store = kascov_core::store::Store::open(&db, network)?;
+            let mut json_events = 0u64;
+            let mut json_coins = 0u64;
+            let mut lanes: Vec<serde_json::Value> = Vec::new();
+            // KIP-21 user lanes: payloads shaped <4-byte namespace><16 zero bytes>,
+            // stamped with their namespace at write time. Strict complement of the
+            // generic tag buckets below, so no event is counted twice. (Zero rows
+            // today — detection scaffolding that lights up when lane traffic lands.)
+            for (hex, events, coins) in store.lane_namespaces()? {
+                let bytes = hex::decode(&hex).unwrap_or_default();
+                let printable =
+                    !bytes.is_empty() && bytes.iter().all(|&b| (0x20..=0x7e).contains(&b));
+                let label = if printable {
+                    String::from_utf8_lossy(&bytes).into_owned()
+                } else {
+                    format!("0x{hex}")
+                };
+                lanes.push(serde_json::json!({
+                    "label": label,
+                    "hex": hex,
+                    "ascii": printable,
+                    "kind": "lane",
+                    "events": events,
+                    "covenants": coins,
+                }));
             }
-            // key = "tag:<hex>" — a 4-byte app tag; decode printable ASCII
-            let hex = key.strip_prefix("tag:").unwrap_or(&key);
-            let bytes = hex::decode(hex).unwrap_or_default();
-            let printable = !bytes.is_empty() && bytes.iter().all(|&b| (0x20..=0x7e).contains(&b));
-            let label = if printable { String::from_utf8_lossy(&bytes).into_owned() } else { format!("0x{hex}") };
-            lanes.push(serde_json::json!({
-                "label": label,
-                "hex": hex,
-                "ascii": printable,
-                "kind": "tag",
-                "events": events,
-                "covenants": coins,
-            }));
-        }
-        if json_events > 0 {
-            lanes.push(serde_json::json!({
-                "label": "JSON inscriptions",
-                "hex": serde_json::Value::Null,
-                "ascii": false,
-                "kind": "inscription",
-                "events": json_events,
-                "covenants": json_coins,
-            }));
-        }
-        lanes.sort_by(|a, b| b["events"].as_u64().cmp(&a["events"].as_u64()));
-        let tip = store.tip()?;
-        Ok(Some(serde_json::to_string(&serde_json::json!({
-            "network": network.to_string(),
-            "generated_at_ms": now_ms(),
-            "tip_daa": tip.map(|t| t.0),
-            "lanes": lanes,
-        }))?))
-    })
+            for (key, events, coins) in store.based_app_namespaces()? {
+                if key == "json" || key == "jsonhex" {
+                    json_events += events;
+                    json_coins += coins;
+                    continue;
+                }
+                // key = "tag:<hex>" — a 4-byte app tag; decode printable ASCII
+                let hex = key.strip_prefix("tag:").unwrap_or(&key);
+                let bytes = hex::decode(hex).unwrap_or_default();
+                let printable =
+                    !bytes.is_empty() && bytes.iter().all(|&b| (0x20..=0x7e).contains(&b));
+                let label = if printable {
+                    String::from_utf8_lossy(&bytes).into_owned()
+                } else {
+                    format!("0x{hex}")
+                };
+                lanes.push(serde_json::json!({
+                    "label": label,
+                    "hex": hex,
+                    "ascii": printable,
+                    "kind": "tag",
+                    "events": events,
+                    "covenants": coins,
+                }));
+            }
+            if json_events > 0 {
+                lanes.push(serde_json::json!({
+                    "label": "JSON inscriptions",
+                    "hex": serde_json::Value::Null,
+                    "ascii": false,
+                    "kind": "inscription",
+                    "events": json_events,
+                    "covenants": json_coins,
+                }));
+            }
+            lanes.sort_by(|a, b| b["events"].as_u64().cmp(&a["events"].as_u64()));
+            let tip = store.tip()?;
+            Ok(Some(serde_json::to_string(&serde_json::json!({
+                "network": network.to_string(),
+                "generated_at_ms": now_ms(),
+                "tip_daa": tip.map(|t| t.0),
+                "lanes": lanes,
+            }))?))
+        },
+    )
     .await
 }
 
@@ -6326,10 +6955,19 @@ async fn families_handler(
     };
     let db = state.base_dir.join(format!("{network}.db"));
     let cc = "public, max-age=30, s-maxage=120, stale-while-revalidate=600";
-    serve_cached(&state, format!("{network}/families"), 60, cc, accepts_gzip(&headers), move || {
-        let store = kascov_core::store::Store::open(&db, network)?;
-        Ok(Some(serde_json::to_string(&build_families(&store, network)?)?))
-    })
+    serve_cached(
+        &state,
+        format!("{network}/families"),
+        60,
+        cc,
+        accepts_gzip(&headers),
+        move || {
+            let store = kascov_core::store::Store::open(&db, network)?;
+            Ok(Some(serde_json::to_string(&build_families(
+                &store, network,
+            )?)?))
+        },
+    )
     .await
 }
 
@@ -6346,16 +6984,23 @@ async fn reorgs_handler(
     };
     let db = state.base_dir.join(format!("{network}.db"));
     let cc = "public, max-age=30, s-maxage=120, stale-while-revalidate=600";
-    serve_cached(&state, format!("{network}/reorgs"), 60, cc, accepts_gzip(&headers), move || {
-        let store = kascov_core::store::Store::open(&db, network)?;
-        let reorgs = store.reorg_log(500)?;
-        let out = serde_json::json!({
-            "network": network.to_string(),
-            "generated_at_ms": now_ms(),
-            "reorgs": reorgs,
-        });
-        Ok(Some(serde_json::to_string(&out)?))
-    })
+    serve_cached(
+        &state,
+        format!("{network}/reorgs"),
+        60,
+        cc,
+        accepts_gzip(&headers),
+        move || {
+            let store = kascov_core::store::Store::open(&db, network)?;
+            let reorgs = store.reorg_log(500)?;
+            let out = serde_json::json!({
+                "network": network.to_string(),
+                "generated_at_ms": now_ms(),
+                "reorgs": reorgs,
+            });
+            Ok(Some(serde_json::to_string(&out)?))
+        },
+    )
     .await
 }
 
@@ -6483,14 +7128,17 @@ fn share_info(
     let balance_line = if alive {
         format!("{} live on chain", og::fmt_amount(summary.live_value, unit))
     } else {
-        format!("{} at birth · story ended", og::fmt_amount(summary.born_value, unit))
+        format!(
+            "{} at birth · story ended",
+            og::fmt_amount(summary.born_value, unit)
+        )
     };
     // DAA -> wall clock, anchored on the indexer's tip (~10 DAA per second;
     // same estimate the frontend makes in daaToMs).
     let born_date = match (store.tip()?, summary.genesis_daa) {
-        (Some((tip_daa, tip_ms)), Some(genesis_daa)) => {
-            Some(og::fmt_date(tip_ms.saturating_sub(tip_daa.saturating_sub(genesis_daa) * 100)))
-        }
+        (Some((tip_daa, tip_ms)), Some(genesis_daa)) => Some(og::fmt_date(
+            tip_ms.saturating_sub(tip_daa.saturating_sub(genesis_daa) * 100),
+        )),
         _ => None,
     };
     let events = format!(
@@ -6512,7 +7160,13 @@ fn share_info(
     if claimed_line.is_some() {
         description.push_str(" · name claimed in its genesis payload");
     }
-    Ok(ShareInfo { name, alive, balance_line, born_line, description })
+    Ok(ShareInfo {
+        name,
+        alive,
+        balance_line,
+        born_line,
+        description,
+    })
 }
 
 /// The crawler-visible substance under the share page's summary line: a
@@ -6688,7 +7342,10 @@ async fn token_image_handler(
         (
             [
                 (header::CONTENT_TYPE, ct),
-                (header::CACHE_CONTROL, "public, max-age=86400, immutable".to_string()),
+                (
+                    header::CACHE_CONTROL,
+                    "public, max-age=86400, immutable".to_string(),
+                ),
                 (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
             ],
             bytes,
@@ -6705,7 +7362,11 @@ async fn token_image_handler(
                 }
             }
             "mismatch" if now.saturating_sub(*fetched) < IMAGE_RETRY_MISMATCH_MS => {
-                return (StatusCode::NOT_FOUND, "image does not match its on-chain hash").into_response();
+                return (
+                    StatusCode::NOT_FOUND,
+                    "image does not match its on-chain hash",
+                )
+                    .into_response();
             }
             _ if now.saturating_sub(*fetched) < IMAGE_RETRY_FAIL_MS => {
                 return (StatusCode::NOT_FOUND, "image unavailable").into_response();
@@ -6715,7 +7376,12 @@ async fn token_image_handler(
     }
 
     // 2. no verified row: need a claim with BOTH url and hash
-    let Some(ClaimedTokenMeta { image: Some(url), image_hash: Some(want_hash), .. }) = claim else {
+    let Some(ClaimedTokenMeta {
+        image: Some(url),
+        image_hash: Some(want_hash),
+        ..
+    }) = claim
+    else {
         return (StatusCode::NOT_FOUND, "token has no hash-committed image").into_response();
     };
 
@@ -6782,11 +7448,19 @@ async fn token_image_handler(
     let got_hash = hex::encode(sha2::Sha256::digest(&body));
     if got_hash != want_hash {
         record("mismatch", None, None).await;
-        return (StatusCode::NOT_FOUND, "image does not match its on-chain hash").into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            "image does not match its on-chain hash",
+        )
+            .into_response();
     }
     let Some(ct) = sniff_image(&body) else {
         record("not_image", None, None).await;
-        return (StatusCode::NOT_FOUND, "committed bytes are not a recognized image format").into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            "committed bytes are not a recognized image format",
+        )
+            .into_response();
     };
 
     record("verified", Some(ct.to_string()), Some(body.clone())).await;
@@ -6895,7 +7569,9 @@ async fn og_card_handler(
     let db = state.base_dir.join(format!("{network}.db"));
     let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
         let store = kascov_core::store::Store::open(&db, network)?;
-        let Some(summary) = store.summary(&covenant_id)? else { return Ok(None) };
+        let Some(summary) = store.summary(&covenant_id)? else {
+            return Ok(None);
+        };
         let info = share_info(&store, &summary, network)?;
         let card = og::CardData {
             id: covenant_id.to_string(),
@@ -6919,7 +7595,10 @@ async fn og_card_handler(
         Ok(Ok(Some(png))) => (
             [
                 (header::CONTENT_TYPE, "image/png"),
-                (header::CACHE_CONTROL, "public, max-age=86400, s-maxage=604800"),
+                (
+                    header::CACHE_CONTROL,
+                    "public, max-age=86400, s-maxage=604800",
+                ),
             ],
             png,
         )
@@ -7093,11 +7772,16 @@ async fn sitemap_handler(
 /// serve_cached stamps application/json on everything it serves; the XML
 /// surfaces (/sitemap.xml, /feed.xml) correct the label after the fact
 /// (success path only — error bodies are plain text and never cached).
-fn relabel_xml(mut resp: axum::response::Response, content_type: &'static str) -> axum::response::Response {
+fn relabel_xml(
+    mut resp: axum::response::Response,
+    content_type: &'static str,
+) -> axum::response::Response {
     use axum::http::header;
     if resp.status().is_success() {
-        resp.headers_mut()
-            .insert(header::CONTENT_TYPE, axum::http::HeaderValue::from_static(content_type));
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static(content_type),
+        );
     }
     resp
 }
@@ -7132,7 +7816,8 @@ fn build_feed_xml(changelog_json: &str, now: u64) -> Result<String> {
         title: String,
         body: String,
     }
-    let entries: Vec<Entry> = serde_json::from_str(changelog_json).context("changelog.json unreadable")?;
+    let entries: Vec<Entry> =
+        serde_json::from_str(changelog_json).context("changelog.json unreadable")?;
     let updated = entries
         .iter()
         .map(|e| e.date.as_str())
@@ -7158,7 +7843,11 @@ fn build_feed_xml(changelog_json: &str, now: u64) -> Result<String> {
         let mut n = 1;
         while seen.contains(&id) {
             n += 1;
-            id = format!("tag:kascov.io,{}:{}-{n}", entry.date, feed_slug(&entry.title));
+            id = format!(
+                "tag:kascov.io,{}:{}-{n}",
+                entry.date,
+                feed_slug(&entry.title)
+            );
         }
         seen.push(id.clone());
         xml.push_str(&format!(
@@ -7336,9 +8025,12 @@ async fn tx_handler(
                 }
                 if let Some(i) = c.input_index {
                     row["input_index"] = serde_json::json!(i);
-                    row["role"] = serde_json::json!(
-                        if leader_index.get(&c.covenant_id) == Some(&i) { "leader" } else { "delegator" }
-                    );
+                    row["role"] =
+                        serde_json::json!(if leader_index.get(&c.covenant_id) == Some(&i) {
+                            "leader"
+                        } else {
+                            "delegator"
+                        });
                 }
                 if let Some(h) = &c.kcc1_template_hash {
                     row["kcc1_template_hash"] = serde_json::json!(hex::encode(h));
@@ -7429,7 +8121,9 @@ async fn digest_handler(
     let cc = "public, max-age=60, s-maxage=300, stale-while-revalidate=600";
     serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
-        Ok(Some(serde_json::to_string(&build_digest(&store, network)?)?))
+        Ok(Some(serde_json::to_string(&build_digest(
+            &store, network,
+        )?)?))
     })
     .await
 }
@@ -7452,7 +8146,9 @@ async fn templates_handler(
     let cc = "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
     serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
-        Ok(Some(serde_json::to_string(&build_templates_snapshot(&store, network)?)?))
+        Ok(Some(serde_json::to_string(&build_templates_snapshot(
+            &store, network,
+        )?)?))
     })
     .await
 }
@@ -7494,7 +8190,9 @@ async fn activity_handler(
     let cc = "public, max-age=15, s-maxage=60, stale-while-revalidate=300";
     serve_cached(&state, key, 30, cc, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
-        Ok(Some(serde_json::to_string(&build_activity_snapshot(&store, network, range)?)?))
+        Ok(Some(serde_json::to_string(&build_activity_snapshot(
+            &store, network, range,
+        )?)?))
     })
     .await
 }
@@ -7590,8 +8288,12 @@ fn personal_message_hash(msg: &str) -> [u8; 32] {
 /// half of a proof was wrong.
 fn verify_kaspa_message(x_only: &[u8], msg: &str, sig: &[u8]) -> bool {
     use secp256k1::{schnorr::Signature, Message, XOnlyPublicKey};
-    let Ok(key) = XOnlyPublicKey::from_slice(x_only) else { return false };
-    let Ok(signature) = Signature::from_slice(sig) else { return false };
+    let Ok(key) = XOnlyPublicKey::from_slice(x_only) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(sig) else {
+        return false;
+    };
     let Ok(digest) = Message::from_digest_slice(&personal_message_hash(msg)) else {
         return false;
     };
@@ -7621,7 +8323,10 @@ fn parse_addr_or_pubkey(raw: &str, network: Network) -> Option<(String, Vec<u8>)
     if pubkey.len() != version.public_key_len() {
         return None;
     }
-    Some((Address::new(addr_prefix(network), version, &pubkey).to_string(), pubkey))
+    Some((
+        Address::new(addr_prefix(network), version, &pubkey).to_string(),
+        pubkey,
+    ))
 }
 
 /// Which smart coins has this address/pubkey touched (as a p2pk-state owner)?
@@ -7658,7 +8363,12 @@ async fn prove_holding_handler(
         Ok(n) => n,
         Err(resp) => return resp,
     };
-    if let Err(reason) = state.tool_limiter.lock().await.try_take(&client_ip(&headers)) {
+    if let Err(reason) = state
+        .tool_limiter
+        .lock()
+        .await
+        .try_take(&client_ip(&headers))
+    {
         return too_many(reason);
     }
     // A signature covers any length, but nothing legitimate needs more, and an
@@ -7812,7 +8522,9 @@ async fn addr_handler(
             .collect();
         let mut covenants = Vec::with_capacity(rows.len().min(ADDR_MAX_COVENANTS));
         for r in rows.iter().take(ADDR_MAX_COVENANTS) {
-            let Some(c) = store.summary(&r.covenant_id)? else { continue };
+            let Some(c) = store.summary(&r.covenant_id)? else {
+                continue;
+            };
             covenants.push(serde_json::json!({
                 // grid-row shape — keep in sync with build_grid_snapshot
                 "covenant_id": c.covenant_id,
@@ -7916,8 +8628,13 @@ fn build_search_index(store: &kascov_core::store::Store) -> Result<SearchIndex> 
     // and without this the tokens people actually talk about are unfindable.
     let mut claims: Vec<(String, [u8; 32])> = Vec::new();
     for t in store.token_directory()? {
-        let Some(c) = store.claimed_token_meta(&t.token_id)? else { continue };
-        for claim in [c.name.as_deref(), c.ticker.as_deref()].into_iter().flatten() {
+        let Some(c) = store.claimed_token_meta(&t.token_id)? else {
+            continue;
+        };
+        for claim in [c.name.as_deref(), c.ticker.as_deref()]
+            .into_iter()
+            .flatten()
+        {
             let claim = claim.trim().to_lowercase();
             if !claim.is_empty() {
                 claims.push((claim, t.token_id.0));
@@ -7926,7 +8643,12 @@ fn build_search_index(store: &kascov_core::store::Store) -> Result<SearchIndex> 
     }
     claims.sort_unstable();
     claims.dedup();
-    Ok(SearchIndex { names, name_tokens, claims, templates })
+    Ok(SearchIndex {
+        names,
+        name_tokens,
+        claims,
+        templates,
+    })
 }
 
 /// The current index for `network`, rebuilding at most when the covenant set
@@ -8091,8 +8813,9 @@ async fn search_handler(
                     if let Some(s) = store.summary(&cid)? {
                         seen.insert(id);
                         push(&s, "claimed", &mut rows);
-                        if let Some(claim) =
-                            store.claimed_token_meta(&cid)?.and_then(|m| m.name.or(m.ticker))
+                        if let Some(claim) = store
+                            .claimed_token_meta(&cid)?
+                            .and_then(|m| m.name.or(m.ticker))
                         {
                             if let Some(row) = rows.last_mut() {
                                 row["claimed"] = serde_json::Value::String(claim);
@@ -8191,7 +8914,11 @@ async fn stream_handler(
     };
     // Optional ?covenant=<64 hex>: narrow the fan-out to one coin's events.
     let Ok(needle) = covenant_filter(params.get("covenant").map(String::as_str)) else {
-        return (StatusCode::BAD_REQUEST, "bad covenant filter (want 64 hex chars)").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "bad covenant filter (want 64 hex chars)",
+        )
+            .into_response();
     };
     let Some((_, channel)) = state.live.iter().find(|(n, _)| *n == network) else {
         return (StatusCode::NOT_FOUND, "unknown network").into_response();
@@ -8199,7 +8926,11 @@ async fn stream_handler(
     // Reserve a subscriber slot; back out over the cap.
     if channel.subscribers.fetch_add(1, Ordering::AcqRel) >= MAX_STREAM_SUBSCRIBERS {
         channel.subscribers.fetch_sub(1, Ordering::AcqRel);
-        return (StatusCode::SERVICE_UNAVAILABLE, "stream full — use the polling feeds").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stream full — use the polling feeds",
+        )
+            .into_response();
     }
     let slot = SubscriberSlot(channel.subscribers.clone());
     let rx = channel.tx.subscribe();
@@ -8211,26 +8942,32 @@ async fn stream_handler(
     // TCP buffers without erroring) — after the deadline the stream ends
     // cleanly and well-behaved clients (EventSource) reconnect on their own.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
-    let stream = futures::stream::unfold((rx, slot, needle), move |(mut rx, slot, needle)| async move {
-        loop {
-            match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Ok(msg)) => {
-                    // Filtered streams drop non-matching events pre-emit; the
-                    // keep-alive layer still shows the client a live socket.
-                    if !sse_event_matches(&msg, needle.as_deref()) {
-                        continue;
+    let stream = futures::stream::unfold(
+        (rx, slot, needle),
+        move |(mut rx, slot, needle)| async move {
+            loop {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Ok(msg)) => {
+                        // Filtered streams drop non-matching events pre-emit; the
+                        // keep-alive layer still shows the client a live socket.
+                        if !sse_event_matches(&msg, needle.as_deref()) {
+                            continue;
+                        }
+                        let event = Event::default().data(&*msg);
+                        return Some((
+                            Ok::<_, std::convert::Infallible>(event),
+                            (rx, slot, needle),
+                        ));
                     }
-                    let event = Event::default().data(&*msg);
-                    return Some((Ok::<_, std::convert::Infallible>(event), (rx, slot, needle)));
+                    // Fell behind the buffer: skip ahead — clients resync by polling.
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
+                    // Lifetime reached — recycle the slot.
+                    Err(_) => return None,
                 }
-                // Fell behind the buffer: skip ahead — clients resync by polling.
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
-                // Lifetime reached — recycle the slot.
-                Err(_) => return None,
             }
-        }
-    });
+        },
+    );
     // Lead with a comment so headers and first bytes flush at accept time —
     // clients see the connection is live and buffering proxies commit to the
     // stream instead of holding a byteless response open.
@@ -8240,14 +8977,24 @@ async fn stream_handler(
     .chain(stream);
 
     let mut resp = Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(25)).text("ka"))
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(25))
+                .text("ka"),
+        )
         .into_response();
     let headers = resp.headers_mut();
     // no-store beats axum's default no-cache: the CDN must never coalesce a stream
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
     // ask proxies not to buffer (nginx-style hint; Firebase may ignore it)
-    headers.insert(HeaderName::from_static("x-accel-buffering"), HeaderValue::from_static("no"));
+    headers.insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
     resp
 }
 
@@ -8345,15 +9092,22 @@ mod galaxy_tests {
     use kascov_core::{BlockHash, CovenantId, Network, Outpoint, TxId};
 
     fn ev(cov: u8, kind: EventKind, tx: u8) -> NewEvent {
-        NewEvent { covenant_id: CovenantId([cov; 32]), kind, txid: TxId([tx; 32]), tx_index: tx as u32, payload: None, lane_namespace: None }
+        NewEvent {
+            covenant_id: CovenantId([cov; 32]),
+            kind,
+            txid: TxId([tx; 32]),
+            tx_index: tx as u32,
+            payload: None,
+            lane_namespace: None,
+        }
     }
 
     // A synthetic index with two "apps": {A1,B2} share tx 0x10, and
     // {C3,D4,E5} share tx 0x20; a lone F6 is a size-1 cluster (excluded).
     // A1 gets a live utxo so it reads as active. Extra events extend it.
     fn galaxy_store(tag: &str, extra: Vec<NewEvent>) -> Store {
-        let path = std::env::temp_dir()
-            .join(format!("kascov-galaxy-{tag}-{}.db", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("kascov-galaxy-{tag}-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut store = Store::open(&path, Network::Testnet(10)).unwrap();
         let mut events = vec![
@@ -8372,7 +9126,10 @@ mod galaxy_tests {
             accepting_blue_score: 100,
             events,
             created_utxos: vec![NewUtxo {
-                outpoint: Outpoint { txid: TxId([0x10; 32]), index: 0 },
+                outpoint: Outpoint {
+                    txid: TxId([0x10; 32]),
+                    index: 0,
+                },
                 covenant_id: CovenantId([0xA1; 32]),
                 value: 1_000_000_000,
                 spk_version: 0,
@@ -8428,7 +9185,11 @@ mod galaxy_tests {
         let col = build_galaxy_fmt(
             &store,
             net,
-            GalaxyFmt { columnar: true, core_only: false, visual_only: false },
+            GalaxyFmt {
+                columnar: true,
+                core_only: false,
+                visual_only: false,
+            },
         )
         .unwrap();
 
@@ -8464,8 +9225,9 @@ mod galaxy_tests {
 
     #[test]
     fn galaxy_members_form_an_organic_disc_not_a_single_ring() {
-        let extra: Vec<NewEvent> =
-            (0x60..0x69).map(|c| ev(c, EventKind::Genesis, 0x40)).collect();
+        let extra: Vec<NewEvent> = (0x60..0x69)
+            .map(|c| ev(c, EventKind::Genesis, 0x40))
+            .collect();
         let store = galaxy_store("organic", extra);
         let g = build_galaxy(&store, Network::Testnet(10)).unwrap();
         let app = &g["apps"][0]; // the added 9-member cluster sorts first
@@ -8491,9 +9253,15 @@ mod galaxy_tests {
             radii.len() >= 4,
             "members should occupy several radii instead of one circular outline"
         );
-        let mean_x = members.iter().map(|n| n["x"].as_i64().unwrap()).sum::<i64>() as f64
+        let mean_x = members
+            .iter()
+            .map(|n| n["x"].as_i64().unwrap())
+            .sum::<i64>() as f64
             / members.len() as f64;
-        let mean_y = members.iter().map(|n| n["y"].as_i64().unwrap()).sum::<i64>() as f64
+        let mean_y = members
+            .iter()
+            .map(|n| n["y"].as_i64().unwrap())
+            .sum::<i64>() as f64
             / members.len() as f64;
         assert!((mean_x - cx as f64).abs() <= 1.0);
         assert!((mean_y - cy as f64).abs() <= 1.0);
@@ -8505,15 +9273,20 @@ mod galaxy_tests {
     fn galaxy_core_tier_positions_match_full_tier() {
         // add a 9-member cluster (all sharing tx 0x40) so one cluster crosses
         // GALAXY_CORE_MIN_SIZE while {A1,B2} and {C3,D4,E5} stay below it
-        let extra: Vec<NewEvent> =
-            (0x60..0x69).map(|c| ev(c, EventKind::Genesis, 0x40)).collect();
+        let extra: Vec<NewEvent> = (0x60..0x69)
+            .map(|c| ev(c, EventKind::Genesis, 0x40))
+            .collect();
         let store = galaxy_store("core", extra);
         let net = Network::Testnet(10);
         let full = build_galaxy(&store, net).unwrap();
         let core = build_galaxy_fmt(
             &store,
             net,
-            GalaxyFmt { columnar: false, core_only: true, visual_only: false },
+            GalaxyFmt {
+                columnar: false,
+                core_only: true,
+                visual_only: false,
+            },
         )
         .unwrap();
 
@@ -8522,15 +9295,20 @@ mod galaxy_tests {
         let core_nodes = core["nodes"].as_array().unwrap();
         assert_eq!(full_nodes.len(), 14); // 9 + 3 + 2
         assert_eq!(core_nodes.len(), 9); // only the big cluster survives
-        assert_eq!(core["nodes_total"].as_u64().unwrap(), full_nodes.len() as u64);
+        assert_eq!(
+            core["nodes_total"].as_u64().unwrap(),
+            full_nodes.len() as u64
+        );
 
         // apps + bounds emitted in full — the client viewport must not shift
         assert_eq!(core["apps"], full["apps"]);
         assert_eq!(core["bounds"], full["bounds"]);
 
         // every core node equals its full-tier twin, matched by covenant id
-        let full_by_id: std::collections::HashMap<&str, &serde_json::Value> =
-            full_nodes.iter().map(|n| (n["id"].as_str().unwrap(), n)).collect();
+        let full_by_id: std::collections::HashMap<&str, &serde_json::Value> = full_nodes
+            .iter()
+            .map(|n| (n["id"].as_str().unwrap(), n))
+            .collect();
         for n in core_nodes {
             let twin = full_by_id[n["id"].as_str().unwrap()];
             assert_eq!(n, twin, "core node must be byte-identical to its full twin");
@@ -8544,9 +9322,14 @@ mod galaxy_tests {
                 .unwrap()
                 .iter()
                 .map(|e| {
-                    let (a, b) = (e[0].as_u64().unwrap() as usize, e[1].as_u64().unwrap() as usize);
-                    let (ia, ib) =
-                        (nodes[a]["id"].as_str().unwrap(), nodes[b]["id"].as_str().unwrap());
+                    let (a, b) = (
+                        e[0].as_u64().unwrap() as usize,
+                        e[1].as_u64().unwrap() as usize,
+                    );
+                    let (ia, ib) = (
+                        nodes[a]["id"].as_str().unwrap(),
+                        nodes[b]["id"].as_str().unwrap(),
+                    );
                     let (lo, hi) = if ia < ib { (ia, ib) } else { (ib, ia) };
                     (lo.to_string(), hi.to_string(), e[2].as_u64().unwrap())
                 })
@@ -8555,7 +9338,10 @@ mod galaxy_tests {
         let core_pairs = pairs(&core, core_nodes);
         let full_pairs = pairs(&full, full_nodes);
         assert!(!core_pairs.is_empty());
-        assert!(core_pairs.is_subset(&full_pairs), "core edges must be a subset of full edges");
+        assert!(
+            core_pairs.is_subset(&full_pairs),
+            "core edges must be a subset of full edges"
+        );
         // and exactly the full edges whose two ends are both core members
         let expected = full_pairs
             .iter()
@@ -8572,7 +9358,11 @@ mod galaxy_tests {
         let both = build_galaxy_fmt(
             &store,
             net,
-            GalaxyFmt { columnar: true, core_only: true, visual_only: false },
+            GalaxyFmt {
+                columnar: true,
+                core_only: true,
+                visual_only: false,
+            },
         )
         .unwrap();
         assert_eq!(both["tier"], "core");
@@ -8590,7 +9380,11 @@ mod galaxy_tests {
         let visual = build_galaxy_fmt(
             &store,
             net,
-            GalaxyFmt { columnar: true, core_only: false, visual_only: true },
+            GalaxyFmt {
+                columnar: true,
+                core_only: false,
+                visual_only: true,
+            },
         )
         .unwrap();
         assert_eq!(visual["tier"], "visual");
@@ -8636,7 +9430,10 @@ mod api_growth_tests {
         let a = "11".repeat(32);
         let b = "22".repeat(32);
         assert_eq!(parse_coin_ids(&a).unwrap(), vec![[0x11u8; 32]]);
-        assert_eq!(parse_coin_ids(&format!("{a},{b}")).unwrap(), vec![[0x11u8; 32], [0x22u8; 32]]);
+        assert_eq!(
+            parse_coin_ids(&format!("{a},{b}")).unwrap(),
+            vec![[0x11u8; 32], [0x22u8; 32]]
+        );
         // whitespace around ids is tolerated
         assert_eq!(parse_coin_ids(&format!(" {a} , {b}")).unwrap().len(), 2);
         // malformed: empty, short, non-hex, trailing comma
@@ -8703,8 +9500,8 @@ mod webhook_guard_tests {
             "::1",
             "::",
             "fc00::1",
-            "fdab::2", // unique local
-            "fe80::1", // link local
+            "fdab::2",         // unique local
+            "fe80::1",         // link local
             "::ffff:10.0.0.1", // v4-mapped private
             "::ffff:127.0.0.1",
         ] {
@@ -8744,7 +9541,10 @@ mod webhook_guard_tests {
             "http://[fc00::2]/x",
             "http://0.0.0.0/x",
         ] {
-            assert!(webhook_target_allowed(url).is_err(), "{url} must be rejected");
+            assert!(
+                webhook_target_allowed(url).is_err(),
+                "{url} must be rejected"
+            );
         }
     }
 
@@ -8808,7 +9608,10 @@ mod price_tests {
 
     #[test]
     fn coingecko_shape_parses_and_rejects_junk() {
-        assert_eq!(parse_coingecko_price(r#"{"kaspa":{"usd":0.077612}}"#), Some(0.077612));
+        assert_eq!(
+            parse_coingecko_price(r#"{"kaspa":{"usd":0.077612}}"#),
+            Some(0.077612)
+        );
         assert_eq!(parse_coingecko_price(r#"{}"#), None);
         assert_eq!(parse_coingecko_price(r#"{"kaspa":{}}"#), None);
         assert_eq!(parse_coingecko_price(r#"{"kaspa":{"usd":"0.07"}}"#), None); // string, not number
@@ -8829,8 +9632,11 @@ mod consistency_tests {
         TokenView {
             supply,
             holders,
-            balances: balances
-                .map(|rows| rows.iter().map(|(owner, v)| (owner.to_string(), *v)).collect()),
+            balances: balances.map(|rows| {
+                rows.iter()
+                    .map(|(owner, v)| (owner.to_string(), *v))
+                    .collect()
+            }),
         }
     }
 
@@ -8875,11 +9681,15 @@ mod consistency_tests {
         // matched balances: agree / differ / a top holder they don't list
         let aa = "aa".repeat(32);
         let ours_top = view(Some(100), Some(2), Some(&[(&aa, 60)]));
-        let (v, r) =
-            classify_pair(Some(&ours_top), Some(&view(Some(100), Some(2), Some(&[(&aa, 60)]))));
+        let (v, r) = classify_pair(
+            Some(&ours_top),
+            Some(&view(Some(100), Some(2), Some(&[(&aa, 60)]))),
+        );
         assert_eq!((v, r), ("agree", None));
-        let (v, r) =
-            classify_pair(Some(&ours_top), Some(&view(Some(100), Some(2), Some(&[(&aa, 59)]))));
+        let (v, r) = classify_pair(
+            Some(&ours_top),
+            Some(&view(Some(100), Some(2), Some(&[(&aa, 59)]))),
+        );
         assert_eq!(v, "differ");
         assert!(r.unwrap().contains("balance of"));
         let (v, r) = classify_pair(Some(&ours_top), Some(&view(Some(100), Some(2), Some(&[]))));
@@ -8890,8 +9700,14 @@ mod consistency_tests {
     #[test]
     fn owner_normalization_maps_confident_forms_only() {
         let hex64 = "AB".repeat(32);
-        assert_eq!(normalize_owner(&hex64).as_deref(), Some("ab".repeat(32).as_str()));
-        assert_eq!(normalize_owner(&format!("0x{hex64}")).as_deref(), Some("ab".repeat(32).as_str()));
+        assert_eq!(
+            normalize_owner(&hex64).as_deref(),
+            Some("ab".repeat(32).as_str())
+        );
+        assert_eq!(
+            normalize_owner(&format!("0x{hex64}")).as_deref(),
+            Some("ab".repeat(32).as_str())
+        );
         // typed 33-byte form maps through owner_display
         assert_eq!(
             normalize_owner(&format!("00{}", "cd".repeat(32))).as_deref(),
@@ -8912,11 +9728,17 @@ mod consistency_tests {
             kaspa_addresses::Version::PubKey,
             &[7u8; 32],
         );
-        assert_eq!(normalize_owner(&addr.to_string()).as_deref(), Some("07".repeat(32).as_str()));
+        assert_eq!(
+            normalize_owner(&addr.to_string()).as_deref(),
+            Some("07".repeat(32).as_str())
+        );
         // no confident mapping → None, never a guess
         assert_eq!(normalize_owner("not an owner"), None);
         assert_eq!(normalize_owner(&"ab".repeat(20)), None);
-        assert_eq!(normalize_owner(&format!("script:{}", "zz".repeat(32))), None);
+        assert_eq!(
+            normalize_owner(&format!("script:{}", "zz".repeat(32))),
+            None
+        );
     }
 
     /// Discovery pages are assembled defensively: ids under any plausible
@@ -8946,17 +9768,43 @@ mod consistency_tests {
         assert_eq!(discovery.tokens_other, 2);
         assert_eq!(discovery.blue_score, Some(483_212_800));
         assert_eq!(discovery.unreadable_items, 1);
-        assert_eq!(discovery.views[&id_a], TokenView { supply: Some(500), holders: Some(3), balances: None });
+        assert_eq!(
+            discovery.views[&id_a],
+            TokenView {
+                supply: Some(500),
+                holders: Some(3),
+                balances: None
+            }
+        );
         // string-encoded numbers parse; missing holders stays honest None
-        assert_eq!(discovery.views[&id_b], TokenView { supply: Some(900), holders: None, balances: None });
+        assert_eq!(
+            discovery.views[&id_b],
+            TokenView {
+                supply: Some(900),
+                holders: None,
+                balances: None
+            }
+        );
 
         // page-walk decisions: short page stops, full page continues until
         // the reported total is reached (or forever when total is unknown)
         assert!(!more_discovery_pages(0, 0, Some(0)));
         assert!(!more_discovery_pages(5, 5, Some(200)));
-        assert!(more_discovery_pages(CONSISTENCY_PAGE_LIMIT as usize, 100, Some(200)));
-        assert!(!more_discovery_pages(CONSISTENCY_PAGE_LIMIT as usize, 200, Some(200)));
-        assert!(more_discovery_pages(CONSISTENCY_PAGE_LIMIT as usize, 300, None));
+        assert!(more_discovery_pages(
+            CONSISTENCY_PAGE_LIMIT as usize,
+            100,
+            Some(200)
+        ));
+        assert!(!more_discovery_pages(
+            CONSISTENCY_PAGE_LIMIT as usize,
+            200,
+            Some(200)
+        ));
+        assert!(more_discovery_pages(
+            CONSISTENCY_PAGE_LIMIT as usize,
+            300,
+            None
+        ));
     }
 
     #[test]
@@ -9068,7 +9916,10 @@ mod consistency_tests {
                 covenant_id: id.clone(),
                 name: og::friendly_name(&id),
                 verdict: "not_comparable",
-                ours: Some(ConsistencySide { supply: Some(1000), holders: Some(4) }),
+                ours: Some(ConsistencySide {
+                    supply: Some(1000),
+                    holders: Some(4),
+                }),
                 other: None,
                 reason: None,
             }],
@@ -9076,9 +9927,22 @@ mod consistency_tests {
         };
         let v = serde_json::to_value(&report).unwrap();
         for key in [
-            "network", "checked_at_ms", "our_tip_daa", "other_source", "other_blue_score",
-            "tokens_ours", "tokens_other", "intersection", "agree", "differ", "only_kascov",
-            "only_other", "not_comparable", "reason", "details", "note",
+            "network",
+            "checked_at_ms",
+            "our_tip_daa",
+            "other_source",
+            "other_blue_score",
+            "tokens_ours",
+            "tokens_other",
+            "intersection",
+            "agree",
+            "differ",
+            "only_kascov",
+            "only_other",
+            "not_comparable",
+            "reason",
+            "details",
+            "note",
         ] {
             assert!(v.get(key).is_some(), "report must carry {key}");
         }
@@ -9112,9 +9976,15 @@ mod feed_and_sitemap_tests {
     /// other — run: cp web/changelog.json crates/kascov/assets/changelog.json
     #[test]
     fn crate_changelog_copy_matches_the_site_changelog() {
-        let site = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/changelog.json"))
-            .expect("web/changelog.json must exist in the repo checkout");
-        assert_eq!(CHANGELOG_JSON, site, "crates/kascov/assets/changelog.json is out of sync with web/changelog.json");
+        let site = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/changelog.json"
+        ))
+        .expect("web/changelog.json must exist in the repo checkout");
+        assert_eq!(
+            CHANGELOG_JSON, site,
+            "crates/kascov/assets/changelog.json is out of sync with web/changelog.json"
+        );
     }
 
     #[test]
@@ -9130,9 +10000,16 @@ mod feed_and_sitemap_tests {
                 "feed-level <{required}> is required by RFC 4287"
             );
         }
-        let entries: Vec<_> = feed.children().filter(|n| n.has_tag_name((ATOM, "entry"))).collect();
+        let entries: Vec<_> = feed
+            .children()
+            .filter(|n| n.has_tag_name((ATOM, "entry")))
+            .collect();
         let changelog: serde_json::Value = serde_json::from_str(CHANGELOG_JSON).unwrap();
-        assert_eq!(entries.len(), changelog.as_array().unwrap().len(), "one entry per changelog item");
+        assert_eq!(
+            entries.len(),
+            changelog.as_array().unwrap().len(),
+            "one entry per changelog item"
+        );
         let mut ids = Vec::new();
         for entry in &entries {
             let text = |tag: &str| {
@@ -9144,14 +10021,19 @@ mod feed_and_sitemap_tests {
                     .to_string()
             };
             let id = text("id");
-            assert!(id.starts_with("tag:kascov.io,"), "stable tag: ids, got {id}");
+            assert!(
+                id.starts_with("tag:kascov.io,"),
+                "stable tag: ids, got {id}"
+            );
             assert!(!ids.contains(&id), "entry ids must be unique: {id}");
             ids.push(id);
             assert!(!text("title").is_empty());
             assert!(!text("content").is_empty());
             let updated = text("updated");
             assert!(
-                updated.len() == 20 && updated.ends_with("T00:00:00Z") && updated[..10].split('-').count() == 3,
+                updated.len() == 20
+                    && updated.ends_with("T00:00:00Z")
+                    && updated[..10].split('-').count() == 3,
                 "day-precision RFC 3339 stamps, got {updated}"
             );
         }
@@ -9162,7 +10044,12 @@ mod feed_and_sitemap_tests {
         let spiky = r#"[{"date":"2026-01-02","title":"a <b> & \"c\"","body":"x < y & z"}]"#;
         let xml = build_feed_xml(spiky, 0).unwrap();
         let doc = roxmltree::Document::parse(&xml).expect("escaped feed still parses");
-        let title = doc.descendants().find(|n| n.has_tag_name((ATOM, "title")) && n.parent().unwrap().has_tag_name((ATOM, "entry"))).unwrap();
+        let title = doc
+            .descendants()
+            .find(|n| {
+                n.has_tag_name((ATOM, "title")) && n.parent().unwrap().has_tag_name((ATOM, "entry"))
+            })
+            .unwrap();
         assert_eq!(title.text(), Some("a <b> & \"c\""));
         // same-day duplicate titles still get unique ids
         let dup = r#"[{"date":"2026-01-02","title":"same","body":"1"},{"date":"2026-01-02","title":"same","body":"2"}]"#;
@@ -9173,8 +10060,14 @@ mod feed_and_sitemap_tests {
 
     #[test]
     fn feed_slug_is_url_safe() {
-        assert_eq!(feed_slug("every transaction gets a page"), "every-transaction-gets-a-page");
-        assert_eq!(feed_slug("the galaxy — glows & breathes!"), "the-galaxy-glows-breathes");
+        assert_eq!(
+            feed_slug("every transaction gets a page"),
+            "every-transaction-gets-a-page"
+        );
+        assert_eq!(
+            feed_slug("the galaxy — glows & breathes!"),
+            "the-galaxy-glows-breathes"
+        );
         assert_eq!(feed_slug("---"), "");
     }
 
@@ -9206,13 +10099,25 @@ mod feed_and_sitemap_tests {
         let now = 1_752_000_000_000; // fixed "now" for the root entry
         let xml = build_sitemap_xml(Some(&store), now).unwrap();
         let doc = roxmltree::Document::parse(&xml).expect("sitemap must be well-formed XML");
-        let urls: Vec<_> = doc.root_element().children().filter(|n| n.has_tag_name("url")).collect();
+        let urls: Vec<_> = doc
+            .root_element()
+            .children()
+            .filter(|n| n.has_tag_name("url"))
+            .collect();
         assert_eq!(urls.len(), 3, "root + the builder guide + the one coin");
         let lastmod_of = |n: &roxmltree::Node<'_, '_>| {
-            n.children().find(|c| c.has_tag_name("lastmod")).and_then(|c| c.text()).map(str::to_string)
+            n.children()
+                .find(|c| c.has_tag_name("lastmod"))
+                .and_then(|c| c.text())
+                .map(str::to_string)
         };
         let loc_of = |n: &roxmltree::Node<'_, '_>| {
-            n.children().find(|c| c.has_tag_name("loc")).unwrap().text().unwrap().to_string()
+            n.children()
+                .find(|c| c.has_tag_name("loc"))
+                .unwrap()
+                .text()
+                .unwrap()
+                .to_string()
         };
         assert_eq!(lastmod_of(&urls[0]), Some(og::iso_date(now)));
         // the guide is a static route: listed, deliberately undated
@@ -9224,7 +10129,11 @@ mod feed_and_sitemap_tests {
         // W3C date shape (YYYY-MM-DD)
         let lm = lastmod_of(&urls[2]).unwrap();
         assert_eq!(lm.len(), 10);
-        assert!(lm.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() }));
+        assert!(lm.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 {
+            c == '-'
+        } else {
+            c.is_ascii_digit()
+        }));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -9232,8 +10141,16 @@ mod feed_and_sitemap_tests {
     fn sitemap_without_a_store_still_lists_the_root() {
         let xml = build_sitemap_xml(None, 0).unwrap();
         let doc = roxmltree::Document::parse(&xml).unwrap();
-        let urls: Vec<_> = doc.root_element().children().filter(|n| n.has_tag_name("url")).collect();
-        assert_eq!(urls.len(), 2, "the root and the builder guide need no store");
+        let urls: Vec<_> = doc
+            .root_element()
+            .children()
+            .filter(|n| n.has_tag_name("url"))
+            .collect();
+        assert_eq!(
+            urls.len(),
+            2,
+            "the root and the builder guide need no store"
+        );
         assert!(xml.contains("<lastmod>1970-01-01</lastmod>"));
         assert!(xml.contains("<loc>https://kascov.io/guide</loc>"));
     }
@@ -9269,7 +10186,10 @@ mod feed_and_sitemap_tests {
             accepting_blue_score: 1_000,
             events,
             created_utxos: vec![kascov_core::store::NewUtxo {
-                outpoint: Outpoint { txid: TxId([0x10; 32]), index: 0 },
+                outpoint: Outpoint {
+                    txid: TxId([0x10; 32]),
+                    index: 0,
+                },
                 covenant_id: id,
                 value: 1_000_000_000,
                 spk_version: 0,
@@ -9293,7 +10213,11 @@ mod feed_and_sitemap_tests {
         assert_eq!(html.matches("<li>").count(), 10, "{html}");
         assert!(html.contains("transition —"), "{html}");
         // comfortably inside the share page's ~6KB budget
-        assert!(html.len() < 2_500, "body extra must stay small, got {}", html.len());
+        assert!(
+            html.len() < 2_500,
+            "body extra must stay small, got {}",
+            html.len()
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
@@ -9322,7 +10246,10 @@ mod prove_holding_tests {
 
     fn sign(kp: &Keypair, msg: &str) -> Vec<u8> {
         let digest = secp256k1::Message::from_digest_slice(&personal_message_hash(msg)).unwrap();
-        SECP256K1.sign_schnorr_no_aux_rand(&digest, kp).as_ref().to_vec()
+        SECP256K1
+            .sign_schnorr_no_aux_rand(&digest, kp)
+            .as_ref()
+            .to_vec()
     }
 
     #[test]
@@ -9336,7 +10263,9 @@ mod prove_holding_tests {
     fn the_digest_is_domain_separated_not_a_plain_blake2b() {
         // A bare blake2b-256 of the same bytes must NOT equal the keyed one, or
         // a signature made for some other Kaspa domain would verify here.
-        let plain = blake2b_simd::Params::new().hash_length(32).hash(b"Hello Kaspa!");
+        let plain = blake2b_simd::Params::new()
+            .hash_length(32)
+            .hash(b"Hello Kaspa!");
         assert_ne!(plain.as_bytes(), &personal_message_hash("Hello Kaspa!")[..]);
     }
 
@@ -9346,8 +10275,16 @@ mod prove_holding_tests {
         let sig = sign(&kp, "kascov verify: 1234 abcd");
         // The nonce is the whole point: changing one character must break it,
         // or a proof issued for one Discord account would work for the next.
-        assert!(verify_kaspa_message(&pk.serialize(), "kascov verify: 1234 abcd", &sig));
-        assert!(!verify_kaspa_message(&pk.serialize(), "kascov verify: 1234 abce", &sig));
+        assert!(verify_kaspa_message(
+            &pk.serialize(),
+            "kascov verify: 1234 abcd",
+            &sig
+        ));
+        assert!(!verify_kaspa_message(
+            &pk.serialize(),
+            "kascov verify: 1234 abce",
+            &sig
+        ));
         assert!(!verify_kaspa_message(&pk.serialize(), "", &sig));
     }
 
@@ -9357,8 +10294,15 @@ mod prove_holding_tests {
         let sig = sign(&kp, "Hello Kaspa!");
         let mut other = [0u8; 32];
         other[31] = 5;
-        let other_pk = Keypair::from_seckey_slice(SECP256K1, &other).unwrap().x_only_public_key().0;
-        assert!(!verify_kaspa_message(&other_pk.serialize(), "Hello Kaspa!", &sig));
+        let other_pk = Keypair::from_seckey_slice(SECP256K1, &other)
+            .unwrap()
+            .x_only_public_key()
+            .0;
+        assert!(!verify_kaspa_message(
+            &other_pk.serialize(),
+            "Hello Kaspa!",
+            &sig
+        ));
     }
 
     #[test]
@@ -9369,10 +10313,17 @@ mod prove_holding_tests {
         assert!(!verify_kaspa_message(&[0u8; 31], "Hello Kaspa!", &sig));
         assert!(!verify_kaspa_message(&[0u8; 32], "Hello Kaspa!", &sig)); // not on the curve
         assert!(!verify_kaspa_message(&pk.serialize(), "Hello Kaspa!", &[]));
-        assert!(!verify_kaspa_message(&pk.serialize(), "Hello Kaspa!", &[0u8; 64]));
-        assert!(!verify_kaspa_message(&pk.serialize(), "Hello Kaspa!", &sig[..63]));
+        assert!(!verify_kaspa_message(
+            &pk.serialize(),
+            "Hello Kaspa!",
+            &[0u8; 64]
+        ));
+        assert!(!verify_kaspa_message(
+            &pk.serialize(),
+            "Hello Kaspa!",
+            &sig[..63]
+        ));
     }
-
 
     /// Prints a real (address, message, signature) triple for a throwaway key,
     /// so the live endpoint can be exercised end to end without anyone's real
@@ -9389,9 +10340,12 @@ mod prove_holding_tests {
         let addr = Address::new(Prefix::Mainnet, Version::PubKey, &xonly).to_string();
         let msg = "kascov verify: live-check";
         let sig = sign(&kp, msg);
-        println!("{}", serde_json::json!({
-            "address": addr, "message": msg, "signature": hex::encode(sig),
-        }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "address": addr, "message": msg, "signature": hex::encode(sig),
+            })
+        );
     }
 
     #[test]

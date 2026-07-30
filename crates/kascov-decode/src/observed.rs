@@ -49,7 +49,13 @@ pub fn observed_skeletons() -> Vec<Skeleton> {
     add(Skeleton::derive_observed(
         "genesis0 · list",
         &[fixture!("g0_list_v1_a"), fixture!("g0_list_v1_b")],
-        &["state_hash_a", "state_hash_b", "state_hash_c", "min_amount", "next_state_template"],
+        &[
+            "state_hash_a",
+            "state_hash_b",
+            "state_hash_c",
+            "min_amount",
+            "next_state_template",
+        ],
     ));
     add(Skeleton::derive_observed(
         "genesis0 · buy",
@@ -144,7 +150,12 @@ pub fn observed_repeat_skeletons() -> Vec<RepeatSkeleton> {
             "payload_len_b",
             "instance_salt",
         ],
-        &["output_index", "output_amount", "output_index", "output_spk_hash"],
+        &[
+            "output_index",
+            "output_amount",
+            "output_index",
+            "output_spk_hash",
+        ],
     ) {
         out.push(s);
     }

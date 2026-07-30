@@ -9,6 +9,7 @@
 //! Pure computation: no node, no keys, no state. The handler in main.rs adds
 //! the rate limiter and the body cap; everything here is testable offline.
 
+use kascov_core::Network;
 use kaspa_consensus_core::config::params::{Params, MAINNET_PARAMS, TESTNET_PARAMS};
 use kaspa_consensus_core::mass::units::{ComputeBudget, ScriptUnits};
 use kaspa_consensus_core::mass::{calc_storage_mass, MassCalculator, UtxoCell};
@@ -17,7 +18,6 @@ use kaspa_consensus_core::tx::{
     ComputeCommit, CovenantBinding, MutableTransaction, ScriptPublicKey, Transaction,
     TransactionInput, TransactionOutpoint, TransactionOutput, UtxoEntry,
 };
-use kascov_core::Network;
 
 /// Consensus caps (Params::max_tx_inputs/max_tx_outputs) — anything past them
 /// is un-relayable regardless of what the fields say.
@@ -121,7 +121,10 @@ fn as_hex32(v: &serde_json::Value) -> Option<[u8; 32]> {
 /// Field lookup: camelCase first, then the snake_case spelling. The caller
 /// learns which spelling matched, so snake_case is DETECTED, never silently
 /// normalized away.
-fn field<'a>(obj: &'a serde_json::Map<String, serde_json::Value>, camel: &str) -> (Option<&'a serde_json::Value>, bool) {
+fn field<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    camel: &str,
+) -> (Option<&'a serde_json::Value>, bool) {
     if let Some(v) = obj.get(camel) {
         return (Some(v), false);
     }
@@ -145,7 +148,11 @@ struct ParseLog {
 
 impl ParseLog {
     fn new() -> Self {
-        Self { findings: Vec::new(), snake_seen: Vec::new(), unknown: Vec::new() }
+        Self {
+            findings: Vec::new(),
+            snake_seen: Vec::new(),
+            unknown: Vec::new(),
+        }
     }
 
     fn snake(&mut self, camel: &str, input_index: Option<usize>) {
@@ -186,8 +193,9 @@ impl ParseLog {
 
     fn unknown_keys(&mut self, obj: &serde_json::Map<String, serde_json::Value>, known: &[&str]) {
         for key in obj.keys() {
-            let matches_known =
-                known.iter().any(|k| key.as_str() == *k || key.as_str() == snake_of(k));
+            let matches_known = known
+                .iter()
+                .any(|k| key.as_str() == *k || key.as_str() == snake_of(k));
             if !matches_known && !self.unknown.contains(key) {
                 self.unknown.push(key.clone());
             }
@@ -195,7 +203,11 @@ impl ParseLog {
     }
 }
 
-fn parse_spk(v: &serde_json::Value, log: &mut ParseLog, input_index: Option<usize>) -> Option<(u16, Vec<u8>)> {
+fn parse_spk(
+    v: &serde_json::Value,
+    log: &mut ParseLog,
+    input_index: Option<usize>,
+) -> Option<(u16, Vec<u8>)> {
     match v {
         serde_json::Value::String(_) => as_hex(v).map(|script| (0u16, script)),
         serde_json::Value::Object(obj) => {
@@ -205,15 +217,13 @@ fn parse_spk(v: &serde_json::Value, log: &mut ParseLog, input_index: Option<usiz
                 log.snake("version", input_index);
             }
             let version = version.and_then(as_u64).unwrap_or(0) as u16;
-            let script = ["script", "scriptPublicKey", "hex"]
-                .iter()
-                .find_map(|k| {
-                    let (v, snake) = field(obj, k);
-                    if snake {
-                        log.snake(k, input_index);
-                    }
-                    v.and_then(as_hex)
-                })?;
+            let script = ["script", "scriptPublicKey", "hex"].iter().find_map(|k| {
+                let (v, snake) = field(obj, k);
+                if snake {
+                    log.snake(k, input_index);
+                }
+                v.and_then(as_hex)
+            })?;
             Some((version, script))
         }
         _ => None,
@@ -225,14 +235,29 @@ fn parse_spk(v: &serde_json::Value, log: &mut ParseLog, input_index: Option<usiz
 fn parse(body: &str, log: &mut ParseLog) -> Result<PTx, String> {
     let root: serde_json::Value =
         serde_json::from_str(body).map_err(|e| format!("not valid JSON: {e}"))?;
-    let mut obj = root.as_object().ok_or("expected a JSON object describing a transaction")?;
+    let mut obj = root
+        .as_object()
+        .ok_or("expected a JSON object describing a transaction")?;
     // Tolerate the RPC submit wrapper: {"transaction": {...}, "allowOrphan": …}.
     if let Some(inner) = obj.get("transaction").and_then(|v| v.as_object()) {
         obj = inner;
     }
     log.unknown_keys(
         obj,
-        &["version", "inputs", "outputs", "lockTime", "subnetworkId", "gas", "payload", "mass", "id", "transaction", "allowOrphan", "verboseData"],
+        &[
+            "version",
+            "inputs",
+            "outputs",
+            "lockTime",
+            "subnetworkId",
+            "gas",
+            "payload",
+            "mass",
+            "id",
+            "transaction",
+            "allowOrphan",
+            "verboseData",
+        ],
     );
 
     let (version, snake) = field(obj, "version");
@@ -257,12 +282,18 @@ fn parse(body: &str, log: &mut ParseLog) -> Result<PTx, String> {
     if snake {
         log.snake("inputs", None);
     }
-    let inputs_v = inputs_v.and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let inputs_v = inputs_v
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let (outputs_v, snake) = field(obj, "outputs");
     if snake {
         log.snake("outputs", None);
     }
-    let outputs_v = outputs_v.and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let outputs_v = outputs_v
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
 
     let mut inputs = Vec::with_capacity(inputs_v.len().min(MAX_TX_IO));
     for (i, iv) in inputs_v.iter().enumerate().take(MAX_TX_IO) {
@@ -273,7 +304,16 @@ fn parse(body: &str, log: &mut ParseLog) -> Result<PTx, String> {
         };
         log.unknown_keys(
             iobj,
-            &["previousOutpoint", "sequence", "sigOpCount", "computeBudget", "signatureScript", "utxo", "utxoEntry", "verboseData"],
+            &[
+                "previousOutpoint",
+                "sequence",
+                "sigOpCount",
+                "computeBudget",
+                "signatureScript",
+                "utxo",
+                "utxoEntry",
+                "verboseData",
+            ],
         );
 
         let (outpoint, snake) = field(iobj, "previousOutpoint");
@@ -314,7 +354,9 @@ fn parse(body: &str, log: &mut ParseLog) -> Result<PTx, String> {
                 log.findings.push(Finding {
                     severity: "warn",
                     code: "bad_number",
-                    message: format!("input {i}: computeBudget isn't a readable integer — treating it as absent"),
+                    message: format!(
+                        "input {i}: computeBudget isn't a readable integer — treating it as absent"
+                    ),
                     input_index: Some(i),
                     suggestion: None,
                 });
@@ -333,7 +375,9 @@ fn parse(body: &str, log: &mut ParseLog) -> Result<PTx, String> {
                 log.findings.push(Finding {
                     severity: "warn",
                     code: "bad_hex",
-                    message: format!("input {i}: signatureScript isn't valid hex — treating it as absent"),
+                    message: format!(
+                        "input {i}: signatureScript isn't valid hex — treating it as absent"
+                    ),
                     input_index: Some(i),
                     suggestion: None,
                 });
@@ -348,7 +392,17 @@ fn parse(body: &str, log: &mut ParseLog) -> Result<PTx, String> {
             v.and_then(|v| v.as_object())
         });
         if let Some(uobj) = utxo {
-            log.unknown_keys(uobj, &["amount", "value", "scriptPublicKey", "blockDaaScore", "isCoinbase", "covenantId"]);
+            log.unknown_keys(
+                uobj,
+                &[
+                    "amount",
+                    "value",
+                    "scriptPublicKey",
+                    "blockDaaScore",
+                    "isCoinbase",
+                    "covenantId",
+                ],
+            );
             input.utxo_amount = ["amount", "value"].iter().find_map(|k| {
                 let (v, snake) = field(uobj, k);
                 if snake {
@@ -377,7 +431,16 @@ fn parse(body: &str, log: &mut ParseLog) -> Result<PTx, String> {
             outputs.push(output);
             continue;
         };
-        log.unknown_keys(oobj, &["value", "amount", "scriptPublicKey", "covenant", "verboseData"]);
+        log.unknown_keys(
+            oobj,
+            &[
+                "value",
+                "amount",
+                "scriptPublicKey",
+                "covenant",
+                "verboseData",
+            ],
+        );
         output.value = ["value", "amount"].iter().find_map(|k| {
             let (v, snake) = field(oobj, k);
             if snake {
@@ -428,7 +491,13 @@ fn parse(body: &str, log: &mut ParseLog) -> Result<PTx, String> {
         });
     }
 
-    Ok(PTx { version, inputs, outputs, lock_time, payload })
+    Ok(PTx {
+        version,
+        inputs,
+        outputs,
+        lock_time,
+        payload,
+    })
 }
 
 // ── static checks ──────────────────────────────────────────────────────────
@@ -442,7 +511,10 @@ fn covenant_looking(input: &PInput) -> bool {
             return true;
         }
     }
-    input.signature_script.as_ref().is_some_and(|s| s.len() > 150)
+    input
+        .signature_script
+        .as_ref()
+        .is_some_and(|s| s.len() > 150)
 }
 
 /// The smallest computeBudget whose allowance covers `used` script units —
@@ -658,7 +730,10 @@ pub fn run(body: &str, network: Network) -> Result<serde_json::Value, String> {
                 findings.push(Finding {
                     severity: "error",
                     code: "sigop_overflow",
-                    message: format!("input {i}: sigOpCount {} doesn't fit the u8 wire field", input.sig_op_count.unwrap_or(0)),
+                    message: format!(
+                        "input {i}: sigOpCount {} doesn't fit the u8 wire field",
+                        input.sig_op_count.unwrap_or(0)
+                    ),
                     input_index: Some(i),
                     suggestion: None,
                 });
@@ -712,12 +787,18 @@ pub fn run(body: &str, network: Network) -> Result<serde_json::Value, String> {
             over.push(format!("compute {} > {}", nc.compute_mass, limits.compute));
         }
         if nc.transient_mass > limits.transient {
-            over.push(format!("transient {} > {}", nc.transient_mass, limits.transient));
+            over.push(format!(
+                "transient {} > {}",
+                nc.transient_mass, limits.transient
+            ));
         }
 
         // Storage mass needs every input amount (KIP-9 reads both sides).
         let mut storage: Option<u64> = None;
-        let amounts_known = ptx.inputs.iter().all(|i| i.utxo_amount.is_some_and(|a| a > 0));
+        let amounts_known = ptx
+            .inputs
+            .iter()
+            .all(|i| i.utxo_amount.is_some_and(|a| a > 0));
         if amounts_known && outputs_ok {
             let input_cells: Vec<UtxoCell> = ptx
                 .inputs
@@ -735,7 +816,12 @@ pub fn run(body: &str, network: Network) -> Result<serde_json::Value, String> {
                 })
                 .collect();
             let output_cells = tx.outputs.iter().map(UtxoCell::from);
-            match calc_storage_mass(false, input_cells.iter().copied(), output_cells, params.storage_mass_parameter) {
+            match calc_storage_mass(
+                false,
+                input_cells.iter().copied(),
+                output_cells,
+                params.storage_mass_parameter,
+            ) {
                 Some(mass) => {
                     if mass > limits.storage {
                         over.push(format!("storage {} > {}", mass, limits.storage));
@@ -816,7 +902,8 @@ pub fn run(body: &str, network: Network) -> Result<serde_json::Value, String> {
                         ScriptPublicKey::from_vec(v, s),
                         0,
                         false,
-                        i.utxo_covenant_id.map(kaspa_consensus_core::Hash::from_bytes),
+                        i.utxo_covenant_id
+                            .map(kaspa_consensus_core::Hash::from_bytes),
                     )
                 })
                 .collect();
@@ -851,10 +938,15 @@ pub fn run(body: &str, network: Network) -> Result<serde_json::Value, String> {
                 findings.push(Finding {
                     severity: "error",
                     code: "input_script_failed",
-                    message: format!("input {}: the script engine rejected the witness — {}", exec.input_index, exec.verdict),
+                    message: format!(
+                        "input {}: the script engine rejected the witness — {}",
+                        exec.input_index, exec.verdict
+                    ),
                     input_index: Some(exec.input_index),
-                    suggestion: units_exceeded
-                        .then(|| "raise this input's computeBudget to cover its measured script units".to_string()),
+                    suggestion: units_exceeded.then(|| {
+                        "raise this input's computeBudget to cover its measured script units"
+                            .to_string()
+                    }),
                 });
             }
         }
@@ -891,10 +983,14 @@ fn build_tx(ptx: &PTx, version: u16) -> Transaction {
         .iter()
         .map(|i| {
             let commit = if version >= 1 {
-                ComputeCommit::ComputeBudget(ComputeBudget(i.compute_budget.unwrap_or(0).min(u16::MAX as u64) as u16))
+                ComputeCommit::ComputeBudget(ComputeBudget(
+                    i.compute_budget.unwrap_or(0).min(u16::MAX as u64) as u16,
+                ))
             } else {
                 // Plain spends carry one CheckSig; assume it when unstated.
-                ComputeCommit::SigopCount((i.sig_op_count.unwrap_or(1).min(u8::MAX as u64) as u8).into())
+                ComputeCommit::SigopCount(
+                    (i.sig_op_count.unwrap_or(1).min(u8::MAX as u64) as u8).into(),
+                )
             };
             TransactionInput {
                 previous_outpoint: TransactionOutpoint::new(
@@ -917,12 +1013,21 @@ fn build_tx(ptx: &PTx, version: u16) -> Transaction {
                     .clone()
                     .map(|(v, s)| ScriptPublicKey::from_vec(v, s))
                     .unwrap_or_else(|| ScriptPublicKey::from_vec(0, Vec::new())),
-                o.covenant
-                    .map(|(id, auth)| CovenantBinding::new(auth, kaspa_consensus_core::Hash::from_bytes(id))),
+                o.covenant.map(|(id, auth)| {
+                    CovenantBinding::new(auth, kaspa_consensus_core::Hash::from_bytes(id))
+                }),
             )
         })
         .collect();
-    Transaction::new(version, inputs, outputs, ptx.lock_time, SUBNETWORK_ID_NATIVE, 0, ptx.payload.clone())
+    Transaction::new(
+        version,
+        inputs,
+        outputs,
+        ptx.lock_time,
+        SUBNETWORK_ID_NATIVE,
+        0,
+        ptx.payload.clone(),
+    )
 }
 
 #[cfg(test)]
@@ -1052,7 +1157,10 @@ mod tests {
     fn unknown_fields_are_counted_not_rejected() {
         let body = good_v1().replacen("\"version\":1", "\"version\":1,\"frobnicator\":7", 1);
         let v = run_tn10(&body);
-        assert!(finding(&v, "unknown_fields")["message"].as_str().unwrap().contains("frobnicator"));
+        assert!(finding(&v, "unknown_fields")["message"]
+            .as_str()
+            .unwrap()
+            .contains("frobnicator"));
         assert_eq!(v["verdict"], "ready");
     }
 
@@ -1066,7 +1174,10 @@ mod tests {
         assert_eq!(f["severity"], "error");
         assert_eq!(f["input_index"], 0);
         let msg = f["message"].as_str().unwrap();
-        assert!(msg.contains("9,999") && msg.contains("100,000"), "trap numbers must be spelled out: {msg}");
+        assert!(
+            msg.contains("9,999") && msg.contains("100,000"),
+            "trap numbers must be spelled out: {msg}"
+        );
         assert!(f["suggestion"].as_str().unwrap().contains("computeBudget"));
         assert_eq!(v["verdict"], "will_fail");
         // the guard: masses must be absent, not a panic
@@ -1082,7 +1193,10 @@ mod tests {
         let f = finding(&v, "fee_input_budget_missing");
         assert_eq!(f["input_index"], 1);
         assert!(f["message"].as_str().unwrap().contains("fee/change input"));
-        assert!(f["suggestion"].as_str().unwrap().contains("computeBudget: 10"));
+        assert!(f["suggestion"]
+            .as_str()
+            .unwrap()
+            .contains("computeBudget: 10"));
         assert_eq!(v["verdict"], "will_fail");
     }
 
@@ -1111,7 +1225,10 @@ mod tests {
         let v = run_tn10(&body);
         let f = finding(&v, "sigop_count_on_v1");
         assert_eq!(f["severity"], "error");
-        assert!(f["message"].as_str().unwrap().contains("10,000 script units"));
+        assert!(f["message"]
+            .as_str()
+            .unwrap()
+            .contains("10,000 script units"));
         assert_eq!(v["verdict"], "will_fail");
     }
 
@@ -1138,7 +1255,9 @@ mod tests {
 
     #[test]
     fn storage_mass_needs_input_amounts() {
-        let body = good_v1().replace("\"amount\":1000000000,", "").replace("\"amount\":500000000,", "");
+        let body = good_v1()
+            .replace("\"amount\":1000000000,", "")
+            .replace("\"amount\":500000000,", "");
         let v = run_tn10(&body);
         assert!(codes(&v).contains(&"storage_mass_skipped".to_string()));
         assert!(v["masses"]["storage"].is_null());
@@ -1188,7 +1307,10 @@ mod tests {
         assert_eq!(exec["allowance"], 19_999); // budget 1 × 10,000 + 9,999 free
         assert!(exec["script_units_used"].as_u64().unwrap() <= 19_999);
         assert_eq!(v["verdict"], "ready", "findings: {:?}", codes(&v));
-        assert!(v["execution_note"].as_str().unwrap().contains("transaction as submitted"));
+        assert!(v["execution_note"]
+            .as_str()
+            .unwrap()
+            .contains("transaction as submitted"));
     }
 
     /// The REAL bytes of an accepted testnet-10 covenant spend (a terminal
@@ -1198,7 +1320,8 @@ mod tests {
     /// testnet-10 resets.
     mod real_witness {
         /// P2SH lock of the state coin (spk version 0).
-        pub const STATE_SPK: &str = "aa20693bc1d2d058eae1ca60ed0050f8fbcd724652f6a3e51b7976d8bb4d480231f887";
+        pub const STATE_SPK: &str =
+            "aa20693bc1d2d058eae1ca60ed0050f8fbcd724652f6a3e51b7976d8bb4d480231f887";
         /// The on-chain unlocking script of the spend.
         pub const WITNESS: &str = "004cb56b6c76009c6375025802b100c320366db7e0f3350cfd60638e0c631061d8d8fac72600ee5e7e258d1fc939b28675030000207c7e01ac7e876902e803b9be760480f0fa0294527994760480f0fa02547993a16300c252795479949c696700c20480f0fa029c6951c3b9bf876951c2789c6968007a75007a75007a75516776519c637578aa20e3777a271a8e60c379317a67b9e5978d82542ed6805192b9558be8e1006649fe8769765279ac69757551677500696868";
         /// The state coin's value in sompi.
@@ -1209,7 +1332,8 @@ mod tests {
         /// compiles to OpCheckSequenceVerify over this field).
         pub const SEQUENCE: u64 = 600;
         /// Where the money went: recipient p2pk, value − the contract's 1000.
-        pub const OUT_SPK: &str = "20366db7e0f3350cfd60638e0c631061d8d8fac72600ee5e7e258d1fc939b28675ac";
+        pub const OUT_SPK: &str =
+            "20366db7e0f3350cfd60638e0c631061d8d8fac72600ee5e7e258d1fc939b28675ac";
         pub const OUT_VALUE: u64 = 99_997_000;
     }
 
@@ -1229,7 +1353,11 @@ mod tests {
         .to_string();
         let v = run_tn10(&body);
         let exec = &v["executed"][0];
-        assert_eq!(exec["pass"], true, "the real accepted witness must replay clean: {}", exec["verdict"]);
+        assert_eq!(
+            exec["pass"], true,
+            "the real accepted witness must replay clean: {}",
+            exec["verdict"]
+        );
         let used = exec["script_units_used"].as_u64().unwrap();
         assert!(used > 0 && used <= exec["allowance"].as_u64().unwrap());
         assert_eq!(v["verdict"], "ready", "findings: {:?}", codes(&v));
@@ -1269,14 +1397,29 @@ mod tests {
         };
         let store = kascov_core::store::Store::open(std::path::Path::new(&db), TN10).unwrap();
         let registry = kascov_decode::Registry::default();
-        for summary in store.covenants_with_templates(&["SilverScript · Mecenas"]).unwrap() {
+        for summary in store
+            .covenants_with_templates(&["SilverScript · Mecenas"])
+            .unwrap()
+        {
             for utxo in store.utxos(&summary.covenant_id, false).unwrap() {
-                let Some(sig) = utxo.spent_sig.clone().filter(|s| !s.is_empty()) else { continue };
+                let Some(sig) = utxo.spent_sig.clone().filter(|s| !s.is_empty()) else {
+                    continue;
+                };
                 let spk = utxo.spk_script.clone();
-                let Some(program) = kascov_decode::p2sh_reveal(&spk, &sig) else { continue };
+                let Some(program) = kascov_decode::p2sh_reveal(&spk, &sig) else {
+                    continue;
+                };
                 let decoded = registry.decode(0, &program);
-                let field = |n: &str| decoded.fields.iter().find(|f| f.name == n).map(|f| f.value.clone());
-                let (Some(recipient), Some(pledge), Some(period)) = (field("recipient"), field("pledge"), field("period")) else {
+                let field = |n: &str| {
+                    decoded
+                        .fields
+                        .iter()
+                        .find(|f| f.name == n)
+                        .map(|f| f.value.clone())
+                };
+                let (Some(recipient), Some(pledge), Some(period)) =
+                    (field("recipient"), field("pledge"), field("period"))
+                else {
                     continue;
                 };
                 let pledge = i64::from_le_bytes({
@@ -1338,7 +1481,10 @@ mod tests {
                     println!("OUT_VALUE: {}", utxo.value - 1000);
                     return;
                 }
-                eprintln!("candidate {} failed: {}", summary.covenant_id, exec[0].verdict);
+                eprintln!(
+                    "candidate {} failed: {}",
+                    summary.covenant_id, exec[0].verdict
+                );
             }
         }
         panic!("no passing terminal Mecenas receive found in {db}");

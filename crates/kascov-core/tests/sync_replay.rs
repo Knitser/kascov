@@ -43,9 +43,17 @@ fn covenant_tx(txid: TxId, spends: Vec<Outpoint>, covenant: Option<CovenantId>) 
                 value: 100_000_000,
                 spk_version: 0,
                 spk_script: vec![0xaa, 0xbb],
-                covenant: Some(CovenantBinding { covenant_id, authorizing_input: 0 }),
+                covenant: Some(CovenantBinding {
+                    covenant_id,
+                    authorizing_input: 0,
+                }),
             }],
-            None => vec![Output { value: 100_000_000, spk_version: 0, spk_script: vec![0xcc], covenant: None }],
+            None => vec![Output {
+                value: 100_000_000,
+                spk_version: 0,
+                spk_script: vec![0xcc],
+                covenant: None,
+            }],
         },
         payload: vec![0xde, 0xad], // v1 payload, captured on covenant events
     }
@@ -86,12 +94,18 @@ impl ChainSource for FakeChain {
         })
     }
     async fn block_with_txs(&self, hash: BlockHash) -> Result<Block> {
-        self.blocks.get(&hash).cloned().ok_or(Error::Rpc(format!("no block {hash}")))
+        self.blocks
+            .get(&hash)
+            .cloned()
+            .ok_or(Error::Rpc(format!("no block {hash}")))
     }
     async fn virtual_chain_from(&self, _cursor: BlockHash) -> Result<ChainStep> {
         let mut steps = self.steps.lock().unwrap();
         if steps.is_empty() {
-            Ok(ChainStep { removed: vec![], added: vec![] })
+            Ok(ChainStep {
+                removed: vec![],
+                added: vec![],
+            })
         } else {
             Ok(steps.remove(0))
         }
@@ -102,7 +116,10 @@ impl ChainSource for FakeChain {
 }
 
 fn accepted(block: BlockHash, txs: &[TxId]) -> AcceptedBlock {
-    AcceptedBlock { accepting_block: block, accepted_tx_ids: txs.to_vec() }
+    AcceptedBlock {
+        accepting_block: block,
+        accepted_tx_ids: txs.to_vec(),
+    }
 }
 
 #[tokio::test]
@@ -112,39 +129,75 @@ async fn genesis_transitions_burn_and_reorg() {
     let _ = std::fs::remove_file(&db);
     let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
 
-    let mut chain = FakeChain { blocks: HashMap::new(), steps: Mutex::new(vec![]), sink: h(0) };
+    let mut chain = FakeChain {
+        blocks: HashMap::new(),
+        steps: Mutex::new(vec![]),
+        sink: h(0),
+    };
 
     // Chain block 1: tx A creates covenant X (genesis) — its id must be the
     // KIP-20 hash of the spent outpoint + the authorized output, or the
     // classifier will (rightly) refuse to call it a genesis.
-    let genesis_spend = Outpoint { txid: tx_id(0x01), index: 0 };
+    let genesis_spend = Outpoint {
+        txid: tx_id(0x01),
+        index: 0,
+    };
     let cov_x = valid_genesis_id(genesis_spend);
     let genesis_tx = covenant_tx(tx_id(0xA0), vec![genesis_spend], Some(cov_x));
     // Chain block 2: tx B spends A:0, continues covenant X (transition).
-    let transition_tx = covenant_tx(tx_id(0xB0), vec![Outpoint { txid: tx_id(0xA0), index: 0 }], Some(cov_x));
+    let transition_tx = covenant_tx(
+        tx_id(0xB0),
+        vec![Outpoint {
+            txid: tx_id(0xA0),
+            index: 0,
+        }],
+        Some(cov_x),
+    );
     // Chain block 3 (later reorged out): tx C spends B:0 with no successor (burn).
-    let burn_tx = covenant_tx(tx_id(0xD0), vec![Outpoint { txid: tx_id(0xB0), index: 0 }], None);
+    let burn_tx = covenant_tx(
+        tx_id(0xD0),
+        vec![Outpoint {
+            txid: tx_id(0xB0),
+            index: 0,
+        }],
+        None,
+    );
 
     chain.block(h(1), 100, vec![genesis_tx]);
     chain.block(h(2), 200, vec![transition_tx]);
     chain.block(h(3), 300, vec![burn_tx.clone()]);
 
     chain.steps.lock().unwrap().extend([
-        ChainStep { removed: vec![], added: vec![accepted(h(1), &[tx_id(0xA0)]), accepted(h(2), &[tx_id(0xB0)])] },
-        ChainStep { removed: vec![], added: vec![accepted(h(3), &[tx_id(0xD0)])] },
+        ChainStep {
+            removed: vec![],
+            added: vec![
+                accepted(h(1), &[tx_id(0xA0)]),
+                accepted(h(2), &[tx_id(0xB0)]),
+            ],
+        },
+        ChainStep {
+            removed: vec![],
+            added: vec![accepted(h(3), &[tx_id(0xD0)])],
+        },
     ]);
 
     // Pass 1: genesis + transition.
     let mut events = vec![];
     let stats = sync_once(&chain, &mut store, Some(h(0)), |u| {
-        if let SyncUpdate::Event { kind, covenant_id, .. } = u {
+        if let SyncUpdate::Event {
+            kind, covenant_id, ..
+        } = u
+        {
             events.push((kind, covenant_id));
         }
     })
     .await
     .unwrap();
     assert_eq!(stats.events, 2);
-    assert_eq!(events, vec![(EventKind::Genesis, cov_x), (EventKind::Transition, cov_x)]);
+    assert_eq!(
+        events,
+        vec![(EventKind::Genesis, cov_x), (EventKind::Transition, cov_x)]
+    );
 
     let tip = store.tip().unwrap().expect("tip recorded on every pass");
     assert_eq!(tip.0, 0, "FakeChain reports virtual daa 0");
@@ -152,7 +205,10 @@ async fn genesis_transitions_burn_and_reorg() {
 
     let summary = store.summary(&cov_x).unwrap().unwrap();
     assert_eq!(summary.event_count, 2);
-    assert_eq!(summary.live_utxos, 1, "transition output should be the only live state UTXO");
+    assert_eq!(
+        summary.live_utxos, 1,
+        "transition output should be the only live state UTXO"
+    );
     assert!(summary.lineage_complete);
     assert_eq!(summary.genesis_txid, Some(tx_id(0xA0)));
 
@@ -185,18 +241,27 @@ async fn genesis_transitions_burn_and_reorg() {
     assert_eq!(stats.reorged_out, 1);
     let summary = store.summary(&cov_x).unwrap().unwrap();
     assert_eq!(summary.event_count, 2, "burn event must be rolled back");
-    assert_eq!(summary.live_utxos, 1, "state UTXO must be live again after rollback");
+    assert_eq!(
+        summary.live_utxos, 1,
+        "state UTXO must be live again after rollback"
+    );
     let unspent = store
         .utxos(&cov_x, false)
         .unwrap()
         .into_iter()
         .find(|u| u.outpoint.txid == tx_id(0xB0))
         .expect("transition UTXO present");
-    assert_eq!(unspent.spent_sig, None, "rollback must clear the captured sig");
+    assert_eq!(
+        unspent.spent_sig, None,
+        "rollback must clear the captured sig"
+    );
 
     // Pass 4: the burn is re-accepted in chain block 5 — index converges.
     chain.block(h(5), 302, vec![burn_tx]);
-    chain.steps.lock().unwrap().push(ChainStep { removed: vec![], added: vec![accepted(h(5), &[tx_id(0xD0)])] });
+    chain.steps.lock().unwrap().push(ChainStep {
+        removed: vec![],
+        added: vec![accepted(h(5), &[tx_id(0xD0)])],
+    });
     sync_once(&chain, &mut store, None, |_| {}).await.unwrap();
     let summary = store.summary(&cov_x).unwrap().unwrap();
     assert_eq!(summary.event_count, 3);
@@ -215,24 +280,52 @@ async fn mid_life_covenant_is_marked_truncated() {
     let _ = std::fs::remove_file(&db);
     let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
 
-    let mut chain = FakeChain { blocks: HashMap::new(), steps: Mutex::new(vec![]), sink: h(0) };
+    let mut chain = FakeChain {
+        blocks: HashMap::new(),
+        steps: Mutex::new(vec![]),
+        sink: h(0),
+    };
     // A continuation output for a covenant whose earlier history we never saw:
     // it asserts an id that does NOT recompute from this tx's outpoint and
     // outputs (KIP-20), so it can't be a genesis — it's a covenant that was
     // born before we started watching. The classifier records a transition
     // and the lineage stays honestly incomplete.
-    let tx = covenant_tx(tx_id(0xE0), vec![Outpoint { txid: tx_id(0x99), index: 7 }], Some(cov(0xC2)));
+    let tx = covenant_tx(
+        tx_id(0xE0),
+        vec![Outpoint {
+            txid: tx_id(0x99),
+            index: 7,
+        }],
+        Some(cov(0xC2)),
+    );
     chain.block(h(1), 100, vec![tx]);
-    chain.steps.lock().unwrap().push(ChainStep { removed: vec![], added: vec![accepted(h(1), &[tx_id(0xE0)])] });
+    chain.steps.lock().unwrap().push(ChainStep {
+        removed: vec![],
+        added: vec![accepted(h(1), &[tx_id(0xE0)])],
+    });
 
-    sync_once(&chain, &mut store, Some(h(0)), |_| {}).await.unwrap();
+    sync_once(&chain, &mut store, Some(h(0)), |_| {})
+        .await
+        .unwrap();
     let summary = store.summary(&cov(0xC2)).unwrap().unwrap();
     assert_eq!(summary.event_count, 1);
     assert_eq!(summary.live_utxos, 1);
-    assert!(!summary.lineage_complete, "unprovable genesis must mark lineage truncated");
+    assert!(
+        !summary.lineage_complete,
+        "unprovable genesis must mark lineage truncated"
+    );
     assert_eq!(summary.genesis_txid, None);
-    let kinds: Vec<String> = store.events(&cov(0xC2)).unwrap().iter().map(|e| e.kind.clone()).collect();
-    assert_eq!(kinds, ["transition"], "first sighting without genesis proof is a transition");
+    let kinds: Vec<String> = store
+        .events(&cov(0xC2))
+        .unwrap()
+        .iter()
+        .map(|e| e.kind.clone())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["transition"],
+        "first sighting without genesis proof is a transition"
+    );
 }
 
 #[tokio::test]
@@ -242,33 +335,57 @@ async fn intra_block_create_and_spend_is_marked_spent() {
     let _ = std::fs::remove_file(&db);
     let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
 
-    let mut chain = FakeChain { blocks: HashMap::new(), steps: Mutex::new(vec![]), sink: h(0) };
+    let mut chain = FakeChain {
+        blocks: HashMap::new(),
+        steps: Mutex::new(vec![]),
+        sink: h(0),
+    };
 
     // tx A births covenant X, tx B immediately spends A:0 (continuation) —
     // and BOTH are accepted by the same chain block, as happens routinely on
     // a 10 bps network where one accepting block sweeps a whole mergeset.
-    let funding = Outpoint { txid: tx_id(0x01), index: 0 };
+    let funding = Outpoint {
+        txid: tx_id(0x01),
+        index: 0,
+    };
     let id = valid_genesis_id(funding);
     let tx_a = covenant_tx(tx_id(0xA0), vec![funding], Some(id));
-    let tx_b = covenant_tx(tx_id(0xB0), vec![Outpoint { txid: tx_id(0xA0), index: 0 }], Some(id));
+    let tx_b = covenant_tx(
+        tx_id(0xB0),
+        vec![Outpoint {
+            txid: tx_id(0xA0),
+            index: 0,
+        }],
+        Some(id),
+    );
     chain.block(h(1), 100, vec![tx_a, tx_b]);
-    chain
-        .steps
-        .lock()
-        .unwrap()
-        .push(ChainStep { removed: vec![], added: vec![accepted(h(1), &[tx_id(0xA0), tx_id(0xB0)])] });
+    chain.steps.lock().unwrap().push(ChainStep {
+        removed: vec![],
+        added: vec![accepted(h(1), &[tx_id(0xA0), tx_id(0xB0)])],
+    });
 
-    sync_once(&chain, &mut store, Some(h(0)), |_| {}).await.unwrap();
+    sync_once(&chain, &mut store, Some(h(0)), |_| {})
+        .await
+        .unwrap();
 
     let summary = store.summary(&id).unwrap().unwrap();
     assert_eq!(summary.event_count, 2, "genesis + transition");
-    assert_eq!(summary.live_utxos, 1, "A:0 was spent within the block; only B:0 is live");
+    assert_eq!(
+        summary.live_utxos, 1,
+        "A:0 was spent within the block; only B:0 is live"
+    );
 
     let utxos = store.utxos(&id, false).unwrap();
-    let a0 = utxos.iter().find(|u| u.outpoint.txid == tx_id(0xA0)).unwrap();
+    let a0 = utxos
+        .iter()
+        .find(|u| u.outpoint.txid == tx_id(0xA0))
+        .unwrap();
     assert!(!a0.live, "intra-block-spent UTXO must not stay live");
     assert_eq!(a0.spent_txid, Some(tx_id(0xB0)));
-    assert!(a0.spent_sig.is_some(), "the spend's signature script must be captured");
+    assert!(
+        a0.spent_sig.is_some(),
+        "the spend's signature script must be captured"
+    );
 
     // Write-time tx_index capture: each event carries its tx's 0-based
     // position in the accepting block's accepted-tx list.

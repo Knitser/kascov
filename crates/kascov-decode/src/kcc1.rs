@@ -9,7 +9,12 @@ use crate::encode_push;
 /// Unkeyed BLAKE2b with 32-byte output — the spec's `Hash` (§3.1).
 fn hash32(input: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
-    out.copy_from_slice(blake2b_simd::Params::new().hash_length(32).hash(input).as_bytes());
+    out.copy_from_slice(
+        blake2b_simd::Params::new()
+            .hash_length(32)
+            .hash(input)
+            .as_bytes(),
+    );
     out
 }
 
@@ -37,7 +42,13 @@ pub fn push_explicit(payload: &[u8]) -> Vec<u8> {
         }
         n => {
             let n = n as u32;
-            let mut out = vec![0x4e, (n & 0xff) as u8, (n >> 8 & 0xff) as u8, (n >> 16 & 0xff) as u8, (n >> 24) as u8];
+            let mut out = vec![
+                0x4e,
+                (n & 0xff) as u8,
+                (n >> 8 & 0xff) as u8,
+                (n >> 16 & 0xff) as u8,
+                (n >> 24) as u8,
+            ];
             out.extend_from_slice(payload);
             out
         }
@@ -157,7 +168,11 @@ pub fn decode_arg_int(bytes: &[u8]) -> Option<i64> {
         magnitude |= (b as u128) << (8 * i);
     }
     let magnitude = i64::try_from(magnitude).ok()?;
-    Some(if last & 0x80 != 0 { -magnitude } else { magnitude })
+    Some(if last & 0x80 != 0 {
+        -magnitude
+    } else {
+        magnitude
+    })
 }
 
 /// Dispatch tag (§6.1): the first four bytes of `Hash(UTF8(signature))`,
@@ -354,9 +369,19 @@ mod tests {
 
     #[test]
     fn read_push_explicit_round_trips_and_rejects_non_canonical() {
-        for payload in [vec![], vec![0x01], vec![0x81], vec![0x07; 75], vec![0x07; 76], vec![0x07; 0x100]] {
+        for payload in [
+            vec![],
+            vec![0x01],
+            vec![0x81],
+            vec![0x07; 75],
+            vec![0x07; 76],
+            vec![0x07; 0x100],
+        ] {
             let encoded = push_explicit(&payload);
-            assert_eq!(read_push_explicit(&encoded), Some((payload.as_slice(), encoded.len())));
+            assert_eq!(
+                read_push_explicit(&encoded),
+                Some((payload.as_slice(), encoded.len()))
+            );
         }
         assert_eq!(read_push_explicit(&[0x51]), None); // OP_1
         assert_eq!(read_push_explicit(&[0x4f]), None); // OP_1NEGATE
@@ -397,7 +422,11 @@ mod tests {
         // §11.1 arguments + tag ahead of the mandatory final PushMinimal(R)
         let args = h("011104010203045151");
         assert_eq!(
-            hex::encode(signature_script(&args, Some(&dispatch_tag(STEP_SIGNATURE)), &program)),
+            hex::encode(signature_script(
+                &args,
+                Some(&dispatch_tag(STEP_SIGNATURE)),
+                &program
+            )),
             "011104010203045151043a088d130151"
         );
     }
@@ -409,7 +438,10 @@ mod tests {
 
     #[test]
     fn vector_11_3_state_encoding() {
-        assert_eq!(hex::encode(encode_state_int(-5).unwrap()), "0500000000000080");
+        assert_eq!(
+            hex::encode(encode_state_int(-5).unwrap()),
+            "0500000000000080"
+        );
         let fields = [
             (FieldType::PubKey, StateValue::Bytes(vec![0x07; 32])),
             (FieldType::Int, StateValue::Int(-5)),
@@ -433,18 +465,40 @@ mod tests {
         let mut trailing = encoded.clone();
         trailing.push(0x00);
         assert_eq!(decode_state(&TYPES_11_3, &trailing), None);
-        assert_eq!(decode_state(&TYPES_11_3, &encoded[..encoded.len() - 2]), None);
-        assert_eq!(decode_state(&[FieldType::Sig, FieldType::Int, FieldType::Bool], &encoded), None);
+        assert_eq!(
+            decode_state(&TYPES_11_3, &encoded[..encoded.len() - 2]),
+            None
+        );
+        assert_eq!(
+            decode_state(&[FieldType::Sig, FieldType::Int, FieldType::Bool], &encoded),
+            None
+        );
     }
 
     // §11.4
     #[test]
     fn vector_11_4_template_hashes() {
         let rows: &[(&str, &str, &str)] = &[
-            ("", "", "94c1c088cc9453996779630ad3af45cbd92814828dd784cf2aa12df95d1b8afe"),
-            ("61", "6263", "77bbcab7072b897c548327378f11776f4853104c71bdb95a12ded5d2783523bf"),
-            ("6162", "63", "20263e794775e4edf2b306c0f306af9e50175c831c857604b481e847f790bf95"),
-            ("00ff", "100080", "81485678b557bcd4a836c2db54ee268e1dc08549f1b8e4d8d67960321b765f25"),
+            (
+                "",
+                "",
+                "94c1c088cc9453996779630ad3af45cbd92814828dd784cf2aa12df95d1b8afe",
+            ),
+            (
+                "61",
+                "6263",
+                "77bbcab7072b897c548327378f11776f4853104c71bdb95a12ded5d2783523bf",
+            ),
+            (
+                "6162",
+                "63",
+                "20263e794775e4edf2b306c0f306af9e50175c831c857604b481e847f790bf95",
+            ),
+            (
+                "00ff",
+                "100080",
+                "81485678b557bcd4a836c2db54ee268e1dc08549f1b8e4d8d67960321b765f25",
+            ),
         ];
         for (prefix, suffix, want) in rows {
             assert_eq!(
@@ -454,7 +508,10 @@ mod tests {
             );
         }
         // rows 2 and 3 concatenate identically; the LE64 length fields split them
-        assert_ne!(template_hash(&h("61"), &h("6263")), template_hash(&h("6162"), &h("63")));
+        assert_ne!(
+            template_hash(&h("61"), &h("6263")),
+            template_hash(&h("6162"), &h("63"))
+        );
     }
 
     // §11.5 — R = 5102aabb010102ccdd75, state.start = 1, state.len = 8.
@@ -464,7 +521,11 @@ mod tests {
         // fields byte[2] a = aabb, bool b = true, byte[2] c = ccdd
         assert_eq!(
             decode_state(
-                &[FieldType::FixedBytes(2), FieldType::Bool, FieldType::FixedBytes(2)],
+                &[
+                    FieldType::FixedBytes(2),
+                    FieldType::Bool,
+                    FieldType::FixedBytes(2)
+                ],
                 &r[1..9]
             ),
             Some(vec![
@@ -475,9 +536,30 @@ mod tests {
         );
         let views: &[(usize, usize, &str, &str, &str, &str)] = &[
             // (view.start, view.len, prefix, encoded_state, suffix, hash)
-            (1, 5, "51", "02aabb0101", "02ccdd75", "c44ab750e981ea120b9341a4107aa589d40d47f7a6c0b4fcb644ab344f893cfa"),
-            (4, 5, "5102aabb", "010102ccdd", "75", "7ba3a2319a0bbab234bef65c1198bf4b86edb778a8072762c5bb5ccdf7666ec4"),
-            (4, 2, "5102aabb", "0101", "02ccdd75", "82ea2f1d05005e6f6b4a2a29d3bf65315e11b4f85f7aa7d9a0c904ec03b6ab70"),
+            (
+                1,
+                5,
+                "51",
+                "02aabb0101",
+                "02ccdd75",
+                "c44ab750e981ea120b9341a4107aa589d40d47f7a6c0b4fcb644ab344f893cfa",
+            ),
+            (
+                4,
+                5,
+                "5102aabb",
+                "010102ccdd",
+                "75",
+                "7ba3a2319a0bbab234bef65c1198bf4b86edb778a8072762c5bb5ccdf7666ec4",
+            ),
+            (
+                4,
+                2,
+                "5102aabb",
+                "0101",
+                "02ccdd75",
+                "82ea2f1d05005e6f6b4a2a29d3bf65315e11b4f85f7aa7d9a0c904ec03b6ab70",
+            ),
         ];
         for (start, len, want_prefix, want_state, want_suffix, want_hash) in views {
             let (prefix, rest) = r.split_at(*start);
@@ -497,7 +579,10 @@ mod tests {
     // §11.6 — fixed record (int -5, bool true).
     #[test]
     fn vector_11_6_hash_committed_virtual_element() {
-        let fields = [(FieldType::Int, StateValue::Int(-5)), (FieldType::Bool, StateValue::Bool(true))];
+        let fields = [
+            (FieldType::Int, StateValue::Int(-5)),
+            (FieldType::Bool, StateValue::Bool(true)),
+        ];
         let payload = packed(&fields).unwrap();
         assert_eq!(hex::encode(&payload), "050000000000008001");
         let want = h("ce56c1a4ec3df391eb0692835e4529f8c5dd6da7c68e533ce68ba2f7dd35debf");
@@ -506,16 +591,29 @@ mod tests {
         assert!(!verify_commitment(&want, &payload[..payload.len() - 1]));
         assert!(!verify_commitment(&want[..31], &payload));
         // Packed is undefined for variable-width layouts (§10.1)
-        assert_eq!(packed(&[(FieldType::Bytes, StateValue::Bytes(vec![0x01]))]), None);
+        assert_eq!(
+            packed(&[(FieldType::Bytes, StateValue::Bytes(vec![0x01]))]),
+            None
+        );
     }
 
     #[test]
     fn state_int_codec_edges() {
         for v in [0i64, 1, -1, 127, -128, i64::MAX, -i64::MAX] {
-            assert_eq!(decode_state_int(&encode_state_int(v).unwrap()), Some(v), "{v}");
+            assert_eq!(
+                decode_state_int(&encode_state_int(v).unwrap()),
+                Some(v),
+                "{v}"
+            );
         }
-        assert_eq!(hex::encode(encode_state_int(i64::MAX).unwrap()), "ffffffffffffff7f");
-        assert_eq!(hex::encode(encode_state_int(-i64::MAX).unwrap()), "ffffffffffffffff");
+        assert_eq!(
+            hex::encode(encode_state_int(i64::MAX).unwrap()),
+            "ffffffffffffff7f"
+        );
+        assert_eq!(
+            hex::encode(encode_state_int(-i64::MAX).unwrap()),
+            "ffffffffffffffff"
+        );
         assert_eq!(encode_state_int(i64::MIN), None); // -2^63 is outside the §5.3 range
         assert_eq!(decode_state_int(&[0, 0, 0, 0, 0, 0, 0, 0x80]), None); // negative zero
     }
@@ -533,7 +631,21 @@ mod tests {
         for v in [0i64, 1, 6, 17, 127, 128, 32767, 100_000_000] {
             assert_eq!(encode_arg_int(v).unwrap(), crate::snum(v));
         }
-        for v in [0i64, 1, -1, 17, -5, 127, -127, 128, -128, 32767, -32768, i64::MAX, -i64::MAX] {
+        for v in [
+            0i64,
+            1,
+            -1,
+            17,
+            -5,
+            127,
+            -127,
+            128,
+            -128,
+            32767,
+            -32768,
+            i64::MAX,
+            -i64::MAX,
+        ] {
             assert_eq!(decode_arg_int(&encode_arg_int(v).unwrap()), Some(v), "{v}");
         }
         assert_eq!(decode_arg_int(&[0x05, 0x00]), None); // padded
