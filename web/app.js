@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-rollback';
+} from './core/format.js?v=20260729-dragfix3';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-rollback';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-rollback';
-import { createPendingModel } from './core/pending.js?v=20260729-rollback';
+} from './core/state.js?v=20260729-dragfix3';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-dragfix3';
+import { createPendingModel } from './core/pending.js?v=20260729-dragfix3';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,12 +35,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-rollback';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-rollback';
-import { createRefreshGate } from './core/refresh.js?v=20260729-rollback';
-import { networkRouteHash } from './core/routing.js?v=20260729-rollback';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-rollback';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-rollback';
+} from './core/data.js?v=20260729-dragfix3';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-dragfix3';
+import { createRefreshGate } from './core/refresh.js?v=20260729-dragfix3';
+import { networkRouteHash } from './core/routing.js?v=20260729-dragfix3';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-dragfix3';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-dragfix3';
 
 
 
@@ -4726,7 +4726,8 @@ function holdersBubbleMapHtml(count) {
     `<canvas class="holders-bubbles-canvas" tabindex="0" role="img" ` +
     `aria-label="${esc(fmtInt(count))} top holders drawn as bubbles. Area follows proven balance. ` +
     `Faint lines are observed moves between current holders in the loaded history. ` +
-    `Use arrow keys to inspect holders and Enter to open one."></canvas>` +
+    `Drag a bubble to rearrange the map. Use arrow keys to inspect holders, ` +
+    `Shift plus arrow keys to move one, and Enter to open it."></canvas>` +
     `<a class="hb-inspector" data-holder-inspector hidden>` +
     `<span class="hb-inspector-kind" data-hb-kind></span>` +
     `<strong class="mono" data-hb-owner></strong>` +
@@ -4735,7 +4736,24 @@ function holdersBubbleMapHtml(count) {
     `<p class="dim hb-key"><span class="hb-swatch hb-presence"></span> presence ` +
     `<span class="hb-swatch hb-covenant"></span> covenant ` +
     `<span class="hb-swatch hb-pubkey"></span> pubkey ` +
-    `<span class="hb-key-rule">area = proven balance · lines = observed moves · drift is visual</span></p></div>`;
+    `<span class="hb-key-rule">drag a bubble to rearrange · area = proven balance · lines = observed moves · drift is visual</span></p></div>`;
+}
+
+/* Which networks have already had their registry warm-up scheduled. The
+   listed-name repaint must be able to happen at most ONCE per network no
+   matter what the loader does: guarding only on the cache slot means a
+   loader that fails without writing that slot re-enters the renderer
+   forever, and an infinite async loop freezes the entire page rather than
+   just degrading one column. This makes that impossible by construction. */
+const registryWarmed = new Set();
+
+function warmRegistryOnce(network, view, repaint) {
+  const key = `${network}/${view}`;
+  if (registryWarmed.has(key) || state.registry[network]) return;
+  registryWarmed.add(key);
+  loadRegistry(network)
+    .then(() => { if (state.network === network && parseRoute().view === view) repaint(); })
+    .catch(() => { /* the column just stays unlabelled; never re-enter */ });
 }
 
 /* Every graduated pool on this network. A pool is not its own record here:
@@ -4755,11 +4773,7 @@ function renderPools() {
   /* the listed names are a second, slower source; warm once and repaint.
      Guarded on the cache SLOT, not the promise: loadRegistry resolves
      instantly once cached, so an unguarded repaint would loop forever. */
-  if (!state.registry[network]) {
-    loadRegistry(network).then(() => {
-      if (state.network === network && parseRoute().view === 'pools') renderPools();
-    });
-  }
+  warmRegistryOnce(network, 'pools', renderPools);
   const cached = tokenPages.get(network);
   if (!cached) {
     view.innerHTML = head + routeLoading('reading this network’s pools…');
@@ -5182,11 +5196,7 @@ function renderTokens() {
      Warm it once and repaint when it lands. The guard is on the cache SLOT and
      not on the promise: loadRegistry resolves instantly once cached, so an
      unguarded repaint would call straight back into this function forever. */
-  if (!state.registry[network]) {
-    loadRegistry(network).then(() => {
-      if (state.network === network && parseRoute().view === 'tokens') renderTokens();
-    });
-  }
+  warmRegistryOnce(network, 'tokens', renderTokens);
   const cached = tokenPages.get(network);
   const fresh = cached && Date.now() - cached.at < TOKENS_TTL_MS;
   if (!fresh) {

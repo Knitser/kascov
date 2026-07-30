@@ -5,11 +5,11 @@
    galaxy, lane pages, changelog). No DOM — everything here returns data
    and fills the caches in core/state; rendering stays in app.js. */
 
-import { friendlyName } from './format.js?v=20260729-rollback';
+import { friendlyName } from './format.js?v=20260729-dragfix3';
 import {
   GRID_PAGE, ACTIVITY_TTL_MS, ACTIVITY_MISS_TTL_MS,
   makeAnchor, daaToMs, state,
-} from './state.js?v=20260729-rollback';
+} from './state.js?v=20260729-dragfix3';
 
 /* the wire says 'active'/'burned'; the UI speaks alive/retired — the one
    place that mapping happens (grid rows, detail coins, search results and
@@ -363,6 +363,12 @@ async function loadRegistry(network) {
       state.registry[network] = { data, at: Date.now() };
       return data;
     } catch (e) {
+      // ALWAYS record the attempt. Callers guard their repaint on this slot
+      // being present, so leaving it empty after a throw turns 'warm the
+      // registry, then repaint once' into an infinite async loop that starves
+      // the event loop and freezes the whole page. The 404 branch above
+      // already writes a null-data slot; a thrown fetch must do the same.
+      if (!state.registry[network]) state.registry[network] = { data: null, at: Date.now() };
       return t ? t.data : null;
     }
   });
