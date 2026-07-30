@@ -661,12 +661,14 @@ pub struct MarketSummary {
     /// assumed: the pool's own share counter minus the shares actually issued.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lp_of_pool: Option<crate::CovenantId>,
+    /// The share count the pool stated in its newest PROVEN reveal — one spend
+    /// behind the live cell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_shares: Option<i64>,
+    /// LP tokens held outside the issuing covenant, as of the LIVE balances.
+    /// A different moment from `pool_shares`: do not subtract them.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub locked_shares: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub locked_bps: Option<i64>,
+    pub issued_shares: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub program: Option<MarketProgramRow>,
 }
@@ -702,22 +704,25 @@ pub(crate) fn market_summary(
         out.unpriced_reason =
             Some("this token is a pool's LP share token; kascov does not price LP shares".into());
         out.lp_of_pool = Some(crate::CovenantId(pool));
-        // The pool counts shares its own state block states; the LP token
-        // records which of those were actually issued. The difference is
-        // liquidity no share can redeem, so it can never leave the pool.
-        // Both halves are proven, so the gap is proven too — nothing here is
-        // a protocol constant taken on faith.
+        // Both halves are proven, but NOT at the same moment, and that makes
+        // their difference unpublishable.
+        //
+        // `shares` is read from the newest proof-grade reveal of the pool
+        // program, which is by construction one spend behind the live cell.
+        // `held_wallet` is the live balance. Subtracting one from the other
+        // spans however many add/remove-liquidity events happened in between,
+        // so the remainder is not "shares nobody can redeem" — it is that
+        // number plus an unknown drift. It briefly read as a clean 1,000,000
+        // across two snapshots and then moved, which is exactly how a
+        // mismatched-provenance figure fails: it looks like an invariant until
+        // it doesn't.
+        //
+        // So publish the two facts with their provenance and let the reader
+        // see they are from different moments. kascov does not subtract across
+        // time and call the result proven.
         if let Some(prog) = market_program_row(conn, &pool)? {
-            if let Some(shares) = prog.shares {
-                out.pool_shares = Some(shares);
-                let issued = held_wallet.unwrap_or(0) + held_script.unwrap_or(0);
-                if shares > 0 && issued >= 0 && issued <= shares {
-                    let locked = shares - issued;
-                    out.locked_shares = Some(locked);
-                    out.locked_bps =
-                        Some(((locked as i128 * 10_000) / shares as i128) as i64);
-                }
-            }
+            out.pool_shares = prog.shares;
+            out.issued_shares = Some(held_wallet.unwrap_or(0) + held_script.unwrap_or(0));
             out.program = Some(prog);
         }
         return Ok(out);

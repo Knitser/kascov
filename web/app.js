@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-dragfix3';
+} from './core/format.js?v=20260729-provenance';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-dragfix3';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-dragfix3';
-import { createPendingModel } from './core/pending.js?v=20260729-dragfix3';
+} from './core/state.js?v=20260729-provenance';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-provenance';
+import { createPendingModel } from './core/pending.js?v=20260729-provenance';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,12 +35,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-dragfix3';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-dragfix3';
-import { createRefreshGate } from './core/refresh.js?v=20260729-dragfix3';
-import { networkRouteHash } from './core/routing.js?v=20260729-dragfix3';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-dragfix3';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-dragfix3';
+} from './core/data.js?v=20260729-provenance';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-provenance';
+import { createRefreshGate } from './core/refresh.js?v=20260729-provenance';
+import { networkRouteHash } from './core/routing.js?v=20260729-provenance';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-provenance';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-provenance';
 
 
 
@@ -5050,8 +5050,8 @@ function renderLabels() {
       'that a pool exists yet, or where the liquidity went.'],
     ['pool shares', 'this coin is the LP token named inside a matched pool program’s state block, at bytes 62 to 94.',
       'a price. a share is a claim on a pool’s holdings, not a traded instrument.'],
-    ['locked forever', 'the pool counts more shares than exist as tokens; the difference is derived from those two proven counts.',
-      'a launchpad’s published lock constant, taken on faith. kascov derives the figure and ignores the claim.'],
+    ['shares, at last proof', 'the share count the pool committed in its newest proof-grade reveal, read from its own state block.',
+      'how much liquidity is locked. that would mean subtracting a live balance from this older number, and the gap between them also holds every deposit and withdrawal in between.'],
     ['unmatched', 'the revealed program did not byte-match any audited build.',
       'a price, ever. matching is never widened to make a program fit.'],
     ['listed as X', 'a launchpad’s registry claim, cross-checked field by field against the chain — genesis transaction, inventory covenant, creator key.',
@@ -5087,22 +5087,26 @@ function lpSharesSectionHtml(m, network) {
   const poolLink = pool
     ? `<a href="#/${esc(network)}/c/${esc(pool)}" class="mono">${esc(shortHex(pool, 10, 8))}</a>`
     : 'a pool';
+  /* Two proven facts from DIFFERENT moments, said as such. The pool's share
+     count comes from its newest proof-grade reveal (one spend behind the live
+     cell); the issued count is the live balance. kascov used to subtract them
+     and call the remainder "locked forever" — that difference spans every
+     liquidity event in between, so it read as a clean 1,000,000 across two
+     snapshots and then drifted. A figure that only looks like an invariant is
+     not one, so the subtraction is gone. */
   let lockedHtml = '';
-  if (m.locked_shares != null && m.pool_shares != null) {
-    const pct = m.locked_bps != null ? (m.locked_bps / 100).toFixed(1) : null;
-    const issued = m.pool_shares - m.locked_shares;
+  if (m.pool_shares != null || m.issued_shares != null) {
     lockedHtml =
       `<div class="lane-stats token-stats">` +
-      `<div class="stat"><span class="stat-n" title="the share count the pool states in its own committed state block">${esc(fmtInt(m.pool_shares))}</span><span class="stat-label">shares the pool counts</span></div>` +
-      `<div class="stat"><span class="stat-n" title="shares that exist as this token and can be redeemed against the pool">${esc(fmtInt(issued))}</span><span class="stat-label">issued as tokens</span></div>` +
-      `<div class="stat"><span class="stat-n" title="shares the pool counts that no token backs — liquidity nobody holds a claim on, so it can never be withdrawn">${esc(fmtInt(m.locked_shares))}</span><span class="stat-label">locked forever</span></div>` +
-      (pct ? `<div class="stat"><span class="stat-n" title="the locked share of this pool's liquidity, derived from the two counts beside it rather than taken from any published figure">${esc(pct)}%</span><span class="stat-label">of the pool locked</span></div>` : '') +
+      (m.pool_shares != null
+        ? `<div class="stat"><span class="stat-n" title="the share count the pool stated in its newest proven reveal — one spend behind the live cell">${esc(fmtInt(m.pool_shares))}</span><span class="stat-label">shares, at last proof</span></div>` : '') +
+      (m.issued_shares != null
+        ? `<div class="stat"><span class="stat-n" title="LP tokens held outside the issuing covenant, from the live balances">${esc(fmtInt(m.issued_shares))}</span><span class="stat-label">issued, live</span></div>` : '') +
       `</div>` +
-      `<p class="dim">the pool's own state block counts <strong>${esc(fmtInt(m.pool_shares))}</strong> shares, ` +
-      `and <strong>${esc(fmtInt(issued))}</strong> of them exist as this token. the remaining ` +
-      `<strong>${esc(fmtInt(m.locked_shares))}</strong> are backed by no token at all, so nothing can redeem them ` +
-      `and that liquidity cannot leave the pool. kascov derives this from the two counts, both proven from chain — ` +
-      `it is not a number anyone published.</p>`;
+      `<p class="dim">these two are read at different moments: the share count is what the pool ` +
+      `committed at its last proven reveal, the issued count is live. kascov will not subtract one ` +
+      `from the other and call the remainder locked liquidity — that difference also contains every ` +
+      `deposit and withdrawal in between, and a number that merely looks constant is not proven.</p>`;
   }
   return `<section aria-label="Pool shares"><h2>pool shares</h2>` +
     `<p class="dim">this token is not priced here, and that is deliberate. it is a receipt for a share of ` +
@@ -5144,12 +5148,10 @@ function marketCellsHtml(m, network) {
      redeem. Labelled in the cell, since the column headers say otherwise. */
   if (m.phase === 'lp shares') {
     const noPrice = dash(m.unpriced_reason || 'LP shares are not priced');
-    if (m.pool_shares == null || m.locked_shares == null) return noPrice + dash('') + dash('');
-    const issued = m.pool_shares - m.locked_shares;
-    const pct = m.locked_bps != null ? `${(m.locked_bps / 100).toFixed(0)}% locked` : '';
+    if (m.pool_shares == null && m.issued_shares == null) return noPrice + dash('') + dash('');
     return noPrice +
-      `<td class="mono" title="shares that exist as this token and can be redeemed against the pool, out of ${esc(fmtInt(m.pool_shares))} the pool counts">${esc(fmtInt(issued))} issued</td>` +
-      `<td class="mono" title="${esc(fmtInt(m.locked_shares))} shares the pool counts that no token backs, so that liquidity can never be withdrawn — derived from the two counts, not from any published figure">${esc(pct)}</td>`;
+      `<td class="mono" title="LP tokens held outside the issuing covenant, from the live balances">${m.issued_shares != null ? esc(fmtInt(m.issued_shares)) + ' issued' : '<span class="dim">—</span>'}</td>` +
+      `<td class="mono" title="the share count the pool stated in its newest proven reveal, one spend behind the live cell — a different moment from the issued count beside it, so the two are not subtracted">${m.pool_shares != null ? esc(fmtInt(m.pool_shares)) + ' at proof' : '<span class="dim">—</span>'}</td>`;
   }
   const why = m.unpriced_reason || '';
   const price = (m.last_quote_sompi != null && m.last_base_amount)
