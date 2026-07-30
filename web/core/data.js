@@ -5,11 +5,11 @@
    galaxy, lane pages, changelog). No DOM — everything here returns data
    and fills the caches in core/state; rendering stays in app.js. */
 
-import { friendlyName } from './format.js?v=20260730-txtrade';
+import { friendlyName } from './format.js?v=20260730-alltrades';
 import {
   GRID_PAGE, ACTIVITY_TTL_MS, ACTIVITY_MISS_TTL_MS,
   makeAnchor, daaToMs, state,
-} from './state.js?v=20260730-txtrade';
+} from './state.js?v=20260730-alltrades';
 
 /* the wire says 'active'/'burned'; the UI speaks alive/retired — the one
    place that mapping happens (grid rows, detail coins, search results and
@@ -590,6 +590,22 @@ async function loadTokens(network) {
   return rec;
 }
 
+/* Every verified trade for one token, fetched only when the reader asks for
+   the full list. Kept out of the token page payload so a page load never pays
+   for thousands of rows nobody opened. */
+const tradeLists = new Map(); // `${network}/${id}` -> { data, at }
+
+async function loadAllTrades(network, id) {
+  const key = `${network}/${id}`;
+  const t = tradeLists.get(key);
+  if (t && Date.now() - t.at < TOKENS_TTL_MS) return t;
+  const res = await fetch(`data/${network}/token/${id}/trades.json`, { cache: 'no-cache' });
+  if (!res.ok) throw new Error(`trades ${res.status}`);
+  const rec = { data: await res.json(), at: Date.now() };
+  tradeLists.set(key, rec);
+  return rec;
+}
+
 /* the verification log and the unknown-build queue. A 404 means an older
    worker without the route, remembered as missing and reprobed after the ttl,
    so the page can say so honestly rather than showing an empty log. */
@@ -747,7 +763,7 @@ export {
   loadActivity, loadReorgs, loadDigest,
   galaxyCache, loadGalaxy,
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,
-  TOKENS_TTL_MS, tokenPages, loadTokens, loadVerification, verifyPages,
+  TOKENS_TTL_MS, tokenPages, loadTokens, loadVerification, loadAllTrades, tradeLists, verifyPages,
   tokenDetails, loadTokenDetail, loadOlderTokenEvents,
   txDetails, loadTxDetail,
   loadChangelog,

@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260730-txtrade';
+} from './core/format.js?v=20260730-alltrades';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260730-txtrade';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-txtrade';
-import { createPendingModel } from './core/pending.js?v=20260730-txtrade';
+} from './core/state.js?v=20260730-alltrades';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-alltrades';
+import { createPendingModel } from './core/pending.js?v=20260730-alltrades';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -29,18 +29,19 @@ import {
   galaxyCache, loadGalaxy,
   LANE_PAGE_TTL_MS, lanePages, loadLanePage,
   TOKENS_TTL_MS, tokenPages, loadTokens, loadVerification, verifyPages,
+  loadAllTrades, tradeLists,
   tokenDetails, loadTokenDetail, loadOlderTokenEvents,
   txDetails, loadTxDetail,
   loadChangelog,
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260730-txtrade';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-txtrade';
-import { createRefreshGate } from './core/refresh.js?v=20260730-txtrade';
-import { networkRouteHash } from './core/routing.js?v=20260730-txtrade';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-txtrade';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-txtrade';
+} from './core/data.js?v=20260730-alltrades';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-alltrades';
+import { createRefreshGate } from './core/refresh.js?v=20260730-alltrades';
+import { networkRouteHash } from './core/routing.js?v=20260730-alltrades';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-alltrades';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-alltrades';
 
 
 
@@ -4693,7 +4694,7 @@ function tokenFieldChips(fields) {
 const TRADES_COLLAPSED = 12;
 let tradesExpanded = false;
 
-function marketSectionHtml(m, trades, network, toMs) {
+function marketSectionHtml(m, trades, network, toMs, tokenId = '', tradesTotal = null) {
   if (!m) return '';
   if (m.phase === 'lp shares') return lpSharesSectionHtml(m, network);
   const tiles = [];
@@ -4737,8 +4738,13 @@ function marketSectionHtml(m, trades, network, toMs) {
       ? `<p class="dim market-prog">pool program verified from its own committed bytes: ${esc(fmtInt(m.program.exercised_trades))} trades replayed against its constant-product formula, reserves read from its own state block${m.program.invariant_ok ? '' : ' — INVARIANT VIOLATION, nothing priced'}.</p>`
       : '';
   let tradesHtml = '';
-  const publishable = Array.isArray(trades) ? trades.filter((t) => t.co_covenants === 0) : [];
+  /* When the reader has asked for everything, render the separately-fetched
+     full list; otherwise the newest page that came with the token. */
+  const full = tradesExpanded ? tradeLists.get(`${network}/${tokenId}`) : null;
+  const source = (full && full.data && full.data.trades) || trades;
+  const publishable = Array.isArray(source) ? source.filter((t) => t.co_covenants === 0) : [];
   const rows = tradesExpanded ? publishable : publishable.slice(0, TRADES_COLLAPSED);
+  const grandTotal = tradesTotal != null ? tradesTotal : publishable.length;
   if (rows.length) {
     tradesHtml = `<div class="tokens-tablewrap"><table class="tokens-table market-trades">` +
       `<thead><tr><th>side</th><th>KAS</th><th>tokens</th><th>price (KAS)</th><th>when</th></tr></thead><tbody>` +
@@ -4750,13 +4756,12 @@ function marketSectionHtml(m, trades, network, toMs) {
           `<td class="mono">${esc(fmtPriceKas(t.quote_sompi, t.base_amount))}</td>` +
           `<td>${ms != null ? esc(relTimeShort(ms)) : `DAA ${esc(fmtInt(t.accepting_daa))}`}</td></tr>`;
       }).join('') + `</tbody></table></div>`;
-    if (publishable.length > TRADES_COLLAPSED) {
+    if (grandTotal > TRADES_COLLAPSED) {
       tradesHtml += tradesExpanded
         ? `<p class="timeline-more"><button type="button" class="btn btn-quiet" data-action="trades-less">` +
-          `show fewer</button> <span class="dim">all ${esc(fmtInt(publishable.length))} trades in this page’s payload; ` +
-          `older ones exist on chain and are not loaded here.</span></p>`
+          `show fewer</button> <span class="dim">showing every one of ${esc(fmtInt(publishable.length))} verified trades.</span></p>`
         : `<p class="timeline-more"><button type="button" class="btn btn-quiet" data-action="trades-more">` +
-          `show all ${esc(fmtInt(publishable.length))} trades</button></p>`;
+          `show all ${esc(fmtInt(grandTotal))} trades</button></p>`;
     }
   }
   if (!tiles.length && !whyLine && !tradesHtml) return '';
@@ -5989,7 +5994,7 @@ function renderTokenPage(route) {
   view.innerHTML = back + header + fieldsLine +
     stats +
     supplySplit +
-    marketSectionHtml(d.market, d.trades, network, toMs) +
+    marketSectionHtml(d.market, d.trades, network, toMs, route.id, d.trades_total) +
     tokenValidationHtml(t, d.validation) +
     auditSectionHtml(t, d, network) +
     holdersSection +
@@ -7716,9 +7721,16 @@ const ACTIONS = {
     render(); /* failed lane loads are never cached — this refetches */
   },
 
-  'trades-more'() {
-    tradesExpanded = true;
-    render();
+  'trades-more'(el) {
+    /* Fetch the whole list first, then expand. Without the fetch the button
+       would only ever reveal the page the token payload happened to carry. */
+    const route = parseRoute();
+    if (route.view !== 'token' || !route.id) return;
+    el.disabled = true;
+    el.textContent = 'loading every trade…';
+    loadAllTrades(state.network, route.id)
+      .then(() => { tradesExpanded = true; render(); })
+      .catch(() => { el.disabled = false; el.textContent = 'could not load them, try again'; });
   },
 
   'trades-less'() {

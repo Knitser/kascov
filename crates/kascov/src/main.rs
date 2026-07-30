@@ -1377,6 +1377,7 @@ async fn serve(
         .route("/data/{network}/templates.json", get(templates_handler))
         .route("/data/{network}/tokens.json", get(tokens_handler))
         .route("/data/{network}/verification.json", get(verification_handler))
+        .route("/data/{network}/token/{id}/trades.json", get(token_trades_handler))
         .route("/data/{network}/token/{id}", get(token_handler))
         .route("/data/{network}/consistency.json", get(consistency_handler))
         .route("/data/{network}/events", get(events_handler))
@@ -4649,6 +4650,47 @@ const TOKEN_EVENTS_MAX: u64 = 1000;
 /// `next_before_seq`. Either way a page cuts on a whole-event boundary, so no
 /// event's deltas straddle two pages.
 /// 404 for ids the derivation doesn't know as tokens.
+/// GET /data/{network}/token/{id}/trades.json — every verified trade for one
+/// token, newest first.
+///
+/// Separate from the token page on purpose: the full list can run to thousands
+/// of rows, and nobody should pay for that on a page load they did not ask for.
+async fn token_trades_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    // Strict parse BEFORE the cache key, same as token_handler: garbage must
+    // never populate the cache map.
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let id_hex = id.strip_suffix(".json").unwrap_or(&id);
+    let Ok(token_id) = id_hex.parse::<kascov_core::CovenantId>() else {
+        return (StatusCode::BAD_REQUEST, "bad token id").into_response();
+    };
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/token/{}/trades", token_id);
+    let cc = "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
+    serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        // Bounded, but far above any real token's history so "all" means all.
+        // If a token ever exceeds this the count below still tells the truth.
+        let rows = store.token_trades_page(&token_id, 20_000)?;
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "token_id": token_id,
+            "generated_at_ms": now_ms(),
+            "trades_total": store.token_trades_count(&token_id)?,
+            "trades": rows,
+        }))?))
+    })
+    .await
+}
+
 async fn token_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
@@ -4783,11 +4825,14 @@ async fn token_handler(
             } else {
                 serde_json::Value::Null
             },
+            "trades_total": store.token_trades_count(&token_id)?,
             "trades": store
-                // 250 keeps a busy token's recent history browsable without
-                // making every token page carry a huge payload. The UI states
-                // that older trades exist beyond this page.
-                .token_trades_page(&token_id, 250)?
+                // The inline payload stays a PAGE: the newest 100. The full
+                // list is a separate endpoint the UI fetches only when asked,
+                // so a token page never carries thousands of rows nobody
+                // opened. `trades_total` is published so the button can name
+                // the real number rather than the size of this page.
+                .token_trades_page(&token_id, 100)?
                 .iter()
                 .map(|tr| serde_json::to_value(tr))
                 .collect::<std::result::Result<Vec<_>, _>>()?,

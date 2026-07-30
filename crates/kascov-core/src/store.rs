@@ -3967,6 +3967,18 @@ impl Store {
         self.derive_tokens_if_stale()
     }
 
+    /// How many verified trades this token has, so a UI can offer "all of
+    /// them" with a real number instead of the size of whatever page it got.
+    pub fn token_trades_count(&self, id: &CovenantId) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM token_trades WHERE token_id = ?1",
+                [id.0.as_slice()],
+                |r| r.get(0),
+            )
+            .map_err(db_err)
+    }
+
     /// How kascov reads one transaction as a trade, if it admitted one.
     ///
     /// This is what makes a tx permalink answerable: a reader comparing two
