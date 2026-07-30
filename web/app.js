@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-tickers';
+} from './core/format.js?v=20260729-nav2';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-tickers';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-tickers';
-import { createPendingModel } from './core/pending.js?v=20260729-tickers';
+} from './core/state.js?v=20260729-nav2';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-nav2';
+import { createPendingModel } from './core/pending.js?v=20260729-nav2';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,12 +35,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-tickers';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-tickers';
-import { createRefreshGate } from './core/refresh.js?v=20260729-tickers';
-import { networkRouteHash } from './core/routing.js?v=20260729-tickers';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-tickers';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-tickers';
+} from './core/data.js?v=20260729-nav2';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-nav2';
+import { createRefreshGate } from './core/refresh.js?v=20260729-nav2';
+import { networkRouteHash } from './core/routing.js?v=20260729-nav2';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-nav2';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-nav2';
 
 
 
@@ -4300,7 +4300,7 @@ function renderAddress(route) {
   const q = route.id;
   const net = NETWORKS[network];
   document.title = `address ${shortHex(q, 10, 6)} — kascov`;
-  const back = `<a class="back" href="#/${esc(network)}/explore">← all smart coins</a>`;
+  const back = backLink(`#/${esc(network)}/explore`, 'all smart coins');
   const headChip = (label, value) =>
     `<p class="id-chip">${label ? `<span class="dim">${esc(label)}</span> ` : ''}<span class="mono break">${esc(value)}</span>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(value)}">copy</button></p>`;
@@ -4336,7 +4336,13 @@ function renderAddress(route) {
   const toMs = (daa) => aMs - (aDaa - daa) * MS_PER_DAA;
   const entry = state.cache[network];
   const controls = rows.filter((r) => r.controls_now).length;
-  const bits = [`${fmtInt(data.covenants_total)} smart coin${data.covenants_total === 1 ? '' : 's'} touched`];
+  /* TWO indexes, and the headline must not report one as if it were both:
+     this line used to read "0 smart coins touched" directly above a table of
+     14 held tokens. Lead with whichever the key actually has. */
+  const heldCount = Array.isArray(data.token_holdings) ? data.token_holdings.length : 0;
+  const bits = [];
+  if (heldCount) bits.push(`${fmtInt(heldCount)} token${heldCount === 1 ? '' : 's'} held`);
+  bits.push(`${fmtInt(data.covenants_total)} smart coin${data.covenants_total === 1 ? '' : 's'} touched`);
   if (controls) bits.push(`${fmtInt(controls)} controlled right now`);
   if (data.covenants_total > rows.length) bits.push(`showing the ${fmtInt(rows.length)} most recent`);
   const cards = rows.map((c) => {
@@ -4448,7 +4454,7 @@ function renderLane(route) {
   const printable = bytes.length === 4 && bytes.every((b) => { const c = parseInt(b, 16); return c >= 0x20 && c <= 0x7e; });
   const plain = printable ? bytes.map((b) => String.fromCharCode(parseInt(b, 16))).join('') : `0x${ns}`;
   document.title = `lane ${plain} — kascov`;
-  const back = `<a class="back" href="#/${esc(network)}/explore">← all smart coins</a>`;
+  const back = backLink(`#/${esc(network)}/explore`, 'all smart coins');
   const head = (sub) => back +
     `<header class="page-head lane-head"><h1>lane ${nsLabel(ns)}</h1>` +
     `<p class="page-sub">a KIP-21 payload lane — every transaction stamped with this 4-byte namespace <span class="dim">on ${esc(net.label)}</span></p>` +
@@ -4783,6 +4789,41 @@ function holdersBubbleMapHtml(count) {
     `<span class="hb-swatch hb-covenant"></span> covenant ` +
     `<span class="hb-swatch hb-pubkey"></span> pubkey ` +
     `<span class="hb-key-rule">drag a bubble to rearrange · area = proven balance · lines = observed moves · drift is visual</span></p></div>`;
+}
+
+/* Where the reader came from, so "back" can mean back rather than always
+   dumping them at a directory. Updated by render() on every route change.
+   Using history.back() keeps it instant: the browser restores the previous
+   view and its scroll position instead of refetching a page we already had. */
+let cameFrom = null;   // { hash, label }
+let lastPaintedHash = null;
+let lastPaintedLabel = null;
+
+function backLink(fallbackHref, fallbackLabel) {
+  if (cameFrom && cameFrom.hash && cameFrom.hash !== location.hash) {
+    return `<button type="button" class="back back-btn" data-action="nav-back">` +
+      `← back to ${esc(cameFrom.label)}</button>`;
+  }
+  return `<a class="back" href="${fallbackHref}">← ${esc(fallbackLabel)}</a>`;
+}
+
+/* A short human name for a route, for the back label. */
+function routeLabel(route) {
+  switch (route.view) {
+    case 'explore': return 'all smart coins';
+    case 'tokens': return 'all tokens';
+    case 'pools': return 'pools';
+    case 'pool': return 'that pool';
+    case 'token': return 'that token';
+    case 'detail': return 'that smart coin';
+    case 'address': return 'that address';
+    case 'tx': return 'that transaction';
+    case 'verify': return 'the verification log';
+    case 'labels': return 'what the labels mean';
+    case 'lane': return 'that lane';
+    case 'guide': return 'the guide';
+    default: return 'where you were';
+  }
 }
 
 /* Which networks have already had their registry warm-up scheduled. The
@@ -5227,7 +5268,7 @@ function renderTokens() {
   if (!view) return; /* stale cached index.html */
   const net = NETWORKS[network];
   document.title = `tokens on ${net.label} — kascov`;
-  const back = `<a class="back" href="#/${esc(network)}/explore">← all smart coins</a>`;
+  const back = backLink(`#/${esc(network)}/explore`, 'all smart coins');
   /* rows carrying a validation verdict mean a newer worker — the directory
      gains badges, supply/holders columns and token-page links; without them
      everything renders exactly as before */
@@ -5704,7 +5745,7 @@ function renderTokenPage(route) {
   const id = route.id;
   const net = NETWORKS[network];
   const cached = tokenDetails.get(`${network}/${id}`);
-  const back = `<a class="back" href="#/${esc(network)}/tokens">← all tokens</a>`;
+  const back = backLink(`#/${esc(network)}/tokens`, 'all tokens');
   const fresh = cached && Date.now() - cached.at < TOKENS_TTL_MS;
   if (!fresh) {
     /* stale-while-revalidate, same shape as lane pages */
@@ -6126,7 +6167,7 @@ function renderTxPage(route) {
   const txid = route.id;
   const net = NETWORKS[network];
   document.title = `tx ${shortHex(txid, 10, 8)} — kascov`;
-  const back = `<a class="back" href="#/${esc(network)}/explore">← all smart coins</a>`;
+  const back = backLink(`#/${esc(network)}/explore`, 'all smart coins');
   const cached = txDetails.get(`${network}/${txid}`);
   const fresh = cached && Date.now() - cached.at < TOKENS_TTL_MS;
   if (!fresh) {
@@ -6501,6 +6542,19 @@ async function render() {
   /* a stale cached index.html may predate newer views — never crash on them */
   for (const k of Object.keys(views)) if (!views[k]) delete views[k];
   if (!views[route.view]) route.view = 'landing';
+
+  /* Remember where we were BEFORE this route paints, so a detail page can
+     offer a real "back to that token" instead of always sending the reader to
+     a directory. Skipped when the route is unchanged (a repaint, not a move)
+     so a refresh can never make "back" point at the page you are on. */
+  {
+    const here = location.hash;
+    if (lastPaintedHash && lastPaintedHash !== here) {
+      cameFrom = { hash: lastPaintedHash, label: lastPaintedLabel || 'where you were' };
+    }
+    lastPaintedHash = here;
+    lastPaintedLabel = routeLabel(route);
+  }
 
   document.querySelectorAll('.network-tab').forEach((b) => {
     b.setAttribute('aria-pressed', String(b.dataset.network === state.network));
@@ -7581,6 +7635,11 @@ const ACTIONS = {
 
   'retry-lane'(el) {
     render(); /* failed lane loads are never cached — this refetches */
+  },
+
+  'nav-back'() {
+    /* the browser's own back: instant, and it restores scroll */
+    history.back();
   },
 
   'retry-tokens'(el) {
