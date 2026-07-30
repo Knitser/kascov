@@ -14,12 +14,6 @@ cargo run -p kascov-lab -- examples        # print every copy-paste recipe
 
 First run only: `cargo run -p kascov-lab -- keygen`, fund the printed address at <https://faucet-testnet.kaspanet.io>, then any demo works. Every command has `--help`.
 
-### The web guide
-
-The complete tested walkthrough now lives inside the kascov application at [kascov.io/guide](https://kascov.io/guide): compile a Mecenas, deploy it on TN10, avoid the v0-UTXO compute-budget trap, spend it through `receive`, and replay the real spend opcode by opcode.
-
-It uses the normal application shell and supports section links such as `#/guide?at=trap`. Existing `/guide.html#trap` bookmarks redirect to the same section. See [[Web Explorer#Builder guide inside the shell]] for the route and compatibility design.
-
 ### Commands at a glance
 
 | command | what it does |

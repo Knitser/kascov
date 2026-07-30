@@ -196,37 +196,6 @@ h2::after {
   text-align: center;
   color: var(--muted);
 }
-
-.manual-copy-dialog {
-  width: min(38rem, calc(100% - 2rem));
-  padding: 1rem;
-  color: var(--text);
-  background: var(--card);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
-.manual-copy-dialog::backdrop { background: rgba(2, 8, 7, 0.78); }
-.manual-copy-dialog p { color: var(--muted); }
-.manual-copy-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-}
-.manual-copy-head h2 { margin: 0; }
-#manual-copy-value {
-  box-sizing: border-box;
-  width: 100%;
-  min-height: 8rem;
-  padding: 0.75rem;
-  resize: vertical;
-  color: var(--text);
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 16px;
-}
 .panel-error { border-color: rgba(242, 165, 102, 0.4); }
 .route-loading {
   min-height: 180px;
@@ -2068,6 +2037,7 @@ a.btn:hover { text-decoration: none; }
     gap: 0.7rem;
     overflow-x: auto;
     scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
     padding-bottom: 0.4rem;
     /* subtle right-edge fade as a "more this way" hint; floors at 35%
        opacity so the last card never disappears */
@@ -2092,6 +2062,7 @@ a.btn:hover { text-decoration: none; }
     max-width: 100%;
     min-width: 0;
     overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
   }
   .pulse-ranges::-webkit-scrollbar { display: none; }
@@ -2105,6 +2076,7 @@ a.btn:hover { text-decoration: none; }
 
   /* decoder + dev: reachable buttons, momentum scrolling in code */
   .decode-actions .btn, .example-row .chip { min-height: 44px; }
+  .inst-list, .codeblock, .script { -webkit-overflow-scrolling: touch; }
   .codeblock { font-size: 0.72rem; padding: 0.75rem 0.8rem; }
 }
 
@@ -2150,7 +2122,7 @@ a.btn:hover { text-decoration: none; }
   color: var(--faint);
   margin-right: 0.35rem;
 }
-.tl-payload-val { color: var(--text); overflow-wrap: anywhere; word-break: normal; }
+.tl-payload-val { color: var(--text); word-break: break-word; }
 .tl-payload-val.mono { font-family: var(--mono); font-size: 0.8rem; }
 
 /* KRC-20-style inscription chip under a timeline row */
@@ -2303,7 +2275,7 @@ a.holder-id:hover .holder-name { color: var(--accent); }
 .gen-block pre {
   margin: 0; padding: 0.7rem 0.8rem;
   font-size: 0.78rem; line-height: 1.5;
-  overflow-x: auto;
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
   white-space: pre; max-height: 340px; overflow-y: auto;
 }
 @media (max-width: 720px) {
@@ -2985,7 +2957,7 @@ button.build-card { width: 100%; text-align: left; font: inherit; color: inherit
 .gd-block p strong, .gd-block li strong { color: var(--text); }
 .gd-block ul { margin: 0.4rem 0 1rem; padding-left: 1.15rem; }
 .gd-block li { margin-bottom: 0.55rem; }
-.guide-main code.mono { color: var(--text); background: var(--bg-soft); border: 1px solid var(--border); border-radius: 5px; padding: 0.08em 0.35em; overflow-wrap: anywhere; word-break: normal; }
+.guide-main code.mono { color: var(--text); background: var(--bg-soft); border: 1px solid var(--border); border-radius: 5px; padding: 0.08em 0.35em; word-break: break-word; }
 .guide-main a code.mono { color: var(--accent); }
 
 .gd-honest { max-width: 78ch; margin: 0 0 1.8rem; padding: 0.75rem 1rem; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--muted); font-size: 0.92rem; line-height: 1.6; }
@@ -3007,7 +2979,7 @@ button.build-card { width: 100%; text-align: left; font: inherit; color: inherit
 .gd-table td { text-align: left; padding: 0.6rem 0.9rem 0.6rem 0; border-bottom: 1px solid var(--border); color: var(--muted); vertical-align: top; line-height: 1.6; }
 .gd-table td:last-child code.mono { white-space: nowrap; }
 .gd-table a.mono { word-break: break-all; }
-.gd-scroll { overflow-x: auto; overscroll-behavior-inline: contain; }
+.gd-scroll { overflow-x: auto; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; }
 .gd-foot { margin-top: 2rem; padding-top: 1.2rem; border-top: 1px solid var(--border); color: var(--faint); font-size: 0.9rem; }
 .gd-foot p { margin: 0 0 0.5rem; }
 .gd-foot a { color: var(--accent); }
@@ -4155,13 +4127,13 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
   padding: 0 !important;
   margin: -1px !important;
   overflow: hidden !important;
-  clip-path: inset(50%) !important;
+  clip: rect(0, 0, 0, 0) !important;
   white-space: nowrap !important;
   border: 0 !important;
 }
 
-@media (max-width: 840px) {
-  /* A compact screen gets three predictable rows: identity/network, search, pages.
+@media (max-width: 720px) {
+  /* A phone gets three predictable rows: identity/network, search, pages.
      display:contents lets the two navs participate in the header grid while
      preserving their semantic grouping in the DOM. */
   .header-inner {
@@ -4197,20 +4169,9 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
     overscroll-behavior-inline: contain;
     scroll-snap-type: x proximity;
     scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
   }
   .site-nav::-webkit-scrollbar { display: none; }
-  .site-nav.can-scroll-right {
-    -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent);
-    mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent);
-  }
-  .site-nav.can-scroll-left {
-    -webkit-mask-image: linear-gradient(90deg, transparent, #000 28px, #000 100%);
-    mask-image: linear-gradient(90deg, transparent, #000 28px, #000 100%);
-  }
-  .site-nav.can-scroll-left.can-scroll-right {
-    -webkit-mask-image: linear-gradient(90deg, transparent, #000 28px, #000 calc(100% - 28px), transparent);
-    mask-image: linear-gradient(90deg, transparent, #000 28px, #000 calc(100% - 28px), transparent);
-  }
   .nav-link {
     flex: none;
     min-height: 44px;
@@ -4259,6 +4220,7 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
     overscroll-behavior-inline: contain;
     scroll-snap-type: x proximity;
     scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
   }
   .api-nav::-webkit-scrollbar { display: none; }
   .api-nav-group { display: none; }
@@ -4287,6 +4249,7 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
     overflow-x: auto;
     overscroll-behavior-inline: contain;
     scrollbar-gutter: stable;
+    -webkit-overflow-scrolling: touch;
   }
   .ep-fields thead, .ep-fields tbody,
   .ep-params thead, .ep-params tbody {
@@ -4314,6 +4277,7 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
     max-width: 100%;
     overscroll-behavior-inline: contain;
     scrollbar-gutter: stable;
+    -webkit-overflow-scrolling: touch;
   }
   .tokens-table th:first-child,
   .tokens-table td:first-child {
@@ -4335,6 +4299,7 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
     pointer-events: auto;
     overscroll-behavior-inline: contain;
     scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
   }
   .galaxy-legend::-webkit-scrollbar { display: none; }
   .lg-item { flex: none; }
@@ -4592,7 +4557,7 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
 @media (max-width: 640px) {
   .holders-bubbles-canvas { height: clamp(300px, 90vw, 390px); }
   .hb-toolbar { top: .58rem; left: .65rem; right: .65rem; }
-  .hb-motion { min-height: 44px; }
+  .hb-motion { min-height: 36px; }
   .hb-inspector {
     bottom: .75rem;
     min-width: calc(100% - 1.3rem);

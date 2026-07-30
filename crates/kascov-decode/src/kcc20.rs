@@ -91,24 +91,13 @@ pub fn revealed_template(
 /// Returns the four labeled fields only when the template is "KCC20 token"
 /// and every field is present with its observed width (owner 32 bytes,
 /// identifier_type 1 byte) — a partial or misshapen decode yields `None`.
-pub fn decode_token_state(
-    registry: &Registry,
-    spk_version: u16,
-    program: &[u8],
-) -> Option<TokenState> {
+pub fn decode_token_state(registry: &Registry, spk_version: u16, program: &[u8]) -> Option<TokenState> {
     let d = registry.decode(spk_version, program);
     if d.template == Some(TOKEN_TEMPLATE) {
-        let field = |name: &str| {
-            d.fields
-                .iter()
-                .find(|f| f.name == name)
-                .map(|f| f.value.clone())
-        };
+        let field = |name: &str| d.fields.iter().find(|f| f.name == name).map(|f| f.value.clone());
         let owner: [u8; 32] = field("owner_identifier")?.try_into().ok()?;
         let id_type = field("identifier_type")?;
-        let [identifier_type] = id_type.as_slice() else {
-            return None;
-        };
+        let [identifier_type] = id_type.as_slice() else { return None };
         return Some(TokenState {
             owner,
             identifier_type: *identifier_type,
@@ -198,10 +187,7 @@ pub fn locate_state_block(program: &[u8]) -> Option<StateBlock> {
         && program[45] == 0x01
         && program[47] == 0x6c
     {
-        return Some(StateBlock {
-            start: 1,
-            guarded: true,
-        });
+        return Some(StateBlock { start: 1, guarded: true });
     }
     // Unguarded build: the same pushes with no guards, block at offset 0.
     if program.len() >= 46
@@ -210,10 +196,7 @@ pub fn locate_state_block(program: &[u8]) -> Option<StateBlock> {
         && program[35] == 0x08
         && program[44] == 0x01
     {
-        return Some(StateBlock {
-            start: 0,
-            guarded: false,
-        });
+        return Some(StateBlock { start: 0, guarded: false });
     }
     None
 }
@@ -231,10 +214,7 @@ pub fn has_state_block(program: &[u8]) -> bool {
 /// 55b28d8; recompute is gated by the store's `kcc1_abi_version` meta.
 pub fn kcc1_template_hash(program: &[u8]) -> Option<[u8; 32]> {
     let b = locate_state_block(program)?;
-    Some(crate::kcc1::template_hash(
-        &program[..b.start],
-        &program[b.end()..],
-    ))
+    Some(crate::kcc1::template_hash(&program[..b.start], &program[b.end()..]))
 }
 
 /// Splice a candidate state into a same-build program at the fixed state
@@ -260,12 +240,7 @@ pub fn splice_token_state(
 /// [`crate::p2sh_reveal`]'s verification).
 pub fn blake2b_256(bytes: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
-    out.copy_from_slice(
-        blake2b_simd::Params::new()
-            .hash_length(32)
-            .hash(bytes)
-            .as_bytes(),
-    );
+    out.copy_from_slice(blake2b_simd::Params::new().hash_length(32).hash(bytes).as_bytes());
     out
 }
 
@@ -315,40 +290,22 @@ mod tests {
         // Guarded: the build kascov shipped fixtures for.
         for base in builds() {
             let b = locate_state_block(base).expect("guarded build must locate");
-            assert_eq!(
-                b,
-                StateBlock {
-                    start: 1,
-                    guarded: true
-                }
-            );
+            assert_eq!(b, StateBlock { start: 1, guarded: true });
         }
         // Unguarded: the same field layout with the guards removed, shifted by
         // exactly one byte. This is the case that hid a live mainnet token.
         let b = locate_state_block(UNGUARDED_KRON).expect("unguarded build must locate");
-        assert_eq!(
-            b,
-            StateBlock {
-                start: 0,
-                guarded: false
-            }
-        );
+        assert_eq!(b, StateBlock { start: 0, guarded: false });
         assert_eq!(UNGUARDED_KRON.len(), 2433);
         // The old predicate's very first byte check is what failed.
-        assert_ne!(
-            UNGUARDED_KRON[0], 0x6b,
-            "this fixture exists because it is not guarded"
-        );
+        assert_ne!(UNGUARDED_KRON[0], 0x6b, "this fixture exists because it is not guarded");
     }
 
     #[test]
     fn decodes_the_unguarded_build_without_a_registered_skeleton() {
         let registry = Registry::default();
         // No skeleton matches this build, so the registry cannot name it...
-        assert_ne!(
-            registry.decode(1, UNGUARDED_KRON).template,
-            Some(TOKEN_TEMPLATE)
-        );
+        assert_ne!(registry.decode(1, UNGUARDED_KRON).template, Some(TOKEN_TEMPLATE));
         // ...yet the state block is present and decodes to the real on-chain
         // values, which is precisely the token kascov used to miss.
         let st = decode_token_state(&registry, 1, UNGUARDED_KRON)

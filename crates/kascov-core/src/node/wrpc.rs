@@ -29,9 +29,8 @@ impl NodeHandle {
         };
         let resolver = url.is_none().then(Resolver::default);
 
-        let client =
-            KaspaRpcClient::new(WrpcEncoding::Borsh, url, resolver, Some(network_id), None)
-                .map_err(|e| Error::Connect(e.to_string()))?;
+        let client = KaspaRpcClient::new(WrpcEncoding::Borsh, url, resolver, Some(network_id), None)
+            .map_err(|e| Error::Connect(e.to_string()))?;
 
         let options = ConnectOptions {
             block_async_connect: true,
@@ -39,10 +38,7 @@ impl NodeHandle {
             strategy: ConnectStrategy::Fallback,
             ..Default::default()
         };
-        client
-            .connect(Some(options))
-            .await
-            .map_err(|e| Error::Connect(e.to_string()))?;
+        client.connect(Some(options)).await.map_err(|e| Error::Connect(e.to_string()))?;
 
         let handle = Self { client, network };
         let info = handle.server_info().await?;
@@ -80,11 +76,7 @@ impl NodeHandle {
     }
 
     pub async fn block_with_txs(&self, hash: BlockHash) -> Result<Block> {
-        let block = self
-            .client
-            .get_block(to_hash(hash), true)
-            .await
-            .map_err(rpc_err)?;
+        let block = self.client.get_block(to_hash(hash), true).await.map_err(rpc_err)?;
         Ok(map_block(block))
     }
 
@@ -96,11 +88,7 @@ impl NodeHandle {
             .await
             .map_err(rpc_err)?;
         Ok(ChainStep {
-            removed: response
-                .removed_chain_block_hashes
-                .into_iter()
-                .map(from_hash)
-                .collect(),
+            removed: response.removed_chain_block_hashes.into_iter().map(from_hash).collect(),
             added: response
                 .accepted_transaction_ids
                 .into_iter()
@@ -123,11 +111,8 @@ impl NodeHandle {
     /// (its outpoint would be unknowable), so drop those rather than track a
     /// phantom.
     pub async fn mempool_txs(&self) -> Result<Vec<Transaction>> {
-        let entries = self
-            .client
-            .get_mempool_entries(false, false)
-            .await
-            .map_err(rpc_err)?;
+        let entries =
+            self.client.get_mempool_entries(false, false).await.map_err(rpc_err)?;
         Ok(entries
             .into_iter()
             .map(|e| map_tx(e.transaction))
@@ -166,12 +151,7 @@ fn map_block(block: RpcBlock) -> Block {
         daa_score: block.header.daa_score,
         blue_score: block.header.blue_score,
         timestamp_ms: block.header.timestamp,
-        parents: block
-            .header
-            .direct_parents()
-            .iter()
-            .map(|h| from_hash(*h))
-            .collect(),
+        parents: block.header.direct_parents().iter().map(|h| from_hash(*h)).collect(),
         mergeset,
         transactions: block.transactions.into_iter().map(map_tx).collect(),
     }
@@ -226,17 +206,12 @@ pub fn compute_covenant_id(
     use kaspa_consensus_core::hashing::covenant_id::covenant_id;
     use kaspa_consensus_core::tx::{ScriptPublicKey, TransactionOutpoint, TransactionOutput};
 
-    let outpoint = TransactionOutpoint::new(
-        RpcHash::from_bytes(genesis_outpoint.txid.0),
-        genesis_outpoint.index,
-    );
+    let outpoint =
+        TransactionOutpoint::new(RpcHash::from_bytes(genesis_outpoint.txid.0), genesis_outpoint.index);
     let outputs: Vec<(u32, TransactionOutput)> = auth_outputs
         .iter()
         .map(|&(index, value, version, script)| {
-            (
-                index,
-                TransactionOutput::new(value, ScriptPublicKey::from_vec(version, script.to_vec())),
-            )
+            (index, TransactionOutput::new(value, ScriptPublicKey::from_vec(version, script.to_vec())))
         })
         .collect();
     CovenantId(covenant_id(outpoint, outputs.iter().map(|(i, o)| (*i, o))).as_bytes())

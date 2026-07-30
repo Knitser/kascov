@@ -431,10 +431,7 @@ pub struct EventRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tx_index: Option<u64>,
     /// The transaction's v1 payload, when it carried one.
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "opt_hex_ser"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "opt_hex_ser")]
     pub payload: Option<Vec<u8>>,
     /// Accepting block header timestamp (ms) — real chain time, not a DAA
     /// estimate. None on rows written before capture.
@@ -445,10 +442,7 @@ pub struct EventRow {
     pub accepting_blue_score: Option<u64>,
 }
 
-fn opt_hex_ser<S: serde::Serializer>(
-    bytes: &Option<Vec<u8>>,
-    s: S,
-) -> std::result::Result<S::Ok, S::Error> {
+fn opt_hex_ser<S: serde::Serializer>(bytes: &Option<Vec<u8>>, s: S) -> std::result::Result<S::Ok, S::Error> {
     match bytes {
         Some(b) => s.serialize_str(&hex::encode(b)),
         None => s.serialize_none(),
@@ -825,11 +819,7 @@ fn extract_inscription_json(payload: &[u8]) -> Option<serde_json::Value> {
         return first(payload);
     }
     if payload.starts_with(b"7b22") {
-        let run: Vec<u8> = payload
-            .iter()
-            .copied()
-            .take_while(|b| b.is_ascii_hexdigit())
-            .collect();
+        let run: Vec<u8> = payload.iter().copied().take_while(|b| b.is_ascii_hexdigit()).collect();
         let n = run.len() & !1;
         if let Ok(dec) = hex::decode(&run[..n]) {
             return first(&dec);
@@ -899,9 +889,7 @@ const INSCRIPTION_WINDOW: usize = 2048;
 /// row. `''` when the payload isn't a parseable inscription.
 fn inscription_kind_of(payload: &[u8]) -> String {
     let head = &payload[..payload.len().min(INSCRIPTION_WINDOW)];
-    extract_inscription_json(head)
-        .map(|v| inscription_kind(&v))
-        .unwrap_or_default()
+    extract_inscription_json(head).map(|v| inscription_kind(&v)).unwrap_or_default()
 }
 
 /// Process-wide decode registry for write-time template recognition —
@@ -932,18 +920,14 @@ const KCC1_ABI_VERSION: &str = "55b28d8";
 impl Store {
     pub fn open(path: &Path, network: Network) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| Error::Invalid {
-                what: "db path",
-                value: e.to_string(),
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::Invalid { what: "db path", value: e.to_string() })?;
         }
         let conn = Connection::open(path).map_err(db_err)?;
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(db_err)?;
+        conn.pragma_update(None, "journal_mode", "WAL").map_err(db_err)?;
         // Concurrent readers (backup, serve snapshots) must wait out write
         // bursts instead of failing with SQLITE_BUSY.
-        conn.busy_timeout(std::time::Duration::from_secs(10))
-            .map_err(db_err)?;
+        conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(db_err)?;
         conn.execute_batch(SCHEMA).map_err(db_err)?;
         // Additive migrations for pre-existing databases (SQLite has no
         // ADD COLUMN IF NOT EXISTS; a duplicate-column error means done).
@@ -1153,11 +1137,8 @@ impl Store {
         }
         let tx = self.conn.transaction().map_err(db_err)?;
         // State scripts nothing matched ('' = decoded, no template).
-        tx.execute(
-            "UPDATE covenant_utxos SET template = NULL WHERE template = ''",
-            [],
-        )
-        .map_err(db_err)?;
+        tx.execute("UPDATE covenant_utxos SET template = NULL WHERE template = ''", [])
+            .map_err(db_err)?;
         // Spends whose committed P2SH program the old registry couldn't name
         // (or could only call a nested commitment). Only canonical P2SH spks
         // can ever reveal, so the '' rows of plain p2pk spends stay put
@@ -1190,19 +1171,14 @@ impl Store {
 
     fn meta(&self, key: &str) -> Result<Option<String>> {
         self.conn
-            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
-                row.get(0)
-            })
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| row.get(0))
             .optional()
             .map_err(db_err)
     }
 
     fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn
-            .execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
-                params![key, value],
-            )
+            .execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)", params![key, value])
             .map_err(db_err)?;
         Ok(())
     }
@@ -1247,15 +1223,11 @@ impl Store {
     /// Write a consistent copy of the database (safe while a writer is active).
     pub fn backup_to(&self, out: &Path) -> Result<()> {
         if out.exists() {
-            std::fs::remove_file(out).map_err(|e| Error::Invalid {
-                what: "backup path",
-                value: e.to_string(),
-            })?;
+            std::fs::remove_file(out)
+                .map_err(|e| Error::Invalid { what: "backup path", value: e.to_string() })?;
         }
         let path = out.to_string_lossy();
-        self.conn
-            .execute("VACUUM INTO ?1", [path.as_ref()])
-            .map_err(db_err)?;
+        self.conn.execute("VACUUM INTO ?1", [path.as_ref()]).map_err(db_err)?;
         Ok(())
     }
 
@@ -1534,10 +1506,8 @@ impl Store {
         for utxo in &block.created_utxos {
             // Recognition is stamped at write time ('' = no template matched)
             // so template analytics stay pure GROUP BYs at read time.
-            let template = registry()
-                .decode(utxo.spk_version, &utxo.spk_script)
-                .template
-                .unwrap_or("");
+            let template =
+                registry().decode(utxo.spk_version, &utxo.spk_script).template.unwrap_or("");
             note_kcc20(&utxo.covenant_id, template);
             tx.execute(
                 "INSERT OR REPLACE INTO covenant_utxos
@@ -1570,21 +1540,13 @@ impl Store {
                     "SELECT spk_version, spk_script, covenant_id FROM covenant_utxos
                      WHERE txid = ?1 AND output_index = ?2",
                     params![outpoint.txid.0.as_slice(), outpoint.index],
-                    |r| {
-                        Ok((
-                            r.get::<_, u16>(0)?,
-                            r.get::<_, Vec<u8>>(1)?,
-                            r.get::<_, [u8; 32]>(2)?,
-                        ))
-                    },
+                    |r| Ok((r.get::<_, u16>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, [u8; 32]>(2)?)),
                 )
                 .optional()
                 .map_err(db_err)?
                 .map(|(version, spk, covenant_id)| {
                     let redeem = kascov_decode::p2sh_reveal(&spk, sig);
-                    kcc1_hash = redeem
-                        .as_deref()
-                        .and_then(kascov_decode::kcc20::kcc1_template_hash);
+                    kcc1_hash = redeem.as_deref().and_then(kascov_decode::kcc20::kcc1_template_hash);
                     let template = redeem
                         .and_then(|redeem| {
                             kascov_decode::kcc20::revealed_template(registry(), version, &redeem)
@@ -1760,26 +1722,17 @@ impl Store {
                 [hash],
             )
             .map_err(db_err)?;
-            tx.execute(
-                "DELETE FROM covenant_utxos WHERE created_block = ?1",
-                [hash],
-            )
-            .map_err(db_err)?;
+            tx.execute("DELETE FROM covenant_utxos WHERE created_block = ?1", [hash]).map_err(db_err)?;
             tx.execute(
                 "UPDATE covenants SET event_count = event_count -
                    (SELECT COUNT(*) FROM covenant_events WHERE accepting_block = ?1 AND covenant_id = covenants.covenant_id)",
                 [hash],
             )
             .map_err(db_err)?;
-            tx.execute(
-                "DELETE FROM covenant_events WHERE accepting_block = ?1",
-                [hash],
-            )
-            .map_err(db_err)?;
+            tx.execute("DELETE FROM covenant_events WHERE accepting_block = ?1", [hash]).map_err(db_err)?;
         }
         // Covenants whose genesis was rolled back disappear entirely.
-        tx.execute("DELETE FROM covenants WHERE event_count <= 0", [])
-            .map_err(db_err)?;
+        tx.execute("DELETE FROM covenants WHERE event_count <= 0", []).map_err(db_err)?;
         // Token rewind, phase 2: re-derive every affected token from the
         // POST-rollback source tables — exactly what a from-scratch index at
         // the rolled-back height would contain. Cells whose proving reveal
@@ -1792,11 +1745,9 @@ impl Store {
         // here, and not every reorged block carried covenant activity anyway.
         if !removed.is_empty() {
             let daa: u64 = tx
-                .query_row(
-                    "SELECT value FROM meta WHERE key = 'processed_daa'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
+                .query_row("SELECT value FROM meta WHERE key = 'processed_daa'", [], |row| {
+                    row.get::<_, String>(0)
+                })
                 .optional()
                 .map_err(db_err)?
                 .and_then(|s| s.parse().ok())
@@ -1844,16 +1795,10 @@ impl Store {
             .query_row(
                 "SELECT MIN(accepting_daa), MAX(accepting_daa) FROM covenant_events",
                 [],
-                |row| {
-                    Ok(row
-                        .get::<_, Option<u64>>(0)?
-                        .zip(row.get::<_, Option<u64>>(1)?))
-                },
+                |row| Ok(row.get::<_, Option<u64>>(0)?.zip(row.get::<_, Option<u64>>(1)?)),
             )
             .map_err(db_err)?;
-        let Some((min_daa, max_daa)) = bounds else {
-            return Ok(vec![]);
-        };
+        let Some((min_daa, max_daa)) = bounds else { return Ok(vec![]) };
         let mut stmt = self
             .conn
             .prepare(
@@ -1923,9 +1868,8 @@ impl Store {
                 )
                 .map_err(db_err)?;
             for (block, indices) in blocks {
-                let any: bool = probe
-                    .query_row([block.0.as_slice()], |r| r.get(0))
-                    .map_err(db_err)?;
+                let any: bool =
+                    probe.query_row([block.0.as_slice()], |r| r.get(0)).map_err(db_err)?;
                 if !any {
                     continue;
                 }
@@ -1949,9 +1893,7 @@ impl Store {
     /// Where an interrupted tx_index backfill should resume (the last
     /// accepting block already stamped), if it ever recorded progress.
     pub fn tx_index_backfill_resume(&self) -> Result<Option<BlockHash>> {
-        Ok(self
-            .meta("tx_index_backfilled_to")?
-            .and_then(|s| s.parse().ok()))
+        Ok(self.meta("tx_index_backfilled_to")?.and_then(|s| s.parse().ok()))
     }
 
     pub fn set_tx_index_backfill_progress(&self, at: BlockHash) -> Result<()> {
@@ -1963,9 +1905,9 @@ impl Store {
     }
 
     /* ---------- gap recovery (see sync::recover_gap) ----------
-    A deep-reorg wedge answered by a sink reset leaves a DAA window with
-    zero indexed events between two healthy segments. These methods merge
-    the canonical history of that window back in, offline, on a COPY. */
+       A deep-reorg wedge answered by a sink reset leaves a DAA window with
+       zero indexed events between two healthy segments. These methods merge
+       the canonical history of that window back in, offline, on a COPY. */
 
     /// The widest DAA discontinuity between consecutive indexed events, as
     /// `(last DAA before, first DAA after)`, when it spans at least
@@ -1991,9 +1933,7 @@ impl Store {
     /// Every recorded gap recovery as `(from_daa, to_daa)`, newest first —
     /// the idempotence marker recover_gap consults before doing anything.
     pub fn gap_recoveries(&self) -> Result<Vec<(u64, u64)>> {
-        let Some(raw) = self.meta("gap_recoveries")? else {
-            return Ok(vec![]);
-        };
+        let Some(raw) = self.meta("gap_recoveries")? else { return Ok(vec![]) };
         let entries: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
         let mut out: Vec<(u64, u64)> = entries
             .iter()
@@ -2008,9 +1948,7 @@ impl Store {
     /// DAA discontinuity and a re-run's auto-detection would otherwise see
     /// only a sub-window of the original gap and skip the rest.
     pub fn gap_recovery_pending(&self) -> Result<Option<(u64, u64)>> {
-        let Some(raw) = self.meta("gap_recovery_pending")? else {
-            return Ok(None);
-        };
+        let Some(raw) = self.meta("gap_recovery_pending")? else { return Ok(None) };
         let mut parts = raw.splitn(2, ':').map(|p| p.parse::<u64>().ok());
         Ok(parts.next().flatten().zip(parts.next().flatten()))
     }
@@ -2064,10 +2002,8 @@ impl Store {
         // chain discipline as apply(). INSERT OR IGNORE (not REPLACE): an
         // existing row may carry spend capture this recovered view lacks.
         for utxo in &block.created_utxos {
-            let template = registry()
-                .decode(utxo.spk_version, &utxo.spk_script)
-                .template
-                .unwrap_or("");
+            let template =
+                registry().decode(utxo.spk_version, &utxo.spk_script).template.unwrap_or("");
             let inserted = tx
                 .execute(
                     "INSERT OR IGNORE INTO covenant_utxos
@@ -2106,9 +2042,7 @@ impl Store {
             // Spend-time recognition, same as apply(): the reveal names the
             // program that actually ran ('' = spend seen, nothing matched).
             let redeem = kascov_decode::p2sh_reveal(&spk, sig);
-            let kcc1_hash = redeem
-                .as_deref()
-                .and_then(kascov_decode::kcc20::kcc1_template_hash);
+            let kcc1_hash = redeem.as_deref().and_then(kascov_decode::kcc20::kcc1_template_hash);
             let revealed = redeem
                 .and_then(|redeem| {
                     kascov_decode::kcc20::revealed_template(registry(), version, &redeem)
@@ -2242,11 +2176,7 @@ impl Store {
                     .map_err(db_err)?;
                 rows
             };
-            if !ordered
-                .iter()
-                .enumerate()
-                .all(|(new_seq, &old_seq)| old_seq == new_seq as i64)
-            {
+            if !ordered.iter().enumerate().all(|(new_seq, &old_seq)| old_seq == new_seq as i64) {
                 // The prior-art trick (scripts/repair-lineage.py, 99b5bba):
                 // an in-place renumber can transiently collide with its own
                 // unmoved rows on the (covenant_id, seq) PK — park every row
@@ -2322,13 +2252,10 @@ impl Store {
             let mut tokens_todo: std::collections::BTreeSet<[u8; 32]> = Default::default();
             let mut minters_todo: std::collections::BTreeSet<[u8; 32]> = Default::default();
             for id in &refresh {
-                if crate::tokens::is_token(&tx, id)? || crate::tokens::has_token_evidence(&tx, id)?
-                {
+                if crate::tokens::is_token(&tx, id)? || crate::tokens::has_token_evidence(&tx, id)? {
                     tokens_todo.insert(*id);
                 }
-                if crate::tokens::is_minter(&tx, id)?
-                    || crate::tokens::has_minter_evidence(&tx, id)?
-                {
+                if crate::tokens::is_minter(&tx, id)? || crate::tokens::has_minter_evidence(&tx, id)? {
                     minters_todo.insert(*id);
                 }
                 let mut stmt = tx
@@ -2357,16 +2284,11 @@ impl Store {
         // the reorg feed's consumers count rollbacks. This entry is also the
         // marker that makes the next recover_gap run a no-op.
         let existing: Option<String> = tx
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'gap_recoveries'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT value FROM meta WHERE key = 'gap_recoveries'", [], |r| r.get(0))
             .optional()
             .map_err(db_err)?;
-        let mut entries: Vec<serde_json::Value> = existing
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default();
+        let mut entries: Vec<serde_json::Value> =
+            existing.and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
         entries.push(serde_json::json!({
             "from_daa": gap_lo,
             "to_daa": gap_hi,
@@ -2377,10 +2299,8 @@ impl Store {
             "covenants_refreshed": counts.covenants_refreshed,
             "note": "recover-gap: canonical history merged from a node walk (the window was skipped by a deep-reorg sink reset)",
         }));
-        let raw = serde_json::to_string(&entries).map_err(|e| Error::Invalid {
-            what: "gap_recoveries meta",
-            value: e.to_string(),
-        })?;
+        let raw = serde_json::to_string(&entries)
+            .map_err(|e| Error::Invalid { what: "gap_recoveries meta", value: e.to_string() })?;
         tx.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('gap_recoveries', ?1)",
             [raw],
@@ -2389,10 +2309,8 @@ impl Store {
         // The in-flight window marker and the walk-resume cursor retire with
         // the completed marker, in the same transaction: either all survive a
         // crash or none do.
-        tx.execute("DELETE FROM meta WHERE key = 'gap_recovery_pending'", [])
-            .map_err(db_err)?;
-        tx.execute("DELETE FROM meta WHERE key = 'gap_walk_cursor'", [])
-            .map_err(db_err)?;
+        tx.execute("DELETE FROM meta WHERE key = 'gap_recovery_pending'", []).map_err(db_err)?;
+        tx.execute("DELETE FROM meta WHERE key = 'gap_walk_cursor'", []).map_err(db_err)?;
         tx.commit().map_err(db_err)?;
         Ok(counts)
     }
@@ -2458,11 +2376,7 @@ impl Store {
         let limit = limit.min(i64::MAX as u64) as i64;
         let rows = stmt
             .query_map([limit], |row| {
-                Ok(ReorgRow {
-                    daa: row.get(0)?,
-                    at_ms: row.get(1)?,
-                    rolled_back: row.get(2)?,
-                })
+                Ok(ReorgRow { daa: row.get(0)?, at_ms: row.get(1)?, rolled_back: row.get(2)? })
             })
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -2487,11 +2401,7 @@ impl Store {
     /// previous page's `(next_after_daa, next_after_id)` to walk backwards.
     /// `None` starts from the tip. The compound key means covenants sharing a
     /// boundary DAA page deterministically instead of being skipped.
-    pub fn list_page(
-        &self,
-        after: Option<(u64, [u8; 32])>,
-        limit: u64,
-    ) -> Result<Vec<CovenantSummary>> {
+    pub fn list_page(&self, after: Option<(u64, [u8; 32])>, limit: u64) -> Result<Vec<CovenantSummary>> {
         let order = "ORDER BY c.last_activity_daa DESC, c.covenant_id DESC";
         let limit = limit.min(i64::MAX as u64) as i64;
         let rows = match after {
@@ -2573,9 +2483,7 @@ impl Store {
             Some((daa, _)) => Some(daa),
             None => self
                 .conn
-                .query_row("SELECT MAX(accepting_daa) FROM covenant_events", [], |r| {
-                    r.get(0)
-                })
+                .query_row("SELECT MAX(accepting_daa) FROM covenant_events", [], |r| r.get(0))
                 .map_err(db_err)?,
         };
         let cutoff = tip_daa.unwrap_or(0).saturating_sub(window_daa);
@@ -2587,13 +2495,7 @@ impl Store {
                         COALESCE(SUM(kind = 'burn'), 0)
                  FROM covenant_events WHERE accepting_daa >= ?1",
                 params![cutoff],
-                |r| {
-                    Ok((
-                        r.get::<_, u64>(0)?,
-                        r.get::<_, u64>(1)?,
-                        r.get::<_, u64>(2)?,
-                    ))
-                },
+                |r| Ok((r.get::<_, u64>(0)?, r.get::<_, u64>(1)?, r.get::<_, u64>(2)?)),
             )
             .map_err(db_err)?;
         // same birth definition as born_values(): outputs created at genesis DAA
@@ -2642,15 +2544,7 @@ impl Store {
                 |r| r.get(0),
             )
             .map_err(db_err)?;
-        Ok(DigestStats {
-            births,
-            moves,
-            burns,
-            value_born,
-            active_now,
-            busiest,
-            biggest_birth,
-        })
+        Ok(DigestStats { births, moves, burns, value_born, active_now, busiest, biggest_birth })
     }
 
     /// Kind counts per fixed-width DAA bucket, ascending, for events at or
@@ -2710,14 +2604,7 @@ impl Store {
               (SELECT covenant_id, MIN(accepting_daa) g FROM covenant_events WHERE kind='genesis' GROUP BY covenant_id) gg
               JOIN (SELECT covenant_id, accepting_daa b FROM covenant_events WHERE kind='burn') bb ON gg.covenant_id = bb.covenant_id
             WHERE (bb.b - gg.g) >= 0)";
-        let labels = [
-            "< 10 s",
-            "10 s – 1 min",
-            "1 – 10 min",
-            "10 min – 1 h",
-            "1 – 6 h",
-            "6 h +",
-        ];
+        let labels = ["< 10 s", "10 s – 1 min", "1 – 10 min", "10 min – 1 h", "1 – 6 h", "6 h +"];
         let hist_sql = format!(
             "{cte} SELECT CASE
                WHEN life < 100 THEN 0 WHEN life < 600 THEN 1 WHEN life < 6000 THEN 2
@@ -2728,9 +2615,7 @@ impl Store {
         {
             let mut stmt = self.conn.prepare(&hist_sql).map_err(db_err)?;
             let rows = stmt
-                .query_map([], |r| {
-                    Ok((r.get::<_, i64>(0)? as usize, r.get::<_, i64>(1)? as u64))
-                })
+                .query_map([], |r| Ok((r.get::<_, i64>(0)? as usize, r.get::<_, i64>(1)? as u64)))
                 .map_err(db_err)?;
             for row in rows {
                 let (b, c) = row.map_err(db_err)?;
@@ -2741,8 +2626,7 @@ impl Store {
         }
         let total: u64 = counts.iter().sum();
         let median = if total > 0 {
-            let med_sql =
-                format!("{cte} SELECT life FROM lifespans ORDER BY life LIMIT 1 OFFSET ?");
+            let med_sql = format!("{cte} SELECT life FROM lifespans ORDER BY life LIMIT 1 OFFSET ?");
             self.conn
                 .query_row(&med_sql, [(total / 2) as i64], |r| r.get::<_, i64>(0))
                 .map(|v| v as u64)
@@ -2750,11 +2634,7 @@ impl Store {
         } else {
             0
         };
-        let buckets = labels
-            .iter()
-            .zip(counts.iter())
-            .map(|(l, c)| (*l, *c))
-            .collect();
+        let buckets = labels.iter().zip(counts.iter()).map(|(l, c)| (*l, *c)).collect();
         Ok((buckets, median, total))
     }
 
@@ -2769,9 +2649,7 @@ impl Store {
             )
             .map_err(db_err)?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok((CovenantId(row.get(0)?), row.get::<_, u64>(1)?))
-            })
+            .query_map([], |row| Ok((CovenantId(row.get(0)?), row.get::<_, u64>(1)?)))
             .map_err(db_err)?
             .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()
             .map_err(db_err)?;
@@ -2942,13 +2820,7 @@ impl Store {
             )
             .map_err(db_err)?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)? as u64,
-                    r.get::<_, i64>(2)? as u64,
-                ))
-            })
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64)))
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
@@ -2978,13 +2850,7 @@ impl Store {
             )
             .map_err(db_err)?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)? as u64,
-                    r.get::<_, i64>(2)? as u64,
-                ))
-            })
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64)))
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
@@ -3011,13 +2877,7 @@ impl Store {
             )
             .map_err(db_err)?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)? as u64,
-                    r.get::<_, i64>(2)? as u64,
-                ))
-            })
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64)))
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
@@ -3053,13 +2913,7 @@ impl Store {
             )
             .map_err(db_err)?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)? as u64,
-                    r.get::<_, i64>(2)? as u64,
-                ))
-            })
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64)))
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
@@ -3080,27 +2934,21 @@ impl Store {
             ))
             .map_err(db_err)?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
-            })
+            .query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)))
             .map_err(db_err)?;
         // kind -> (event count, distinct covenant ids)
         let mut agg: std::collections::HashMap<String, (u64, std::collections::HashSet<String>)> =
             std::collections::HashMap::new();
         for row in rows {
             let (payload, cid) = row.map_err(db_err)?;
-            let Some(v) = extract_inscription_json(&payload) else {
-                continue;
-            };
+            let Some(v) = extract_inscription_json(&payload) else { continue };
             let kind = inscription_kind(&v);
             let e = agg.entry(kind).or_default();
             e.0 += 1;
             e.1.insert(cid);
         }
-        let mut out: Vec<(String, u64, u64)> = agg
-            .into_iter()
-            .map(|(k, (c, set))| (k, c, set.len() as u64))
-            .collect();
+        let mut out: Vec<(String, u64, u64)> =
+            agg.into_iter().map(|(k, (c, set))| (k, c, set.len() as u64)).collect();
         out.sort_by(|a, b| b.1.cmp(&a.1));
         out.truncate(60);
         Ok(out)
@@ -3108,15 +2956,7 @@ impl Store {
 
     /// Record a community-verified source (proven byte-identical to a compiled
     /// program). Keyed by the program's blake2b hash.
-    pub fn put_verified_source(
-        &self,
-        hash: &str,
-        hex: &str,
-        source: &str,
-        args: &str,
-        template: Option<&str>,
-        now_ms: u64,
-    ) -> Result<()> {
+    pub fn put_verified_source(&self, hash: &str, hex: &str, source: &str, args: &str, template: Option<&str>, now_ms: u64) -> Result<()> {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO verified_sources (program_hash, program_hex, source, args, template, verified_at) VALUES (?1,?2,?3,?4,?5,?6)",
@@ -3127,10 +2967,7 @@ impl Store {
     }
 
     /// Fetch a published source by program hash → (source, args, template, verified_at).
-    pub fn get_verified_source(
-        &self,
-        hash: &str,
-    ) -> Result<Option<(String, String, Option<String>, u64)>> {
+    pub fn get_verified_source(&self, hash: &str) -> Result<Option<(String, String, Option<String>, u64)>> {
         self.conn
             .query_row(
                 "SELECT source, args, template, verified_at FROM verified_sources WHERE program_hash = ?1",
@@ -3144,14 +2981,7 @@ impl Store {
     /// Add a webhook subscription (covenant_id / kind NULL = wildcard).
     /// `secret` signs deliveries and gates unsubscribe (NULL = legacy row,
     /// unsigned and deletable by id alone). Returns its id.
-    pub fn add_subscription(
-        &self,
-        covenant_id: Option<&[u8]>,
-        kind: Option<&str>,
-        url: &str,
-        secret: Option<&str>,
-        now_ms: u64,
-    ) -> Result<i64> {
+    pub fn add_subscription(&self, covenant_id: Option<&[u8]>, kind: Option<&str>, url: &str, secret: Option<&str>, now_ms: u64) -> Result<i64> {
         self.conn
             .execute(
                 "INSERT INTO webhook_subscriptions (covenant_id, kind, url, secret, created_at) VALUES (?1,?2,?3,?4,?5)",
@@ -3165,43 +2995,24 @@ impl Store {
     /// Bypasses any secret — for the delivery loop retiring dead endpoints;
     /// caller-facing unsubscribe goes through [`delete_subscription_secured`].
     pub fn delete_subscription(&self, id: i64) -> Result<bool> {
-        let n = self
-            .conn
-            .execute(
-                "DELETE FROM webhook_subscriptions WHERE id = ?1",
-                params![id],
-            )
-            .map_err(db_err)?;
+        let n = self.conn.execute("DELETE FROM webhook_subscriptions WHERE id = ?1", params![id]).map_err(db_err)?;
         Ok(n > 0)
     }
 
     /// Caller-facing unsubscribe: a row with a secret is only deleted when
     /// the caller presents it; legacy NULL-secret rows delete by id alone.
-    pub fn delete_subscription_secured(
-        &self,
-        id: i64,
-        secret: Option<&str>,
-    ) -> Result<UnsubscribeOutcome> {
+    pub fn delete_subscription_secured(&self, id: i64, secret: Option<&str>) -> Result<UnsubscribeOutcome> {
         let stored: Option<Option<String>> = self
             .conn
-            .query_row(
-                "SELECT secret FROM webhook_subscriptions WHERE id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
+            .query_row("SELECT secret FROM webhook_subscriptions WHERE id = ?1", params![id], |r| r.get(0))
             .optional()
             .map_err(db_err)?;
         match stored {
             None => Ok(UnsubscribeOutcome::NotFound),
-            Some(Some(stored)) if secret != Some(stored.as_str()) => {
-                Ok(UnsubscribeOutcome::WrongSecret)
-            }
+            Some(Some(stored)) if secret != Some(stored.as_str()) => Ok(UnsubscribeOutcome::WrongSecret),
             Some(_) => {
                 self.conn
-                    .execute(
-                        "DELETE FROM webhook_subscriptions WHERE id = ?1",
-                        params![id],
-                    )
+                    .execute("DELETE FROM webhook_subscriptions WHERE id = ?1", params![id])
                     .map_err(db_err)?;
                 Ok(UnsubscribeOutcome::Deleted)
             }
@@ -3214,46 +3025,29 @@ impl Store {
             .conn
             .prepare("SELECT url FROM webhook_subscriptions WHERE (covenant_id IS NULL OR covenant_id = ?1) AND (kind IS NULL OR kind = ?2)")
             .map_err(db_err)?;
-        let rows = stmt
-            .query_map(params![covenant_id, kind], |r| r.get::<_, String>(0))
-            .map_err(db_err)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(db_err)
+        let rows = stmt.query_map(params![covenant_id, kind], |r| r.get::<_, String>(0)).map_err(db_err)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(db_err)
     }
 
     /// Total active subscriptions (for the fire loop to skip work when zero).
     pub fn subscription_count(&self) -> Result<u64> {
-        self.conn
-            .query_row("SELECT COUNT(*) FROM webhook_subscriptions", [], |r| {
-                r.get::<_, i64>(0)
-            })
-            .map(|n| n as u64)
-            .map_err(db_err)
+        self.conn.query_row("SELECT COUNT(*) FROM webhook_subscriptions", [], |r| r.get::<_, i64>(0)).map(|n| n as u64).map_err(db_err)
     }
 
     /// Like [`subscriptions_for`] but returns `(id, url, secret)` — the
     /// delivery loop needs the id to retire a subscription after repeated
     /// failures and the secret to sign the POST body.
-    pub fn subscriptions_matching(
-        &self,
-        covenant_id: &[u8],
-        kind: &str,
-    ) -> Result<Vec<(i64, String, Option<String>)>> {
+    pub fn subscriptions_matching(&self, covenant_id: &[u8], kind: &str) -> Result<Vec<(i64, String, Option<String>)>> {
         let mut stmt = self
             .conn
             .prepare("SELECT id, url, secret FROM webhook_subscriptions WHERE (covenant_id IS NULL OR covenant_id = ?1) AND (kind IS NULL OR kind = ?2)")
             .map_err(db_err)?;
         let rows = stmt
             .query_map(params![covenant_id, kind], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                ))
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
             })
             .map_err(db_err)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(db_err)
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(db_err)
     }
 
     /// True when `namespace` names a strict KIP-21 lane (rows carrying it in
@@ -3294,9 +3088,11 @@ impl Store {
             Self::lane_where(self.lane_is_strict(namespace)?)
         );
         self.conn
-            .query_row(&sql, params![namespace], |r| {
-                Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
-            })
+            .query_row(
+                &sql,
+                params![namespace],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
             .map_err(db_err)
     }
 
@@ -3310,19 +3106,16 @@ impl Store {
         );
         let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
         let rows = stmt
-            .query_map(
-                params![namespace, limit.min(i64::MAX as u64) as i64],
-                |row| {
-                    Ok(GlobalEventRow {
-                        covenant_id: CovenantId(row.get(0)?),
-                        seq: row.get(1)?,
-                        kind: row.get(2)?,
-                        txid: TxId(row.get(3)?),
-                        accepting_daa: row.get(4)?,
-                        tx_index: row.get(5)?,
-                    })
-                },
-            )
+            .query_map(params![namespace, limit.min(i64::MAX as u64) as i64], |row| {
+                Ok(GlobalEventRow {
+                    covenant_id: CovenantId(row.get(0)?),
+                    seq: row.get(1)?,
+                    kind: row.get(2)?,
+                    txid: TxId(row.get(3)?),
+                    accepting_daa: row.get(4)?,
+                    tx_index: row.get(5)?,
+                })
+            })
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
@@ -3365,10 +3158,7 @@ impl Store {
             .query_map([txid.0.as_slice()], |row| {
                 Ok(SpentStateRow {
                     covenant_id: CovenantId(row.get(0)?),
-                    outpoint: Outpoint {
-                        txid: TxId(row.get(1)?),
-                        index: row.get(2)?,
-                    },
+                    outpoint: Outpoint { txid: TxId(row.get(1)?), index: row.get(2)? },
                     value: row.get(3)?,
                     spk_version: row.get(4)?,
                     spk_script: row.get(5)?,
@@ -3504,16 +3294,13 @@ impl Store {
         });
         let Some(v) = parsed else { return Ok(None) };
         let clean = |key: &[&str], max: usize| -> Option<String> {
-            key.iter()
-                .find_map(|k| v.get(k))
-                .and_then(|x| x.as_str())
-                .and_then(|s| {
-                    let s = s.trim();
-                    (!s.is_empty()
-                        && s.chars().count() <= max
-                        && s.chars().all(|c| !c.is_control()))
-                    .then(|| s.to_string())
-                })
+            key.iter().find_map(|k| v.get(k)).and_then(|x| x.as_str()).and_then(|s| {
+                let s = s.trim();
+                (!s.is_empty()
+                    && s.chars().count() <= max
+                    && s.chars().all(|c| !c.is_control()))
+                .then(|| s.to_string())
+            })
         };
         let name = clean(&["name"], 48);
         let ticker = clean(&["ticker", "symbol"], 12);
@@ -3530,32 +3317,22 @@ impl Store {
             lower.starts_with("https://") || lower.starts_with("ipfs://")
         });
         // 64 lowercase hex chars or nothing — a malformed hash is no hash.
-        let image_hash = clean(&["image_hash"], 64)
-            .filter(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()))
-            .map(|h| h.to_lowercase());
+        let image_hash = clean(&["image_hash"], 64).filter(|h| {
+            h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())
+        }).map(|h| h.to_lowercase());
         // KCC-0021 `decimals`: a display scale only, never applied to the
         // on-chain integers kascov verifies. Accepts a JSON integer or a
         // base-10 string (KRC-20 carries its `dec` as a string, and deployers
         // copy that habit). Bounded 0..=255 after ERC-20's uint8; anything
         // else is treated as undeclared rather than silently clamped, so a
         // typo cannot quietly move a token's decimal point.
-        let decimals = v
-            .get("decimals")
-            .and_then(|d| {
-                d.as_u64()
-                    .or_else(|| d.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-            })
-            .and_then(|n| u8::try_from(n).ok());
+        let decimals = v.get("decimals").and_then(|d| {
+            d.as_u64().or_else(|| d.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        }).and_then(|n| u8::try_from(n).ok());
         if name.is_none() && ticker.is_none() {
             return Ok(None);
         }
-        Ok(Some(ClaimedTokenMeta {
-            name,
-            ticker,
-            image,
-            image_hash,
-            decimals,
-        }))
+        Ok(Some(ClaimedTokenMeta { name, ticker, image, image_hash, decimals }))
     }
 
     /// Cached verified-art row: (status, content_type, bytes, fetched_ms).
@@ -3649,11 +3426,7 @@ impl Store {
             .map_err(db_err)?;
         let rows = stmt
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, Option<[u8; 32]>>(2)?,
-                ))
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?, row.get::<_, Option<[u8; 32]>>(2)?))
             })
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -3738,9 +3511,7 @@ impl Store {
             )
             .map_err(db_err)?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok((CovenantId(r.get(0)?), r.get::<_, i64>(1)? != 0))
-            })
+            .query_map([], |r| Ok((CovenantId(r.get(0)?), r.get::<_, i64>(1)? != 0)))
             .map_err(db_err)?
             .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()
             .map_err(db_err)?;
@@ -3821,10 +3592,7 @@ impl Store {
         let mut stmt = self.conn.prepare(&sql).map_err(db_err)?;
         let limit = limit.min(i64::MAX as u64) as i64;
         let rows = stmt
-            .query_map(
-                params![lo.as_slice(), hi.as_slice(), limit],
-                map_summary_row,
-            )
+            .query_map(params![lo.as_slice(), hi.as_slice(), limit], map_summary_row)
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
@@ -3936,9 +3704,7 @@ impl Store {
         for (spk, controls_now, states_seen, first_seen_daa, last_seen_daa) in rows {
             // p2pk shape: [len-2 push opcode][key][OpCheckSig], key 32 or 33 bytes.
             let key = match spk.first().copied() {
-                Some(len @ (32 | 33))
-                    if spk.len() == len as usize + 2 && spk.last() == Some(&0xac) =>
-                {
+                Some(len @ (32 | 33)) if spk.len() == len as usize + 2 && spk.last() == Some(&0xac) => {
                     &spk[1..1 + len as usize]
                 }
                 _ => continue,
@@ -4028,12 +3794,7 @@ impl Store {
     /// index in DAA order and only temp-sorts within each group before the
     /// LIMIT cuts off — no compound index needed (measured: <10ms a page from
     /// DAA 0 on a 767k-event index).
-    pub fn events_after(
-        &self,
-        after_daa: u64,
-        after_seq: u64,
-        limit: u64,
-    ) -> Result<Vec<FeedEventRow>> {
+    pub fn events_after(&self, after_daa: u64, after_seq: u64, limit: u64) -> Result<Vec<FeedEventRow>> {
         const COLS: &str =
             "covenant_id, seq, kind, txid, accepting_daa, accepting_block, tx_index, length(payload)";
         fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FeedEventRow> {
@@ -4162,9 +3923,7 @@ impl Store {
                     )
                     .map_err(db_err)?;
                 let collected = stmt
-                    .query_map(params![after, BATCH], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                    })
+                    .query_map(params![after, BATCH], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                     .map_err(db_err)?
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(db_err)?;
@@ -4176,9 +3935,7 @@ impl Store {
             let tx = self.conn.transaction().map_err(db_err)?;
             for (rowid, spk, sig) in &rows {
                 after = *rowid;
-                let Some(program) = kascov_decode::p2sh_reveal(spk, sig) else {
-                    continue;
-                };
+                let Some(program) = kascov_decode::p2sh_reveal(spk, sig) else { continue };
                 if kascov_decode::kcc20::locate_state_block(&program).is_none() {
                     continue;
                 }
@@ -4226,16 +3983,8 @@ impl Store {
     ///
     /// Types 0x00 and 0x03 are the same x-only key, so both prefixes are asked
     /// for; the counterparty is stored in the RAW hex(type || key) form.
-    pub fn trades_by_key(
-        &self,
-        pubkey: &[u8],
-        limit: u32,
-    ) -> Result<Vec<(CovenantId, crate::tokens::TokenTradeRow)>> {
-        let x_only = if pubkey.len() == 33 {
-            &pubkey[1..]
-        } else {
-            pubkey
-        };
+    pub fn trades_by_key(&self, pubkey: &[u8], limit: u32) -> Result<Vec<(CovenantId, crate::tokens::TokenTradeRow)>> {
+        let x_only = if pubkey.len() == 33 { &pubkey[1..] } else { pubkey };
         if x_only.len() != 32 {
             return Ok(Vec::new());
         }
@@ -4301,10 +4050,7 @@ impl Store {
     /// indexers wants to see the reading, not infer it from cell values. The
     /// pool balances before and after are included precisely because they are
     /// what a disagreement is settled with.
-    pub fn trade_by_txid(
-        &self,
-        txid: &[u8; 32],
-    ) -> Result<Option<(CovenantId, crate::tokens::TokenTradeRow)>> {
+    pub fn trade_by_txid(&self, txid: &[u8; 32]) -> Result<Option<(CovenantId, crate::tokens::TokenTradeRow)>> {
         self.conn
             .query_row(
                 "SELECT token_id, seq, txid, market_covenant_id, side, base_amount, quote_sompi,
@@ -4348,11 +4094,7 @@ impl Store {
     pub fn token_holdings_for_pubkey(&self, pubkey: &[u8]) -> Result<Vec<TokenHoldingRow>> {
         // x-only: a 33-byte compressed key carries a parity prefix the state
         // block never stores, so index on the trailing 32 bytes.
-        let x_only = if pubkey.len() == 33 {
-            &pubkey[1..]
-        } else {
-            pubkey
-        };
+        let x_only = if pubkey.len() == 33 { &pubkey[1..] } else { pubkey };
         if x_only.len() != 32 {
             return Ok(Vec::new());
         }
@@ -4368,24 +4110,21 @@ impl Store {
             )
             .map_err(db_err)?;
         let rows = stmt
-            .query_map(
-                params![format!("00{hex_key}"), format!("03{hex_key}")],
-                |r| {
-                    let owner: String = r.get(1)?;
-                    Ok(TokenHoldingRow {
-                        token_id: crate::CovenantId(r.get(0)?),
-                        owner_kind: match owner.get(..2) {
-                            Some("00") => "pubkey".into(),
-                            Some("03") => "presence".into(),
-                            _ => "other".into(),
-                        },
-                        balance: r.get(2)?,
-                        cells: r.get(3)?,
-                        status: r.get(4)?,
-                        supply: r.get(5)?,
-                    })
-                },
-            )
+            .query_map(params![format!("00{hex_key}"), format!("03{hex_key}")], |r| {
+                let owner: String = r.get(1)?;
+                Ok(TokenHoldingRow {
+                    token_id: crate::CovenantId(r.get(0)?),
+                    owner_kind: match owner.get(..2) {
+                        Some("00") => "pubkey".into(),
+                        Some("03") => "presence".into(),
+                        _ => "other".into(),
+                    },
+                    balance: r.get(2)?,
+                    cells: r.get(3)?,
+                    status: r.get(4)?,
+                    supply: r.get(5)?,
+                })
+            })
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
@@ -4401,9 +4140,7 @@ impl Store {
             .prepare("SELECT token_id, status FROM tokens")
             .map_err(db_err)?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, [u8; 32]>(0)?, r.get::<_, String>(1)?))
-            })
+            .query_map([], |r| Ok((r.get::<_, [u8; 32]>(0)?, r.get::<_, String>(1)?)))
             .map_err(db_err)?
             .collect::<std::result::Result<_, _>>()
             .map_err(db_err)?;
@@ -4487,9 +4224,7 @@ impl Store {
             .conn
             .prepare("SELECT token_id, status FROM tokens")
             .map_err(db_err)?
-            .query_map([], |r| {
-                Ok((r.get::<_, [u8; 32]>(0)?, r.get::<_, String>(1)?))
-            })
+            .query_map([], |r| Ok((r.get::<_, [u8; 32]>(0)?, r.get::<_, String>(1)?)))
             .map_err(db_err)?
             .collect::<std::result::Result<_, _>>()
             .map_err(db_err)?;
@@ -4562,11 +4297,7 @@ impl Store {
                     unmatched,
                     unrevealed,
                     inv_failed,
-                    if changes.is_empty() {
-                        None
-                    } else {
-                        Some(serde_json::Value::from(changes).to_string())
-                    },
+                    if changes.is_empty() { None } else { Some(serde_json::Value::from(changes).to_string()) },
                     error,
                     run_id,
                 ],
@@ -4811,13 +4542,7 @@ impl Store {
                     )
                     .map_err(db_err)?;
                 let rows = stmt
-                    .query_map([], |r| {
-                        Ok((
-                            r.get(0)?,
-                            r.get::<_, i64>(1)? != 0,
-                            r.get::<_, i64>(2)? != 0,
-                        ))
-                    })
+                    .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, i64>(2)? != 0)))
                     .map_err(db_err)?
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(db_err)?;
@@ -4836,12 +4561,7 @@ impl Store {
                 }
                 tx.commit().map_err(db_err)?;
             }
-            token_set.extend(
-                candidates
-                    .iter()
-                    .filter(|(_, token_ev, _)| *token_ev)
-                    .map(|(id, _, _)| *id),
-            );
+            token_set.extend(candidates.iter().filter(|(_, token_ev, _)| *token_ev).map(|(id, _, _)| *id));
             let ids: Vec<[u8; 32]> = token_set.into_iter().collect();
             for chunk in ids.chunks(32) {
                 let tx = self.conn.transaction().map_err(db_err)?;
@@ -4904,11 +4624,7 @@ impl Store {
     }
 
     /// Top holders of one token by live hash-proven balance.
-    pub fn token_balances(
-        &self,
-        id: &CovenantId,
-        limit: u64,
-    ) -> Result<Vec<crate::tokens::TokenBalanceRow>> {
+    pub fn token_balances(&self, id: &CovenantId, limit: u64) -> Result<Vec<crate::tokens::TokenBalanceRow>> {
         crate::tokens::token_balances(&self.conn, &id.0, limit)
     }
 
@@ -4986,10 +4702,7 @@ impl Store {
         let rows = stmt
             .query_map(params![id.0.as_slice(), live_only as i64], |row| {
                 Ok(UtxoRow {
-                    outpoint: Outpoint {
-                        txid: TxId(row.get(0)?),
-                        index: row.get(1)?,
-                    },
+                    outpoint: Outpoint { txid: TxId(row.get(0)?), index: row.get(1)? },
                     value: row.get(2)?,
                     spk_version: row.get(3)?,
                     spk_script: row.get(4)?,
@@ -5012,10 +4725,8 @@ mod tests {
     use super::*;
 
     fn test_store_path(name: &str) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "kascov-store-test-{}-{name}.db",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir()
+            .join(format!("kascov-store-test-{}-{name}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         path
     }
@@ -5078,10 +4789,7 @@ mod tests {
             blk.events[0].payload = Some(payload.to_string().into_bytes());
             store.apply(&blk, BlockHash([1; 32])).unwrap();
 
-            let meta = store
-                .claimed_token_meta(&CovenantId([cov; 32]))
-                .unwrap()
-                .unwrap();
+            let meta = store.claimed_token_meta(&CovenantId([cov; 32])).unwrap().unwrap();
             // The sibling fields survive either way: one bad field is dropped,
             // it never invalidates the whole object.
             assert_eq!(meta.name.as_deref(), Some("Example"), "{url}");
@@ -5109,32 +4817,16 @@ mod tests {
         let mut blk = block_with_events(
             1,
             100,
-            vec![
-                (0xC1, EventKind::Genesis, 0x0A),
-                (0xC2, EventKind::Genesis, 0x0B),
-            ],
+            vec![(0xC1, EventKind::Genesis, 0x0A), (0xC2, EventKind::Genesis, 0x0B)],
         );
         blk.events[0].payload = Some(b"GZ4M-hello".to_vec());
         blk.events[1].payload = Some(b"GZ4M-world".to_vec());
         store.apply(&blk, BlockHash([1; 32])).unwrap();
 
         let ns = "475a344d";
-        assert_eq!(
-            store.lane_stats(ns).unwrap(),
-            (2, 2),
-            "tag-lane events must be counted"
-        );
-        assert_eq!(
-            store.lane_recent(ns, 50).unwrap().len(),
-            2,
-            "recent must include tag-lane events"
-        );
-        let total: u64 = store
-            .lane_activity(ns, 36_000)
-            .unwrap()
-            .iter()
-            .map(|(_, c)| c)
-            .sum();
+        assert_eq!(store.lane_stats(ns).unwrap(), (2, 2), "tag-lane events must be counted");
+        assert_eq!(store.lane_recent(ns, 50).unwrap().len(), 2, "recent must include tag-lane events");
+        let total: u64 = store.lane_activity(ns, 36_000).unwrap().iter().map(|(_, c)| c).sum();
         assert_eq!(total, 2, "activity buckets must include tag-lane events");
         // An unrelated namespace stays empty — no cross-lane leakage.
         assert_eq!(store.lane_stats("deadbeef").unwrap(), (0, 0));
@@ -5188,10 +4880,7 @@ mod tests {
         // Pre-gap genesis (daa 100) + post-gap transition (daa 2_000_000) —
         // exactly the shape a sink reset leaves behind.
         store
-            .apply(
-                &block_with_events(1, 100, vec![(0xA1, EventKind::Genesis, 0x0A)]),
-                BlockHash([1; 32]),
-            )
+            .apply(&block_with_events(1, 100, vec![(0xA1, EventKind::Genesis, 0x0A)]), BlockHash([1; 32]))
             .unwrap();
         store
             .apply(
@@ -5202,27 +4891,12 @@ mod tests {
         // The gap event arrives out of order through the merge path (twice —
         // the second offer must dedup away).
         let gap_block = block_with_events(3, 1_000_000, vec![(0xA1, EventKind::Transition, 0x0B)]);
-        assert_eq!(
-            store
-                .merge_recovered_block(&gap_block)
-                .unwrap()
-                .events_added,
-            1
-        );
-        assert_eq!(
-            store
-                .merge_recovered_block(&gap_block)
-                .unwrap()
-                .events_added,
-            0
-        );
+        assert_eq!(store.merge_recovered_block(&gap_block).unwrap().events_added, 1);
+        assert_eq!(store.merge_recovered_block(&gap_block).unwrap().events_added, 0);
         // A token whose derived rows cite the covenant's about-to-move seq 1.
         store
             .raw_conn()
-            .execute(
-                "INSERT INTO tokens (token_id, status) VALUES (?1, 'unvalidated')",
-                [[0xEEu8; 32].as_slice()],
-            )
+            .execute("INSERT INTO tokens (token_id, status) VALUES (?1, 'unvalidated')", [[0xEEu8; 32].as_slice()])
             .unwrap();
         store
             .raw_conn()
@@ -5243,14 +4917,7 @@ mod tests {
         // Chronological seqs: 0x0A (100) → 0x0B (1M) → 0x0C (2M).
         let events = store.events(&cov).unwrap();
         let view: Vec<(u64, TxId)> = events.iter().map(|e| (e.seq, e.txid)).collect();
-        assert_eq!(
-            view,
-            [
-                (0, TxId([0x0A; 32])),
-                (1, TxId([0x0B; 32])),
-                (2, TxId([0x0C; 32]))
-            ]
-        );
+        assert_eq!(view, [(0, TxId([0x0A; 32])), (1, TxId([0x0B; 32])), (2, TxId([0x0C; 32]))]);
         // Summary refreshed from the merged truth.
         let sum = store.summary(&cov).unwrap().unwrap();
         assert_eq!(sum.event_count, 3);
@@ -5270,17 +4937,9 @@ mod tests {
         let counts = store
             .finalize_gap_recovery(100, 2_000_000, &MergeCounts::default())
             .unwrap();
+        assert_eq!(counts.covenants_resequenced, 0, "already in chronological order");
         assert_eq!(
-            counts.covenants_resequenced, 0,
-            "already in chronological order"
-        );
-        assert_eq!(
-            store
-                .events(&cov)
-                .unwrap()
-                .iter()
-                .map(|e| (e.seq, e.txid))
-                .collect::<Vec<_>>(),
+            store.events(&cov).unwrap().iter().map(|e| (e.seq, e.txid)).collect::<Vec<_>>(),
             view
         );
     }
@@ -5297,38 +4956,10 @@ mod tests {
             accepting_time_ms: 100_000,
             accepting_blue_score: 100,
             events: vec![
-                NewEvent {
-                    covenant_id: CovenantId([0xa0; 32]),
-                    kind: EventKind::Genesis,
-                    txid: TxId([1; 32]),
-                    tx_index: 0,
-                    payload: None,
-                    lane_namespace: None,
-                },
-                NewEvent {
-                    covenant_id: CovenantId(id_a1_zero),
-                    kind: EventKind::Genesis,
-                    txid: TxId([2; 32]),
-                    tx_index: 1,
-                    payload: None,
-                    lane_namespace: None,
-                },
-                NewEvent {
-                    covenant_id: CovenantId([0xa1; 32]),
-                    kind: EventKind::Genesis,
-                    txid: TxId([3; 32]),
-                    tx_index: 2,
-                    payload: None,
-                    lane_namespace: None,
-                },
-                NewEvent {
-                    covenant_id: CovenantId([0xb0; 32]),
-                    kind: EventKind::Genesis,
-                    txid: TxId([4; 32]),
-                    tx_index: 3,
-                    payload: None,
-                    lane_namespace: None,
-                },
+                NewEvent { covenant_id: CovenantId([0xa0; 32]), kind: EventKind::Genesis, txid: TxId([1; 32]), tx_index: 0, payload: None, lane_namespace: None },
+                NewEvent { covenant_id: CovenantId(id_a1_zero), kind: EventKind::Genesis, txid: TxId([2; 32]), tx_index: 1, payload: None, lane_namespace: None },
+                NewEvent { covenant_id: CovenantId([0xa1; 32]), kind: EventKind::Genesis, txid: TxId([3; 32]), tx_index: 2, payload: None, lane_namespace: None },
+                NewEvent { covenant_id: CovenantId([0xb0; 32]), kind: EventKind::Genesis, txid: TxId([4; 32]), tx_index: 3, payload: None, lane_namespace: None },
             ],
             created_utxos: vec![],
             spent_utxos: vec![],
@@ -5355,10 +4986,7 @@ mod tests {
         lo2[0] = 0xc0;
         let mut hi2 = [0xffu8; 32];
         hi2[0] = 0xc0;
-        assert!(store
-            .covenants_by_id_range(&lo2, &hi2, 20)
-            .unwrap()
-            .is_empty());
+        assert!(store.covenants_by_id_range(&lo2, &hi2, 20).unwrap().is_empty());
     }
 
     #[test]
@@ -5443,10 +5071,7 @@ mod tests {
         // spend witness: junk arg, then the revealed program
         let mut sig = kascov_decode::encode_push(&[0x01, 0x02]);
         sig.extend_from_slice(&kascov_decode::encode_push(program));
-        let outpoint = Outpoint {
-            txid: TxId([7; 32]),
-            index: 0,
-        };
+        let outpoint = Outpoint { txid: TxId([7; 32]), index: 0 };
         let named = vec![("PURE".to_string(), 1u64)];
 
         {
@@ -5566,7 +5191,7 @@ mod tests {
                 ev(1, 1, Some(lane_payload), Some(lane_ns.clone())),
                 ev(2, 2, Some(vec![0xaa, 0xbb, 0xcc, 0xdd, 0x01]), None),
                 ev(3, 3, Some(json.clone()), None),
-                ev(4, 4, Some(json), None), // same kind, second covenant
+                ev(4, 4, Some(json), None),  // same kind, second covenant
                 ev(5, 5, Some(jsonhex), None),
                 ev(6, 6, Some(vec![0x01]), None), // < 4 bytes: excluded everywhere
                 ev(7, 7, None, None),
@@ -5601,10 +5226,7 @@ mod tests {
         );
         assert_eq!(
             kinds,
-            vec![
-                ("krc-20 · mint · KAS".to_string(), 2, 2),
-                ("note".to_string(), 1, 1)
-            ]
+            vec![("krc-20 · mint · KAS".to_string(), 2, 2), ("note".to_string(), 1, 1)]
         );
         // Complement: the lane row lives in lane_namespaces, never in tags.
         assert_eq!(store.lane_namespaces().unwrap(), vec![(lane_ns, 1, 1)]);
@@ -5613,10 +5235,7 @@ mod tests {
         // both public fns must notice and fall back to the legacy scans.
         store
             .conn
-            .execute(
-                "UPDATE covenant_events SET payload_tag = NULL, inscription_kind = NULL",
-                [],
-            )
+            .execute("UPDATE covenant_events SET payload_tag = NULL, inscription_kind = NULL", [])
             .unwrap();
         assert!(store.payload_tags_pending().unwrap());
         assert_eq!(norm(store.based_app_namespaces().unwrap()), tags);
@@ -5645,10 +5264,7 @@ mod tests {
         let mut store = test_store("processed");
         assert_eq!(store.processed_daa().unwrap(), None);
         store
-            .apply(
-                &block_with_events(1, 100, vec![(0xA1, EventKind::Genesis, 0x01)]),
-                BlockHash([1; 32]),
-            )
+            .apply(&block_with_events(1, 100, vec![(0xA1, EventKind::Genesis, 0x01)]), BlockHash([1; 32]))
             .unwrap();
         assert_eq!(store.processed_daa().unwrap(), Some(100));
         // reset_cursor-style empty batch (accepting_daa = 0) must not touch it
@@ -5665,20 +5281,14 @@ mod tests {
     fn recent_events_orders_newest_first_and_limits() {
         let mut store = test_store("recent");
         store
-            .apply(
-                &block_with_events(1, 100, vec![(0xA1, EventKind::Genesis, 0x01)]),
-                BlockHash([1; 32]),
-            )
+            .apply(&block_with_events(1, 100, vec![(0xA1, EventKind::Genesis, 0x01)]), BlockHash([1; 32]))
             .unwrap();
         store
             .apply(
                 &block_with_events(
                     2,
                     200,
-                    vec![
-                        (0xA1, EventKind::Transition, 0x02),
-                        (0xB2, EventKind::Genesis, 0x03),
-                    ],
+                    vec![(0xA1, EventKind::Transition, 0x02), (0xB2, EventKind::Genesis, 0x03)],
                 ),
                 BlockHash([2; 32]),
             )
@@ -5712,10 +5322,7 @@ mod tests {
         let mut store = test_store("digest");
         // old genesis — outside the window once the tip is set
         store
-            .apply(
-                &block_with_events(1, 1_000, vec![(0xA1, EventKind::Genesis, 0x01)]),
-                BlockHash([1; 32]),
-            )
+            .apply(&block_with_events(1, 1_000, vec![(0xA1, EventKind::Genesis, 0x01)]), BlockHash([1; 32]))
             .unwrap();
         // inside the window: 0xB2 born holding 50 KAS + two moves, 0xA1 retires
         let mut b2 = block_with_events(
@@ -5729,10 +5336,7 @@ mod tests {
             ],
         );
         b2.created_utxos = vec![NewUtxo {
-            outpoint: Outpoint {
-                txid: TxId([0x03; 32]),
-                index: 0,
-            },
+            outpoint: Outpoint { txid: TxId([0x03; 32]), index: 0 },
             covenant_id: CovenantId([0xB2; 32]),
             value: 5_000_000_000,
             spk_version: 1,
@@ -5747,10 +5351,7 @@ mod tests {
         assert_eq!(d.value_born, 5_000_000_000);
         assert_eq!(d.active_now, 1);
         assert_eq!(d.busiest, Some((CovenantId([0xB2; 32]), 3)));
-        assert_eq!(
-            d.biggest_birth,
-            Some((CovenantId([0xB2; 32]), 5_000_000_000))
-        );
+        assert_eq!(d.biggest_birth, Some((CovenantId([0xB2; 32]), 5_000_000_000)));
     }
 
     #[test]
@@ -5762,10 +5363,7 @@ mod tests {
 
         let mut store = test_store("activity");
         store
-            .apply(
-                &block_with_events(1, 1_000, vec![(0xA1, EventKind::Genesis, 0x01)]),
-                BlockHash([1; 32]),
-            )
+            .apply(&block_with_events(1, 1_000, vec![(0xA1, EventKind::Genesis, 0x01)]), BlockHash([1; 32]))
             .unwrap();
         store
             .apply(
@@ -5788,10 +5386,7 @@ mod tests {
         // 24h-range width: daa 1_000 → bucket 0, daa 999_000 → bucket 69 (993_600)
         let rows = store.activity(14_400, 0).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(
-            (rows[0].daa, rows[0].births, rows[0].moves, rows[0].burns),
-            (0, 1, 0, 0)
-        );
+        assert_eq!((rows[0].daa, rows[0].births, rows[0].moves, rows[0].burns), (0, 1, 0, 0));
         assert_eq!(
             (rows[1].daa, rows[1].births, rows[1].moves, rows[1].burns),
             (69 * 14_400, 1, 2, 1)
@@ -5800,10 +5395,7 @@ mod tests {
         // a cutoff at the newest bucket edge drops the old genesis
         let tail = store.activity(14_400, 993_600).unwrap();
         assert_eq!(tail.len(), 1);
-        assert_eq!(
-            (tail[0].daa, tail[0].births, tail[0].moves, tail[0].burns),
-            (993_600, 1, 2, 1)
-        );
+        assert_eq!((tail[0].daa, tail[0].births, tail[0].moves, tail[0].burns), (993_600, 1, 2, 1));
     }
 
     #[test]
@@ -5822,10 +5414,7 @@ mod tests {
         decoy.extend_from_slice(&key_a);
         decoy.push(0x00);
         let utxo = |tx: u8, cov: u8, script: Vec<u8>| NewUtxo {
-            outpoint: Outpoint {
-                txid: TxId([tx; 32]),
-                index: 0,
-            },
+            outpoint: Outpoint { txid: TxId([tx; 32]), index: 0 },
             covenant_id: CovenantId([cov; 32]),
             value: 1_000,
             spk_version: 1,
@@ -5846,26 +5435,8 @@ mod tests {
         b2.accepting_daa = 200;
         b2.created_utxos = vec![utxo(0x04, 0xA1, p2pk(&key_a))]; // keyA state #2, live
         b2.spent_utxos = vec![
-            (
-                Outpoint {
-                    txid: TxId([0x01; 32]),
-                    index: 0,
-                },
-                TxId([0x04; 32]),
-                vec![],
-                0,
-                0,
-            ),
-            (
-                Outpoint {
-                    txid: TxId([0x05; 32]),
-                    index: 0,
-                },
-                TxId([0x06; 32]),
-                vec![],
-                0,
-                1,
-            ),
+            (Outpoint { txid: TxId([0x01; 32]), index: 0 }, TxId([0x04; 32]), vec![], 0, 0),
+            (Outpoint { txid: TxId([0x05; 32]), index: 0 }, TxId([0x06; 32]), vec![], 0, 1),
         ];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
@@ -5899,17 +5470,14 @@ mod tests {
         p2pk.extend([0x7f; 32]);
         p2pk.push(0xac);
         let junk = vec![0x51, 0x51]; // OpTrue OpTrue — matches no template
-                                     // p2sh commitment over a redeem that is itself template-less
+        // p2sh commitment over a redeem that is itself template-less
         let redeem = vec![0xb9, 0xcf, 0x51]; // OpTxInputIndex OpInputCovenantId OpTrue
         let digest = blake2b_simd::Params::new().hash_length(32).hash(&redeem);
         let mut p2sh = vec![0xaa, 0x20];
         p2sh.extend_from_slice(digest.as_bytes());
         p2sh.push(0x87);
         let utxo = |tx: u8, cov: u8, script: Vec<u8>| NewUtxo {
-            outpoint: Outpoint {
-                txid: TxId([tx; 32]),
-                index: 0,
-            },
+            outpoint: Outpoint { txid: TxId([tx; 32]), index: 0 },
             covenant_id: CovenantId([cov; 32]),
             value: 1_000,
             spk_version: 1,
@@ -5918,33 +5486,20 @@ mod tests {
 
         let mut b1 = BlockEvents::empty(BlockHash([1; 32]));
         b1.accepting_daa = 100;
-        b1.created_utxos = vec![
-            utxo(0x01, 0xA1, p2pk),
-            utxo(0x02, 0xB2, junk),
-            utxo(0x03, 0xC3, p2sh),
-        ];
+        b1.created_utxos =
+            vec![utxo(0x01, 0xA1, p2pk), utxo(0x02, 0xB2, junk), utxo(0x03, 0xC3, p2sh)];
         store.apply(&b1, BlockHash([1; 32])).unwrap();
 
         let by_name = |stats: &[TemplateStat], name: Option<&str>| {
-            stats
-                .iter()
-                .find(|s| s.template.as_deref() == name)
-                .cloned()
-                .unwrap()
+            stats.iter().find(|s| s.template.as_deref() == name).cloned().unwrap()
         };
         let stats = store.template_stats().unwrap();
         assert_eq!(stats.len(), 3); // p2pk state, p2sh commitment, unrecognized
         let p2pk_row = by_name(&stats, Some("p2pk state"));
-        assert_eq!(
-            (p2pk_row.live_states, p2pk_row.ever_seen, p2pk_row.covenants),
-            (1, 1, 1)
-        );
+        assert_eq!((p2pk_row.live_states, p2pk_row.ever_seen, p2pk_row.covenants), (1, 1, 1));
         assert_eq!(p2pk_row.live_value, 1_000);
         let unrec = by_name(&stats, None); // '' sentinel: decoded, nothing matched
-        assert_eq!(
-            (unrec.live_states, unrec.ever_seen, unrec.covenants),
-            (1, 1, 1)
-        );
+        assert_eq!((unrec.live_states, unrec.ever_seen, unrec.covenants), (1, 1, 1));
         assert!(store.revealed_template_counts().unwrap().is_empty());
 
         // spend the p2sh state, revealing its (template-less) program
@@ -5952,23 +5507,15 @@ mod tests {
         sig.extend_from_slice(&redeem);
         let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
         b2.accepting_daa = 200;
-        b2.spent_utxos = vec![(
-            Outpoint {
-                txid: TxId([0x03; 32]),
-                index: 0,
-            },
-            TxId([0x04; 32]),
-            sig,
-            0,
-            0,
-        )];
+        b2.spent_utxos =
+            vec![(Outpoint { txid: TxId([0x03; 32]), index: 0 }, TxId([0x04; 32]), sig, 0, 0)];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
         let stats = store.template_stats().unwrap();
         let p2sh_row = by_name(&stats, Some("p2sh commitment"));
         assert_eq!((p2sh_row.live_states, p2sh_row.live_value), (0, 0)); // spent…
         assert_eq!((p2sh_row.ever_seen, p2sh_row.covenants), (1, 1)); // …but remembered
-                                                                      // the reveal ran but matched no template — '' is stored, not counted
+        // the reveal ran but matched no template — '' is stored, not counted
         assert!(store.revealed_template_counts().unwrap().is_empty());
         let revealed: Option<String> = store
             .conn
@@ -5997,16 +5544,8 @@ mod tests {
         let mut b3 = BlockEvents::empty(BlockHash([3; 32]));
         b3.accepting_daa = 300;
         b3.created_utxos = vec![utxo(0x05, 0xC3, p2sh2)];
-        b3.spent_utxos = vec![(
-            Outpoint {
-                txid: TxId([0x05; 32]),
-                index: 0,
-            },
-            TxId([0x06; 32]),
-            sig2,
-            0,
-            0,
-        )];
+        b3.spent_utxos =
+            vec![(Outpoint { txid: TxId([0x05; 32]), index: 0 }, TxId([0x06; 32]), sig2, 0, 0)];
         store.apply(&b3, BlockHash([3; 32])).unwrap();
         assert_eq!(
             store.revealed_template_counts().unwrap(),
@@ -6029,10 +5568,7 @@ mod tests {
             s
         };
         let utxo = |tx: u8, cov: u8, script: Vec<u8>| NewUtxo {
-            outpoint: Outpoint {
-                txid: TxId([tx; 32]),
-                index: 0,
-            },
+            outpoint: Outpoint { txid: TxId([tx; 32]), index: 0 },
             covenant_id: CovenantId([cov; 32]),
             value: 1_000,
             spk_version: 1,
@@ -6050,32 +5586,17 @@ mod tests {
         store.apply(&b1, BlockHash([1; 32])).unwrap();
         let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
         b2.accepting_daa = 200;
-        b2.spent_utxos = vec![(
-            Outpoint {
-                txid: TxId([0x01; 32]),
-                index: 0,
-            },
-            TxId([0x04; 32]),
-            vec![],
-            0,
-            0,
-        )];
+        b2.spent_utxos =
+            vec![(Outpoint { txid: TxId([0x01; 32]), index: 0 }, TxId([0x04; 32]), vec![], 0, 0)];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
         // every cell classifies as a commitment until a reveal names the coin
         let by_name = |stats: &[TemplateStat], name: Option<&str>| {
-            stats
-                .iter()
-                .find(|s| s.template.as_deref() == name)
-                .cloned()
-                .unwrap()
+            stats.iter().find(|s| s.template.as_deref() == name).cloned().unwrap()
         };
         let stats = store.template_stats().unwrap();
         let p2sh_row = by_name(&stats, Some("p2sh commitment"));
-        assert_eq!(
-            (p2sh_row.live_states, p2sh_row.ever_seen, p2sh_row.covenants),
-            (2, 3, 2)
-        );
+        assert_eq!((p2sh_row.live_states, p2sh_row.ever_seen, p2sh_row.covenants), (2, 3, 2));
 
         // stamp 0xE5's spent cell with a semantic reveal (the pick rule is
         // under test here, not reveal decoding — which recognize_and_bucket
@@ -6092,17 +5613,11 @@ mod tests {
         // the revealed name owns ALL of 0xE5's cells — the live unrevealed
         // one included (that's the coin's effective name now)
         let named = by_name(&stats, Some("genesis0 · list"));
-        assert_eq!(
-            (named.live_states, named.ever_seen, named.covenants),
-            (1, 2, 1)
-        );
+        assert_eq!((named.live_states, named.ever_seen, named.covenants), (1, 2, 1));
         assert_eq!(named.live_value, 1_000);
         // "p2sh commitment" shrinks to the genuinely-unrevealed coin
         let p2sh_row = by_name(&stats, Some("p2sh commitment"));
-        assert_eq!(
-            (p2sh_row.live_states, p2sh_row.ever_seen, p2sh_row.covenants),
-            (1, 1, 1)
-        );
+        assert_eq!((p2sh_row.live_states, p2sh_row.ever_seen, p2sh_row.covenants), (1, 1, 1));
     }
 
     #[test]
@@ -6133,48 +5648,14 @@ mod tests {
     fn active_flags_matches_list_derivation() {
         let mut store = test_store("active-flags");
         // A1: one live utxo (active) · B2: utxo created then spent (burned)
-        let mut b1 = block_with_events(
-            1,
-            100,
-            vec![
-                (0xA1, EventKind::Genesis, 0x01),
-                (0xB2, EventKind::Genesis, 0x02),
-            ],
-        );
+        let mut b1 = block_with_events(1, 100, vec![(0xA1, EventKind::Genesis, 0x01), (0xB2, EventKind::Genesis, 0x02)]);
         b1.created_utxos = vec![
-            NewUtxo {
-                outpoint: Outpoint {
-                    txid: TxId([0x01; 32]),
-                    index: 0,
-                },
-                covenant_id: CovenantId([0xA1; 32]),
-                value: 5,
-                spk_version: 0,
-                spk_script: vec![],
-            },
-            NewUtxo {
-                outpoint: Outpoint {
-                    txid: TxId([0x02; 32]),
-                    index: 0,
-                },
-                covenant_id: CovenantId([0xB2; 32]),
-                value: 7,
-                spk_version: 0,
-                spk_script: vec![],
-            },
+            NewUtxo { outpoint: Outpoint { txid: TxId([0x01; 32]), index: 0 }, covenant_id: CovenantId([0xA1; 32]), value: 5, spk_version: 0, spk_script: vec![] },
+            NewUtxo { outpoint: Outpoint { txid: TxId([0x02; 32]), index: 0 }, covenant_id: CovenantId([0xB2; 32]), value: 7, spk_version: 0, spk_script: vec![] },
         ];
         store.apply(&b1, BlockHash([1; 32])).unwrap();
         let mut b2 = block_with_events(2, 200, vec![(0xB2, EventKind::Burn, 0x03)]);
-        b2.spent_utxos = vec![(
-            Outpoint {
-                txid: TxId([0x02; 32]),
-                index: 0,
-            },
-            TxId([0x03; 32]),
-            vec![],
-            0,
-            0,
-        )];
+        b2.spent_utxos = vec![(Outpoint { txid: TxId([0x02; 32]), index: 0 }, TxId([0x03; 32]), vec![], 0, 0)];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
         let flags = store.active_flags().unwrap();
@@ -6182,8 +5663,7 @@ mod tests {
             assert_eq!(
                 flags.get(&c.covenant_id).copied().unwrap_or(false),
                 c.live_utxos > 0,
-                "flag mismatch for {:?}",
-                c.covenant_id
+                "flag mismatch for {:?}", c.covenant_id
             );
         }
         assert_eq!(flags.get(&CovenantId([0xA1; 32])), Some(&true));
@@ -6199,10 +5679,7 @@ mod tests {
         let mut store = test_store("folded-summary");
         let junk = vec![0x51, 0x51]; // OpTrue OpTrue — recognizes as '' (no template)
         let utxo = |tx: u8, cov: u8, value: u64| NewUtxo {
-            outpoint: Outpoint {
-                txid: TxId([tx; 32]),
-                index: 0,
-            },
+            outpoint: Outpoint { txid: TxId([tx; 32]), index: 0 },
             covenant_id: CovenantId([cov; 32]),
             value,
             spk_version: 1,
@@ -6218,32 +5695,17 @@ mod tests {
                 (0xC3, EventKind::Genesis, 0x07),
             ],
         );
-        b1.created_utxos = vec![
-            utxo(0x01, 0xA1, 5),
-            utxo(0x08, 0xA1, 7),
-            utxo(0x02, 0xB2, 9),
-        ];
+        b1.created_utxos = vec![utxo(0x01, 0xA1, 5), utxo(0x08, 0xA1, 7), utxo(0x02, 0xB2, 9)];
         store.apply(&b1, BlockHash([1; 32])).unwrap();
         // later block: A1 gains a post-genesis state (NOT born value), B2 is swept
         let mut b2 = block_with_events(
             2,
             200,
-            vec![
-                (0xA1, EventKind::Transition, 0x03),
-                (0xB2, EventKind::Burn, 0x04),
-            ],
+            vec![(0xA1, EventKind::Transition, 0x03), (0xB2, EventKind::Burn, 0x04)],
         );
         b2.created_utxos = vec![utxo(0x03, 0xA1, 11)];
-        b2.spent_utxos = vec![(
-            Outpoint {
-                txid: TxId([0x02; 32]),
-                index: 0,
-            },
-            TxId([0x04; 32]),
-            vec![],
-            0,
-            0,
-        )];
+        b2.spent_utxos =
+            vec![(Outpoint { txid: TxId([0x02; 32]), index: 0 }, TxId([0x04; 32]), vec![], 0, 0)];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
         // Stamp templates directly to exercise every pick-rule branch:
@@ -6268,20 +5730,17 @@ mod tests {
             assert_eq!(
                 c.born_value,
                 born.get(&c.covenant_id).copied().unwrap_or(0),
-                "born_value mismatch for {:?}",
-                c.covenant_id
+                "born_value mismatch for {:?}", c.covenant_id
             );
             assert_eq!(
                 c.born_value,
                 store.born_value(&c.covenant_id).unwrap(),
-                "point born_value mismatch for {:?}",
-                c.covenant_id
+                "point born_value mismatch for {:?}", c.covenant_id
             );
             assert_eq!(
                 c.template.as_ref(),
                 templates.get(&c.covenant_id),
-                "template mismatch for {:?}",
-                c.covenant_id
+                "template mismatch for {:?}", c.covenant_id
             );
             let s = store.summary(&c.covenant_id).unwrap().unwrap();
             assert_eq!((s.born_value, &s.template), (c.born_value, &c.template));
@@ -6289,15 +5748,9 @@ mod tests {
         // pinned expectations, so the folded columns and the maps can't both
         // drift in the same direction unnoticed
         let a1 = store.summary(&CovenantId([0xA1; 32])).unwrap().unwrap();
-        assert_eq!(
-            (a1.born_value, a1.template.as_deref()),
-            (12, Some("mecenas"))
-        );
+        assert_eq!((a1.born_value, a1.template.as_deref()), (12, Some("mecenas")));
         let b2 = store.summary(&CovenantId([0xB2; 32])).unwrap().unwrap();
-        assert_eq!(
-            (b2.born_value, b2.template.as_deref()),
-            (9, Some("p2sh commitment"))
-        );
+        assert_eq!((b2.born_value, b2.template.as_deref()), (9, Some("p2sh commitment")));
         let c3 = store.summary(&CovenantId([0xC3; 32])).unwrap().unwrap();
         assert_eq!((c3.born_value, c3.template), (0, None));
     }
@@ -6319,11 +5772,7 @@ mod tests {
         // daa 100: two lane events (two covenants) + one foreign-lane event.
         let mut b1 = BlockEvents::empty(BlockHash([1; 32]));
         b1.accepting_daa = 100;
-        b1.events = vec![
-            ev(1, 1, Some(&ns)),
-            ev(2, 2, Some(&ns)),
-            ev(3, 3, Some("cafebabe")),
-        ];
+        b1.events = vec![ev(1, 1, Some(&ns)), ev(2, 2, Some(&ns)), ev(3, 3, Some("cafebabe"))];
         store.apply(&b1, BlockHash([1; 32])).unwrap();
         // daa 150: same bucket (width 100) as 100.
         let mut b2 = BlockEvents::empty(BlockHash([2; 32]));
@@ -6337,10 +5786,7 @@ mod tests {
         store.apply(&b3, BlockHash([3; 32])).unwrap();
 
         assert_eq!(store.lane_stats(&ns).unwrap(), (4, 2));
-        assert_eq!(
-            store.lane_activity(&ns, 100).unwrap(),
-            vec![(100, 3), (200, 1)]
-        );
+        assert_eq!(store.lane_activity(&ns, 100).unwrap(), vec![(100, 3), (200, 1)]);
         let recent = store.lane_recent(&ns, 2).unwrap();
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].txid, TxId([5; 32])); // newest first
@@ -6354,10 +5800,7 @@ mod tests {
     #[test]
     fn spent_by_txid_returns_witness() {
         let mut store = test_store("spent-by-txid");
-        let outpoint = Outpoint {
-            txid: TxId([0x10; 32]),
-            index: 0,
-        };
+        let outpoint = Outpoint { txid: TxId([0x10; 32]), index: 0 };
         let mut b1 = BlockEvents::empty(BlockHash([1; 32]));
         b1.accepting_daa = 100;
         b1.created_utxos = vec![NewUtxo {
@@ -6410,10 +5853,7 @@ mod tests {
             lane_namespace: None,
         }];
         b1.created_utxos = vec![NewUtxo {
-            outpoint: Outpoint {
-                txid: tx1,
-                index: 0,
-            },
+            outpoint: Outpoint { txid: tx1, index: 0 },
             covenant_id: cov_a,
             value: 5_000,
             spk_version: 1,
@@ -6443,36 +5883,21 @@ mod tests {
         ];
         b2.created_utxos = vec![
             NewUtxo {
-                outpoint: Outpoint {
-                    txid: tx2,
-                    index: 0,
-                },
+                outpoint: Outpoint { txid: tx2, index: 0 },
                 covenant_id: cov_a,
                 value: 4_000,
                 spk_version: 1,
                 spk_script: vec![0x51],
             },
             NewUtxo {
-                outpoint: Outpoint {
-                    txid: tx2,
-                    index: 1,
-                },
+                outpoint: Outpoint { txid: tx2, index: 1 },
                 covenant_id: cov_b,
                 value: 1_000,
                 spk_version: 1,
                 spk_script: vec![0x52],
             },
         ];
-        b2.spent_utxos = vec![(
-            Outpoint {
-                txid: tx1,
-                index: 0,
-            },
-            tx2,
-            vec![0x01, 0x51],
-            60,
-            0,
-        )];
+        b2.spent_utxos = vec![(Outpoint { txid: tx1, index: 0 }, tx2, vec![0x01, 0x51], 60, 0)];
         store.apply(&b2, BlockHash([2; 32])).unwrap();
 
         let mut b3 = BlockEvents::empty(BlockHash([3; 32]));
@@ -6509,10 +5934,7 @@ mod tests {
         assert_eq!(events[0].tx_index, Some(0));
         let created = store.cells_created_by_txid(&tx1).unwrap();
         assert_eq!(created.len(), 1);
-        assert_eq!(
-            (created[0].covenant_id, created[0].index, created[0].value),
-            (cov_a, 0, 5_000)
-        );
+        assert_eq!((created[0].covenant_id, created[0].index, created[0].value), (cov_a, 0, 5_000));
         assert_eq!(created[0].template, None); // NULL and '' both read as None
         assert!(store.cells_spent_by_txid(&tx1).unwrap().is_empty());
         assert!(store.token_actions_by_txid(&tx1).unwrap().is_empty());
@@ -6521,26 +5943,17 @@ mod tests {
         let events = store.events_by_txid(&tx2).unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(
-            events
-                .iter()
-                .map(|e| (e.covenant_id, e.kind.as_str()))
-                .collect::<Vec<_>>(),
+            events.iter().map(|e| (e.covenant_id, e.kind.as_str())).collect::<Vec<_>>(),
             vec![(cov_a, "transition"), (cov_b, "genesis")],
         );
         let created = store.cells_created_by_txid(&tx2).unwrap();
         assert_eq!(
-            created
-                .iter()
-                .map(|c| (c.covenant_id, c.index, c.value))
-                .collect::<Vec<_>>(),
+            created.iter().map(|c| (c.covenant_id, c.index, c.value)).collect::<Vec<_>>(),
             vec![(cov_a, 0, 4_000), (cov_b, 1, 1_000)],
         );
         let spent = store.cells_spent_by_txid(&tx2).unwrap();
         assert_eq!(spent.len(), 1);
-        assert_eq!(
-            (spent[0].covenant_id, spent[0].txid, spent[0].index),
-            (cov_a, tx1, 0)
-        );
+        assert_eq!((spent[0].covenant_id, spent[0].txid, spent[0].index), (cov_a, tx1, 0));
         assert_eq!(spent[0].value, 5_000);
         assert_eq!(spent[0].revealed_template, None);
         assert!(spent[0].has_witness);
@@ -6572,10 +5985,7 @@ mod tests {
                 &block_with_events(
                     1,
                     100,
-                    vec![
-                        (0xA1, EventKind::Genesis, 0x01),
-                        (0xB2, EventKind::Genesis, 0x02),
-                    ],
+                    vec![(0xA1, EventKind::Genesis, 0x01), (0xB2, EventKind::Genesis, 0x02)],
                 ),
                 BlockHash([1; 32]),
             )
@@ -6586,14 +5996,8 @@ mod tests {
         let store = Store::open(&path, Network::Testnet(10)).unwrap();
         drop(store);
         let store = Store::open(&path, Network::Testnet(10)).unwrap();
-        assert_eq!(
-            store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index,
-            Some(0)
-        );
-        assert_eq!(
-            store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index,
-            Some(1)
-        );
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index, Some(0));
+        assert_eq!(store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index, Some(1));
         // The bundled header fields landed too (block_with_events: daa*1000, daa).
         let (time_ms, blue): (u64, u64) = store
             .conn
@@ -6610,10 +6014,7 @@ mod tests {
         let event = &store.events(&CovenantId([0xA1; 32])).unwrap()[0];
         assert_eq!(event.tx_index, None);
         let json = serde_json::to_value(event).unwrap();
-        assert!(
-            json.get("tx_index").is_none(),
-            "None tx_index must be omitted"
-        );
+        assert!(json.get("tx_index").is_none(), "None tx_index must be omitted");
     }
 
     /// The backfill's write helper: only NULL rows are stamped, unknown txids
@@ -6626,10 +6027,7 @@ mod tests {
                 &block_with_events(
                     1,
                     100,
-                    vec![
-                        (0xA1, EventKind::Genesis, 0x01),
-                        (0xB2, EventKind::Genesis, 0x02),
-                    ],
+                    vec![(0xA1, EventKind::Genesis, 0x01), (0xB2, EventKind::Genesis, 0x02)],
                 ),
                 BlockHash([1; 32]),
             )
@@ -6648,37 +6046,21 @@ mod tests {
         let stamped = store
             .stamp_tx_indices(&[(
                 BlockHash([1; 32]),
-                vec![
-                    (TxId([0xEE; 32]), 0),
-                    (TxId([0x01; 32]), 1),
-                    (TxId([0x02; 32]), 2),
-                ],
+                vec![(TxId([0xEE; 32]), 0), (TxId([0x01; 32]), 1), (TxId([0x02; 32]), 2)],
             )])
             .unwrap();
         assert_eq!(stamped, 2);
-        assert_eq!(
-            store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index,
-            Some(1)
-        );
-        assert_eq!(
-            store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index,
-            Some(2)
-        );
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index, Some(1));
+        assert_eq!(store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index, Some(2));
         // Block 2 was not in the batch: still NULL.
-        assert_eq!(
-            store.events(&CovenantId([0xA1; 32])).unwrap()[1].tx_index,
-            None
-        );
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[1].tx_index, None);
 
         // Re-stamping with different indices must not touch stamped rows.
         let restamped = store
             .stamp_tx_indices(&[(BlockHash([1; 32]), vec![(TxId([0x01; 32]), 9)])])
             .unwrap();
         assert_eq!(restamped, 0);
-        assert_eq!(
-            store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index,
-            Some(1)
-        );
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index, Some(1));
     }
 
     /// The consumer ordering contract: (accepting_daa, tx_index) sorts an
@@ -6709,10 +6091,7 @@ mod tests {
         let mut rows = store.recent_events(10).unwrap();
         rows.sort_by_key(|r| (r.accepting_daa, r.tx_index));
         let order: Vec<TxId> = rows.iter().map(|r| r.txid).collect();
-        assert_eq!(
-            order,
-            vec![TxId([0x20; 32]), TxId([0x10; 32]), TxId([0x30; 32])]
-        );
+        assert_eq!(order, vec![TxId([0x20; 32]), TxId([0x10; 32]), TxId([0x30; 32])]);
     }
 
     /// The canonical event shape: exactly these keys, with tx_index and
@@ -6732,14 +6111,8 @@ mod tests {
         let v = serde_json::to_value(&row).unwrap();
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
         let mut expect = vec![
-            "covenant_id",
-            "seq",
-            "kind",
-            "txid",
-            "accepting_daa",
-            "accepting_block",
-            "tx_index",
-            "payload_len",
+            "covenant_id", "seq", "kind", "txid", "accepting_daa", "accepting_block",
+            "tx_index", "payload_len",
         ];
         let mut got = keys.clone();
         got.sort_unstable();
@@ -6748,11 +6121,7 @@ mod tests {
         assert_eq!(v["tx_index"], serde_json::json!(4));
         assert_eq!(v["payload_len"], serde_json::json!(20));
 
-        let bare = FeedEventRow {
-            tx_index: None,
-            payload_len: None,
-            ..row
-        };
+        let bare = FeedEventRow { tx_index: None, payload_len: None, ..row };
         let v = serde_json::to_value(&bare).unwrap();
         let obj = v.as_object().unwrap();
         assert!(!obj.contains_key("tx_index"), "absent, not null");
@@ -6787,12 +6156,7 @@ mod tests {
         let mut b3 = BlockEvents::empty(BlockHash([3; 32]));
         b3.accepting_daa = 105;
         // tx 0x40 moves two covenants at once: same txid, same tx_index.
-        b3.events = vec![
-            ev(0xE, 0x30, 0),
-            ev(0xA, 0x40, 1),
-            ev(0x9, 0x40, 1),
-            ev(0xF, 0x80, 2),
-        ];
+        b3.events = vec![ev(0xE, 0x30, 0), ev(0xA, 0x40, 1), ev(0x9, 0x40, 1), ev(0xF, 0x80, 2)];
         let mut b4 = BlockEvents::empty(BlockHash([4; 32]));
         b4.accepting_daa = 110;
         b4.events = vec![ev(0xB, 0x90, 0)];
@@ -6815,15 +6179,8 @@ mod tests {
         // DAA 105 → the 0x40 pair (covenant 0x9 before 0xA), 0x80, NULL 0x30;
         // DAA 110 → 0x90.
         let expect: Vec<(u8, u8)> = vec![
-            (0x20, 0xC),
-            (0x50, 0xA),
-            (0x70, 0xD),
-            (0x60, 0xA),
-            (0x10, 0xB),
-            (0x40, 0x9),
-            (0x40, 0xA),
-            (0x80, 0xF),
-            (0x30, 0xE),
+            (0x20, 0xC), (0x50, 0xA), (0x70, 0xD), (0x60, 0xA), (0x10, 0xB),
+            (0x40, 0x9), (0x40, 0xA), (0x80, 0xF), (0x30, 0xE),
             (0x90, 0xB),
         ];
         let key = |e: &FeedEventRow| (e.txid.0[0], e.covenant_id.0[0]);
@@ -6846,11 +6203,7 @@ mod tests {
                 }
                 let last_daa = rows.last().unwrap().accepting_daa;
                 let in_group = rows.iter().filter(|e| e.accepting_daa == last_daa).count() as u64;
-                seq = if last_daa == daa {
-                    seq + in_group
-                } else {
-                    in_group
-                };
+                seq = if last_daa == daa { seq + in_group } else { in_group };
                 daa = last_daa;
                 walked.extend(rows.iter().map(key));
                 if rows.len() < page as usize {
@@ -6861,15 +6214,7 @@ mod tests {
         }
         // A cursor mid-group resumes exactly after what it consumed: group
         // 100 is [0x20, 0x50, 0x70, 0x60, 0x10], so seq 2 resumes at 0x70.
-        assert_eq!(
-            store
-                .events_after(100, 2, 3)
-                .unwrap()
-                .iter()
-                .map(key)
-                .collect::<Vec<_>>(),
-            vec![(0x70, 0xD), (0x60, 0xA), (0x10, 0xB)]
-        );
+        assert_eq!(store.events_after(100, 2, 3).unwrap().iter().map(key).collect::<Vec<_>>(), vec![(0x70, 0xD), (0x60, 0xA), (0x10, 0xB)]);
         // A cursor past the tip yields nothing.
         assert!(store.events_after(110, 1, 5).unwrap().is_empty());
     }
@@ -6880,53 +6225,20 @@ mod tests {
     #[test]
     fn subscription_secret_roundtrip() {
         let store = test_store("sub-secret");
-        let id = store
-            .add_subscription(
-                None,
-                Some("genesis"),
-                "https://example.com/hook",
-                Some("aa11"),
-                1,
-            )
-            .unwrap();
-        let legacy = store
-            .add_subscription(None, None, "https://example.com/legacy", None, 2)
-            .unwrap();
+        let id = store.add_subscription(None, Some("genesis"), "https://example.com/hook", Some("aa11"), 1).unwrap();
+        let legacy = store.add_subscription(None, None, "https://example.com/legacy", None, 2).unwrap();
 
-        let subs = store
-            .subscriptions_matching([0u8; 32].as_slice(), "genesis")
-            .unwrap();
+        let subs = store.subscriptions_matching([0u8; 32].as_slice(), "genesis").unwrap();
         assert!(subs.contains(&(id, "https://example.com/hook".into(), Some("aa11".into()))));
         assert!(subs.contains(&(legacy, "https://example.com/legacy".into(), None)));
 
-        assert_eq!(
-            store.delete_subscription_secured(id, None).unwrap(),
-            UnsubscribeOutcome::WrongSecret
-        );
-        assert_eq!(
-            store.delete_subscription_secured(id, Some("bb22")).unwrap(),
-            UnsubscribeOutcome::WrongSecret
-        );
-        assert_eq!(
-            store.subscription_count().unwrap(),
-            2,
-            "wrong secret must not delete"
-        );
-        assert_eq!(
-            store.delete_subscription_secured(id, Some("aa11")).unwrap(),
-            UnsubscribeOutcome::Deleted
-        );
-        assert_eq!(
-            store.delete_subscription_secured(id, Some("aa11")).unwrap(),
-            UnsubscribeOutcome::NotFound
-        );
+        assert_eq!(store.delete_subscription_secured(id, None).unwrap(), UnsubscribeOutcome::WrongSecret);
+        assert_eq!(store.delete_subscription_secured(id, Some("bb22")).unwrap(), UnsubscribeOutcome::WrongSecret);
+        assert_eq!(store.subscription_count().unwrap(), 2, "wrong secret must not delete");
+        assert_eq!(store.delete_subscription_secured(id, Some("aa11")).unwrap(), UnsubscribeOutcome::Deleted);
+        assert_eq!(store.delete_subscription_secured(id, Some("aa11")).unwrap(), UnsubscribeOutcome::NotFound);
         // Legacy row: no secret stored, id alone (with or without a guess).
-        assert_eq!(
-            store
-                .delete_subscription_secured(legacy, Some("anything"))
-                .unwrap(),
-            UnsubscribeOutcome::Deleted
-        );
+        assert_eq!(store.delete_subscription_secured(legacy, Some("anything")).unwrap(), UnsubscribeOutcome::Deleted);
         assert_eq!(store.subscription_count().unwrap(), 0);
     }
 }

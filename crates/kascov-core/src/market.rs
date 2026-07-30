@@ -55,9 +55,7 @@ const SLOT_INDICES: [usize; 37] = [
 const IDX_TOKEN_COVENANT: usize = 1;
 const IDX_TOKEN_RESERVE: usize = 2;
 const IDX_CREATOR: [usize; 2] = [19, 81];
-const IDX_VKAS: [usize; 12] = [
-    185, 187, 311, 313, 457, 459, 579, 582, 1237, 1239, 2084, 2087,
-];
+const IDX_VKAS: [usize; 12] = [185, 187, 311, 313, 457, 459, 579, 582, 1237, 1239, 2084, 2087];
 const IDX_GRADUATION: usize = 724;
 
 /// What a matched curve program states about itself. Every field is read from
@@ -94,10 +92,9 @@ fn push_units(program: &[u8]) -> Vec<(std::ops::Range<usize>, Vec<u8>)> {
         let (data_start, len): (usize, usize) = match op {
             0x01..=0x4b => (i + 1, op as usize),
             0x4c if i + 1 < n => (i + 2, program[i + 1] as usize),
-            0x4d if i + 2 < n => (
-                i + 3,
-                u16::from_le_bytes([program[i + 1], program[i + 2]]) as usize,
-            ),
+            0x4d if i + 2 < n => {
+                (i + 3, u16::from_le_bytes([program[i + 1], program[i + 2]]) as usize)
+            }
             0x4e if i + 4 < n => (
                 i + 5,
                 u32::from_le_bytes([
@@ -125,10 +122,7 @@ fn push_units(program: &[u8]) -> Vec<(std::ops::Range<usize>, Vec<u8>)> {
         if data_start + len > n {
             break;
         }
-        out.push((
-            i..data_start + len,
-            program[data_start..data_start + len].to_vec(),
-        ));
+        out.push((i..data_start + len, program[data_start..data_start + len].to_vec()));
         i = data_start + len;
     }
     out
@@ -166,8 +160,7 @@ pub fn match_kron_curve(program: &[u8]) -> Option<CurveParams> {
         if CURVE_FIXTURE[fpos..fr.start] != program[cpos..cr.start] {
             return None;
         }
-        if !slots.contains(&i)
-            && (fdata != cdata || CURVE_FIXTURE[fr.clone()] != program[cr.clone()])
+        if !slots.contains(&i) && (fdata != cdata || CURVE_FIXTURE[fr.clone()] != program[cr.clone()])
         {
             return None;
         }
@@ -179,14 +172,13 @@ pub fn match_kron_curve(program: &[u8]) -> Option<CurveParams> {
     }
 
     // Internal consistency: repeated slots must agree with themselves.
-    let vkas_vals: BTreeSet<Option<i64>> = IDX_VKAS.iter().map(|&i| le_i64(&cand[i].1)).collect();
+    let vkas_vals: BTreeSet<Option<i64>> =
+        IDX_VKAS.iter().map(|&i| le_i64(&cand[i].1)).collect();
     let [Some(v_kas_units)] = *vkas_vals.into_iter().collect::<Vec<_>>().as_slice() else {
         return None;
     };
     let creators: BTreeSet<&Vec<u8>> = IDX_CREATOR.iter().map(|&i| &cand[i].1).collect();
-    let [creator] = *creators.into_iter().collect::<Vec<_>>().as_slice() else {
-        return None;
-    };
+    let [creator] = *creators.into_iter().collect::<Vec<_>>().as_slice() else { return None };
     let creator_fee_owner: [u8; 32] = creator.as_slice().try_into().ok()?;
     let token_covenant_id: [u8; 32] = cand[IDX_TOKEN_COVENANT].1.as_slice().try_into().ok()?;
     Some(CurveParams {
@@ -296,13 +288,9 @@ pub fn match_kron_pool(program: &[u8]) -> Option<PoolParams> {
     if POOL_FIXTURE[fpos..] != tpl[cpos..] {
         return None;
     }
-    let creators: BTreeSet<&Vec<u8>> = POOL_TEMPLATE_CREATOR_SLOTS
-        .iter()
-        .map(|&i| &cand_units[i].1)
-        .collect();
-    let [creator] = *creators.into_iter().collect::<Vec<_>>().as_slice() else {
-        return None;
-    };
+    let creators: BTreeSet<&Vec<u8>> =
+        POOL_TEMPLATE_CREATOR_SLOTS.iter().map(|&i| &cand_units[i].1).collect();
+    let [creator] = *creators.into_iter().collect::<Vec<_>>().as_slice() else { return None };
     Some(PoolParams {
         token_covenant_id,
         kas_reserve_units,
@@ -337,17 +325,9 @@ pub fn bracket_holds(
     // fee moves the executed price off the pure marginal by a bounded, known
     // amount. Zero for the curve, whose price is exact.
     let q = KAS_QUANTUM_SOMPI + quote_sompi * fee_in_bps / 10_000;
-    let lo_num = if is_buy {
-        v_sompi + k0 - q
-    } else {
-        v_sompi + k1 - q
-    };
+    let lo_num = if is_buy { v_sompi + k0 - q } else { v_sompi + k1 - q };
     let lo_den = if is_buy { b0 } else { b1 };
-    let hi_num = if is_buy {
-        v_sompi + k1 + q
-    } else {
-        v_sompi + k0 + q
-    };
+    let hi_num = if is_buy { v_sompi + k1 + q } else { v_sompi + k0 + q };
     let hi_den = if is_buy { b1 } else { b0 };
     let (Some(lo), Some(px), Some(hi)) = (
         lo_num.checked_mul(base_amount),
@@ -360,9 +340,7 @@ pub fn bracket_holds(
     if lo > px {
         return false;
     }
-    let Some(px_hi) = quote_sompi.checked_mul(hi_den) else {
-        return false;
-    };
+    let Some(px_hi) = quote_sompi.checked_mul(hi_den) else { return false };
     // price <= upper marginal:  quote*hi_den <= hi_num*base
     px_hi <= hi
 }
@@ -380,25 +358,21 @@ pub fn invariant_holds(
     quote_sompi: i128,
     fee_in_bps: i128,
 ) -> bool {
-    let (Some(before), Some(after)) = (
-        (v_sompi + k0).checked_mul(b0),
-        (v_sompi + k1).checked_mul(b1),
-    ) else {
+    let (Some(before), Some(after)) =
+        ((v_sompi + k0).checked_mul(b0), (v_sompi + k1).checked_mul(b1))
+    else {
         return false;
     };
     if after < before {
         return false;
     }
-    let Some(growth) = after.checked_sub(before) else {
-        return false;
-    };
+    let Some(growth) = after.checked_sub(before) else { return false };
     if fee_in_bps == 0 {
         // the curve: k is constant to within quantisation — 10 ppm is 300x
         // the measured residual and orders below any hidden fee
-        let (Some(g), Some(cap)) = (
-            growth.checked_mul(1_000_000),
-            before.checked_mul(INVARIANT_MAX_GROWTH_PPM),
-        ) else {
+        let (Some(g), Some(cap)) =
+            (growth.checked_mul(1_000_000), before.checked_mul(INVARIANT_MAX_GROWTH_PPM))
+        else {
             return false;
         };
         return g <= cap;
@@ -407,9 +381,7 @@ pub fn invariant_holds(
     // that fee (plus a quantum) scaled by the larger token side — dk from a
     // KAS-side deposit f is f x B
     let fee = quote_sompi * fee_in_bps / 10_000 + KAS_QUANTUM_SOMPI;
-    let Some(cap) = fee.checked_mul(b0.max(b1)) else {
-        return false;
-    };
+    let Some(cap) = fee.checked_mul(b0.max(b1)) else { return false };
     growth <= cap
 }
 
@@ -438,9 +410,7 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
             break;
         }
     }
-    let Some(program) = revealed else {
-        return Ok(());
-    }; // nothing proof-grade yet
+    let Some(program) = revealed else { return Ok(()) }; // nothing proof-grade yet
     let program_hash = kascov_decode::kcc20::blake2b_256(&program);
 
     // Skip gate: same program, already judged — nothing to redo but the
@@ -456,15 +426,14 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
         .map_err(db_err)?;
     let unmatched_tag = unmatched_tag();
     let params_known = match &known {
-        Some((h, skel, v, _)) if h.as_slice() == program_hash && skel == "KRON curve v1" => {
-            Some(*v)
-        }
+        Some((h, skel, v, _)) if h.as_slice() == program_hash && skel == "KRON curve v1" => Some(*v),
         // Give up again on the same bytes ONLY if the stored row is complete.
         // A row written before the structural fingerprint existed has no shape,
         // and skipping it would leave it blank forever — so it falls through
         // once, gets rewritten with its shape, and is skipped ever after.
-        Some((h, skel, _, len))
-            if h.as_slice() == program_hash && *skel == unmatched_tag && len.is_some() =>
+        Some((h, skel, _, len)) if h.as_slice() == program_hash
+            && *skel == unmatched_tag
+            && len.is_some() =>
         {
             return Ok(()); // this matcher already gave up on these exact bytes
         }
@@ -554,22 +523,19 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
     let mut ok = true;
     let mut checked_through: i64 = -1;
     let rows = trades
-        .query_map(
-            params![p.token_covenant_id.as_slice(), covenant_id.as_slice()],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, i64>(6)?,
-                    r.get::<_, i64>(7)?,
-                    r.get::<_, i64>(8)?,
-                ))
-            },
-        )
+        .query_map(params![p.token_covenant_id.as_slice(), covenant_id.as_slice()], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, i64>(7)?,
+                r.get::<_, i64>(8)?,
+            ))
+        })
         .map_err(db_err)?;
     for row in rows {
         let (seq, side, base, quote, k0, k1, b0, b1, co) = row.map_err(db_err)?;
@@ -578,17 +544,8 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
             continue; // stored, never judged: another covenant moved too
         }
         let (k0, k1, b0, b1) = (k0 as i128, k1 as i128, b0 as i128, b1 as i128);
-        if !bracket_holds(
-            v,
-            k0,
-            k1,
-            b0,
-            b1,
-            quote as i128,
-            base as i128,
-            side == "buy",
-            fee_in_bps,
-        ) {
+        if !bracket_holds(v, k0, k1, b0, b1, quote as i128, base as i128, side == "buy", fee_in_bps)
+        {
             continue; // off-curve: never priced, never counted
         }
         if !invariant_holds(v, k0, k1, b0, b1, quote as i128, fee_in_bps) {
@@ -615,9 +572,7 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
             p.graduation_kas_sompi,
             serde_json::json!({ "creator_fee_owner": hex::encode(p.creator) }).to_string(),
             p.kas_reserve_sompi,
-            p.lp_token_covenant_id
-                .as_ref()
-                .map(|l| l.as_slice().to_vec()),
+            p.lp_token_covenant_id.as_ref().map(|l| l.as_slice().to_vec()),
             p.shares,
             checked_through,
             exercised,
@@ -773,7 +728,8 @@ pub(crate) fn market_summary(
         return Ok(out);
     }
     let Some(market) = market_covenant_id else {
-        out.unpriced_reason = Some("no single covenant holds this token's inventory".into());
+        out.unpriced_reason =
+            Some("no single covenant holds this token's inventory".into());
         return Ok(out);
     };
     let program = market_program_row(conn, market)?;
@@ -812,11 +768,7 @@ pub(crate) fn market_summary(
     }
 
     let v = prog.v_kas_units as i128 * KAS_QUANTUM_SOMPI;
-    let fee_in_bps: i128 = if prog.skeleton == "KRON pool v1" {
-        20
-    } else {
-        0
-    };
+    let fee_in_bps: i128 = if prog.skeleton == "KRON pool v1" { 20 } else { 0 };
     let trades = crate::tokens::token_trades_page(conn, token_id, scan)?;
     // publishable: same-tx-clean, on this market, bracket-passing
     let publishable: Vec<&crate::tokens::TokenTradeRow> = trades
@@ -839,9 +791,8 @@ pub(crate) fn market_summary(
         .collect();
 
     // last price: newest publishable AND resolvable (>= 1 KAS moved)
-    if let Some(last) = publishable
-        .iter()
-        .find(|t| t.quote_sompi >= MIN_PRICEABLE_QUOTE_SOMPI)
+    if let Some(last) =
+        publishable.iter().find(|t| t.quote_sompi >= MIN_PRICEABLE_QUOTE_SOMPI)
     {
         out.last_quote_sompi = Some(last.quote_sompi);
         out.last_base_amount = Some(last.base_amount);
@@ -856,15 +807,13 @@ pub(crate) fn market_summary(
 
     // 24h window: fails closed whole when any trade predates timestamps
     if trades_missing_time > 0 {
-        out.window_note = Some("some of this token's trades predate timestamp capture".into());
+        out.window_note =
+            Some("some of this token's trades predate timestamp capture".into());
     } else if let Some(end) = tip_at_ms {
         let start = end - WINDOW_SPAN_MS;
         let in_window: Vec<&&crate::tokens::TokenTradeRow> = publishable
             .iter()
-            .filter(|t| {
-                t.accepting_time_ms
-                    .is_some_and(|ms| ms >= start && ms <= end)
-            })
+            .filter(|t| t.accepting_time_ms.is_some_and(|ms| ms >= start && ms <= end))
             .collect();
         if !in_window.is_empty() {
             let vol: i128 = in_window.iter().map(|t| t.quote_sompi as i128).sum();
@@ -872,9 +821,7 @@ pub(crate) fn market_summary(
             out.trades_24h = Some(in_window.len() as i64);
         }
         // 24h change: newest resolvable vs newest resolvable before the window
-        let newest = publishable
-            .iter()
-            .find(|t| t.quote_sompi >= MIN_PRICEABLE_QUOTE_SOMPI);
+        let newest = publishable.iter().find(|t| t.quote_sompi >= MIN_PRICEABLE_QUOTE_SOMPI);
         let reference = publishable.iter().find(|t| {
             t.quote_sompi >= MIN_PRICEABLE_QUOTE_SOMPI
                 && t.accepting_time_ms.is_some_and(|ms| ms < start)
@@ -913,9 +860,8 @@ pub(crate) fn market_summary(
         out.reserve_sompi = Some(value);
         if let (Some(grad), true) = (prog.graduation_kas_sompi, prog.skeleton == "KRON curve v1") {
             if grad > 0 {
-                out.grad_progress_bps = (value as i128)
-                    .checked_mul(10_000)
-                    .map(|n| (n / grad as i128) as i64);
+                out.grad_progress_bps =
+                    (value as i128).checked_mul(10_000).map(|n| (n / grad as i128) as i64);
             }
         }
     } else if cells != 1 {
@@ -993,8 +939,7 @@ pub(crate) fn market_program_row(
         [covenant_id.as_slice()],
         |r| {
             let cid = |v: Option<Vec<u8>>| -> Option<crate::CovenantId> {
-                v.and_then(|b| b.as_slice().try_into().ok())
-                    .map(crate::CovenantId)
+                v.and_then(|b| b.as_slice().try_into().ok()).map(crate::CovenantId)
             };
             Ok(MarketProgramRow {
                 covenant_id: crate::CovenantId(r.get(0)?),
@@ -1072,10 +1017,7 @@ mod tests {
         let mut evil = CURVE_FIXTURE.to_vec();
         let at = units[target].0.end - 1;
         evil[at] ^= 0x01;
-        assert!(
-            match_kron_curve(&evil).is_none(),
-            "almost the build is not the build"
-        );
+        assert!(match_kron_curve(&evil).is_none(), "almost the build is not the build");
         assert!(match_kron_curve(b"\x51\x52\x53").is_none());
         assert!(match_kron_curve(&[]).is_none());
     }
@@ -1135,10 +1077,7 @@ mod tests {
         // the invariant is two-sided: k held exactly passes, k shrinking and
         // k growing past the fee threshold both refuse
         assert!(invariant_holds(v, k0, k1, b0, b1, quote, 0));
-        assert!(
-            !invariant_holds(v, k0, k0 - quote, b0, b1, quote, 0),
-            "k may not shrink"
-        );
+        assert!(!invariant_holds(v, k0, k0 - quote, b0, b1, quote, 0), "k may not shrink");
         assert!(
             !invariant_holds(v, k0, k1 + k1 / 100, b0, b1, quote, 0),
             "an in-covenant fee grows k past the cap and refuses the parameters"

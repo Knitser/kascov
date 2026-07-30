@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260730-ui';
+} from './core/format.js?v=20260730-chips';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260730-ui';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-ui';
-import { createPendingModel } from './core/pending.js?v=20260730-ui';
+} from './core/state.js?v=20260730-chips';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-chips';
+import { createPendingModel } from './core/pending.js?v=20260730-chips';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -36,12 +36,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260730-ui';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-ui';
-import { createRefreshGate } from './core/refresh.js?v=20260730-ui';
-import { networkRouteHash } from './core/routing.js?v=20260730-ui';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-ui';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-ui';
+} from './core/data.js?v=20260730-chips';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-chips';
+import { createRefreshGate } from './core/refresh.js?v=20260730-chips';
+import { networkRouteHash } from './core/routing.js?v=20260730-chips';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-chips';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-chips';
 
 
 
@@ -3756,10 +3756,10 @@ function wireGuideCopy() {
       const clone = pre.cloneNode(true);
       clone.querySelectorAll('.o, .e').forEach((n) => n.remove());
       const text = clone.textContent.replace(/^\s*\n/gm, '').trimEnd();
-      copyToClipboard(text).then((ok) => {
-        btn.textContent = ok ? 'copied ✓' : 'select to copy';
+      navigator.clipboard?.writeText(text).then(() => {
+        btn.textContent = 'copied ✓';
         setTimeout(() => { btn.textContent = 'copy'; }, 1200);
-      });
+      }).catch(() => {});
     });
     box.append(btn);
   });
@@ -6639,28 +6639,6 @@ function enterView(view, viewName) {
   finishViewNavigation(view, viewName);
 }
 
-function syncSiteNavOverflow(nav = document.querySelector('.site-nav')) {
-  if (!nav) return;
-  const remaining = nav.scrollWidth - nav.clientWidth;
-  nav.classList.toggle('can-scroll-left', nav.scrollLeft > 1);
-  nav.classList.toggle('can-scroll-right', nav.scrollLeft < remaining - 1);
-}
-
-function revealCurrentNav(current) {
-  const nav = current && current.closest('.site-nav');
-  if (!nav) return;
-  requestAnimationFrame(() => {
-    const rail = nav.getBoundingClientRect();
-    const item = current.getBoundingClientRect();
-    if (item.left < rail.left) {
-      nav.scrollLeft += item.left - rail.left;
-    } else if (item.right > rail.right) {
-      nav.scrollLeft += item.right - rail.right;
-    }
-    requestAnimationFrame(() => syncSiteNavOverflow(nav));
-  });
-}
-
 async function render() {
   const token = ++renderToken;
   const route = parseRoute();
@@ -6732,7 +6710,6 @@ async function render() {
     if (a.dataset.nav === navFor) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
-  revealCurrentNav(document.querySelector('.site-nav [aria-current="page"]'));
   /* search is chain-wide (names, ids, txids, addresses — local + the worker
      endpoint), so it stays reachable on every view; ⌘K focuses it anywhere */
   $('#header-search').hidden = false;
@@ -7169,31 +7146,25 @@ document.addEventListener('visibilitychange', () => {
 
 /* ----------------------------------------------------------------- events */
 
-function showManualCopy(text) {
-  const dialog = document.querySelector('#manual-copy-dialog');
-  const value = document.querySelector('#manual-copy-value');
-  if (!dialog || !value) return;
-  value.value = String(text);
-  if (!dialog.open) {
-    if (typeof dialog.showModal === 'function') dialog.showModal();
-    else dialog.setAttribute('open', '');
-  }
-  requestAnimationFrame(() => {
-    value.focus();
-    value.select();
-  });
-}
-
 async function copyToClipboard(text) {
   try {
-    if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
-      throw new Error('Clipboard API unavailable');
-    }
     await navigator.clipboard.writeText(text);
     return true;
-  } catch {
-    showManualCopy(text);
-    return false;
+  } catch (e) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch (e2) {
+      return false;
+    }
   }
 }
 
@@ -7568,7 +7539,7 @@ const ACTIONS = {
     const text = pre && pre.querySelector('pre') ? pre.querySelector('pre').textContent : '';
     copyToClipboard(text).then((ok) => {
       const orig = el.textContent;
-      el.textContent = ok ? 'copied!' : 'select to copy';
+      el.textContent = ok ? 'copied!' : 'copy failed';
       el.classList.add('copied');
       setTimeout(() => { el.textContent = orig; el.classList.remove('copied'); }, 1400);
     });
@@ -7611,7 +7582,7 @@ const ACTIONS = {
     copyToClipboard(location.href).then((ok) => {
       const original = el.dataset.label || el.textContent;
       el.dataset.label = original;
-      el.textContent = ok ? 'link copied!' : 'select to copy';
+      el.textContent = ok ? 'link copied!' : 'copy failed';
       setTimeout(() => { el.textContent = el.dataset.label; }, 1400);
     });
   },
@@ -7620,7 +7591,7 @@ const ACTIONS = {
     copyToClipboard(el.dataset.copy || '').then((ok) => {
       const original = el.dataset.label || el.textContent;
       el.dataset.label = original;
-      el.textContent = ok ? 'copied!' : 'select to copy';
+      el.textContent = ok ? 'copied!' : 'copy failed';
       el.classList.add('copied');
       setTimeout(() => {
         el.textContent = el.dataset.label;
@@ -8158,9 +8129,6 @@ if (galaxySearch) {
 window.addEventListener('resize', () => { if (galaxyCtrl) galaxyCtrl.resize(); });
 
 window.addEventListener('hashchange', render);
-const siteNav = document.querySelector('.site-nav');
-if (siteNav) siteNav.addEventListener('scroll', () => syncSiteNavOverflow(siteNav), { passive: true });
-window.addEventListener('resize', () => syncSiteNavOverflow(siteNav));
 
 /* fill static guide icons */
 document.querySelectorAll('.guide-icon').forEach((el) => {
@@ -8432,13 +8400,12 @@ document.addEventListener('keydown', (e) => {
 /* click any [data-copy] (build-page commands) to copy it */
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-copy]');
-  if (!el || el.dataset.action === 'copy') return;
+  if (!el) return;
   const text = el.dataset.copy;
-  copyToClipboard(text).then((ok) => {
-    if (!ok) return;
+  navigator.clipboard?.writeText(text).then(() => {
     el.classList.add('copied');
     setTimeout(() => el.classList.remove('copied'), 1100);
-  });
+  }).catch(() => {});
 });
 
 networkFilterReset(); /* testnet-10 boots with the traffic generator hidden */

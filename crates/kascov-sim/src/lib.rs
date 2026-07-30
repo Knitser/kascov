@@ -11,7 +11,6 @@
 
 use blake2b_simd::Params as Blake2bParams;
 use kaspa_addresses::{Address, Prefix, Version as AddrVersion};
-use kaspa_consensus_core::mass::units::ScriptUnits;
 use kaspa_consensus_core::{
     constants::TX_VERSION_TOCCATA,
     hashing::sighash::{calc_schnorr_signature_hash, SigHashReusedValuesUnsync},
@@ -23,6 +22,7 @@ use kaspa_consensus_core::{
         TransactionOutpoint, TransactionOutput, UtxoEntry,
     },
 };
+use kaspa_consensus_core::mass::units::ScriptUnits;
 use kaspa_txscript::{
     caches::Cache, pay_to_address_script, pay_to_script_hash_script, EngineCtx, EngineFlags,
     TxScriptEngine,
@@ -117,8 +117,7 @@ fn failing_rule(template: &str, recipient: &str, value: u64, output_value: u64) 
     match template {
         "SilverScript · Escrow" => {
             if output_value != value.saturating_sub(1000) {
-                "the output must equal the escrowed value minus the contract's 1000-sompi fee"
-                    .into()
+                "the output must equal the escrowed value minus the contract's 1000-sompi fee".into()
             } else if !matches!(recipient, "buyer" | "seller") {
                 "the escrow can only pay the committed buyer or seller — no third address".into()
             } else {
@@ -130,12 +129,7 @@ fn failing_rule(template: &str, recipient: &str, value: u64, output_value: u64) 
 }
 
 fn blake2b32(bytes: &[u8]) -> [u8; 32] {
-    *Blake2bParams::new()
-        .hash_length(32)
-        .hash(bytes)
-        .as_bytes()
-        .first_chunk::<32>()
-        .unwrap()
+    *Blake2bParams::new().hash_length(32).hash(bytes).as_bytes().first_chunk::<32>().unwrap()
 }
 
 fn xonly(kp: &Keypair) -> [u8; 32] {
@@ -186,13 +180,7 @@ pub fn simulate(req: &SimRequest) -> SimResult {
             format!("simulation doesn't support {template} · {}", req.entrypoint),
         );
     };
-    let field = |name: &str| {
-        decoded
-            .fields
-            .iter()
-            .find(|f| f.name == name)
-            .map(|f| f.value.clone())
-    };
+    let field = |name: &str| decoded.fields.iter().find(|f| f.name == name).map(|f| f.value.clone());
     let Some(committed) = field(signer_field) else {
         return SimResult::err(&req.entrypoint, format!("{template} has no {signer_field}"));
     };
@@ -235,15 +223,7 @@ pub fn simulate(req: &SimRequest) -> SimResult {
         ComputeCommit::ComputeBudget(ComputeBudget(60)),
     );
     let output = TransactionOutput::new(output_value, dest_spk);
-    let tx = Transaction::new(
-        TX_VERSION_TOCCATA,
-        vec![input],
-        vec![output],
-        0,
-        SUBNETWORK_ID_NATIVE,
-        0,
-        vec![],
-    );
+    let tx = Transaction::new(TX_VERSION_TOCCATA, vec![input], vec![output], 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
     // block_daa_score = 0 → the coin reads as maximally old, so relative
     // timelocks (reclaim) are satisfied and don't mask the rule under test.
     let entry = UtxoEntry::new(value, state_spk, 0, false, None);
@@ -270,11 +250,7 @@ pub fn simulate(req: &SimRequest) -> SimResult {
     mtx.tx.inputs[0].signature_script = witness;
 
     let (pass, verdict, trace) = run_engine(&mtx, req.trace);
-    let rule = if pass {
-        String::new()
-    } else {
-        failing_rule(template, &req.recipient, value, output_value)
-    };
+    let rule = if pass { String::new() } else { failing_rule(template, &req.recipient, value, output_value) };
     SimResult {
         ok: true,
         pass,
@@ -332,15 +308,7 @@ fn fabricated_replay_tx(
         state_spk.clone(),
         cov_hash.map(|id| kaspa_consensus_core::tx::CovenantBinding::new(0, id)),
     );
-    let tx = Transaction::new(
-        TX_VERSION_TOCCATA,
-        vec![input],
-        vec![output],
-        0,
-        SUBNETWORK_ID_NATIVE,
-        0,
-        vec![],
-    );
+    let tx = Transaction::new(TX_VERSION_TOCCATA, vec![input], vec![output], 0, SUBNETWORK_ID_NATIVE, 0, vec![]);
     // block_daa_score = 0 → the coin reads as maximally old, so relative
     // timelocks don't mask the data flow under inspection.
     let entry = UtxoEntry::new(value, state_spk, 0, false, cov_hash);
@@ -382,22 +350,9 @@ pub fn debug_witness(
     }
     // The real budget commitment when captured; otherwise generous, so a
     // fabricated budget shortfall never masks the rules under test.
-    let mtx = fabricated_replay_tx(
-        spk_version,
-        spk_script,
-        sig_script,
-        value,
-        budget.unwrap_or(u16::MAX),
-        covenant_id,
-    );
+    let mtx = fabricated_replay_tx(spk_version, spk_script, sig_script, value, budget.unwrap_or(u16::MAX), covenant_id);
     let (pass, verdict, trace, _) = run_engine_at(&mtx, 0, true, None);
-    DebugResult {
-        ok: true,
-        pass,
-        verdict,
-        trace,
-        note: NOTE.into(),
-    }
+    DebugResult { ok: true, pass, verdict, trace, note: NOTE.into() }
 }
 
 /// One input's preflight execution verdict: did the real engine accept the
@@ -417,22 +372,13 @@ pub struct InputExec {
 /// the per-input allowance a node enforces. The caller guarantees every
 /// entry in `mtx.entries` is populated (the preflight only takes this path
 /// when the submitted JSON carries a utxo for every input).
-pub fn preflight_execute(
-    mtx: &MutableTransaction<Transaction>,
-    indices: &[usize],
-) -> Vec<InputExec> {
+pub fn preflight_execute(mtx: &MutableTransaction<Transaction>, indices: &[usize]) -> Vec<InputExec> {
     indices
         .iter()
         .map(|&i| {
             let limit = mtx.tx.inputs[i].compute_commit.allowed_script_units();
             let (pass, verdict, _, used) = run_engine_at(mtx, i, false, Some(limit));
-            InputExec {
-                input_index: i,
-                pass,
-                verdict,
-                script_units_used: used,
-                allowance: limit.0,
-            }
+            InputExec { input_index: i, pass, verdict, script_units_used: used, allowance: limit.0 }
         })
         .collect()
 }
@@ -449,23 +395,10 @@ pub fn preflight_execute_isolated(
     budget: u16,
     covenant_id: Option<[u8; 32]>,
 ) -> InputExec {
-    let mtx = fabricated_replay_tx(
-        spk_version,
-        spk_script,
-        sig_script,
-        value,
-        budget,
-        covenant_id,
-    );
+    let mtx = fabricated_replay_tx(spk_version, spk_script, sig_script, value, budget, covenant_id);
     let limit = ComputeCommit::ComputeBudget(ComputeBudget(budget)).allowed_script_units();
     let (pass, verdict, _, used) = run_engine_at(&mtx, 0, false, Some(limit));
-    InputExec {
-        input_index,
-        pass,
-        verdict,
-        script_units_used: used,
-        allowance: limit.0,
-    }
+    InputExec { input_index, pass, verdict, script_units_used: used, allowance: limit.0 }
 }
 
 /// Run a self-contained ZK verification script (public inputs + proof + vk +
@@ -474,21 +407,13 @@ pub fn preflight_execute_isolated(
 pub fn verify_zk_script(program: &[u8]) -> (bool, String) {
     let sig_cache = Cache::new(10);
     let reused = SigHashReusedValuesUnsync::new();
-    match kaspa_txscript::zk_precompiles::tests::helpers::execute_zk_script(
-        program, &sig_cache, &reused,
-    ) {
-        Ok(()) => (
-            true,
-            "the zero-knowledge proof VERIFIED — the same on-chain check Kaspa L1 performs".into(),
-        ),
+    match kaspa_txscript::zk_precompiles::tests::helpers::execute_zk_script(program, &sig_cache, &reused) {
+        Ok(()) => (true, "the zero-knowledge proof VERIFIED — the same on-chain check Kaspa L1 performs".into()),
         Err(e) => (false, format!("proof rejected: {e}")),
     }
 }
 
-fn run_engine(
-    mtx: &MutableTransaction<Transaction>,
-    trace: bool,
-) -> (bool, String, Vec<TraceStep>) {
+fn run_engine(mtx: &MutableTransaction<Transaction>, trace: bool) -> (bool, String, Vec<TraceStep>) {
     let (pass, verdict, steps, _) = run_engine_at(mtx, 0, trace, None);
     (pass, verdict, steps)
 }
@@ -512,24 +437,12 @@ fn run_engine_at(
     // sees an empty map and errors out immediately.
     let cov_ctx = match kaspa_txscript::covenants::CovenantsContext::from_tx(&vtx) {
         Ok(ctx) => ctx,
-        Err(e) => {
-            return (
-                false,
-                format!("covenant bindings invalid: {e}"),
-                Vec::new(),
-                0,
-            )
-        }
+        Err(e) => return (false, format!("covenant bindings invalid: {e}"), Vec::new(), 0),
     };
     let mut buf: Vec<u8> = Vec::new();
     let (pass, verdict, used) = {
-        let ctx = EngineCtx::new(&sig_cache)
-            .with_reused(&reused)
-            .with_covenants_ctx(&cov_ctx);
-        let flags = EngineFlags {
-            covenants_enabled: true,
-            ..Default::default()
-        };
+        let ctx = EngineCtx::new(&sig_cache).with_reused(&reused).with_covenants_ctx(&cov_ctx);
+        let flags = EngineFlags { covenants_enabled: true, ..Default::default() };
         let mut vm = match limit {
             Some(limit) => TxScriptEngine::from_transaction_input_with_script_units_limit(
                 &vtx,
@@ -540,32 +453,18 @@ fn run_engine_at(
                 flags,
                 limit,
             ),
-            None => TxScriptEngine::from_transaction_input(
-                &vtx,
-                &mtx.tx.inputs[idx],
-                idx,
-                &entry,
-                ctx,
-                flags,
-            ),
+            None => TxScriptEngine::from_transaction_input(&vtx, &mtx.tx.inputs[idx], idx, &entry, ctx, flags),
         };
         if trace {
             vm = vm.with_opcode_execution_log_buffer(&mut buf);
         }
         let outcome = match vm.execute() {
-            Ok(()) => (
-                true,
-                "the spend satisfies the contract — a node would accept it".to_string(),
-            ),
+            Ok(()) => (true, "the spend satisfies the contract — a node would accept it".to_string()),
             Err(e) => (false, format!("{e}")),
         };
         (outcome.0, outcome.1, vm.used_script_units().0)
     };
-    let steps = if trace {
-        parse_trace(&String::from_utf8_lossy(&buf))
-    } else {
-        Vec::new()
-    };
+    let steps = if trace { parse_trace(&String::from_utf8_lossy(&buf)) } else { Vec::new() };
     (pass, verdict, steps, used)
 }
 
@@ -588,17 +487,11 @@ fn parse_trace(log: &str) -> Vec<TraceStep> {
 }
 
 fn parse_hex_array(s: &str) -> Vec<String> {
-    let s = s
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim();
+    let s = s.trim().trim_start_matches('[').trim_end_matches(']').trim();
     if s.is_empty() {
         return Vec::new();
     }
-    s.split(',')
-        .map(|x| x.trim().trim_matches('"').to_string())
-        .collect()
+    s.split(',').map(|x| x.trim().trim_matches('"').to_string()).collect()
 }
 
 #[cfg(test)]
@@ -676,10 +569,7 @@ mod trace_tests {
         assert!(r.pass, "buyer release should pass: {}", r.verdict);
         assert!(!r.trace.is_empty(), "trace should be captured");
         // stacks are concrete hex; the trace should include real opcodes
-        assert!(
-            r.trace.iter().any(|s| s.op.contains("Op")),
-            "trace has opcodes"
-        );
+        assert!(r.trace.iter().any(|s| s.op.contains("Op")), "trace has opcodes");
         eprintln!("trace steps: {}", r.trace.len());
         eprintln!("first: {:?}", r.trace.first());
         eprintln!("last:  {:?}", r.trace.last());
@@ -697,21 +587,11 @@ mod debug_witness_tests {
         let program = vec![0x51]; // OpTrue
         let spk = pay_to_script_hash_script(&program);
         let sig_script = kascov_decode::encode_push(&program);
-        let r = debug_witness(
-            spk.version(),
-            spk.script(),
-            &sig_script,
-            100_000_000,
-            Some(60),
-            Some([0xAB; 32]),
-        );
+        let r = debug_witness(spk.version(), spk.script(), &sig_script, 100_000_000, Some(60), Some([0xAB; 32]));
         assert!(r.ok, "replay should run: {}", r.verdict);
         assert!(r.pass, "OpTrue p2sh reveal should pass: {}", r.verdict);
         assert!(!r.trace.is_empty(), "trace must be captured");
-        assert!(
-            r.trace.iter().any(|s| s.op.contains("Op")),
-            "trace has opcodes"
-        );
+        assert!(r.trace.iter().any(|s| s.op.contains("Op")), "trace has opcodes");
     }
 
     #[test]
@@ -720,14 +600,7 @@ mod debug_witness_tests {
         let spk = pay_to_script_hash_script(&program);
         // Reveal a DIFFERENT program than the one committed to.
         let sig_script = kascov_decode::encode_push(&[0x52]);
-        let r = debug_witness(
-            spk.version(),
-            spk.script(),
-            &sig_script,
-            100_000_000,
-            None,
-            None,
-        );
+        let r = debug_witness(spk.version(), spk.script(), &sig_script, 100_000_000, None, None);
         assert!(r.ok);
         assert!(!r.pass, "a mismatched reveal must fail");
     }
@@ -750,24 +623,12 @@ mod preflight_exec_tests {
         let program = vec![0x51]; // OpTrue
         let spk = pay_to_script_hash_script(&program);
         let sig_script = kascov_decode::encode_push(&program);
-        let r = preflight_execute_isolated(
-            3,
-            spk.version(),
-            spk.script(),
-            &sig_script,
-            100_000_000,
-            1,
-            Some([0xAB; 32]),
-        );
+        let r = preflight_execute_isolated(3, spk.version(), spk.script(), &sig_script, 100_000_000, 1, Some([0xAB; 32]));
         assert_eq!(r.input_index, 3);
         assert!(r.pass, "OpTrue p2sh reveal should pass: {}", r.verdict);
         // 1 budget unit × 10,000 script units + the 9,999 free units
         assert_eq!(r.allowance, 19_999);
-        assert!(
-            r.script_units_used > 0 && r.script_units_used <= r.allowance,
-            "used {} units",
-            r.script_units_used
-        );
+        assert!(r.script_units_used > 0 && r.script_units_used <= r.allowance, "used {} units", r.script_units_used);
     }
 
     #[test]
@@ -779,36 +640,12 @@ mod preflight_exec_tests {
         let spk = pay_to_script_hash_script(&program);
         let mut sig_script = kascov_decode::encode_push(&vec![0x42u8; 12_000]);
         sig_script.extend_from_slice(&kascov_decode::encode_push(&program));
-        let fail = preflight_execute_isolated(
-            0,
-            spk.version(),
-            spk.script(),
-            &sig_script,
-            100_000_000,
-            0,
-            None,
-        );
-        assert!(
-            !fail.pass,
-            "budget 0 must not cover a 12KB witness: {}",
-            fail.verdict
-        );
+        let fail = preflight_execute_isolated(0, spk.version(), spk.script(), &sig_script, 100_000_000, 0, None);
+        assert!(!fail.pass, "budget 0 must not cover a 12KB witness: {}", fail.verdict);
         assert_eq!(fail.allowance, 9_999);
         // The same witness passes once the budget covers it.
-        let pass = preflight_execute_isolated(
-            0,
-            spk.version(),
-            spk.script(),
-            &sig_script,
-            100_000_000,
-            3,
-            None,
-        );
-        assert!(
-            pass.pass,
-            "budget 3 (30,000 units + free) should cover it: {}",
-            pass.verdict
-        );
+        let pass = preflight_execute_isolated(0, spk.version(), spk.script(), &sig_script, 100_000_000, 3, None);
+        assert!(pass.pass, "budget 3 (30,000 units + free) should cover it: {}", pass.verdict);
         assert!(pass.script_units_used > 9_999 && pass.script_units_used <= pass.allowance);
     }
 }
@@ -817,21 +654,13 @@ mod preflight_exec_tests {
 mod zk_probe {
     #[test]
     fn real_groth16_proof_verifies_through_the_engine() {
-        use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
         use kaspa_txscript::caches::Cache;
-        use kaspa_txscript::zk_precompiles::tests::helpers::{
-            build_groth_script, execute_zk_script,
-        };
+        use kaspa_consensus_core::hashing::sighash::SigHashReusedValuesUnsync;
+        use kaspa_txscript::zk_precompiles::tests::helpers::{build_groth_script, execute_zk_script};
         // a complete Groth16-verifying script built from the dep's real fixture
         let script = build_groth_script();
         eprintln!("groth script bytes: {}", script.len());
-        eprintln!(
-            "groth script hex: {}",
-            script
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<String>()
-        );
+        eprintln!("groth script hex: {}", script.iter().map(|b| format!("{:02x}", b)).collect::<String>());
         let sig_cache = Cache::new(10);
         let reused = SigHashReusedValuesUnsync::new();
         let r = execute_zk_script(&script, &sig_cache, &reused);

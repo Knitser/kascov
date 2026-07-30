@@ -276,25 +276,27 @@ fn prove_direct(cells: &mut [Cell]) {
             continue;
         }
         match (&cell.spent_txid, &cell.spent_sig) {
-            (Some(_), Some(sig)) => match kascov_decode::p2sh_reveal(&cell.spk_script, sig) {
-                Some(program) => {
-                    match kcc20::decode_token_state(registry, cell.spk_version, &program) {
-                        Some(st) => cell.proven = Some((st, program)),
-                        None => {
-                            cell.unproven = Some(format!(
-                                "reveal of {} is not a recognized KCC20 build",
-                                outpoint_str(&cell.txid, cell.index)
-                            ))
+            (Some(_), Some(sig)) => {
+                match kascov_decode::p2sh_reveal(&cell.spk_script, sig) {
+                    Some(program) => {
+                        match kcc20::decode_token_state(registry, cell.spk_version, &program) {
+                            Some(st) => cell.proven = Some((st, program)),
+                            None => {
+                                cell.unproven = Some(format!(
+                                    "reveal of {} is not a recognized KCC20 build",
+                                    outpoint_str(&cell.txid, cell.index)
+                                ))
+                            }
                         }
                     }
+                    None => {
+                        cell.unproven = Some(format!(
+                            "spend of {} does not reveal its committed program",
+                            outpoint_str(&cell.txid, cell.index)
+                        ))
+                    }
                 }
-                None => {
-                    cell.unproven = Some(format!(
-                        "spend of {} does not reveal its committed program",
-                        outpoint_str(&cell.txid, cell.index)
-                    ))
-                }
-            },
+            }
             (Some(_), None) => {
                 cell.unproven = Some(format!(
                     "reveal missing for spent output {}",
@@ -410,10 +412,8 @@ fn prove_recovered(conn: &Connection, token_id: &[u8; 32], cells: &mut Vec<Cell>
             // co-spent inputs of other covenants in the same tx. A genesis
             // transaction contributes none of its own, but the launch covenant
             // it spends is exactly such a co-spent input.
-            let mut sigs: Vec<Vec<u8>> = ins
-                .iter()
-                .filter_map(|&i| cells[i].spent_sig.clone())
-                .collect();
+            let mut sigs: Vec<Vec<u8>> =
+                ins.iter().filter_map(|&i| cells[i].spent_sig.clone()).collect();
             let foreign: Vec<Vec<u8>> = foreign_sigs
                 .query_map(params![txid.as_slice(), token_id.as_slice()], |r| r.get(0))
                 .map_err(db_err)?
@@ -557,9 +557,7 @@ fn extract_trade_candidate(
         .filter(|(k, v)| k.starts_with("02") && **v != 0)
         .map(|(k, v)| (*k, *v))
         .collect();
-    let [(market_key, d_tok)] = movers.as_slice() else {
-        return Ok(None);
-    };
+    let [(market_key, d_tok)] = movers.as_slice() else { return Ok(None) };
     // WHO traded. The market took one side; the counterparty is the single
     // non-covenant owner that took the other. More than one and it is
     // ambiguous (a batched settlement moves several), so it stays NULL rather
@@ -576,12 +574,8 @@ fn extract_trade_candidate(
             _ => None,
         }
     };
-    let Ok(market_bytes) = hex::decode(&market_key[2..]) else {
-        return Ok(None);
-    };
-    let Ok(market) = <[u8; 32]>::try_from(market_bytes.as_slice()) else {
-        return Ok(None);
-    };
+    let Ok(market_bytes) = hex::decode(&market_key[2..]) else { return Ok(None) };
+    let Ok(market) = <[u8; 32]>::try_from(market_bytes.as_slice()) else { return Ok(None) };
 
     // K0/K1: the market covenant's KAS consumed and re-created by this tx.
     // The created side anchors on txid (the PK prefix) with covenant_id
@@ -596,15 +590,15 @@ fn extract_trade_candidate(
             )
             .map_err(db_err)?;
         k0 = stmt
-            .query_row(params![txid.as_slice(), market.as_slice()], |r| {
-                r.get::<_, i64>(0)
-            })
+            .query_row(params![txid.as_slice(), market.as_slice()], |r| r.get::<_, i64>(0))
             .map_err(db_err)? as i128;
     }
     let mut k1: i128 = 0;
     {
         let mut stmt = conn
-            .prepare_cached("SELECT covenant_id, value FROM covenant_utxos WHERE txid = ?1")
+            .prepare_cached(
+                "SELECT covenant_id, value FROM covenant_utxos WHERE txid = ?1",
+            )
             .map_err(db_err)?;
         let rows = stmt
             .query_map([txid.as_slice()], |r| {
@@ -623,27 +617,18 @@ fn extract_trade_candidate(
     if d_kas == 0 || (d_kas > 0) == (*d_tok > 0) {
         return Ok(None);
     }
-    let b0: i128 = in_states
-        .iter()
-        .filter(|s| s.owner_key == *market_key)
-        .map(|s| s.amount as i128)
-        .sum();
-    let b1: i128 = out_states
-        .iter()
-        .filter(|s| s.owner_key == *market_key)
-        .map(|s| s.amount as i128)
-        .sum();
+    let b0: i128 =
+        in_states.iter().filter(|s| s.owner_key == *market_key).map(|s| s.amount as i128).sum();
+    let b1: i128 =
+        out_states.iter().filter(|s| s.owner_key == *market_key).map(|s| s.amount as i128).sum();
     let (Ok(quote_sompi), Ok(base_amount)) =
         (i64::try_from(d_kas.abs()), i64::try_from(d_tok.abs()))
     else {
         return Ok(None);
     };
-    let (Ok(kas_before), Ok(kas_after), Ok(base_before), Ok(base_after)) = (
-        i64::try_from(k0),
-        i64::try_from(k1),
-        i64::try_from(b0),
-        i64::try_from(b1),
-    ) else {
+    let (Ok(kas_before), Ok(kas_after), Ok(base_before), Ok(base_after)) =
+        (i64::try_from(k0), i64::try_from(k1), i64::try_from(b0), i64::try_from(b1))
+    else {
         return Ok(None);
     };
 
@@ -690,15 +675,9 @@ fn judge(cell: &Cell) -> std::result::Result<Judged, String> {
     let Some((st, _)) = &cell.proven else {
         return Err(cell.unproven.clone().unwrap_or_else(|| {
             if cell.live() {
-                format!(
-                    "live state unproven for {}",
-                    outpoint_str(&cell.txid, cell.index)
-                )
+                format!("live state unproven for {}", outpoint_str(&cell.txid, cell.index))
             } else {
-                format!(
-                    "state unproven for spent output {}",
-                    outpoint_str(&cell.txid, cell.index)
-                )
+                format!("state unproven for spent output {}", outpoint_str(&cell.txid, cell.index))
             }
         }));
     };
@@ -726,11 +705,7 @@ fn judge(cell: &Cell) -> std::result::Result<Judged, String> {
             outpoint_str(&cell.txid, cell.index)
         ));
     };
-    Ok(Judged {
-        amount,
-        minter,
-        owner_key: st.owner_key(),
-    })
+    Ok(Judged { amount, minter, owner_key: st.owner_key() })
 }
 
 /// The verdict lattice: `invalid` (hash-proven violation) beats
@@ -825,11 +800,9 @@ fn delete_token_rows(conn: &Connection, id: &[u8; 32]) -> Result<()> {
 
 fn processed_daa(conn: &Connection) -> Result<Option<u64>> {
     Ok(conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'processed_daa'",
-            [],
-            |r| r.get::<_, String>(0),
-        )
+        .query_row("SELECT value FROM meta WHERE key = 'processed_daa'", [], |r| {
+            r.get::<_, String>(0)
+        })
         .optional()
         .map_err(db_err)?
         .and_then(|s| s.parse().ok()))
@@ -846,21 +819,12 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
         return delete_token_rows(conn, token_id);
     }
     // Idempotent rewrite: clear this token's derived rows, then re-insert.
-    conn.execute(
-        "DELETE FROM token_events WHERE token_id = ?1",
-        [token_id.as_slice()],
-    )
-    .map_err(db_err)?;
-    conn.execute(
-        "DELETE FROM token_balances WHERE token_id = ?1",
-        [token_id.as_slice()],
-    )
-    .map_err(db_err)?;
-    conn.execute(
-        "DELETE FROM token_trades WHERE token_id = ?1",
-        [token_id.as_slice()],
-    )
-    .map_err(db_err)?;
+    conn.execute("DELETE FROM token_events WHERE token_id = ?1", [token_id.as_slice()])
+        .map_err(db_err)?;
+    conn.execute("DELETE FROM token_balances WHERE token_id = ?1", [token_id.as_slice()])
+        .map_err(db_err)?;
+    conn.execute("DELETE FROM token_trades WHERE token_id = ?1", [token_id.as_slice()])
+        .map_err(db_err)?;
     let derived_at = processed_daa(conn)?;
 
     if !evidence {
@@ -943,25 +907,9 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
         )
         .map_err(db_err)?;
     #[allow(clippy::type_complexity)]
-    let events: Vec<(
-        u64,
-        String,
-        [u8; 32],
-        u64,
-        Option<u64>,
-        Option<i64>,
-        Option<i64>,
-    )> = stmt
+    let events: Vec<(u64, String, [u8; 32], u64, Option<u64>, Option<i64>, Option<i64>)> = stmt
         .query_map([token_id.as_slice()], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-            ))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
         })
         .map_err(db_err)?
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -983,9 +931,9 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
         let outs: &[usize] = outs_of.get(txid).map(Vec::as_slice).unwrap_or(&[]);
         let anchor = |detail: &str| format!("seq {seq} (daa {accepting_daa}): {detail}");
         let unknown = |classified: &mut Vec<ClassifiedEvent>,
-                       verdict: &mut Verdict,
-                       all_clean: &mut bool,
-                       reason: String| {
+                           verdict: &mut Verdict,
+                           all_clean: &mut bool,
+                           reason: String| {
             verdict.flag_unvalidated(reason);
             *all_clean = false;
             classified.push(ClassifiedEvent {
@@ -993,11 +941,7 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
                 kind: "unknown",
                 accepting_daa: *accepting_daa,
                 tx_index: *tx_index,
-                deltas: vec![Delta {
-                    amount: None,
-                    owner_from: None,
-                    owner_to: None,
-                }],
+                deltas: vec![Delta { amount: None, owner_from: None, owner_to: None }],
             });
         };
 
@@ -1018,12 +962,7 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
         let (in_states, out_states) = match (in_judged, out_judged) {
             (Ok(i), Ok(o)) => (i, o),
             (Err(reason), _) | (_, Err(reason)) => {
-                unknown(
-                    &mut classified,
-                    &mut verdict,
-                    &mut all_events_clean,
-                    anchor(&reason),
-                );
+                unknown(&mut classified, &mut verdict, &mut all_events_clean, anchor(&reason));
                 continue;
             }
         };
@@ -1083,7 +1022,8 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
         let minter_in = in_states.iter().any(|s| s.minter);
         let minter_out = out_states.iter().any(|s| s.minter);
         let single_in_owner = {
-            let owners: BTreeSet<&str> = in_states.iter().map(|s| s.owner_key.as_str()).collect();
+            let owners: BTreeSet<&str> =
+                in_states.iter().map(|s| s.owner_key.as_str()).collect();
             (owners.len() == 1).then(|| in_states[0].owner_key.clone())
         };
 
@@ -1238,7 +1178,8 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
     // two testnet-10 tokens were publishing one under an `unvalidated` badge.
     // Reading the verdict directly makes the invariant hold by definition
     // rather than by every future caller remembering to clear a flag.
-    let provable = all_events_clean && verdict.invalid.is_none() && verdict.unvalidated.is_none();
+    let provable =
+        all_events_clean && verdict.invalid.is_none() && verdict.unvalidated.is_none();
     let mut supply_out: Option<i64> = None;
     let mut minted_out: Option<i64> = None;
     let mut burned_out: Option<i64> = None;
@@ -1248,11 +1189,7 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
     let mut held_wallet_out: Option<i64> = None;
     let mut held_script_out: Option<i64> = None;
     if provable {
-        match (
-            i64::try_from(supply),
-            i64::try_from(minted),
-            i64::try_from(burned),
-        ) {
+        match (i64::try_from(supply), i64::try_from(minted), i64::try_from(burned)) {
             (Ok(s), Ok(m), Ok(b)) if supply >= 0 => {
                 // Final audit: the hash-proven live frontier must equal
                 // genesis + mints − burns exactly.
@@ -1462,11 +1399,8 @@ pub(crate) fn derive_minter(conn: &Connection, minter_id: &[u8; 32]) -> Result<B
             .map_err(db_err)?;
         affected.extend(old);
     }
-    conn.execute(
-        "DELETE FROM token_minters WHERE minter_covenant_id = ?1",
-        [minter_id.as_slice()],
-    )
-    .map_err(db_err)?;
+    conn.execute("DELETE FROM token_minters WHERE minter_covenant_id = ?1", [minter_id.as_slice()])
+        .map_err(db_err)?;
     for pin in &pins {
         conn.execute(
             "INSERT OR IGNORE INTO token_minters (minter_covenant_id, token_id) VALUES (?1, ?2)",
@@ -1479,11 +1413,9 @@ pub(crate) fn derive_minter(conn: &Connection, minter_id: &[u8; 32]) -> Result<B
 
 /// Is this covenant registered in the tokens table?
 pub(crate) fn is_token(conn: &Connection, id: &[u8; 32]) -> Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tokens WHERE token_id = ?1)",
-        [id.as_slice()],
-        |r| r.get(0),
-    )
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM tokens WHERE token_id = ?1)", [id.as_slice()], |r| {
+        r.get(0)
+    })
     .map_err(db_err)
 }
 
@@ -1630,11 +1562,7 @@ pub(crate) fn token_trades_page(
     Ok(rows)
 }
 
-pub(crate) fn token_balances(
-    conn: &Connection,
-    id: &[u8; 32],
-    limit: u64,
-) -> Result<Vec<TokenBalanceRow>> {
+pub(crate) fn token_balances(conn: &Connection, id: &[u8; 32], limit: u64) -> Result<Vec<TokenBalanceRow>> {
     let mut stmt = conn
         .prepare(
             "SELECT owner, balance, cells FROM token_balances WHERE token_id = ?1
@@ -1644,11 +1572,7 @@ pub(crate) fn token_balances(
     let limit = limit.min(i64::MAX as u64) as i64;
     let rows = stmt
         .query_map(params![id.as_slice(), limit], |r| {
-            Ok(TokenBalanceRow {
-                owner: r.get(0)?,
-                balance: r.get(1)?,
-                cells: r.get(2)?,
-            })
+            Ok(TokenBalanceRow { owner: r.get(0)?, balance: r.get(1)?, cells: r.get(2)? })
         })
         .map_err(db_err)?
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -1781,15 +1705,11 @@ pub(crate) fn token_minter_directory(conn: &Connection) -> Result<Vec<TokenMinte
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(db_err)?;
     let mut pins_stmt = conn
-        .prepare(
-            "SELECT token_id FROM token_minters WHERE minter_covenant_id = ?1 ORDER BY token_id",
-        )
+        .prepare("SELECT token_id FROM token_minters WHERE minter_covenant_id = ?1 ORDER BY token_id")
         .map_err(db_err)?;
     for row in &mut rows {
         row.governs = pins_stmt
-            .query_map([row.covenant_id.0.as_slice()], |r| {
-                Ok(CovenantId(r.get(0)?))
-            })
+            .query_map([row.covenant_id.0.as_slice()], |r| Ok(CovenantId(r.get(0)?)))
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
@@ -1876,10 +1796,8 @@ mod tests {
     }
 
     fn test_store(name: &str) -> Store {
-        let path = std::env::temp_dir().join(format!(
-            "kascov-tokens-test-{}-{name}.db",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir()
+            .join(format!("kascov-tokens-test-{}-{name}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         Store::open(&path, Network::Testnet(10)).unwrap()
     }
@@ -1910,10 +1828,7 @@ mod tests {
         }
         fn out(mut self, cov: [u8; 32], txid: [u8; 32], index: u32, st: &St) -> Self {
             self.block.created_utxos.push(NewUtxo {
-                outpoint: Outpoint {
-                    txid: TxId(txid),
-                    index,
-                },
+                outpoint: Outpoint { txid: TxId(txid), index },
                 covenant_id: CovenantId(cov),
                 value: 1000,
                 spk_version: 0,
@@ -1925,10 +1840,7 @@ mod tests {
         /// a trade is measured purely in cell values.
         fn out_v(mut self, cov: [u8; 32], txid: [u8; 32], index: u32, st: &St, value: u64) -> Self {
             self.block.created_utxos.push(NewUtxo {
-                outpoint: Outpoint {
-                    txid: TxId(txid),
-                    index,
-                },
+                outpoint: Outpoint { txid: TxId(txid), index },
                 covenant_id: CovenantId(cov),
                 value,
                 spk_version: 0,
@@ -1940,10 +1852,7 @@ mod tests {
         /// driven by real on-chain commitments rather than synthesised states.
         fn out_spk(mut self, cov: [u8; 32], txid: [u8; 32], index: u32, spk: Vec<u8>) -> Self {
             self.block.created_utxos.push(NewUtxo {
-                outpoint: Outpoint {
-                    txid: TxId(txid),
-                    index,
-                },
+                outpoint: Outpoint { txid: TxId(txid), index },
                 covenant_id: CovenantId(cov),
                 value: 1000,
                 spk_version: 0,
@@ -1951,18 +1860,9 @@ mod tests {
             });
             self
         }
-        fn spend(
-            mut self,
-            prev_txid: [u8; 32],
-            index: u32,
-            spender: [u8; 32],
-            sig: Vec<u8>,
-        ) -> Self {
+        fn spend(mut self, prev_txid: [u8; 32], index: u32, spender: [u8; 32], sig: Vec<u8>) -> Self {
             self.block.spent_utxos.push((
-                Outpoint {
-                    txid: TxId(prev_txid),
-                    index,
-                },
+                Outpoint { txid: TxId(prev_txid), index },
                 TxId(spender),
                 sig,
                 0,
@@ -2021,8 +1921,8 @@ mod tests {
     fn supply_splits_by_owner_type() {
         let mut store = test_store("held-split");
         let outs = [
-            covenant_held(0x11, 700),   // the curve still holds this
-            holder(0x22, 200),          // a signature-owned wallet
+            covenant_held(0x11, 700), // the curve still holds this
+            holder(0x22, 200),        // a signature-owned wallet
             presence_holder(0x33, 100), // a presence-owned wallet (KRON's mode)
         ];
         // Genesis mints into a minter cell, then one transition distributes it
@@ -2044,11 +1944,7 @@ mod tests {
         let t = row(&store, COV).unwrap();
         assert_eq!(t.validation, STATUS_VERIFIED);
         assert_eq!(t.supply, Some(1000));
-        assert_eq!(
-            t.held_covenant,
-            Some(700),
-            "curve inventory is not circulating"
-        );
+        assert_eq!(t.held_covenant, Some(700), "curve inventory is not circulating");
         assert_eq!(t.held_wallet, Some(300), "0x00 and 0x03 are both wallets");
         // The invariant that makes the breakdown trustworthy at all.
         assert_eq!(
@@ -2109,22 +2005,10 @@ mod tests {
             .apply(&mut store);
 
         let t = row(&store, COV).unwrap();
-        assert_eq!(
-            t.validation, STATUS_VERIFIED,
-            "reason: {:?}",
-            t.invalid_reason
-        );
-        assert_eq!(
-            t.supply,
-            Some(1_000_000_000),
-            "the round total the launch intended"
-        );
+        assert_eq!(t.validation, STATUS_VERIFIED, "reason: {:?}", t.invalid_reason);
+        assert_eq!(t.supply, Some(1_000_000_000), "the round total the launch intended");
         assert_eq!(t.held_covenant, Some(999_999_999));
-        assert_eq!(
-            t.held_wallet,
-            Some(1),
-            "the creator allocation is a wallet balance"
-        );
+        assert_eq!(t.held_wallet, Some(1), "the creator allocation is a wallet balance");
     }
 
     /// A history is served newest first and walked backwards a page at a time,
@@ -2147,8 +2031,7 @@ mod tests {
         assert_eq!(head.len(), ascending.len(), "same rows, other direction");
         assert_eq!(head.first().unwrap().seq, newest, "newest first");
         assert!(
-            head.windows(2)
-                .all(|w| (w[0].seq, w[0].delta_idx) >= (w[1].seq, w[1].delta_idx)),
+            head.windows(2).all(|w| (w[0].seq, w[0].delta_idx) >= (w[1].seq, w[1].delta_idx)),
             "a descending page must not wobble"
         );
 
@@ -2163,27 +2046,17 @@ mod tests {
             // the cursor is exclusive on seq, so a seq with several deltas is
             // consumed whole by the caller before it advances
             before = Some(row.seq);
-            let rest = store
-                .token_events_page_before(&id, before, u64::MAX)
-                .unwrap();
+            let rest = store.token_events_page_before(&id, before, u64::MAX).unwrap();
             if rest.is_empty() && row.seq == 0 {
                 break;
             }
         }
-        assert_eq!(
-            seen.first().unwrap().0,
-            newest,
-            "the walk starts at the tip"
-        );
+        assert_eq!(seen.first().unwrap().0, newest, "the walk starts at the tip");
         assert!(
             seen.windows(2).all(|w| w[0].0 > w[1].0),
             "each step must land on a strictly older event, never repeat one"
         );
-        assert_eq!(
-            *seen.last().unwrap(),
-            (0, 0),
-            "the walk reaches genesis and stops"
-        );
+        assert_eq!(*seen.last().unwrap(), (0, 0), "the walk reaches genesis and stops");
     }
 
     /// The same recovery, end to end on real mainnet bytes: the launch
@@ -2195,7 +2068,8 @@ mod tests {
     #[test]
     fn real_mainnet_launch_recovers_the_creator_cell() {
         /// The 2,433-byte unguarded KCC20 program KRON deploys, from chain.
-        const KRON: &[u8] = include_bytes!("../../kascov-decode/fixtures/kcc20_unguarded_kron.bin");
+        const KRON: &[u8] =
+            include_bytes!("../../kascov-decode/fixtures/kcc20_unguarded_kron.bin");
         /// Input 0's sigscript of c3faf69d, argument pushes only. The 172 KB
         /// redeem push that follows is omitted: every candidate filter rejects
         /// it on length, so carrying it would only bloat the fixture.
@@ -2249,21 +2123,9 @@ mod tests {
             .apply(&mut store);
 
         let t = row(&store, COV).unwrap();
-        assert_eq!(
-            t.validation, STATUS_VERIFIED,
-            "reason: {:?}",
-            t.invalid_reason
-        );
-        assert_eq!(
-            t.supply,
-            Some(1_000_000_000),
-            "the launch minted a round billion"
-        );
-        assert_eq!(
-            t.held_covenant,
-            Some(999_999_999),
-            "the curve's unsold inventory"
-        );
+        assert_eq!(t.validation, STATUS_VERIFIED, "reason: {:?}", t.invalid_reason);
+        assert_eq!(t.supply, Some(1_000_000_000), "the launch minted a round billion");
+        assert_eq!(t.held_covenant, Some(999_999_999), "the curve's unsold inventory");
         assert_eq!(t.held_wallet, Some(1), "the creator kept one unit");
     }
 
@@ -2313,11 +2175,7 @@ mod tests {
         t.apply(&mut store);
 
         let row = row(&store, COV).unwrap();
-        assert_eq!(
-            row.validation, STATUS_VERIFIED,
-            "reason: {:?}",
-            row.invalid_reason
-        );
+        assert_eq!(row.validation, STATUS_VERIFIED, "reason: {:?}", row.invalid_reason);
         assert_eq!(row.trades, 1, "the launch is not a trade; the sale is");
         assert_eq!(row.co_moved_trades, 0);
         assert_eq!(row.market_covenant_id, Some(CovenantId(MKT)));
@@ -2326,11 +2184,7 @@ mod tests {
         assert_eq!(trades.len(), 1);
         let tr = &trades[0];
         assert_eq!(tr.side, "buy", "the market gained KAS and shed tokens");
-        assert_eq!(
-            (tr.base_amount, tr.quote_sompi),
-            (200, 1000),
-            "the integer price pair"
-        );
+        assert_eq!((tr.base_amount, tr.quote_sompi), (200, 1000), "the integer price pair");
         assert_eq!((tr.kas_before_sompi, tr.kas_after_sompi), (5000, 6000));
         assert_eq!((tr.base_before, tr.base_after), (700, 500));
         assert_eq!(tr.co_covenants, 0);
@@ -2371,14 +2225,8 @@ mod tests {
             .apply(&mut store);
 
         let row = row(&store, COV).unwrap();
-        assert_eq!(
-            row.trades, 0,
-            "two covenant owners moved: a migration, not a trade"
-        );
-        assert!(store
-            .token_trades_page(&CovenantId(COV), 10)
-            .unwrap()
-            .is_empty());
+        assert_eq!(row.trades, 0, "two covenant owners moved: a migration, not a trade");
+        assert!(store.token_trades_page(&CovenantId(COV), 10).unwrap().is_empty());
     }
 
     /// genesis (minter branch, 0) → mint 100 → split 60/40: the happy path.
@@ -2421,26 +2269,18 @@ mod tests {
         // live frontier: minter branch (0), holder 0x30 (60), holder 0x40 (40)
         assert_eq!(t.holders, 3);
         let balances = store.token_balances(&CovenantId(COV), 10).unwrap();
-        let by_owner: std::collections::HashMap<String, i64> = balances
-            .iter()
-            .map(|b| (b.owner.clone(), b.balance))
-            .collect();
+        let by_owner: std::collections::HashMap<String, i64> =
+            balances.iter().map(|b| (b.owner.clone(), b.balance)).collect();
         assert_eq!(by_owner[&holder(0x30, 60).into_key()], 60);
         assert_eq!(by_owner[&holder(0x40, 40).into_key()], 40);
         assert_eq!(by_owner[&minter_state(0).into_key()], 0);
         // classification: genesis, mint, split
         assert_eq!(
             kinds(&store, COV),
-            vec![
-                (0, "genesis".into()),
-                (1, "mint".into()),
-                (2, "split".into())
-            ]
+            vec![(0, "genesis".into()), (1, "mint".into()), (2, "split".into())]
         );
         // deltas of the mint carry the recipient
-        let evs = store
-            .token_events_page(&CovenantId(COV), Some(0), 10)
-            .unwrap();
+        let evs = store.token_events_page(&CovenantId(COV), Some(0), 10).unwrap();
         let mint_deltas: Vec<_> = evs.iter().filter(|e| e.seq == 1).collect();
         assert_eq!(mint_deltas.len(), 2);
         assert!(mint_deltas.iter().any(|d| d.amount == Some(100)
@@ -2465,10 +2305,7 @@ mod tests {
         let t = row(&store, COV).unwrap();
         assert_eq!(t.validation, STATUS_INVALID);
         let reason = t.invalid_reason.unwrap();
-        assert!(
-            reason.contains("150 > inputs 100 with no minter input"),
-            "{reason}"
-        );
+        assert!(reason.contains("150 > inputs 100 with no minter input"), "{reason}");
         // sums are never stamped on an invalid token
         assert_eq!(t.supply, None);
         assert_eq!(t.minted, None);
@@ -2492,10 +2329,7 @@ mod tests {
             .apply(&mut store);
         let t = row(&store, COV).unwrap();
         assert_eq!(t.validation, STATUS_INVALID);
-        assert!(t
-            .invalid_reason
-            .unwrap()
-            .contains("minter state created without a minter input"));
+        assert!(t.invalid_reason.unwrap().contains("minter state created without a minter input"));
     }
 
     /// Opaque frontier: a spend whose sigscript carries no recoverable
@@ -2589,9 +2423,7 @@ mod tests {
         let mut reorged = test_store("gold-reorged");
         apply_happy_path(&mut reorged);
         // roll back the split AND the mint (blocks 3 and 2, tip first)
-        reorged
-            .rollback(&[BlockHash([3; 32]), BlockHash([2; 32])])
-            .unwrap();
+        reorged.rollback(&[BlockHash([3; 32]), BlockHash([2; 32])]).unwrap();
         // replacement branch: a different mint (250 to holder 0x50)
         let g0 = minter_state(0);
         let m2_outs = [minter_state(0), holder(0x50, 250)];
@@ -2644,17 +2476,8 @@ mod tests {
         assert_eq!(row(&store, COV).unwrap().validation, STATUS_VERIFIED);
         // the reveal that proved everything reorgs out
         store.rollback(&[BlockHash([2; 32])]).unwrap();
-        assert!(
-            row(&store, COV).is_none(),
-            "unprovable token must not stay listed"
-        );
-        assert_eq!(
-            store
-                .token_events_page(&CovenantId(COV), None, 10)
-                .unwrap()
-                .len(),
-            0
-        );
+        assert!(row(&store, COV).is_none(), "unprovable token must not stay listed");
+        assert_eq!(store.token_events_page(&CovenantId(COV), None, 10).unwrap().len(), 0);
         assert_eq!(store.token_balances(&CovenantId(COV), 10).unwrap().len(), 0);
     }
 
@@ -2709,10 +2532,7 @@ mod tests {
         let hook_derived = serde_json::to_value(row(&store, COV).unwrap()).unwrap();
         // full pass from scratch (no version stamp yet on this store)
         assert_eq!(store.derive_tokens_if_stale().unwrap(), 1);
-        assert_eq!(
-            serde_json::to_value(row(&store, COV).unwrap()).unwrap(),
-            hook_derived
-        );
+        assert_eq!(serde_json::to_value(row(&store, COV).unwrap()).unwrap(), hook_derived);
         // current version: no-op — a sentinel survives
         store
             .raw_conn()
@@ -2729,10 +2549,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.derive_tokens_if_stale().unwrap(), 1);
-        assert_eq!(
-            serde_json::to_value(row(&store, COV).unwrap()).unwrap(),
-            hook_derived
-        );
+        assert_eq!(serde_json::to_value(row(&store, COV).unwrap()).unwrap(), hook_derived);
     }
 
     /// Amount encoding at the extremes: i64::MAX round-trips exactly; a
@@ -2772,10 +2589,7 @@ mod tests {
             .apply(&mut store);
         let t = row(&store, COV).unwrap();
         assert_eq!(t.validation, STATUS_UNVALIDATED);
-        assert!(t
-            .invalid_reason
-            .unwrap()
-            .contains("amount out of script-int range"));
+        assert!(t.invalid_reason.unwrap().contains("amount out of script-int range"));
         assert_eq!(t.supply, None);
     }
 
@@ -2791,10 +2605,7 @@ mod tests {
             .unwrap();
         store
             .raw_conn()
-            .execute(
-                "DELETE FROM meta WHERE key = 'token_derivation_version'",
-                [],
-            )
+            .execute("DELETE FROM meta WHERE key = 'token_derivation_version'", [])
             .unwrap();
         assert!(store.derive_tokens_if_stale().unwrap() >= 1);
         let t = row(&store, COV).unwrap();
@@ -2809,15 +2620,9 @@ mod tests {
         let pk = format!("00{}", hex::encode([0xab; 32]));
         assert_eq!(owner_display(&pk), hex::encode([0xab; 32]));
         let cov = format!("02{}", hex::encode([0xcd; 32]));
-        assert_eq!(
-            owner_display(&cov),
-            format!("covenant:{}", hex::encode([0xcd; 32]))
-        );
+        assert_eq!(owner_display(&cov), format!("covenant:{}", hex::encode([0xcd; 32])));
         let script = format!("01{}", hex::encode([0xef; 32]));
-        assert_eq!(
-            owner_display(&script),
-            format!("script:{}", hex::encode([0xef; 32]))
-        );
+        assert_eq!(owner_display(&script), format!("script:{}", hex::encode([0xef; 32])));
         assert_eq!(owner_display("zz"), "zz");
     }
 

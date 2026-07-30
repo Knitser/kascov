@@ -48,10 +48,3 @@ resvg = "0.45"
 
 [profile.release]
 lto = "thin"
-
-# `block` 0.1.6 models an opaque Objective-C runtime class as an empty enum.
-# Rust is phasing out extern statics of uninhabited types. Keep the exact crate
-# API and patch only that FFI marker until the upstream metal/RISC Zero chain
-# moves to block2.
-[patch.crates-io]
-block = { path = "vendor/block" }

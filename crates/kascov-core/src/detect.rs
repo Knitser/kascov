@@ -31,15 +31,10 @@ pub fn covenant_sightings(block: &Block) -> Vec<CovenantSighting> {
     let mut sightings = Vec::new();
     for tx in &block.transactions {
         for (index, output) in tx.outputs.iter().enumerate() {
-            let Some(binding) = output.covenant else {
-                continue;
-            };
+            let Some(binding) = output.covenant else { continue };
             sightings.push(CovenantSighting {
                 covenant_id: binding.covenant_id,
-                outpoint: Outpoint {
-                    txid: tx.txid,
-                    index: index as u32,
-                },
+                outpoint: Outpoint { txid: tx.txid, index: index as u32 },
                 authorizing_input: binding.authorizing_input,
                 authorizing_outpoint: tx
                     .inputs

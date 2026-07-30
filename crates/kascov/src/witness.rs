@@ -115,15 +115,7 @@ pub fn process_image(original: &[u8]) -> std::result::Result<Thumb, &'static str
         for (x, y, px) in rgba.enumerate_pixels() {
             let a = px[3] as u16;
             let blend = |c: u8, b: u16| (((c as u16) * a + b * (255 - a)) / 255) as u8;
-            rgb.put_pixel(
-                x,
-                y,
-                image::Rgb([
-                    blend(px[0], BG[0]),
-                    blend(px[1], BG[1]),
-                    blend(px[2], BG[2]),
-                ]),
-            );
+            rgb.put_pixel(x, y, image::Rgb([blend(px[0], BG[0]), blend(px[1], BG[1]), blend(px[2], BG[2])]));
         }
         let mut jpg: Vec<u8> = Vec::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut std::io::Cursor::new(&mut jpg), 80)
@@ -217,11 +209,7 @@ pub fn apply_check(
                     row.pending_sha256 = None;
                     row.next_check_ms = now_ms + RECHECK_MS;
                     store_blob = Some((t.thumb_sha256, t.content_type, t.bytes));
-                    return Effect {
-                        row,
-                        store_blob,
-                        log_change,
-                    };
+                    return Effect { row, store_blob, log_change };
                 }
                 // never witnessed before: fall through to the first-sighting path
             }
@@ -278,11 +266,7 @@ pub fn apply_check(
             row.next_check_ms = now_ms + backoff(row.fail_count);
         }
     }
-    Effect {
-        row,
-        store_blob,
-        log_change,
-    }
+    Effect { row, store_blob, log_change }
 }
 
 fn backoff(fails: i64) -> i64 {
@@ -385,9 +369,7 @@ pub fn save_effect(
 ) -> Result<()> {
     let r = &effect.row;
     let existing: i64 =
-        archive.query_row("SELECT COUNT(*) FROM listed_image_witness", [], |x| {
-            x.get(0)
-        })?;
+        archive.query_row("SELECT COUNT(*) FROM listed_image_witness", [], |x| x.get(0))?;
     let known: bool = archive.query_row(
         "SELECT EXISTS(SELECT 1 FROM listed_image_witness WHERE covenant_id = ?1)",
         [&r.covenant_id],
@@ -406,19 +388,9 @@ pub fn save_effect(
             last_checked_ms=?7, last_change_ms=?8, change_count=?9, fail_count=?10,
             next_check_ms=?11, state=?12, pending_sha256=?13",
         rusqlite::params![
-            r.covenant_id,
-            r.source_url,
-            r.observed_sha256,
-            r.thumb_sha256,
-            r.content_type,
-            r.first_seen_ms,
-            r.last_checked_ms,
-            r.last_change_ms,
-            r.change_count,
-            r.fail_count,
-            r.next_check_ms,
-            r.state,
-            r.pending_sha256
+            r.covenant_id, r.source_url, r.observed_sha256, r.thumb_sha256, r.content_type,
+            r.first_seen_ms, r.last_checked_ms, r.last_change_ms, r.change_count, r.fail_count,
+            r.next_check_ms, r.state, r.pending_sha256
         ],
     )?;
     if let Some((from, to)) = &effect.log_change {
@@ -450,15 +422,11 @@ pub fn serve_lookup(
     media: &rusqlite::Connection,
     covenant_id: &str,
 ) -> Result<Option<(String, String, Vec<u8>)>> {
-    let Some(row) = load_row(archive, covenant_id)? else {
-        return Ok(None);
-    };
+    let Some(row) = load_row(archive, covenant_id)? else { return Ok(None) };
     if row.state != "witnessed" {
         return Ok(None);
     }
-    let (Some(sha), Some(_ct)) = (row.thumb_sha256, row.content_type) else {
-        return Ok(None);
-    };
+    let (Some(sha), Some(_ct)) = (row.thumb_sha256, row.content_type) else { return Ok(None) };
     let blob = media
         .query_row(
             "SELECT content_type, bytes FROM listed_image_blob WHERE thumb_sha256 = ?1",
@@ -495,26 +463,15 @@ mod tests {
         // the real failure modes observed live: an expiry note and two HTML pages
         assert_eq!(sniff(b"This content is no longer available."), None);
         assert_eq!(sniff(b"<!doctype html><html>..."), None);
-        assert_eq!(
-            sniff(b"<svg xmlns=..."),
-            None,
-            "SVG can script; never witnessed"
-        );
+        assert_eq!(sniff(b"<svg xmlns=..."), None, "SVG can script; never witnessed");
     }
 
     #[test]
     fn processing_shrinks_and_hashes() {
         let t = process_image(&tiny_png()).unwrap();
-        assert!(
-            t.bytes.len() < 64 * 1024,
-            "a thumb is small: {}",
-            t.bytes.len()
-        );
+        assert!(t.bytes.len() < 64 * 1024, "a thumb is small: {}", t.bytes.len());
         assert_eq!(t.content_type, "image/png");
-        assert_ne!(
-            t.source_sha256, t.thumb_sha256,
-            "source hash is over the ORIGINAL bytes"
-        );
+        assert_ne!(t.source_sha256, t.thumb_sha256, "source hash is over the ORIGINAL bytes");
         // deterministic: same input, same hashes
         let t2 = process_image(&tiny_png()).unwrap();
         assert_eq!(t.thumb_sha256, t2.thumb_sha256);
@@ -542,12 +499,7 @@ mod tests {
 
     #[test]
     fn a_first_sighting_witnesses() {
-        let e = apply_check(
-            fresh("https://x/logo.png"),
-            Checked::Image(thumb(1)),
-            1000,
-            false,
-        );
+        let e = apply_check(fresh("https://x/logo.png"), Checked::Image(thumb(1)), 1000, false);
         assert_eq!(e.row.state, "witnessed");
         assert_eq!(e.row.first_seen_ms, Some(1000));
         assert!(e.store_blob.is_some());
@@ -559,12 +511,7 @@ mod tests {
     /// replace the art, and an adoption is dated and counted forever.
     #[test]
     fn a_swap_needs_two_agreeing_checks_and_goes_on_the_record() {
-        let e1 = apply_check(
-            fresh("https://x/l.png"),
-            Checked::Image(thumb(1)),
-            1000,
-            false,
-        );
+        let e1 = apply_check(fresh("https://x/l.png"), Checked::Image(thumb(1)), 1000, false);
         // new bytes appear once: held, old copy still served
         let e2 = apply_check(e1.row, Checked::Image(thumb(2)), 2000, false);
         assert_eq!(e2.row.observed_sha256, Some(format!("{:064x}", 1)));
@@ -581,10 +528,7 @@ mod tests {
         assert_eq!(e4.row.change_count, 1);
         assert_eq!(e4.row.last_change_ms, Some(4000));
         assert!(e4.store_blob.is_some());
-        assert_eq!(
-            e4.log_change,
-            Some((format!("{:064x}", 1), format!("{:064x}", 2)))
-        );
+        assert_eq!(e4.log_change, Some((format!("{:064x}", 1), format!("{:064x}", 2))));
     }
 
     /// A url change in the PUBLISHED LIST is the publisher updating the logo
@@ -593,12 +537,7 @@ mod tests {
     /// record, because a re-skin is a fact either way.
     #[test]
     fn a_replaced_url_adopts_immediately_and_is_recorded() {
-        let e1 = apply_check(
-            fresh("https://x/old.png"),
-            Checked::Image(thumb(1)),
-            1000,
-            false,
-        );
+        let e1 = apply_check(fresh("https://x/old.png"), Checked::Image(thumb(1)), 1000, false);
         let mut moved = e1.row;
         moved.source_url = "https://x/new.png".into();
         let e2 = apply_check(moved, Checked::Image(thumb(2)), 2000, true);
@@ -616,44 +555,29 @@ mod tests {
     /// outliving its source is the entire point.
     #[test]
     fn a_dead_source_never_unwitnesses() {
-        let e1 = apply_check(
-            fresh("https://x/l.png"),
-            Checked::Image(thumb(1)),
-            1000,
-            false,
-        );
+        let e1 = apply_check(fresh("https://x/l.png"), Checked::Image(thumb(1)), 1000, false);
         let e2 = apply_check(e1.row, Checked::Failed, 2000, false);
         assert_eq!(e2.row.state, "witnessed", "the copy survives the source");
         assert_eq!(e2.row.fail_count, 1);
         let e3 = apply_check(e2.row, Checked::NotAnImage, 3000, false);
-        assert_eq!(
-            e3.row.state, "witnessed",
-            "even an expiry page changes nothing"
-        );
+        assert_eq!(e3.row.state, "witnessed", "even an expiry page changes nothing");
         // but a source that was NEVER witnessed reports honestly
         let n = apply_check(fresh("https://x/dead.png"), Checked::Failed, 1000, false);
         assert_eq!(n.row.state, "unavailable");
-        let h = apply_check(
-            fresh("https://x/page.html"),
-            Checked::NotAnImage,
-            1000,
-            false,
-        );
+        let h = apply_check(fresh("https://x/page.html"), Checked::NotAnImage, 1000, false);
         assert_eq!(h.row.state, "not_an_image");
     }
 
     #[test]
     fn failures_back_off_and_recover() {
-        let mut row = apply_check(fresh("https://x/l.png"), Checked::Image(thumb(1)), 0, false).row;
+        let mut row =
+            apply_check(fresh("https://x/l.png"), Checked::Image(thumb(1)), 0, false).row;
         let mut last = 0;
         for i in 1..=6 {
             let e = apply_check(row, Checked::Failed, i * 10, false);
             row = e.row;
             let wait = row.next_check_ms - i * 10;
-            assert!(
-                wait >= last.min(RECHECK_MS),
-                "backoff never shrinks while failing"
-            );
+            assert!(wait >= last.min(RECHECK_MS), "backoff never shrinks while failing");
             assert!(wait <= RECHECK_MS, "and never exceeds the healthy cadence");
             last = wait;
         }
@@ -682,9 +606,7 @@ mod tests {
         assert_eq!(ct, "image/png");
         assert_eq!(bytes, vec![7u8; 8]);
         // a never-witnessed id serves nothing
-        assert!(serve_lookup(&archive, &media, &"cd".repeat(32))
-            .unwrap()
-            .is_none());
+        assert!(serve_lookup(&archive, &media, &"cd".repeat(32)).unwrap().is_none());
         // delisting stops serving but keeps the record
         archive
             .execute(
@@ -694,9 +616,7 @@ mod tests {
             .unwrap();
         assert!(serve_lookup(&archive, &media, &cov).unwrap().is_none());
         let kept: i64 = archive
-            .query_row("SELECT COUNT(*) FROM listed_image_witness", [], |r| {
-                r.get(0)
-            })
+            .query_row("SELECT COUNT(*) FROM listed_image_witness", [], |r| r.get(0))
             .unwrap();
         assert_eq!(kept, 1, "the evidence outlives the listing");
     }

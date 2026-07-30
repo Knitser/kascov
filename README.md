@@ -170,7 +170,7 @@ cargo build --workspace
 cargo test --workspace                              # model, decoder, store, sync, worker, labkit, sim
 cargo test -p kascov-core --test sync_replay        # reorg + lineage convergence on scripted chains
 cargo test -p kascov-core --test gap_recovery       # window merge, resequencing, idempotence
-npm ci && npm run test:web                          # Node contracts + real Chrome responsive behavior
+node --test web/*.test.mjs                          # browser contracts: routing, loading, refresh, pending, galaxy
 python3 -m unittest scripts/test_traffic_report.py  # log-parsing privacy rules
 ```
 
@@ -205,7 +205,7 @@ Issues and pull requests are welcome — bug reports about a coin kascov classif
 
 If you build a Kaspa indexer, wallet or explorer and our numbers disagree, please open an issue. The `/data/{net}/consistency.json` report exists precisely so cross-implementation differences surface as facts rather than arguments.
 
-Run `cargo test --workspace` and `npm run test:web` before opening a PR.
+Run `cargo test --workspace` and `node --test web/*.test.mjs` before opening a PR.
 
 ## License
 

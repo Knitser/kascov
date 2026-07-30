@@ -13,56 +13,22 @@ use anyhow::{Context, Result};
 /* Word lists copied verbatim from web/core/format.js. Do not reorder. */
 
 const ADJECTIVES: [&str; 40] = [
-    "brave",
-    "quick",
-    "silent",
-    "gentle",
-    "bold",
-    "clever",
-    "curious",
-    "dizzy",
-    "eager",
-    "fierce",
-    "glad",
-    "happy",
-    "humble",
-    "jolly",
-    "keen",
-    "lively",
-    "lucky",
-    "mellow",
-    "nimble",
-    "noble",
-    "patient",
-    "playful",
-    "proud",
-    "quiet",
-    "rapid",
-    "restless",
-    "shy",
-    "sleepy",
-    "sly",
-    "snappy",
-    "steady",
-    "stubborn",
-    "sunny",
-    "swift",
-    "tidy",
-    "tiny",
-    "vivid",
-    "wandering",
-    "wise",
-    "zesty",
+    "brave", "quick", "silent", "gentle", "bold", "clever", "curious", "dizzy",
+    "eager", "fierce", "glad", "happy", "humble", "jolly", "keen", "lively",
+    "lucky", "mellow", "nimble", "noble", "patient", "playful", "proud", "quiet",
+    "rapid", "restless", "shy", "sleepy", "sly", "snappy", "steady", "stubborn",
+    "sunny", "swift", "tidy", "tiny", "vivid", "wandering", "wise", "zesty",
 ];
 const COLORS: [&str; 12] = [
-    "teal", "amber", "coral", "indigo", "jade", "crimson", "cobalt", "olive", "violet", "copper",
-    "pearl", "slate",
+    "teal", "amber", "coral", "indigo", "jade", "crimson",
+    "cobalt", "olive", "violet", "copper", "pearl", "slate",
 ];
 const ANIMALS: [&str; 40] = [
-    "otter", "lynx", "crane", "fox", "owl", "badger", "heron", "marmot", "falcon", "tortoise",
-    "hare", "raven", "seal", "ibis", "moth", "newt", "panda", "quail", "robin", "stoat", "tapir",
-    "urchin", "vole", "wren", "yak", "zebra", "gecko", "dolphin", "ferret", "magpie", "hedgehog",
-    "jackal", "kiwi", "lemur", "mole", "narwhal", "osprey", "puffin", "squid", "toad",
+    "otter", "lynx", "crane", "fox", "owl", "badger", "heron", "marmot",
+    "falcon", "tortoise", "hare", "raven", "seal", "ibis", "moth", "newt",
+    "panda", "quail", "robin", "stoat", "tapir", "urchin", "vole", "wren",
+    "yak", "zebra", "gecko", "dolphin", "ferret", "magpie", "hedgehog", "jackal",
+    "kiwi", "lemur", "mole", "narwhal", "osprey", "puffin", "squid", "toad",
 ];
 
 /// JS: `parseInt(id.slice(i*2, i*2+2), 16)` with NaN -> 0. The slice clamps
@@ -74,8 +40,7 @@ fn id_byte(id: &str, i: usize) -> u32 {
 }
 
 pub fn friendly_name(id: &str) -> String {
-    let adj =
-        ADJECTIVES[((id_byte(id, 0) * 256 + id_byte(id, 1)) % ADJECTIVES.len() as u32) as usize];
+    let adj = ADJECTIVES[((id_byte(id, 0) * 256 + id_byte(id, 1)) % ADJECTIVES.len() as u32) as usize];
     let col = COLORS[((id_byte(id, 2) * 256 + id_byte(id, 3)) % COLORS.len() as u32) as usize];
     let ani = ANIMALS[((id_byte(id, 4) * 256 + id_byte(id, 5)) % ANIMALS.len() as u32) as usize];
     format!("{adj}-{col}-{ani}")
@@ -346,13 +311,9 @@ pub fn render_png(svg: &str) -> Result<Vec<u8>> {
     };
     let tree = resvg::usvg::Tree::from_str(svg, &opt).context("parse card svg")?;
     let size = tree.size().to_int_size();
-    let mut pixmap =
-        resvg::tiny_skia::Pixmap::new(size.width(), size.height()).context("allocate pixmap")?;
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::identity(),
-        &mut pixmap.as_mut(),
-    );
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())
+        .context("allocate pixmap")?;
+    resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pixmap.as_mut());
     pixmap.encode_png().context("encode png")
 }
 

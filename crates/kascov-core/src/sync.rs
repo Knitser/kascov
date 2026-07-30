@@ -22,9 +22,7 @@ pub struct SyncStats {
 #[derive(Clone, Debug)]
 pub enum SyncUpdate {
     Progress(SyncStats),
-    Reorg {
-        rolled_back: u64,
-    },
+    Reorg { rolled_back: u64 },
     Event {
         covenant_id: CovenantId,
         kind: EventKind,
@@ -84,9 +82,7 @@ pub async fn sync_once(
         stats.reorged_out = step.removed.len() as u64;
         tracing::info!("reorg: rolling back {} chain blocks", step.removed.len());
         store.rollback(&step.removed)?;
-        updates(SyncUpdate::Reorg {
-            rolled_back: stats.reorged_out,
-        });
+        updates(SyncUpdate::Reorg { rolled_back: stats.reorged_out });
     }
 
     let mut since_checkpoint = 0u64;
@@ -94,8 +90,8 @@ pub async fn sync_once(
     let mut last_daa = 0u64;
 
     /* Prefetch accepting blocks concurrently (ordered) while the store work
-    below stays strictly sequential per chain block. Items are moved into
-    the stream so the fetch closure stays lifetime-free. */
+       below stays strictly sequential per chain block. Items are moved into
+       the stream so the fetch closure stays lifetime-free. */
     let mut prefetched = futures::stream::iter(step.added)
         .map(|accepted| async move {
             let block = node.block_with_txs(accepted.accepting_block).await;
@@ -293,20 +289,15 @@ pub enum ReAnchor {
 /// truthful walk must return blocks, so an EMPTY "success" (how some nodes
 /// answer a stranded cursor) counts as unwalkable rather than as health.
 pub async fn re_anchor(node: &impl ChainSource, store: &mut Store) -> Result<ReAnchor> {
-    let Some(cursor) = store.cursor()? else {
-        return Ok(ReAnchor::NotWedged);
-    };
+    let Some(cursor) = store.cursor()? else { return Ok(ReAnchor::NotWedged) };
     let lagging = match (store.processed_daa()?, store.tip()?) {
         (Some(processed), Some((tip, _))) => tip.saturating_sub(processed) > WEDGE_LAG_DAA,
         _ => false,
     };
-    let walkable =
-        |step: &ChainStep| !(lagging && step.removed.is_empty() && step.added.is_empty());
-    if node
-        .virtual_chain_from(cursor)
-        .await
-        .is_ok_and(|step| walkable(&step))
-    {
+    let walkable = |step: &ChainStep| {
+        !(lagging && step.removed.is_empty() && step.added.is_empty())
+    };
+    if node.virtual_chain_from(cursor).await.is_ok_and(|step| walkable(&step)) {
         return Ok(ReAnchor::NotWedged);
     }
     let mut candidates = store.recent_accepting_blocks(RE_ANCHOR_DENSE_PROBES)?;
@@ -316,11 +307,7 @@ pub async fn re_anchor(node: &impl ChainSource, store: &mut Store) -> Result<ReA
         if anchor == cursor || !probed.insert(anchor) {
             continue; // the cursor is already proven unwalkable above
         }
-        if !node
-            .virtual_chain_from(anchor)
-            .await
-            .is_ok_and(|step| walkable(&step))
-        {
+        if !node.virtual_chain_from(anchor).await.is_ok_and(|step| walkable(&step)) {
             continue;
         }
         let above = store.accepting_blocks_above(anchor_daa)?;
@@ -379,29 +366,19 @@ impl ProgressWatch {
         if advanced {
             self.last_processed = processed;
         }
-        let lagging =
-            matches!((processed, tip), (Some(p), Some(t)) if t.saturating_sub(p) > WEDGE_LAG_DAA);
+        let lagging = matches!((processed, tip), (Some(p), Some(t)) if t.saturating_sub(p) > WEDGE_LAG_DAA);
         if advanced || !lagging {
             self.stuck_passes = 0;
-            return PassVerdict {
-                advanced,
-                demand_recovery: false,
-            };
+            return PassVerdict { advanced, demand_recovery: false };
         }
         self.stuck_passes += 1;
         if self.stuck_passes >= WEDGE_PASSES {
             // Re-arm: a recovery attempt that changes nothing earns another
             // full window before the next demand.
             self.stuck_passes = 0;
-            return PassVerdict {
-                advanced,
-                demand_recovery: true,
-            };
+            return PassVerdict { advanced, demand_recovery: true };
         }
-        PassVerdict {
-            advanced,
-            demand_recovery: false,
-        }
+        PassVerdict { advanced, demand_recovery: false }
     }
 }
 
@@ -499,12 +476,7 @@ pub struct GapRecoveryOptions {
 
 impl Default for GapRecoveryOptions {
     fn default() -> Self {
-        Self {
-            from_daa: None,
-            to_daa: None,
-            min_gap_daa: 100_000,
-            anchor_block: None,
-        }
+        Self { from_daa: None, to_daa: None, min_gap_daa: 100_000, anchor_block: None }
     }
 }
 
@@ -606,12 +578,7 @@ pub async fn recover_gap(
                 progress(format!(
                     "gap [{lo}, {hi}] already recovered — pass --from-daa/--to-daa to run another window"
                 ));
-                return Ok(GapRecoveryReport {
-                    gap_lo: lo,
-                    gap_hi: hi,
-                    already_recovered: true,
-                    ..Default::default()
-                });
+                return Ok(GapRecoveryReport { gap_lo: lo, gap_hi: hi, already_recovered: true, ..Default::default() });
             } else {
                 store.find_daa_gap(opts.min_gap_daa)?.ok_or(crate::Error::Invalid {
                     what: "gap detection",
@@ -628,20 +595,9 @@ pub async fn recover_gap(
     // re-walking a window whose recorded recovery could not reach deep history
     // (the walk was pruning-point-bounded then); every merge dedups, so the
     // re-walk only ever adds what the first pass physically couldn't see.
-    if opts.anchor_block.is_none()
-        && recovered
-            .iter()
-            .any(|&(lo, hi)| gap_lo >= lo && gap_hi <= hi)
-    {
-        progress(format!(
-            "gap [{gap_lo}, {gap_hi}] already recovered — no-op"
-        ));
-        return Ok(GapRecoveryReport {
-            gap_lo,
-            gap_hi,
-            already_recovered: true,
-            ..Default::default()
-        });
+    if opts.anchor_block.is_none() && recovered.iter().any(|&(lo, hi)| gap_lo >= lo && gap_hi <= hi) {
+        progress(format!("gap [{gap_lo}, {gap_hi}] already recovered — no-op"));
+        return Ok(GapRecoveryReport { gap_lo, gap_hi, already_recovered: true, ..Default::default() });
     }
     // Persist the window before the first fetch: an interrupted run must
     // resume THESE bounds, not whatever discontinuity its partial merge left.
@@ -668,19 +624,13 @@ pub async fn recover_gap(
         }
         None => match opts.anchor_block {
             Some(anchor) => {
-                progress(format!(
-                    "anchoring walk at explicit block {anchor} (archival override)"
-                ));
+                progress(format!("anchoring walk at explicit block {anchor} (archival override)"));
                 anchor
             }
             None => dag.pruning_point,
         },
     };
-    let mut report = GapRecoveryReport {
-        gap_lo,
-        gap_hi,
-        ..Default::default()
-    };
+    let mut report = GapRecoveryReport { gap_lo, gap_hi, ..Default::default() };
     let mut merged = crate::store::MergeCounts::default();
 
     'walk: loop {
@@ -737,11 +687,7 @@ pub async fn recover_gap(
                 report.residual_blocks += 1;
                 report.residual_txs += unresolved;
                 let d = accepting.daa_score;
-                report.residual_daa_lo = if report.residual_daa_lo == 0 {
-                    d
-                } else {
-                    report.residual_daa_lo.min(d)
-                };
+                report.residual_daa_lo = if report.residual_daa_lo == 0 { d } else { report.residual_daa_lo.min(d) };
                 report.residual_daa_hi = report.residual_daa_hi.max(d);
             }
             let block_events = if accepting.daa_score <= gap_hi {
@@ -796,10 +742,7 @@ pub async fn recover_gap(
         store.set_gap_walk_cursor(&cursor)?;
         progress(format!(
             "walked {} chain blocks — {} events, {} cells, {} spends merged so far",
-            report.chain_blocks_walked,
-            merged.events_added,
-            merged.utxos_added,
-            merged.spends_repaired
+            report.chain_blocks_walked, merged.events_added, merged.utxos_added, merged.spends_repaired
         ));
     }
 
@@ -875,9 +818,7 @@ fn reconcile_block(
     {
         let mut touched: Vec<CovenantId> = vec![];
         for (input_index, input) in tx.inputs.iter().enumerate() {
-            let Some(id) = store.live_covenant_utxo(&input.previous_outpoint)? else {
-                continue;
-            };
+            let Some(id) = store.live_covenant_utxo(&input.previous_outpoint)? else { continue };
             block_events.spent_utxos.push((
                 input.previous_outpoint,
                 tx.txid,
@@ -953,13 +894,8 @@ fn classify<'a>(
             }
         }
         for (index, output) in tx.outputs.iter().enumerate() {
-            let Some(binding) = output.covenant else {
-                continue;
-            };
-            let outpoint = Outpoint {
-                txid: tx.txid,
-                index: index as u32,
-            };
+            let Some(binding) = output.covenant else { continue };
+            let outpoint = Outpoint { txid: tx.txid, index: index as u32 };
             touched.entry(binding.covenant_id).or_default().1 += 1;
             created_overlay.insert(outpoint, binding.covenant_id);
             block_events.created_utxos.push(NewUtxo {
@@ -1012,19 +948,12 @@ fn is_valid_genesis(tx: &Transaction, id: &CovenantId) -> bool {
         .filter(|(_, o)| o.covenant.is_some_and(|b| b.covenant_id == *id))
         .map(|(i, o)| (i as u32, o))
         .collect();
-    let Some(&(_, first)) = bound.first() else {
-        return false;
-    };
+    let Some(&(_, first)) = bound.first() else { return false };
     let auth = first.covenant.expect("filtered on Some").authorizing_input;
-    if bound
-        .iter()
-        .any(|(_, o)| o.covenant.expect("filtered on Some").authorizing_input != auth)
-    {
+    if bound.iter().any(|(_, o)| o.covenant.expect("filtered on Some").authorizing_input != auth) {
         return false;
     }
-    let Some(input) = tx.inputs.get(auth as usize) else {
-        return false;
-    };
+    let Some(input) = tx.inputs.get(auth as usize) else { return false };
     let fields: Vec<(u32, u64, u16, &[u8])> = bound
         .iter()
         .map(|&(i, o)| (i, o.value, o.spk_version, o.spk_script.as_slice()))
@@ -1152,8 +1081,8 @@ mod tests {
     /// (zero RPC) once complete.
     #[tokio::test]
     async fn backfill_stamps_pre_capture_rows_and_completes() {
-        let db =
-            std::env::temp_dir().join(format!("kascov-sync-backfill-{}.db", std::process::id()));
+        let db = std::env::temp_dir()
+            .join(format!("kascov-sync-backfill-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&db);
         let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
 
@@ -1170,16 +1099,10 @@ mod tests {
             )
             .unwrap();
         store
-            .apply(
-                &block_events(h(2), 200, vec![event(0xA1, tx_id(0xC0), 1)]),
-                h(2),
-            )
+            .apply(&block_events(h(2), 200, vec![event(0xA1, tx_id(0xC0), 1)]), h(2))
             .unwrap();
         store.wipe_tx_indices_for_test().unwrap();
-        assert_eq!(
-            store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index,
-            None
-        );
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index, None);
 
         // The node answers in two capped responses: pruning point -> h1, h1 -> h2.
         let node = FakeAcceptance {
@@ -1214,10 +1137,7 @@ mod tests {
         let a1 = store.events(&CovenantId([0xA1; 32])).unwrap();
         assert_eq!(a1[0].tx_index, Some(1));
         assert_eq!(a1[1].tx_index, Some(1)); // h2's list: coinbase, then 0xC0
-        assert_eq!(
-            store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index,
-            Some(2)
-        );
+        assert_eq!(store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index, Some(2));
         assert!(store.tx_index_backfill_done().unwrap());
 
         // Completed runs are O(1): no RPC at all.
@@ -1239,10 +1159,7 @@ mod tests {
     /// An empty successful step — what a node answers for a walkable cursor
     /// already at the tip (and how some nodes answer a STRANDED one).
     fn walkable() -> ChainStep {
-        ChainStep {
-            removed: vec![],
-            added: vec![],
-        }
+        ChainStep { removed: vec![], added: vec![] }
     }
 
     /// A successful walk that actually returns chain blocks — what a
@@ -1250,40 +1167,24 @@ mod tests {
     fn walkable_with_blocks() -> ChainStep {
         ChainStep {
             removed: vec![],
-            added: vec![AcceptedBlock {
-                accepting_block: h(9),
-                accepted_tx_ids: vec![],
-            }],
+            added: vec![AcceptedBlock { accepting_block: h(9), accepted_tx_ids: vec![] }],
         }
     }
 
     /// Four indexed accepting blocks (daa 100..400); h2 creates a covenant
     /// UTXO that h3 spends; cursor at h4.
     fn stranded_store(name: &str) -> Store {
-        let db = std::env::temp_dir().join(format!("kascov-sync-{name}-{}.db", std::process::id()));
+        let db =
+            std::env::temp_dir().join(format!("kascov-sync-{name}-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&db);
         let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
-        store
-            .apply(
-                &block_events(h(1), 100, vec![event(0xA1, tx_id(0xA0), 1)]),
-                h(1),
-            )
-            .unwrap();
+        store.apply(&block_events(h(1), 100, vec![event(0xA1, tx_id(0xA0), 1)]), h(1)).unwrap();
         let mut b2 = block_events(h(2), 200, vec![event(0xB2, tx_id(0xB0), 1)]);
         b2.created_utxos.push(utxo(0xB2, tx_id(0xB0), 0));
         store.apply(&b2, h(2)).unwrap();
         let mut b3 = block_events(h(3), 300, vec![event(0xC3, tx_id(0xC0), 1)]);
         b3.created_utxos.push(utxo(0xC3, tx_id(0xC0), 0));
-        b3.spent_utxos.push((
-            Outpoint {
-                txid: tx_id(0xB0),
-                index: 0,
-            },
-            tx_id(0xC0),
-            vec![0xAA],
-            7,
-            0,
-        ));
+        b3.spent_utxos.push((Outpoint { txid: tx_id(0xB0), index: 0 }, tx_id(0xC0), vec![0xAA], 7, 0));
         store.apply(&b3, h(3)).unwrap();
         let mut b4 = block_events(h(4), 400, vec![event(0xA1, tx_id(0xD0), 1)]);
         b4.created_utxos.push(utxo(0xA1, tx_id(0xD0), 0));
@@ -1316,15 +1217,9 @@ mod tests {
         // UTXO is gone; C3 (born in h3) disappears entirely.
         let a1 = store.events(&CovenantId([0xA1; 32])).unwrap();
         assert_eq!(a1.len(), 1);
-        assert!(store
-            .utxos(&CovenantId([0xA1; 32]), false)
-            .unwrap()
-            .is_empty());
+        assert!(store.utxos(&CovenantId([0xA1; 32]), false).unwrap().is_empty());
         assert!(store.events(&CovenantId([0xC3; 32])).unwrap().is_empty());
-        assert!(store
-            .utxos(&CovenantId([0xC3; 32]), false)
-            .unwrap()
-            .is_empty());
+        assert!(store.utxos(&CovenantId([0xC3; 32]), false).unwrap().is_empty());
         // h2's UTXO survives and its rolled-back spend is undone.
         let b2 = store.utxos(&CovenantId([0xB2; 32]), false).unwrap();
         assert_eq!(b2.len(), 1);
@@ -1362,10 +1257,7 @@ mod tests {
             rpc_calls: AtomicU64::new(0),
         };
 
-        assert_eq!(
-            re_anchor(&node, &mut store).await.unwrap(),
-            ReAnchor::NothingWalkable
-        );
+        assert_eq!(re_anchor(&node, &mut store).await.unwrap(), ReAnchor::NothingWalkable);
         assert_eq!(store.cursor().unwrap(), Some(h(4)));
         assert_eq!(store.processed_daa().unwrap(), Some(400));
         assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap().len(), 2);
@@ -1386,10 +1278,7 @@ mod tests {
             rpc_calls: AtomicU64::new(0),
         };
 
-        assert_eq!(
-            re_anchor(&node, &mut store).await.unwrap(),
-            ReAnchor::NotWedged
-        );
+        assert_eq!(re_anchor(&node, &mut store).await.unwrap(), ReAnchor::NotWedged);
         assert_eq!(store.cursor().unwrap(), Some(h(4)));
         assert_eq!(node.rpc_calls.load(Ordering::Relaxed), 1);
     }
@@ -1411,10 +1300,7 @@ mod tests {
             rpc_calls: AtomicU64::new(0),
         };
 
-        assert_eq!(
-            re_anchor(&node, &mut store).await.unwrap(),
-            ReAnchor::Anchored(h(2))
-        );
+        assert_eq!(re_anchor(&node, &mut store).await.unwrap(), ReAnchor::Anchored(h(2)));
         assert_eq!(store.cursor().unwrap(), Some(h(2)));
         assert_eq!(store.processed_daa().unwrap(), Some(200));
         // Cursor probe + h3 + h2 (h4 = the cursor is skipped as a candidate).
@@ -1432,10 +1318,7 @@ mod tests {
         for pass in 1..WEDGE_PASSES {
             let verdict = watch.observe(Some(100), Some(tip));
             assert!(!verdict.advanced);
-            assert!(
-                !verdict.demand_recovery,
-                "demanded too early at pass {pass}"
-            );
+            assert!(!verdict.demand_recovery, "demanded too early at pass {pass}");
         }
         assert!(watch.observe(Some(100), Some(tip)).demand_recovery);
         // Re-armed: the next demand needs a full window again.
@@ -1476,21 +1359,13 @@ mod tests {
     /// finalize retires the pending marker together with the completed one.
     #[tokio::test]
     async fn recover_gap_resumes_a_pending_window_over_detection() {
-        let db =
-            std::env::temp_dir().join(format!("kascov-sync-gap-pending-{}.db", std::process::id()));
+        let db = std::env::temp_dir()
+            .join(format!("kascov-sync-gap-pending-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&db);
         let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
+        store.apply(&block_events(h(1), 100, vec![event(0xA1, tx_id(0xA0), 0)]), h(1)).unwrap();
         store
-            .apply(
-                &block_events(h(1), 100, vec![event(0xA1, tx_id(0xA0), 0)]),
-                h(1),
-            )
-            .unwrap();
-        store
-            .apply(
-                &block_events(h(2), 2_000_000, vec![event(0xA1, tx_id(0xB0), 0)]),
-                h(2),
-            )
+            .apply(&block_events(h(2), 2_000_000, vec![event(0xA1, tx_id(0xB0), 0)]), h(2))
             .unwrap();
         store.set_gap_recovery_pending(100, 2_000_000).unwrap();
 
@@ -1500,19 +1375,10 @@ mod tests {
         // panics on any body fetch).
         let node = FakeAcceptance {
             pruning_point: h(0),
-            steps: HashMap::from([(
-                h(0),
-                ChainStep {
-                    removed: vec![],
-                    added: vec![],
-                },
-            )]),
+            steps: HashMap::from([(h(0), ChainStep { removed: vec![], added: vec![] })]),
             rpc_calls: AtomicU64::new(0),
         };
-        let opts = GapRecoveryOptions {
-            min_gap_daa: u64::MAX,
-            ..Default::default()
-        };
+        let opts = GapRecoveryOptions { min_gap_daa: u64::MAX, ..Default::default() };
         let report = recover_gap(&node, &mut store, &opts, |_| {}).await.unwrap();
         assert!(!report.already_recovered);
         assert_eq!((report.gap_lo, report.gap_hi), (100, 2_000_000));
@@ -1529,25 +1395,17 @@ mod tests {
     /// an error).
     #[tokio::test]
     async fn backfill_leaves_pruned_history_null() {
-        let db = std::env::temp_dir().join(format!(
-            "kascov-sync-backfill-pruned-{}.db",
-            std::process::id()
-        ));
+        let db = std::env::temp_dir()
+            .join(format!("kascov-sync-backfill-pruned-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&db);
         let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
 
         // h1 predates the pruning point (h2); only h3 is walkable.
         store
-            .apply(
-                &block_events(h(1), 100, vec![event(0xA1, tx_id(0xA0), 1)]),
-                h(1),
-            )
+            .apply(&block_events(h(1), 100, vec![event(0xA1, tx_id(0xA0), 1)]), h(1))
             .unwrap();
         store
-            .apply(
-                &block_events(h(3), 300, vec![event(0xB2, tx_id(0xB0), 1)]),
-                h(3),
-            )
+            .apply(&block_events(h(3), 300, vec![event(0xB2, tx_id(0xB0), 1)]), h(3))
             .unwrap();
         store.wipe_tx_indices_for_test().unwrap();
 
@@ -1568,14 +1426,8 @@ mod tests {
 
         let stamped = backfill_tx_index(&node, &mut store).await.unwrap();
         assert_eq!(stamped, 1);
-        assert_eq!(
-            store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index,
-            None
-        );
-        assert_eq!(
-            store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index,
-            Some(1)
-        );
+        assert_eq!(store.events(&CovenantId([0xA1; 32])).unwrap()[0].tx_index, None);
+        assert_eq!(store.events(&CovenantId([0xB2; 32])).unwrap()[0].tx_index, Some(1));
         assert!(store.tx_index_backfill_done().unwrap());
     }
 
@@ -1585,8 +1437,8 @@ mod tests {
     /// state returns nothing (the cheap exit for ordinary chain noise).
     #[test]
     fn classify_pending_covers_genesis_transition_burn_and_noop() {
-        let db =
-            std::env::temp_dir().join(format!("kascov-classify-pending-{}.db", std::process::id()));
+        let db = std::env::temp_dir()
+            .join(format!("kascov-classify-pending-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&db);
         let mut store = Store::open(&db, Network::Testnet(10)).unwrap();
 
@@ -1594,10 +1446,7 @@ mod tests {
         let mut b = block_events(h(1), 100, vec![event(0xB2, tx_id(0xB0), 1)]);
         b.created_utxos.push(utxo(0xB2, tx_id(0xB0), 0));
         store.apply(&b, h(1)).unwrap();
-        let live = Outpoint {
-            txid: tx_id(0xB0),
-            index: 0,
-        };
+        let live = Outpoint { txid: tx_id(0xB0), index: 0 };
 
         // A one-input, one-output pending-tx builder.
         let mk = |txid: TxId, spend: Option<Outpoint>, out: Output| Transaction {
@@ -1618,24 +1467,13 @@ mod tests {
             value: 1_000,
             spk_version: 0,
             spk_script: vec![0x51],
-            covenant: Some(CovenantBinding {
-                covenant_id: id,
-                authorizing_input: 0,
-            }),
+            covenant: Some(CovenantBinding { covenant_id: id, authorizing_input: 0 }),
         };
-        let plain_out = || Output {
-            value: 1_000,
-            spk_version: 0,
-            spk_script: vec![0x51],
-            covenant: None,
-        };
+        let plain_out =
+            || Output { value: 1_000, spk_version: 0, spk_script: vec![0x51], covenant: None };
 
         // Transition: spends the live UTXO and re-creates state under the same id.
-        let tx_transition = mk(
-            tx_id(0x11),
-            Some(live),
-            covenant_out(CovenantId([0xB2; 32])),
-        );
+        let tx_transition = mk(tx_id(0x11), Some(live), covenant_out(CovenantId([0xB2; 32])));
         assert_eq!(
             classify_pending(&store, &tx_transition).unwrap(),
             vec![PendingTxEvent {
@@ -1648,47 +1486,29 @@ mod tests {
         let tx_burn = mk(tx_id(0x22), Some(live), plain_out());
         assert_eq!(
             classify_pending(&store, &tx_burn).unwrap(),
-            vec![PendingTxEvent {
-                covenant_id: CovenantId([0xB2; 32]),
-                kind: EventKind::Burn
-            }]
+            vec![PendingTxEvent { covenant_id: CovenantId([0xB2; 32]), kind: EventKind::Burn }]
         );
 
         // Genesis: an output bound to an id that recomputes from its authorizing
         // input's previous outpoint — a fresh KIP-20 birth the store hasn't seen.
-        let gp = Outpoint {
-            txid: tx_id(0x77),
-            index: 3,
-        };
+        let gp = Outpoint { txid: tx_id(0x77), index: 3 };
         let (val, spk) = (5_000u64, vec![0xaa, 0xbb]);
         let gid = crate::node::compute_covenant_id(&gp, &[(0, val, 0, spk.as_slice())]);
         let genesis_out = Output {
             value: val,
             spk_version: 0,
             spk_script: spk,
-            covenant: Some(CovenantBinding {
-                covenant_id: gid,
-                authorizing_input: 0,
-            }),
+            covenant: Some(CovenantBinding { covenant_id: gid, authorizing_input: 0 }),
         };
         let tx_genesis = mk(tx_id(0x33), Some(gp), genesis_out);
         assert_eq!(
             classify_pending(&store, &tx_genesis).unwrap(),
-            vec![PendingTxEvent {
-                covenant_id: gid,
-                kind: EventKind::Genesis
-            }]
+            vec![PendingTxEvent { covenant_id: gid, kind: EventKind::Genesis }]
         );
 
         // Non-covenant: touches no covenant UTXO and binds no id — empty vec.
-        let tx_noop = mk(
-            tx_id(0x44),
-            Some(Outpoint {
-                txid: tx_id(0xFE),
-                index: 9,
-            }),
-            plain_out(),
-        );
+        let tx_noop =
+            mk(tx_id(0x44), Some(Outpoint { txid: tx_id(0xFE), index: 9 }), plain_out());
         assert!(classify_pending(&store, &tx_noop).unwrap().is_empty());
     }
 }

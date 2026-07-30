@@ -10,12 +10,8 @@ use std::str::FromStr;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let outpoint_arg = args
-        .next()
-        .expect("usage: covid <txid>:<index> <idx>:<value>:<script_hex>…");
-    let (txid, idx) = outpoint_arg
-        .split_once(':')
-        .expect("outpoint as txid:index");
+    let outpoint_arg = args.next().expect("usage: covid <txid>:<index> <idx>:<value>:<script_hex>…");
+    let (txid, idx) = outpoint_arg.split_once(':').expect("outpoint as txid:index");
     let outpoint = Outpoint {
         txid: TxId::from_str(txid).expect("valid txid"),
         index: idx.parse().expect("outpoint index"),
@@ -29,9 +25,7 @@ fn main() {
             (index, value, 0u16, script)
         })
         .collect();
-    let borrowed: Vec<(u32, u64, u16, &[u8])> = outs
-        .iter()
-        .map(|(i, v, ver, s)| (*i, *v, *ver, s.as_slice()))
-        .collect();
+    let borrowed: Vec<(u32, u64, u16, &[u8])> =
+        outs.iter().map(|(i, v, ver, s)| (*i, *v, *ver, s.as_slice())).collect();
     println!("{}", compute_covenant_id(&outpoint, &borrowed));
 }

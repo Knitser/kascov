@@ -30,10 +30,7 @@ fn is_valid_genesis(tx: &Transaction, id: &CovenantId) -> Result<bool, String> {
         return Err("no bound outputs".into());
     };
     let auth = first.covenant.expect("filtered").authorizing_input;
-    if bound
-        .iter()
-        .any(|(_, o)| o.covenant.expect("filtered").authorizing_input != auth)
-    {
+    if bound.iter().any(|(_, o)| o.covenant.expect("filtered").authorizing_input != auth) {
         return Ok(false);
     }
     let Some(input) = tx.inputs.get(auth as usize) else {
@@ -43,10 +40,7 @@ fn is_valid_genesis(tx: &Transaction, id: &CovenantId) -> Result<bool, String> {
         .iter()
         .map(|&(i, o)| (i, o.value, o.spk_version, o.spk_script.as_slice()))
         .collect();
-    let _ = Outpoint {
-        txid: TxId([0; 32]),
-        index: 0,
-    }; // keep import
+    let _ = Outpoint { txid: TxId([0; 32]), index: 0 }; // keep import
     Ok(compute_covenant_id(&input.previous_outpoint, &fields) == *id)
 }
 
@@ -72,10 +66,7 @@ async fn main() {
         let block = match node.block_with_txs(block_hash).await {
             Ok(b) => b,
             Err(err) => {
-                println!(
-                    "MISSING  {} block fetch failed: {err}",
-                    &e.covenant_id[..12]
-                );
+                println!("MISSING  {} block fetch failed: {err}", &e.covenant_id[..12]);
                 missing += 1;
                 continue;
             }
@@ -97,37 +88,22 @@ async fn main() {
             }
         }
         let Some(tx) = bodies.get(&txid) else {
-            println!(
-                "MISSING  {} tx {} not found in accepting block/mergeset",
-                &e.covenant_id[..12],
-                &e.txid[..12]
-            );
+            println!("MISSING  {} tx {} not found in accepting block/mergeset", &e.covenant_id[..12], &e.txid[..12]);
             missing += 1;
             continue;
         };
         match is_valid_genesis(tx, &cov) {
             Ok(true) => {
                 valid += 1;
-                println!(
-                    "VALID    {} genesis tx {}",
-                    &e.covenant_id[..12],
-                    &e.txid[..12]
-                );
+                println!("VALID    {} genesis tx {}", &e.covenant_id[..12], &e.txid[..12]);
             }
             Ok(false) => {
                 invalid += 1;
-                println!(
-                    "INVALID  {} genesis tx {} — id does not recompute (mid-life first sighting?)",
-                    &e.covenant_id[..12],
-                    &e.txid[..12]
-                );
+                println!("INVALID  {} genesis tx {} — id does not recompute (mid-life first sighting?)", &e.covenant_id[..12], &e.txid[..12]);
                 if std::env::var("KASCOV_AUDIT_DEBUG").is_ok() {
                     println!("  tx version {} inputs:", tx.version);
                     for (i, input) in tx.inputs.iter().enumerate() {
-                        println!(
-                            "    #{i} prev {}:{}",
-                            input.previous_outpoint.txid, input.previous_outpoint.index
-                        );
+                        println!("    #{i} prev {}:{}", input.previous_outpoint.txid, input.previous_outpoint.index);
                     }
                     for (i, o) in tx.outputs.iter().enumerate() {
                         match o.covenant {
@@ -146,10 +122,8 @@ async fn main() {
                         .filter(|(_, o)| o.covenant.is_some_and(|b| b.covenant_id == cov))
                         .map(|(i, o)| (i as u32, o.value, o.spk_version, o.spk_script.clone()))
                         .collect();
-                    let fields: Vec<(u32, u64, u16, &[u8])> = bound
-                        .iter()
-                        .map(|(i, v, ver, s)| (*i, *v, *ver, s.as_slice()))
-                        .collect();
+                    let fields: Vec<(u32, u64, u16, &[u8])> =
+                        bound.iter().map(|(i, v, ver, s)| (*i, *v, *ver, s.as_slice())).collect();
                     for (i, input) in tx.inputs.iter().enumerate() {
                         let got = compute_covenant_id(&input.previous_outpoint, &fields);
                         println!("    recompute with input #{i}: {got}");
@@ -158,16 +132,9 @@ async fn main() {
             }
             Err(why) => {
                 invalid += 1;
-                println!(
-                    "INVALID  {} genesis tx {} — {why}",
-                    &e.covenant_id[..12],
-                    &e.txid[..12]
-                );
+                println!("INVALID  {} genesis tx {} — {why}", &e.covenant_id[..12], &e.txid[..12]);
             }
         }
     }
-    println!(
-        "---\nvalid: {valid}  invalid: {invalid}  missing: {missing}  total: {}",
-        entries.len()
-    );
+    println!("---\nvalid: {valid}  invalid: {invalid}  missing: {missing}  total: {}", entries.len());
 }

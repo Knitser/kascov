@@ -149,9 +149,7 @@ fn clean_text(s: &str, max: usize) -> Option<String> {
 /// cannot redirect anybody.
 pub fn list_name(body: &str) -> Option<String> {
     let doc: serde_json::Value = serde_json::from_str(body).ok()?;
-    doc.get("name")
-        .and_then(|v| v.as_str())
-        .and_then(|s| clean_text(s, 32))
+    doc.get("name").and_then(|v| v.as_str()).and_then(|s| clean_text(s, 32))
 }
 
 /// Parse the published document. Returns the entries for `network` only: a
@@ -170,38 +168,20 @@ pub fn parse_list(body: &str, network: &str) -> Result<Vec<ListedToken>> {
     let mut out = Vec::with_capacity(items.len());
     for t in items {
         // An entry naming no covenant cannot be attached to anything.
-        let Some(covenant_id) = t
-            .get("covenantId")
-            .and_then(|v| v.as_str())
-            .and_then(norm_id)
+        let Some(covenant_id) = t.get("covenantId").and_then(|v| v.as_str()).and_then(norm_id)
         else {
             continue;
         };
         let ext = t.get("extensions");
         let ext_str = |k: &str| {
-            ext.and_then(|e| e.get(k))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
+            ext.and_then(|e| e.get(k)).and_then(|v| v.as_str()).map(str::to_string)
         };
         out.push(ListedToken {
             covenant_id,
-            name: t
-                .get("name")
-                .and_then(|v| v.as_str())
-                .and_then(|s| clean_text(s, 48)),
-            ticker: t
-                .get("symbol")
-                .and_then(|v| v.as_str())
-                .and_then(|s| clean_text(s, 12)),
-            image: t
-                .get("logoURI")
-                .and_then(|v| v.as_str())
-                .and_then(safe_image),
-            decimals: t
-                .get("decimals")
-                .and_then(|v| v.as_u64())
-                .filter(|d| *d <= 255)
-                .map(|d| d as u8),
+            name: t.get("name").and_then(|v| v.as_str()).and_then(|s| clean_text(s, 48)),
+            ticker: t.get("symbol").and_then(|v| v.as_str()).and_then(|s| clean_text(s, 12)),
+            image: t.get("logoURI").and_then(|v| v.as_str()).and_then(safe_image),
+            decimals: t.get("decimals").and_then(|v| v.as_u64()).filter(|d| *d <= 255).map(|d| d as u8),
             genesis_txid: ext_str("genesisTxid").as_deref().and_then(norm_id),
             curve_covenant_id: ext_str("curveCovenantId").as_deref().and_then(norm_id),
             pool_covenant_id: ext_str("poolCovenantId").as_deref().and_then(norm_id),
@@ -259,11 +239,7 @@ pub fn check(entry: &ListedToken, facts: &ChainFacts) -> CheckedEntry {
         Some(key) => {
             if facts.genesis_owners.is_empty() {
                 Checked::Unproven
-            } else if facts
-                .genesis_owners
-                .iter()
-                .any(|o| o.len() == 66 && &o[2..] == key)
-            {
+            } else if facts.genesis_owners.iter().any(|o| o.len() == 66 && &o[2..] == key) {
                 Checked::Match
             } else {
                 Checked::Differ
@@ -275,9 +251,7 @@ pub fn check(entry: &ListedToken, facts: &ChainFacts) -> CheckedEntry {
     // testable has not earned the label by making no claims.
     let all_checks_passed = facts.known
         && checks.iter().any(|c| *c == Checked::Match)
-        && checks
-            .iter()
-            .all(|c| matches!(c, Checked::Match | Checked::NotStated));
+        && checks.iter().all(|c| matches!(c, Checked::Match | Checked::NotStated));
     CheckedEntry {
         covenant_id: entry.covenant_id.clone(),
         name: entry.name.clone(),
@@ -295,7 +269,8 @@ pub fn check(entry: &ListedToken, facts: &ChainFacts) -> CheckedEntry {
 /// Fetch the published list. Bounded in time and size; every failure is just
 /// an error, because this feature degrades to showing nothing.
 pub async fn fetch_list(client: &reqwest::Client) -> Result<String> {
-    let url = std::env::var("KASCOV_REGISTRY_URL").unwrap_or_else(|_| DEFAULT_LIST_URL.to_string());
+    let url = std::env::var("KASCOV_REGISTRY_URL")
+        .unwrap_or_else(|_| DEFAULT_LIST_URL.to_string());
     let res = client
         .get(&url)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -307,10 +282,7 @@ pub async fn fetch_list(client: &reqwest::Client) -> Result<String> {
     }
     // Content-Length is a hint, not a promise, so the body is also capped as
     // it is read.
-    if res
-        .content_length()
-        .is_some_and(|n| n as usize > MAX_LIST_BYTES)
-    {
+    if res.content_length().is_some_and(|n| n as usize > MAX_LIST_BYTES) {
         anyhow::bail!("list is larger than {MAX_LIST_BYTES} bytes");
     }
     let bytes = res.bytes().await?;
@@ -369,11 +341,7 @@ mod tests {
         let mut f = facts();
         f.owners.retain(|o| !o.ends_with(CREATOR)); // sold, gone from the frontier
         let c = check(&entry(), &f);
-        assert_eq!(
-            c.creator_key,
-            Checked::Match,
-            "genesis is what fixes the creator"
-        );
+        assert_eq!(c.creator_key, Checked::Match, "genesis is what fixes the creator");
         assert!(c.all_checks_passed);
     }
 
@@ -414,10 +382,7 @@ mod tests {
         assert_eq!(c.genesis_txid, Checked::NotStated);
         assert_eq!(c.curve_covenant, Checked::NotStated);
         assert_eq!(c.creator_key, Checked::NotStated);
-        assert!(
-            !c.all_checks_passed,
-            "an entry that claims nothing proves nothing"
-        );
+        assert!(!c.all_checks_passed, "an entry that claims nothing proves nothing");
     }
 
     /// A covenant kascov has never indexed cannot be vouched for at all, no
@@ -452,14 +417,8 @@ mod tests {
         assert_eq!(list.len(), 2, "the entry naming no covenant is dropped");
         assert_eq!(list[0].ticker.as_deref(), Some("PUBIC"));
         assert_eq!(list[0].curve_covenant_id.as_deref(), Some(CURVE));
-        assert_eq!(
-            list[0].pool_covenant_id, None,
-            "a null extension is absent, not empty"
-        );
-        assert_eq!(
-            list[1].image, None,
-            "javascript: is dropped, the entry survives"
-        );
+        assert_eq!(list[0].pool_covenant_id, None, "a null extension is absent, not empty");
+        assert_eq!(list[1].image, None, "javascript: is dropped, the entry survives");
         assert_eq!(list[1].ticker.as_deref(), Some("XSS"));
     }
 

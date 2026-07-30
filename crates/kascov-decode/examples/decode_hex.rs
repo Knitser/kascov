@@ -14,12 +14,7 @@ fn main() {
     if let Some(hex) = args.get(1) {
         let bytes = hex::decode(hex.trim()).expect("hex");
         let (ins, truncated) = disassemble(&bytes);
-        println!(
-            "bytes {} instructions {} truncated {}",
-            bytes.len(),
-            ins.len(),
-            truncated
-        );
+        println!("bytes {} instructions {} truncated {}", bytes.len(), ins.len(), truncated);
         for i in &ins {
             println!("{:04x}  {}", i.offset, i);
         }

@@ -92,10 +92,7 @@ impl FromStr for Network {
                 .strip_prefix("testnet-")
                 .and_then(|n| n.parse().ok())
                 .map(Network::Testnet)
-                .ok_or_else(|| crate::Error::Invalid {
-                    what: "network",
-                    value: s.to_string(),
-                }),
+                .ok_or_else(|| crate::Error::Invalid { what: "network", value: s.to_string() }),
         }
     }
 }

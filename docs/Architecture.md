@@ -22,8 +22,6 @@ web/                 vanilla-JS explorer (no build step) + disasm.js (verified
                      JS port of kascov-decode's disassembler)
 ```
 
-The web directory is itself split by responsibility: `app.js` owns views and DOM orchestration, while `web/core/` owns state, loading policy, request sharing, refresh gating, routing, formatting, pending reconciliation, and price data. See [[Web Explorer]] for the browser-side architecture.
-
 ## Design rules
 
 **Rule 1 — quarantine upstream types.** `kaspa-*` types never leave `kascov-core/src/node/`. Everything downstream uses `model.rs` types (`CovenantId`, `BlockHash`, `Transaction`, …). When rusty-kaspa's API churns, exactly one module absorbs the breakage. The same boundary exposes `node::compute_covenant_id` — a thin wrapper over the consensus KIP-20 hash so classification can never drift from the chain. Exception: [[Covenant Lab]] deliberately uses kaspa crates directly — it *builds* transactions, which is exactly the upstream surface.
@@ -33,10 +31,6 @@ The web directory is itself split by responsibility: `app.js` owns views and DOM
 **Rule 3 — the engine is testable without a node.** `sync_once` is generic over the `ChainSource` trait; integration tests drive it with an in-memory `FakeChain` replaying scripted chain steps (genesis → transitions → burn → reorg → re-acceptance), now constructing real KIP-20 ids so genesis validation is exercised too. See `crates/kascov-core/tests/sync_replay.rs`.
 
 **Rule 4 — decoding never blocks shipping.** Lineage tracing is format-agnostic; the [[Decoding]] fallback (full disassembly) is always correct. Template-specific decoders are additive.
-
-**Rule 5 — live data must not own the reader.** Chain activity may invalidate caches, but it may not erase typed input, collapse an open story, replay a page transition, move focus, or multiply identical network requests. Browser refresh work is keyed and coalesced; only real navigation performs navigation effects. See [[Web Explorer#Live refresh model]].
-
-**Rule 6 — one application shell.** Product documentation that behaves like a page belongs inside the shared shell, with the normal header, search, routing, accessibility, and responsive system. The builder guide is static semantic HTML inside `index.html`, not a second hand-maintained site. Compatibility redirects preserve already-shared standalone URLs.
 
 ## Deployment topology (live since July 22)
 
@@ -75,8 +69,6 @@ Dedicated Windows Server
 ```
 
 Redeploy: fast-forward `/home/kascov/kascov` to the tested `main` revision, build `kascov --release` as the service user, restart `kascov-worker`, and mirror that same revision's `web/` into `C:\kascov\web`. Caddy does not need a reload for ordinary web or worker releases. Verify `/health`, both pending snapshots, the live feed, and the SPA after every release. The old laptop, Firebase, and Cloud Run deploy paths are obsolete.
-
-The daily digest and first-party traffic report are operational companions rather than worker subsystems. Their failure and privacy semantics are documented in [[Operations]] and [[Traffic Analytics]].
 
 ## Networks
 
