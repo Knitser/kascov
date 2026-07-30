@@ -289,6 +289,19 @@ pub struct Store {
     conn: Connection,
 }
 
+/// One decoded token an address holds.
+#[derive(Clone, Debug, Serialize)]
+pub struct TokenHoldingRow {
+    pub token_id: CovenantId,
+    /// 'pubkey' or 'presence' — the same key, different authorization.
+    pub owner_kind: String,
+    pub balance: i64,
+    pub cells: i64,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supply: Option<i64>,
+}
+
 /// One derivation pass, as published. A record of what ran, never an
 /// authority on what may be published.
 #[derive(Clone, Debug, Serialize)]
@@ -3951,6 +3964,53 @@ impl Store {
             )
             .map_err(db_err)?;
         self.derive_tokens_if_stale()
+    }
+
+    /// Which decoded tokens this key holds, and how much of each.
+    ///
+    /// `token_balances.owner` is `hex(identifier_type || owner_identifier)`.
+    /// Types 0x00 (pubkey) and 0x03 (presence) are the SAME x-only key — the
+    /// authorization differs, not the identity — so an address page must ask
+    /// for both or it under-reports the holder. Types 0x01 (script) and 0x02
+    /// (covenant) are different entities entirely and are deliberately absent.
+    pub fn token_holdings_for_pubkey(&self, pubkey: &[u8]) -> Result<Vec<TokenHoldingRow>> {
+        // x-only: a 33-byte compressed key carries a parity prefix the state
+        // block never stores, so index on the trailing 32 bytes.
+        let x_only = if pubkey.len() == 33 { &pubkey[1..] } else { pubkey };
+        if x_only.len() != 32 {
+            return Ok(Vec::new());
+        }
+        let hex_key = hex::encode(x_only);
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT b.token_id, b.owner, b.balance, b.cells, t.status, t.supply
+                 FROM token_balances b
+                 JOIN tokens t ON t.token_id = b.token_id
+                 WHERE b.owner IN (?1, ?2) AND b.balance > 0
+                 ORDER BY b.balance DESC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![format!("00{hex_key}"), format!("03{hex_key}")], |r| {
+                let owner: String = r.get(1)?;
+                Ok(TokenHoldingRow {
+                    token_id: crate::CovenantId(r.get(0)?),
+                    owner_kind: match owner.get(..2) {
+                        Some("00") => "pubkey".into(),
+                        Some("03") => "presence".into(),
+                        _ => "other".into(),
+                    },
+                    balance: r.get(2)?,
+                    cells: r.get(3)?,
+                    status: r.get(4)?,
+                    supply: r.get(5)?,
+                })
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
     }
 
     /// Every token's current verdict. Taken before the derived tables are

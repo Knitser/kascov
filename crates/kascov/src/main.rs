@@ -7486,6 +7486,26 @@ async fn addr_handler(
         let rows = store.covenants_by_pubkey(&pubkey)?;
         let total = rows.len();
         let tip = store.tip()?;
+        // Token balances are indexed separately from covenant states: a holder
+        // can own millions of a token without ever being the p2pk owner of a
+        // covenant cell, so an address that looks empty above may still hold
+        // plenty here. Both are proven from chain.
+        let holdings: Vec<serde_json::Value> = store
+            .token_holdings_for_pubkey(&pubkey)?
+            .into_iter()
+            .map(|h| {
+                let id_hex = h.token_id.to_string();
+                serde_json::json!({
+                    "token_id": id_hex,
+                    "name": og::friendly_name(&id_hex),
+                    "owner_kind": h.owner_kind,
+                    "balance": h.balance,
+                    "cells": h.cells,
+                    "status": h.status,
+                    "supply": h.supply,
+                })
+            })
+            .collect();
         let mut covenants = Vec::with_capacity(rows.len().min(ADDR_MAX_COVENANTS));
         for r in rows.iter().take(ADDR_MAX_COVENANTS) {
             let Some(c) = store.summary(&r.covenant_id)? else { continue };
@@ -7516,6 +7536,7 @@ async fn addr_handler(
             "pubkey": hex::encode(&pubkey),
             "covenants_total": total,
             "covenants": covenants,
+            "token_holdings": holdings,
         }))?))
     })
     .await

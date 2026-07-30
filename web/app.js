@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260729-provenance';
+} from './core/format.js?v=20260729-owners';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260729-provenance';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-provenance';
-import { createPendingModel } from './core/pending.js?v=20260729-provenance';
+} from './core/state.js?v=20260729-owners';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260729-owners';
+import { createPendingModel } from './core/pending.js?v=20260729-owners';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -35,12 +35,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260729-provenance';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-provenance';
-import { createRefreshGate } from './core/refresh.js?v=20260729-provenance';
-import { networkRouteHash } from './core/routing.js?v=20260729-provenance';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-provenance';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-provenance';
+} from './core/data.js?v=20260729-owners';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260729-owners';
+import { createRefreshGate } from './core/refresh.js?v=20260729-owners';
+import { networkRouteHash } from './core/routing.js?v=20260729-owners';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260729-owners';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260729-owners';
 
 
 
@@ -4352,13 +4352,44 @@ function renderAddress(route) {
       `<span class="pill ${alive ? 'pill-alive' : 'pill-retired'}" title="${esc(alive ? GLOSSARY.alive : GLOSSARY.retired)}">${alive ? 'alive' : 'retired'}</span></div></div>` +
       `<p class="card-story">${esc(sb.join(' · '))}</p></article>`;
   }).join('');
+  /* Token balances are a SEPARATE index from covenant states. A holder can own
+     millions of a token and never be the p2pk owner of a covenant cell, which
+     is why this page used to say "hasn't touched any smart coins" to someone
+     holding 121M of one — the holder-bubble links landed here and dead-ended. */
+  const holdings = Array.isArray(data.token_holdings) ? data.token_holdings : [];
+  let holdHtml = '';
+  if (holdings.length) {
+    const rowsHtml = holdings.map((h) => {
+      const share = h.supply ? (h.balance / h.supply) * 100 : null;
+      const pct = share != null ? (share >= 9.95 ? share.toFixed(0) : share.toFixed(1)) : null;
+      return `<tr>` +
+        `<td><a class="token-coin" href="#/${esc(network)}/token/${esc(h.token_id)}">${esc(h.name || friendlyName(h.token_id))}</a></td>` +
+        `<td class="mono tokens-supply">${esc(fmtTokenAmount(h.balance))}</td>` +
+        `<td class="token-share">${pct != null
+          ? `<span class="lane-track token-share-track"><span class="lane-fill" style="width:${Math.max(Math.min(share, 100), 1).toFixed(1)}%"></span></span> ${esc(pct)}%`
+          : '<span class="dim">—</span>'}</td>` +
+        `<td class="mono dim">${esc(fmtInt(h.cells))}</td>` +
+        `<td><span class="owner-kind" title="the identifier type the coin's own state block declares for this key">${esc(h.owner_kind)}</span></td>` +
+        `</tr>`;
+    }).join('');
+    holdHtml = `<section aria-label="Tokens held"><h2>tokens held</h2>` +
+      `<p class="dim">covenant tokens this key owns right now, summed over its live hash-proven cells. ` +
+      `this is a different index from the covenant states below: holding a token does not require owning a covenant.</p>` +
+      `<div class="tokens-tablewrap"><table class="tokens-table">` +
+      `<thead><tr><th>token</th><th>balance</th><th>share of supply</th><th>cells</th><th>as</th></tr></thead>` +
+      `<tbody>${rowsHtml}</tbody></table></div></section>`;
+  }
+  const nothingAtAll = !rows.length && !holdings.length;
   view.innerHTML = back + `<header class="page-head addr-head"><h1>address</h1>` +
     headChip(null, data.address) +
     (data.pubkey !== q.toLowerCase() ? headChip('pubkey', data.pubkey) : '') +
     `<p class="page-sub">${bits.map(esc).join(' · ')} <span class="dim">on ${esc(net.label)}</span> ${usdToggleHtml()}</p></header>` +
-    (rows.length ? `<div class="coin-grid">${cards}</div>`
-      : `<div class="empty-card"><h2>this address hasn’t touched any smart coins we’ve seen.</h2>` +
-        `<p class="dim">kascov matches p2pk covenant states only — plain payments to this address don’t appear here, and covenants with richer scripts may not name their owner.</p></div>`);
+    holdHtml +
+    (rows.length ? `<div class="coin-grid">${cards}</div>` : '') +
+    (nothingAtAll
+      ? `<div class="empty-card"><h2>this address hasn’t touched any smart coins we’ve seen.</h2>` +
+        `<p class="dim">kascov matches p2pk covenant states and covenant-token balances — plain KAS payments to this address don’t appear here, and covenants with richer scripts may not name their owner.</p></div>`
+      : '');
 }
 
 /* ------------------------------------------------------------ lane pages */
