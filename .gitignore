@@ -29,9 +29,16 @@ web/ops/traffic/traffic.json
 scripts/ops/harden-*.ps1
 scripts/ops/RUNBOOK.md
 
-# price-bot state: the id of the message it keeps updating. Local runtime, and
-# the webhook itself is never stored here (env only).
-.kascov-price-bot.json
+# Bot runtime state: the message id the price bot keeps updating, which
+# changelog entries have gone out, who is verified. All of it is local to
+# whichever machine runs the bot and meaningless in git, and committing it
+# means one machine's state overwrites another's on the next pull. Credentials
+# are never in these files; those live in env only.
+.kascov-*.json
+
+# Screenshots pasted into the working tree while getting help. Personal, large,
+# and never part of the project.
+clipboard-*.png
 
 # Playwright browser-test output
 playwright-report/
