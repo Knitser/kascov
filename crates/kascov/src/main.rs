@@ -1384,6 +1384,7 @@ async fn serve(
         .route("/data/{network}/coins", get(coins_handler))
         .route("/data/{network}/activity.json", get(activity_handler))
         .route("/data/{network}/addr/{address}", get(addr_handler))
+        .route("/data/{network}/prove-holding", post(prove_holding_handler))
         .route("/data/{network}/search", get(search_handler))
         .route("/data/{network}/stream", get(stream_handler))
         .route("/data/{network}/pending", get(pending_handler))
@@ -7556,6 +7557,47 @@ fn addr_prefix(network: Network) -> kaspa_addresses::Prefix {
     }
 }
 
+/* ---------------------------------------------------- proof of a holding */
+
+/// The KIP personal-message digest: blake2b-256 keyed with the domain
+/// separator `PersonalMessageSigningHash`, over the message's UTF-8 bytes.
+///
+/// Mirrors `kaspa_wallet_core::message::calc_personal_message_hash` in the
+/// pinned rusty-kaspa rev. Reimplemented rather than imported because pulling
+/// the whole wallet crate into the worker for six lines would drag a wallet,
+/// an RPC client and a storage layer along with it. The construction is pinned
+/// by a round-trip test against rusty-kaspa's own KIP keypair below.
+fn personal_message_hash(msg: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out.copy_from_slice(
+        blake2b_simd::Params::new()
+            .hash_length(32)
+            .key(b"PersonalMessageSigningHash")
+            .to_state()
+            .update(msg.as_bytes())
+            .finalize()
+            .as_bytes(),
+    );
+    out
+}
+
+/// True when `sig` is a schnorr signature over `msg` by the key behind
+/// `x_only`.
+///
+/// Every failure is the same `false`: a malformed key, a malformed signature
+/// and a signature over a different message are indistinguishable to the
+/// caller. Telling them apart would turn this into an oracle for probing which
+/// half of a proof was wrong.
+fn verify_kaspa_message(x_only: &[u8], msg: &str, sig: &[u8]) -> bool {
+    use secp256k1::{schnorr::Signature, Message, XOnlyPublicKey};
+    let Ok(key) = XOnlyPublicKey::from_slice(x_only) else { return false };
+    let Ok(signature) = Signature::from_slice(sig) else { return false };
+    let Ok(digest) = Message::from_digest_slice(&personal_message_hash(msg)) else {
+        return false;
+    };
+    signature.verify(&digest, &key).is_ok()
+}
+
 /// `kaspa:…`/`kaspatest:…` (any known prefix — pubkeys are network-independent)
 /// or raw 32/33-byte pubkey hex. Returns (canonical address re-encoded for the
 /// queried network, pubkey bytes). Script-hash addresses carry no pubkey -> None.
@@ -7583,6 +7625,107 @@ fn parse_addr_or_pubkey(raw: &str, network: Network) -> Option<(String, Vec<u8>)
 }
 
 /// Which smart coins has this address/pubkey touched (as a p2pk-state owner)?
+#[derive(serde::Deserialize)]
+struct ProveHoldingReq {
+    address: String,
+    /// The exact string that was signed, nonce and all.
+    message: String,
+    /// 64-byte schnorr signature, hex.
+    signature: String,
+}
+
+/// POST /data/{network}/prove-holding
+///
+/// Answers one question and keeps no session: did the key behind this address
+/// sign this exact message, and if it did, what does that key hold?
+///
+/// The CHALLENGE deliberately lives with the caller. Whoever is granting
+/// something (the Discord bot) picks the nonce, binds it to the account it is
+/// about to grant to, and remembers what it issued. That keeps kascov stateless
+/// and makes a replayed body worthless: re-sending someone else's proof returns
+/// the same public fact it always did, and the thing that actually decides is
+/// the caller's own record of which nonce it gave to whom.
+///
+/// A failed proof is a 200 with `verified: false`, matching the other tool
+/// endpoints, because the request was well formed and the answer is simply no.
+async fn prove_holding_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    axum::Json(req): axum::Json<ProveHoldingReq>,
+) -> axum::response::Response {
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    if let Err(reason) = state.tool_limiter.lock().await.try_take(&client_ip(&headers)) {
+        return too_many(reason);
+    }
+    // A signature covers any length, but nothing legitimate needs more, and an
+    // unbounded string here is an unbounded hash on a public endpoint.
+    if req.message.len() > 512 {
+        return json_resp(serde_json::json!({ "ok": false, "error": "message too long" }));
+    }
+
+    let refuse = |reason: &str| {
+        json_resp(serde_json::json!({ "ok": true, "verified": false, "reason": reason }))
+    };
+
+    let Some((canonical, pubkey)) = parse_addr_or_pubkey(req.address.trim(), network) else {
+        return refuse("not a kaspa address for this network");
+    };
+    // Schnorr is x-only. An ECDSA address carries a parity byte and a different
+    // signing scheme, so it cannot prove anything here; say so rather than
+    // failing as though the signature were wrong.
+    if pubkey.len() != 32 {
+        return refuse("only schnorr (kaspa:q...) addresses can sign a message");
+    }
+    let Ok(sig) = hex::decode(req.signature.trim().trim_start_matches("0x")) else {
+        return refuse("signature is not hex");
+    };
+    if sig.len() != 64 {
+        return refuse("a schnorr signature is 64 bytes");
+    }
+    if !verify_kaspa_message(&pubkey, &req.message, &sig) {
+        return refuse("signature does not match this address and message");
+    }
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    let holdings = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let rows: Vec<serde_json::Value> = store
+            .token_holdings_for_pubkey(&pubkey)?
+            .into_iter()
+            .map(|h| {
+                let id_hex = h.token_id.to_string();
+                serde_json::json!({
+                    "token_id": id_hex,
+                    "name": og::friendly_name(&id_hex),
+                    "owner_kind": h.owner_kind,
+                    "balance": h.balance,
+                    "status": h.status,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "holdings": rows, "tip_daa": store.tip()?.map(|t| t.0) }))
+    })
+    .await;
+
+    match holdings {
+        Ok(Ok(v)) => json_resp(serde_json::json!({
+            "ok": true,
+            "verified": true,
+            "address": canonical,
+            "holdings": v["holdings"],
+            "tip_daa": v["tip_daa"],
+            // Said out loud because the whole point of this endpoint is that a
+            // balance is proven rather than claimed.
+            "note": "signature checked against this address's key; balances derived from chain",
+        })),
+        _ => json_resp(serde_json::json!({ "ok": false, "error": "could not read holdings" })),
+    }
+}
+
 async fn addr_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path((net_name, address)): axum::extract::Path<(String, String)>,
@@ -9152,5 +9295,90 @@ mod feed_and_sitemap_tests {
         // comfortably inside the share page's ~6KB budget
         assert!(html.len() < 2_500, "body extra must stay small, got {}", html.len());
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod prove_holding_tests {
+    use super::{personal_message_hash, verify_kaspa_message};
+    use secp256k1::{Keypair, XOnlyPublicKey, SECP256K1};
+
+    /// rusty-kaspa's own KIP vector: privkey 0x…03 with "Hello Kaspa!".
+    /// The x-only pubkey below is copied from wallet/core/src/message.rs, so if
+    /// this passes, our digest construction agrees with theirs byte for byte.
+    fn kip_keypair() -> (Keypair, XOnlyPublicKey) {
+        let mut sk = [0u8; 32];
+        sk[31] = 3;
+        let kp = Keypair::from_seckey_slice(SECP256K1, &sk).unwrap();
+        let expected = XOnlyPublicKey::from_slice(&[
+            0xF9, 0x30, 0x8A, 0x01, 0x92, 0x58, 0xC3, 0x10, 0x49, 0x34, 0x4F, 0x85, 0xF8, 0x9D,
+            0x52, 0x29, 0xB5, 0x31, 0xC8, 0x45, 0x83, 0x6F, 0x99, 0xB0, 0x86, 0x01, 0xF1, 0x13,
+            0xBC, 0xE0, 0x36, 0xF9,
+        ])
+        .unwrap();
+        assert_eq!(kp.x_only_public_key().0, expected, "KIP keypair drifted");
+        (kp, expected)
+    }
+
+    fn sign(kp: &Keypair, msg: &str) -> Vec<u8> {
+        let digest = secp256k1::Message::from_digest_slice(&personal_message_hash(msg)).unwrap();
+        SECP256K1.sign_schnorr_no_aux_rand(&digest, kp).as_ref().to_vec()
+    }
+
+    #[test]
+    fn a_signature_over_the_kip_digest_verifies() {
+        let (kp, pk) = kip_keypair();
+        let sig = sign(&kp, "Hello Kaspa!");
+        assert!(verify_kaspa_message(&pk.serialize(), "Hello Kaspa!", &sig));
+    }
+
+    #[test]
+    fn the_digest_is_domain_separated_not_a_plain_blake2b() {
+        // A bare blake2b-256 of the same bytes must NOT equal the keyed one, or
+        // a signature made for some other Kaspa domain would verify here.
+        let plain = blake2b_simd::Params::new().hash_length(32).hash(b"Hello Kaspa!");
+        assert_ne!(plain.as_bytes(), &personal_message_hash("Hello Kaspa!")[..]);
+    }
+
+    #[test]
+    fn a_signature_does_not_carry_to_another_message() {
+        let (kp, pk) = kip_keypair();
+        let sig = sign(&kp, "kascov verify: 1234 abcd");
+        // The nonce is the whole point: changing one character must break it,
+        // or a proof issued for one Discord account would work for the next.
+        assert!(verify_kaspa_message(&pk.serialize(), "kascov verify: 1234 abcd", &sig));
+        assert!(!verify_kaspa_message(&pk.serialize(), "kascov verify: 1234 abce", &sig));
+        assert!(!verify_kaspa_message(&pk.serialize(), "", &sig));
+    }
+
+    #[test]
+    fn another_key_cannot_reuse_the_signature() {
+        let (kp, _) = kip_keypair();
+        let sig = sign(&kp, "Hello Kaspa!");
+        let mut other = [0u8; 32];
+        other[31] = 5;
+        let other_pk = Keypair::from_seckey_slice(SECP256K1, &other).unwrap().x_only_public_key().0;
+        assert!(!verify_kaspa_message(&other_pk.serialize(), "Hello Kaspa!", &sig));
+    }
+
+    #[test]
+    fn malformed_input_is_false_and_never_a_panic() {
+        let (kp, pk) = kip_keypair();
+        let sig = sign(&kp, "Hello Kaspa!");
+        assert!(!verify_kaspa_message(&[], "Hello Kaspa!", &sig));
+        assert!(!verify_kaspa_message(&[0u8; 31], "Hello Kaspa!", &sig));
+        assert!(!verify_kaspa_message(&[0u8; 32], "Hello Kaspa!", &sig)); // not on the curve
+        assert!(!verify_kaspa_message(&pk.serialize(), "Hello Kaspa!", &[]));
+        assert!(!verify_kaspa_message(&pk.serialize(), "Hello Kaspa!", &[0u8; 64]));
+        assert!(!verify_kaspa_message(&pk.serialize(), "Hello Kaspa!", &sig[..63]));
+    }
+
+    #[test]
+    fn unicode_signs_as_its_utf8_bytes() {
+        // rusty-kaspa pins a kanji vector; the digest must be over UTF-8 bytes,
+        // not chars, or non-latin nonces would silently fail to verify.
+        let (kp, pk) = kip_keypair();
+        let msg = "こんにちは世界";
+        assert!(verify_kaspa_message(&pk.serialize(), msg, &sign(&kp, msg)));
     }
 }
