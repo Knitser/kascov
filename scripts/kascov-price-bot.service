@@ -1,0 +1,23 @@
+[Unit]
+Description=Update the kascov $KASCOV price panel in Discord
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kascov
+WorkingDirectory=/home/kascov/kascov
+# Secrets live here and nowhere else: chmod 600, owned by kascov, never in git.
+# Holds KASCOV_DISCORD_WEBHOOK. Not optional - if it is missing the unit should
+# refuse to start loudly rather than fail silently every five minutes.
+EnvironmentFile=/home/kascov/.discord-env
+# State outside the checkout, so a git pull never fights the bot for the file
+# that remembers which message to edit.
+Environment=KASCOV_PRICE_STATE=/home/kascov/kascov-price-bot.json
+ExecStart=/usr/bin/node /home/kascov/kascov/scripts/discord-price-bot.mjs
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/kascov

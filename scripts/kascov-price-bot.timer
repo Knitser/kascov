@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh the Discord $KASCOV price panel every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=300s
+AccuracySec=15s
+Persistent=true
+Unit=kascov-price-bot.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,25 @@
+[Unit]
+Description=Post new kascov changelog entries to Discord
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kascov
+WorkingDirectory=/home/kascov/kascov
+# Secrets live here and nowhere else: chmod 600, owned by kascov, never in git.
+# Holds KASCOV_CHANGELOG_WEBHOOK. Not optional - if it is missing the unit should
+# refuse to start loudly rather than fail silently on every run.
+EnvironmentFile=/home/kascov/.discord-env
+# State outside the checkout, so a git pull never fights the bot for the file
+# that remembers which entries have already gone out. Lose this file and the
+# next run treats the feed as brand new: it re-baselines silently rather than
+# re-posting, which is the safe direction to fail.
+Environment=KASCOV_CHANGELOG_STATE=/home/kascov/kascov-changelog-bot.json
+ExecStart=/usr/bin/node /home/kascov/kascov/scripts/discord-changelog-bot.mjs
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/kascov

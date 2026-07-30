@@ -1,0 +1,12 @@
+[Unit]
+Description=Post new kascov changelog entries to Discord every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=900s
+AccuracySec=60s
+Persistent=true
+Unit=kascov-changelog-bot.service
+
+[Install]
+WantedBy=timers.target
