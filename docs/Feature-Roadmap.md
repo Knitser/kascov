@@ -5,11 +5,14 @@ simulation (CLI), verified contracts, a visual script debugger, based-app lanes,
 KIP-16 ZK panel (see `Novel-Features-Plan.md`). This doc is the backlog *after* that:
 what to deepen and what to build next, grouped by wave. Lift = S/M/L.
 
-> **Status (July 10, 2026):** most of this document shipped — items below carry ✅ DONE
+> **Status (July 25, 2026):** most of this document shipped — items below carry ✅ DONE
 > stamps with their ship date (dates from `web/changelog.json`). Also shipped beyond this
 > plan: per-coin **share cards** `/share/{net}/{id}` + OG PNG + sitemap (2026-07-10) and
-> the **search endpoint** `search?q=` (2026-07-10). Still open: RISC Zero proof
-> verification, covenant lint, the plain-English explainer, and the parking lot.
+> the **search endpoint** `search?q=` (2026-07-10), transaction pages, preflight,
+> KCC20 accounting, verified token art, the authoritative pending lane, and the integrated
+> builder guide. Still open: RISC Zero proof verification, covenant lint, the
+> plain-English explainer, and the parking lot. Current implementation architecture lives
+> in [[Web Explorer]] and [[Operations]].
 
 ---
 
