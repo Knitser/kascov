@@ -7,14 +7,18 @@
  * dependency-free like the other two bots.
  *
  * THE FLOW
- *   /verify address:kaspa:q...   issues a one-time phrase bound to the Discord
- *                                user id AND the address, and returns it
- *                                ephemerally so nobody else sees the challenge.
- *   /confirm signature:<hex>     checks that phrase's signature via kascov's
- *                                own /prove-holding, then grants the role only
- *                                if the proven balance is non-zero.
- *   /holdings address:...        public lookup, no proof, no role.
- *   /unverify                    drops the role and deletes the record.
+ *   /verify      opens a FORM for the address, then issues a one-time phrase
+ *                bound to the Discord user id AND that address, ephemerally.
+ *   /confirm     opens a FORM for the signature, checks it via kascov's own
+ *                /prove-holding, and grants the role only if the proven
+ *                balance is non-zero.
+ *   /holdings    public lookup, no proof, no role.
+ *   /unverify    drops the role and deletes the record.
+ *
+ *   The two sensitive commands take no OPTIONS on purpose. An option's value is
+ *   echoed back in the command invocation, and the link between a Discord
+ *   account and a Kaspa address is the one new fact this bot creates. It is not
+ *   the bot's to announce, so it is typed into a form instead.
  *
  * WHAT MAKES THE PROOF WORTH ANYTHING
  *   The nonce is issued HERE and remembered HERE. kascov's endpoint is
@@ -64,7 +68,14 @@ export function challengePhrase(discordUserId, address, nonce) {
 }
 
 /** Discord signs every request. Anyone can POST to a public URL, so this is the
- *  only thing separating a real interaction from a stranger with curl. */
+ *  only thing separating a real interaction from a stranger with curl.
+ *
+ *  `rawBody` MUST be the exact bytes Discord sent. Accepts a Buffer for that
+ *  reason: rebuilding the body by concatenating decoded chunks corrupts any
+ *  multi-byte character that happens to straddle a chunk boundary, and the
+ *  signature is over bytes, not over characters. A PING is pure ASCII and
+ *  survives that; a real interaction carries channel names and display names
+ *  full of emoji, and does not. */
 export function verifyDiscordSignature(rawBody, signature, timestamp, publicKeyHex) {
   try {
     if (!/^[0-9a-f]{128}$/i.test(signature) || !/^[0-9a-f]{64}$/i.test(publicKeyHex)) return false;
@@ -77,7 +88,9 @@ export function verifyDiscordSignature(rawBody, signature, timestamp, publicKeyH
       format: 'der',
       type: 'spki',
     });
-    return edVerify(null, Buffer.from(timestamp + rawBody), key, Buffer.from(signature, 'hex'));
+    const body = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody, 'utf8');
+    const msg = Buffer.concat([Buffer.from(String(timestamp), 'utf8'), body]);
+    return edVerify(null, msg, key, Buffer.from(signature, 'hex'));
   } catch {
     return false;
   }
@@ -186,11 +199,13 @@ async function holdingsOf(address) {
 
 /* ------------------------------------------------------------- commands */
 
+/* Command options: still used by /holdings, which looks up a PUBLIC address
+   nobody is claiming to own. */
 const opt = (data, name) => (data.options || []).find((o) => o.name === name)?.value;
 
 async function onVerify(interaction) {
   const userId = interaction.member?.user?.id || interaction.user?.id;
-  const address = String(opt(interaction.data, 'address') || '').trim();
+  const address = field(interaction, 'address');
   if (!/^kaspa(test)?:[a-z0-9]{50,}$/i.test(address)) {
     return 'That does not look like a Kaspa address. It starts with `kaspa:` and is about 60 characters.';
   }
@@ -217,7 +232,7 @@ async function onVerify(interaction) {
 
 async function onConfirm(interaction) {
   const userId = interaction.member?.user?.id || interaction.user?.id;
-  const signature = String(opt(interaction.data, 'signature') || '').trim();
+  const signature = field(interaction, 'signature');
   const pending = state.pending[userId];
   if (!challengeIsUsable(pending, userId, Date.now())) {
     return 'No challenge waiting, or it expired. Run `/verify` again to get a fresh one.';
@@ -293,9 +308,11 @@ async function onUnverify(interaction) {
     : 'You were not verified, but anything pending is cleared.';
 }
 
-const HANDLERS = {
-  verify: onVerify, confirm: onConfirm, holdings: onHoldings, unverify: onUnverify,
-};
+/* Slash commands that answer directly. verify/confirm are not here: they open
+   a modal first, and their handlers are reached by the form's custom_id. */
+const HANDLERS = { holdings: onHoldings, unverify: onUnverify };
+
+const MODAL_HANDLERS = { kascov_verify: onVerify, kascov_confirm: onConfirm };
 
 /* ------------------------------------------------------------- the server */
 
@@ -307,6 +324,69 @@ async function respondLater(token, content) {
   }).catch((e) => console.error(`followup failed: ${e.message}`));
 }
 
+/** Run a handler after the ack and deliver whatever it says. */
+async function finish(body, handler, who) {
+  try {
+    const out = await handler(body);
+    await respondLater(body.token, out);
+    console.log(`  answered ${who}`);
+  } catch (e) {
+    console.error(`  handler failed for ${who}: ${e.stack || e.message}`);
+    await respondLater(body.token, 'Something went wrong. Try again shortly.');
+  }
+}
+
+/* A one-field form. Discord caps a label at 45 characters and a placeholder at
+   100, and silently rejects the whole modal if either is over. */
+const oneFieldModal = (customId, title, field) => ({
+  type: 9,
+  data: {
+    custom_id: customId,
+    title,
+    components: [{
+      type: 1,
+      components: [{
+        type: 4,
+        custom_id: field.id,
+        label: field.label,
+        style: field.long ? 2 : 1,
+        min_length: field.min,
+        max_length: field.max,
+        placeholder: field.placeholder,
+        required: true,
+      }],
+    }],
+  },
+});
+
+const MODALS = {
+  verify: oneFieldModal('kascov_verify', 'Verify a Kaspa address', {
+    id: 'address',
+    label: 'Your Kaspa address',
+    min: 20,
+    max: 120,
+    placeholder: 'kaspa:q...',
+  }),
+  confirm: oneFieldModal('kascov_confirm', 'Finish verifying', {
+    id: 'signature',
+    label: 'The signature from your wallet',
+    long: true,
+    min: 32,
+    max: 400,
+    placeholder: 'paste the signature here',
+  }),
+};
+
+/** Pull a named field out of a modal submission. */
+const field = (body, id) => {
+  for (const row of body.data?.components || []) {
+    for (const c of row.components || []) {
+      if (c.custom_id === id) return String(c.value || '').trim();
+    }
+  }
+  return '';
+};
+
 function serve() {
   const server = createServer((req, res) => {
     const send = (code, body) => {
@@ -315,38 +395,58 @@ function serve() {
     };
     if (req.method !== 'POST') return send(405, { error: 'POST only' });
 
-    let raw = '';
+    // Collect BYTES, never a growing string: see verifyDiscordSignature.
+    const chunks = [];
+    let size = 0;
     let tooBig = false;
     req.on('data', (c) => {
-      raw += c;
-      if (raw.length > 100_000) { tooBig = true; req.destroy(); }
+      size += c.length;
+      if (size > 100_000) { tooBig = true; req.destroy(); return; }
+      chunks.push(c);
     });
     req.on('end', async () => {
       if (tooBig) return;
+      const raw = Buffer.concat(chunks);
       const sig = req.headers['x-signature-ed25519'];
       const ts = req.headers['x-signature-timestamp'];
       // 401 is required: Discord actively probes with BAD signatures when you
       // save the endpoint URL, and refuses it unless those are rejected.
       if (!sig || !ts || !verifyDiscordSignature(raw, String(sig), String(ts), PUBLIC_KEY)) {
+        console.log(`rejected: bad signature (${size} bytes)`);
         return send(401, { error: 'bad signature' });
       }
       let body;
-      try { body = JSON.parse(raw); } catch { return send(400, { error: 'bad json' }); }
+      try { body = JSON.parse(raw.toString('utf8')); } catch { return send(400, { error: 'bad json' }); }
 
-      if (body.type === 1) return send(200, { type: 1 }); // PING
-      if (body.type !== 2) return send(200, { type: 4, data: { content: 'unsupported', flags: EPHEMERAL } });
+      if (body.type === 1) { console.log('ping'); return send(200, { type: 1 }); }
 
-      const handler = HANDLERS[body.data?.name];
-      if (!handler) return send(200, { type: 4, data: { content: 'unknown command', flags: EPHEMERAL } });
+      const who = body.member?.user?.id || body.user?.id || '?';
 
-      // Ack inside Discord's 3s window, then take as long as the chain needs.
-      send(200, { type: 5, data: { flags: EPHEMERAL } });
-      try {
-        await respondLater(body.token, await handler(body));
-      } catch (e) {
-        console.error(e.stack || e.message);
-        await respondLater(body.token, 'Something went wrong. Try again shortly.');
+      // A slash command opens a MODAL. The address and the signature are typed
+      // into a form, so neither ever appears in a command invocation where the
+      // channel could see it. The only new fact this bot creates is the link
+      // between an account and an address; it should not announce it.
+      if (body.type === 2) {
+        const name = body.data?.name;
+        console.log(`command /${name} from ${who}`);
+        if (name === 'verify') return send(200, MODALS.verify);
+        if (name === 'confirm') return send(200, MODALS.confirm);
+        const handler = HANDLERS[name];
+        if (!handler) return send(200, { type: 4, data: { content: 'unknown command', flags: EPHEMERAL } });
+        send(200, { type: 5, data: { flags: EPHEMERAL } });
+        return finish(body, handler, who);
       }
+
+      if (body.type === 5) { // MODAL_SUBMIT
+        const id = body.data?.custom_id;
+        console.log(`modal ${id} from ${who}`);
+        const handler = MODAL_HANDLERS[id];
+        if (!handler) return send(200, { type: 4, data: { content: 'unknown form', flags: EPHEMERAL } });
+        send(200, { type: 5, data: { flags: EPHEMERAL } });
+        return finish(body, handler, who);
+      }
+
+      return send(200, { type: 4, data: { content: 'unsupported', flags: EPHEMERAL } });
     });
   });
   server.listen(PORT, '127.0.0.1', () =>
@@ -356,14 +456,10 @@ function serve() {
 /* --------------------------------------------------------------- modes */
 
 const COMMANDS = [
-  {
-    name: 'verify', description: 'Prove an address is yours and get the verified holder role',
-    options: [{ name: 'address', description: 'Your Kaspa address (kaspa:q...)', type: 3, required: true }],
-  },
-  {
-    name: 'confirm', description: 'Finish verifying with the signature from your wallet',
-    options: [{ name: 'signature', description: 'The signature your wallet produced', type: 3, required: true }],
-  },
+  // No options on purpose: an option's value is echoed in the command
+  // invocation, and the address is the one thing worth not announcing.
+  { name: 'verify', description: 'Prove an address is yours and get the verified holder role' },
+  { name: 'confirm', description: 'Finish verifying with the signature from your wallet' },
   {
     name: 'holdings', description: 'Show what an address holds, proven from chain',
     options: [{ name: 'address', description: 'Any Kaspa address', type: 3, required: true }],

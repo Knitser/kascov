@@ -56,6 +56,32 @@ test('another key cannot forge an interaction', () => {
   assert.ok(!verifyDiscordSignature(body, signIt(b.privateKey, ts, body), ts, rawPub(a.publicKey)));
 });
 
+test('a body with emoji verifies, even split across chunks', () => {
+  // The bug this pins: a real interaction carries the channel name, and this
+  // server's channel is "✅ | verify-holdings". Rebuilding the body by
+  // concatenating DECODED chunks corrupts any multi-byte character that lands
+  // on a chunk boundary, so the signature check fails and Discord reports
+  // "the application didn't respond". A PING is pure ASCII and never shows it.
+  const { publicKey, privateKey } = ed();
+  const ts = '1700000000';
+  const body = Buffer.from(JSON.stringify({
+    type: 2,
+    channel: { name: '✅ | verify-holdings' },
+    member: { user: { global_name: '0xKnitser 🐉' } },
+  }), 'utf8');
+  const sig = edSign(null, Buffer.concat([Buffer.from(ts), body]), privateKey).toString('hex');
+
+  assert.ok(verifyDiscordSignature(body, sig, ts, rawPub(publicKey)));
+
+  // Now split mid-character, the way a TCP chunk boundary would, and prove
+  // the byte-preserving path still verifies while naive concatenation cannot.
+  const cut = body.indexOf(Buffer.from('✅', 'utf8')) + 1;
+  const chunks = [body.subarray(0, cut), body.subarray(cut)];
+  assert.ok(verifyDiscordSignature(Buffer.concat(chunks), sig, ts, rawPub(publicKey)));
+  const naive = chunks.map((c) => c.toString()).join('');
+  assert.ok(!verifyDiscordSignature(naive, sig, ts, rawPub(publicKey)));
+});
+
 test('garbage never throws, it just fails', () => {
   const { publicKey } = ed();
   const pub = rawPub(publicKey);
