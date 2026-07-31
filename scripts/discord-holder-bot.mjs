@@ -219,7 +219,14 @@ async function onVerify(interaction) {
     return 'That address is already verified by another account. Use a different one, or ask them to run `/unverify`.';
   }
   const nonce = randomBytes(8).toString('hex');
-  state.pending[userId] = { user: userId, address, nonce, issued_ms: Date.now() };
+  /* Keep the interaction token so the signing page can answer back INTO this
+     same ephemeral message. An interaction token lives 15 minutes, exactly as
+     long as the challenge, so it is valid for precisely as long as it is
+     useful. Without it the page can confirm and Discord stays silent, which
+     reads as though nothing happened. */
+  state.pending[userId] = {
+    user: userId, address, nonce, issued_ms: Date.now(), token: interaction.token,
+  };
   await saveState();
 
   const phrase = challengePhrase(userId, address, nonce);
@@ -351,8 +358,15 @@ async function completeFromPage({ nonce, signature }) {
 
   const balance = balanceFor(proof.holdings, TOKEN_ID);
   if (balance <= 0) {
+    const tok = challenge.token;
     delete state.pending[userId];
     await saveState();
+    if (tok) {
+      await respondLater(tok, [
+        '**Address proven**, and it is definitely yours. It just holds no $KASCOV right now, so there is no role to give.',
+        '-# Nothing was stored. Run `/verify` again whenever that changes.',
+      ].join('\n'));
+    }
     return { ok: false, message: 'Address proven, and it is definitely yours. It just holds no $KASCOV right now, so there is no role to give.', log: 'proven but empty' };
   }
   try {
@@ -364,6 +378,15 @@ async function completeFromPage({ nonce, signature }) {
   delete state.pending[userId];
   state.verified[userId] = { address: challenge.address, verified_ms: Date.now(), balance };
   await saveState();
+
+  /* Close the loop in Discord. The member is looking at a browser tab, and the
+     message that told them to sign should stop telling them to sign. */
+  if (challenge.token) {
+    await respondLater(challenge.token, [
+      `**Verified.** ${fmt(balance)} $KASCOV, proven from chain.`,
+      `-# Signed with your wallet and checked against ${challenge.address.slice(0, 16)}…${challenge.address.slice(-6)}. The role is yours and gets re-checked periodically, so it follows what you actually hold. \`/unverify\` removes it.`,
+    ].join('\n'));
+  }
   return { ok: true, message: `Verified. ${fmt(balance)} $KASCOV proven from chain. Your role is in Discord now.`, log: `granted ${fmt(balance)}` };
 }
 
