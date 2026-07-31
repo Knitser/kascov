@@ -49,6 +49,9 @@ const STATE_PATH = process.env.KASCOV_BOT_STATE || '/home/kascov/kascov-holder-b
    same box, and would break the moment DNS did. */
 const KASCOV = process.env.KASCOV_API || 'http://127.0.0.1:8080';
 const NETWORK = process.env.KASCOV_NETWORK || 'mainnet';
+/* Public origin, for links a member clicks. Distinct from KASCOV above, which
+   is the loopback the service itself calls. */
+const SITE = process.env.KASCOV_SITE || 'https://kascov.io';
 const ROLE_NAME = process.env.KASCOV_ROLE_NAME || 'verified holder';
 /* The coin the role is about. Empty means "any verified token". */
 const TOKEN_ID = process.env.KASCOV_ROLE_TOKEN
@@ -220,16 +223,19 @@ async function onVerify(interaction) {
   await saveState();
 
   const phrase = challengePhrase(userId, address, nonce);
+  /* The phrase goes in the FRAGMENT, not the query string. A fragment never
+     reaches the server, so this link keeps a Discord id and a Kaspa address out
+     of access logs and out of any Referer the page might send. */
+  const link = `${SITE}/verify#${encodeURIComponent(phrase)}`;
   return [
-    '**Step 1 of 2.** Copy this phrase and sign it in your wallet:',
-    `\`\`\`\n${phrase}\n\`\`\``,
-    '**Where to sign it** (nothing pops up on its own, you do this in your wallet app):',
-    '• **Kastle** ・ open the extension, account menu, Sign Message',
-    '• **KasWare** ・ open the extension, Settings, Sign Message',
-    '• **kaspa CLI** ・ `message sign <your-address>` then paste the phrase',
+    '**Step 1 of 2.** Open this and press sign:',
+    link,
     '',
-    'It gives you back a long hex string. Run `/confirm` and paste it into the form.',
-    '-# Copy the whole phrase, including the numbers at both ends. Signing a message is free, moves no funds, and cannot authorise a transaction. kascov will never ask for your seed phrase or private key. This expires in 15 minutes.',
+    'Your wallet pops up, you approve, and it finishes there. Nothing moves and no funds are touched.',
+    '',
+    '**Prefer to do it by hand?** Sign this phrase in any wallet with a Sign Message feature, then run `/confirm`:',
+    `\`\`\`\n${phrase}\n\`\`\``,
+    '-# Signing a message is free and cannot authorise a transaction. kascov will never ask for your seed phrase or private key. This expires in 15 minutes.',
   ].join('\n');
 }
 
@@ -309,6 +315,56 @@ async function onUnverify(interaction) {
   return had
     ? 'Done. Role removed and your address forgotten.'
     : 'You were not verified, but anything pending is cleared.';
+}
+
+/** Find whose challenge a nonce belongs to. Single-use by construction: the
+ *  entry is deleted the moment it resolves either way. */
+export function pendingByNonce(pending, nonce) {
+  if (!nonce || typeof nonce !== 'string') return null;
+  for (const [userId, c] of Object.entries(pending || {})) {
+    if (c && c.nonce === nonce) return { userId, challenge: c };
+  }
+  return null;
+}
+
+/** The signing page's completion path. Same checks as /confirm, reached
+ *  without Discord, so it states its own outcome rather than assuming a
+ *  followup message will carry it. */
+async function completeFromPage({ nonce, signature }) {
+  const found = pendingByNonce(state.pending, String(nonce || '').trim());
+  if (!found || !challengeIsUsable(found.challenge, found.userId, Date.now())) {
+    return { ok: false, message: 'That challenge has expired or was already used. Run /verify again in Discord.', log: 'no such challenge' };
+  }
+  const { userId, challenge } = found;
+  const sig = String(signature || '').trim();
+  const phrase = challengePhrase(userId, challenge.address, challenge.nonce);
+
+  let proof;
+  try {
+    proof = await proveHolding(challenge.address, phrase, sig);
+  } catch {
+    return { ok: false, message: 'Could not reach the verifier. Try again in a moment.', log: 'kascov unreachable' };
+  }
+  if (!proof?.verified) {
+    return { ok: false, message: `That signature did not check out. ${proof?.reason || ''}`, log: 'bad signature' };
+  }
+
+  const balance = balanceFor(proof.holdings, TOKEN_ID);
+  if (balance <= 0) {
+    delete state.pending[userId];
+    await saveState();
+    return { ok: false, message: 'Address proven, and it is definitely yours. It just holds no $KASCOV right now, so there is no role to give.', log: 'proven but empty' };
+  }
+  try {
+    await grantRole(userId);
+  } catch (e) {
+    console.error(e.message);
+    return { ok: false, message: 'Proof accepted, but the role could not be added. Tell an admin the bot role may sit too low.', log: 'grant failed' };
+  }
+  delete state.pending[userId];
+  state.verified[userId] = { address: challenge.address, verified_ms: Date.now(), balance };
+  await saveState();
+  return { ok: true, message: `Verified. ${fmt(balance)} $KASCOV proven from chain. Your role is in Discord now.`, log: `granted ${fmt(balance)}` };
 }
 
 /* Slash commands that answer directly. verify/confirm are not here: they open
@@ -418,6 +474,25 @@ function serve() {
       res.end(typeof body === 'string' ? body : JSON.stringify(body));
     };
     if (req.method !== 'POST') return send(405, { error: 'POST only' });
+
+    /* The signing page finishes here. It carries no Discord signature, and does
+       not need one: the only way in is a NONCE this service issued minutes ago,
+       and holding it grants nothing on its own. Completing still requires a
+       valid signature over the whole phrase by the exact address the challenge
+       was bound to, which only that key can produce. */
+    if ((req.url || '').startsWith('/discord/complete')) {
+      const parts = [];
+      let n = 0;
+      req.on('data', (c) => { n += c.length; if (n <= 8_000) parts.push(c); });
+      req.on('end', async () => {
+        let body;
+        try { body = JSON.parse(Buffer.concat(parts).toString('utf8')); } catch { body = null; }
+        const out = await completeFromPage(body || {});
+        console.log(`complete: ${out.ok ? 'granted' : 'refused'} (${out.log || ''})`);
+        send(200, out.ok ? { ok: true, message: out.message } : { ok: false, message: out.message });
+      });
+      return;
+    }
 
     // Collect BYTES, never a growing string: see verifyDiscordSignature.
     const chunks = [];

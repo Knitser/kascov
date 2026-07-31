@@ -130,3 +130,20 @@ test('a missing or malformed holdings list is zero, never a crash', () => {
   assert.equal(balanceFor([], 'aa'), 0);
   assert.equal(balanceFor([{ token_id: 'aa' }], 'aa'), 0);
 });
+
+/* ------------------------------------------- the signing page's completion */
+
+test('a nonce finds exactly its own challenge', async () => {
+  const { pendingByNonce } = await import('../scripts/discord-holder-bot.mjs');
+  const pending = {
+    '111': { user: '111', address: ADDR, nonce: 'aaaa', issued_ms: 1 },
+    '222': { user: '222', address: 'kaspa:qother', nonce: 'bbbb', issued_ms: 1 },
+  };
+  assert.equal(pendingByNonce(pending, 'aaaa').userId, '111');
+  assert.equal(pendingByNonce(pending, 'bbbb').userId, '222');
+  // A wrong or absent nonce must resolve to nothing rather than the first entry
+  assert.equal(pendingByNonce(pending, 'cccc'), null);
+  assert.equal(pendingByNonce(pending, ''), null);
+  assert.equal(pendingByNonce(pending, undefined), null);
+  assert.equal(pendingByNonce({}, 'aaaa'), null);
+});

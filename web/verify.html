@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>prove your address — kascov</title>
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css?v=20260730-ui">
+  <style>
+    .wrap { max-width: 680px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    .wrap h1 { font-family: var(--display); font-size: clamp(1.7rem, 5vw, 2.3rem); margin: 0 0 .5rem; }
+    .lede { color: var(--muted); line-height: 1.6; margin: 0 0 1.75rem; }
+    .phrase {
+      font-family: var(--mono); font-size: .84rem; line-height: 1.6; word-break: break-all;
+      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: .9rem 1rem; color: var(--text); margin: 0 0 1rem;
+    }
+    .btn {
+      display: block; width: 100%; box-sizing: border-box; text-align: center;
+      font-family: var(--sans); font-size: 1.02rem; font-weight: 600;
+      padding: .95rem 1.25rem; border-radius: var(--radius-sm); cursor: pointer;
+      border: 1px solid var(--border-strong); background: var(--accent-soft); color: var(--text);
+      margin-bottom: .6rem;
+    }
+    .btn:hover:not(:disabled) { background: rgba(112,199,186,.2); }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #06201c; border-color: var(--accent); }
+    .btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+    .note { color: var(--faint); font-size: .87rem; line-height: 1.55; margin: .5rem 0 0; }
+    .step { border-top: 1px solid var(--border); margin-top: 2rem; padding-top: 1.5rem; }
+    .step h2 { font-family: var(--display); font-size: 1.1rem; margin: 0 0 .75rem; }
+    .out {
+      display: none; font-family: var(--mono); font-size: .8rem; word-break: break-all;
+      background: var(--card); border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+      padding: .9rem 1rem; color: var(--accent); margin: 0 0 .75rem;
+    }
+    .msg { display: none; border-radius: var(--radius-sm); padding: .85rem 1rem; margin: 1rem 0 0; line-height: 1.55; }
+    .msg.ok { display: block; border: 1px solid var(--born); background: var(--born-soft); color: var(--text); }
+    .msg.bad { display: block; border: 1px solid var(--burn); background: var(--burn-soft); color: var(--text); }
+    .safety { border: 1px solid var(--burn); background: var(--burn-soft); border-radius: var(--radius-sm); padding: .85rem 1rem; margin: 1.75rem 0 0; }
+    .safety p { margin: 0; color: var(--muted); font-size: .9rem; line-height: 1.55; }
+    .safety strong { color: var(--burn); }
+    .home { display: inline-block; margin-bottom: 1.5rem; color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .82rem; }
+    .home:hover { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <a class="home" href="/">&larr; kascov.io</a>
+    <h1>prove your address</h1>
+    <p class="lede">
+      Sign a phrase with the key that owns the address. That proves it is yours
+      without moving anything and without kascov ever touching your wallet.
+    </p>
+
+    <div id="nochallenge" class="msg bad" style="display:block">
+      No challenge in this link. Run <code>/verify</code> in Discord and open the
+      link it gives you.
+    </div>
+
+    <div id="app" hidden>
+      <h2 style="font-family:var(--display);font-size:1.1rem;margin:0 0 .6rem">The phrase</h2>
+      <div class="phrase" id="phrase"></div>
+      <button class="btn" id="copy" type="button">copy the phrase</button>
+
+      <div class="step">
+        <h2>Sign it</h2>
+        <button class="btn btn-primary" id="sign" type="button">sign with my wallet</button>
+        <p class="note" id="walletnote">Looking for a wallet…</p>
+
+        <div class="out" id="sigout"></div>
+        <button class="btn" id="copysig" type="button" style="display:none">copy the signature</button>
+        <button class="btn btn-primary" id="finish" type="button" style="display:none">finish and get my role</button>
+        <div class="msg" id="result"></div>
+      </div>
+
+      <div class="step">
+        <h2>Or sign it by hand</h2>
+        <p class="note">
+          Any wallet with a Sign Message feature works. Kastle: account menu,
+          Sign Message. KasWare: settings, Sign Message. kaspa CLI:
+          <code>message sign &lt;your-address&gt;</code>. Then paste the signature
+          into <code>/confirm</code> back in Discord.
+        </p>
+      </div>
+
+      <div class="safety">
+        <p>
+          <strong>Signing a message is free and moves no funds.</strong> It cannot
+          authorise a transaction. kascov will never ask for your seed phrase or
+          private key, and this page never sees either. If anything asks you for
+          one, it is not us.
+        </p>
+      </div>
+    </div>
+  </main>
+
+  <script>
+  (function () {
+    /* The challenge rides in the URL FRAGMENT, never the query string: a
+       fragment is not sent to the server, so the phrase (which contains a
+       Discord user id and a Kaspa address) stays out of access logs and out of
+       any Referer header this page might send. */
+    var raw = location.hash.slice(1);
+    if (!raw) return;
+    var phrase;
+    try { phrase = decodeURIComponent(raw); } catch (e) { return; }
+    if (phrase.indexOf('kascov verify: ') !== 0) return;
+
+    var parts = phrase.split(' ');
+    var address = parts[3] || '';
+    var nonce = parts[4] || '';
+
+    document.getElementById('nochallenge').style.display = 'none';
+    document.getElementById('app').hidden = false;
+    document.getElementById('phrase').textContent = phrase;
+
+    var $ = function (id) { return document.getElementById(id); };
+    var note = $('walletnote');
+    var result = $('result');
+    var signature = '';
+
+    function say(kind, html) { result.className = 'msg ' + kind; result.innerHTML = html; }
+
+    function copy(text, btn, label) {
+      navigator.clipboard.writeText(text).then(function () {
+        var old = btn.textContent;
+        btn.textContent = label;
+        setTimeout(function () { btn.textContent = old; }, 1600);
+      }, function () { say('bad', 'Could not reach the clipboard. Select the text and copy it manually.'); });
+    }
+
+    $('copy').addEventListener('click', function () { copy(phrase, $('copy'), 'copied'); });
+
+    /* Only KasWare's injected API is exercised here, because it is the one whose
+       shape is documented and stable. Anything else falls through to the manual
+       path rather than guessing at an interface and failing in a confusing way. */
+    function wallet() {
+      if (window.kasware && typeof window.kasware.signMessage === 'function') {
+        return { name: 'KasWare', api: window.kasware };
+      }
+      return null;
+    }
+
+    function refresh() {
+      var w = wallet();
+      if (w) {
+        note.textContent = w.name + ' detected. Signing opens its popup; nothing is sent until you approve.';
+        $('sign').disabled = false;
+      } else {
+        note.innerHTML = 'No browser wallet detected. Install <a href="https://kasware.xyz" target="_blank" rel="noopener noreferrer">KasWare</a>, or sign by hand using the steps below.';
+        $('sign').disabled = true;
+      }
+    }
+    refresh();
+    /* Extensions inject late; check again rather than telling someone with a
+       wallet installed that they do not have one. */
+    setTimeout(refresh, 600);
+    setTimeout(refresh, 1800);
+
+    $('sign').addEventListener('click', function () {
+      var w = wallet();
+      if (!w) return refresh();
+      $('sign').disabled = true;
+      $('sign').textContent = 'waiting for ' + w.name + '…';
+      Promise.resolve()
+        .then(function () {
+          return w.api.requestAccounts ? w.api.requestAccounts() : null;
+        })
+        .then(function (accounts) {
+          if (accounts && accounts.length && accounts.indexOf(address) === -1) {
+            /* Warn, do not block: a wallet may report a different address format
+               or hold several. The signature check is what actually decides. */
+            say('bad', 'Heads up: your wallet is on <code>' + accounts[0].slice(0, 18)
+              + '…</code> but this challenge is for <code>' + address.slice(0, 18)
+              + '…</code>. Switch accounts, or the signature will not match.');
+          }
+          return w.api.signMessage(phrase);
+        })
+        .then(function (sig) {
+          signature = String(sig || '').trim();
+          if (!signature) throw new Error('the wallet returned nothing');
+          $('sigout').style.display = 'block';
+          $('sigout').textContent = signature;
+          $('copysig').style.display = 'block';
+          $('finish').style.display = 'block';
+          $('sign').textContent = 'signed';
+          say('ok', 'Signed. Press <strong>finish</strong> to complete it here, or copy the signature into <code>/confirm</code> in Discord.');
+        })
+        .catch(function (e) {
+          $('sign').disabled = false;
+          $('sign').textContent = 'sign with my wallet';
+          say('bad', 'Signing did not complete: ' + (e && e.message ? e.message : 'cancelled') + '.');
+        });
+    });
+
+    $('copysig').addEventListener('click', function () { copy(signature, $('copysig'), 'copied'); });
+
+    $('finish').addEventListener('click', function () {
+      $('finish').disabled = true;
+      $('finish').textContent = 'checking…';
+      fetch('/discord/complete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ nonce: nonce, signature: signature })
+      })
+        .then(function (r) { return r.json().catch(function () { return {}; }); })
+        .then(function (d) {
+          if (d && d.ok) {
+            $('finish').textContent = 'done';
+            say('ok', d.message || 'Verified. Your role is in Discord now.');
+          } else {
+            $('finish').disabled = false;
+            $('finish').textContent = 'finish and get my role';
+            say('bad', (d && d.message) || 'That did not check out. You can still paste the signature into <code>/confirm</code>.');
+          }
+        })
+        .catch(function () {
+          $('finish').disabled = false;
+          $('finish').textContent = 'finish and get my role';
+          say('bad', 'Could not reach kascov. Paste the signature into <code>/confirm</code> in Discord instead.');
+        });
+    });
+  })();
+  </script>
+</body>
+</html>
