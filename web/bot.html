@@ -49,7 +49,7 @@
       from chain, and grants a role only if both hold up. Nothing is taken on
       trust, including your word for it.
     </p>
-    <p class="updated">last updated 2026-07-30</p>
+    <p class="updated">last updated 2026-07-31</p>
 
     <div class="never">
       <p style="margin:0">
@@ -107,11 +107,12 @@
     <h2 id="privacy">Privacy</h2>
 
     <div class="keeps">
-      <p style="margin:0 0 .5rem"><strong>Everything the bot stores about you:</strong></p>
+      <p style="margin:0 0 .5rem"><strong>Everything the bot keeps after you verify:</strong></p>
       <ul style="margin:0">
         <li>your Discord user id</li>
         <li>the Kaspa address you proved</li>
         <li>the time you proved it</li>
+        <li>the balance it read at that moment</li>
       </ul>
     </div>
 
@@ -121,14 +122,27 @@
       by two different accounts.
     </p>
 
+    <h3>While you are mid-verification</h3>
+    <p>
+      Between <code>/verify</code> and finishing, one more thing is held for up to
+      fifteen minutes: the phrase you were asked to sign, and the Discord token
+      that lets the bot edit its own message when you are done. That is what turns
+      &ldquo;sign this&rdquo; into &ldquo;verified&rdquo; in the same message
+      rather than leaving you guessing.
+    </p>
+    <p>
+      Both are deleted the moment you finish, and expire on their own if you do
+      not. Neither survives into the record above.
+    </p>
+
     <h3>What is not stored</h3>
     <ul>
       <li>No seed phrase, private key, or anything that could move funds. The bot
           never receives one.</li>
       <li>No message content. The bot only sees the commands you send it.</li>
       <li>No email, no IP address, no analytics, no advertising identifiers.</li>
-      <li>The one-time phrase and its signature are used to check the proof and
-          then discarded. Neither is kept.</li>
+      <li>Your signature is used to check the proof and then dropped. It is never
+          written down, not even for the fifteen minutes the phrase is.</li>
     </ul>
 
     <h3>Who else sees it</h3>
@@ -142,8 +156,8 @@
 
     <h3>Deleting it</h3>
     <p>
-      Run <code>/unverify</code>. The row is deleted and the role removed, with
-      no record that it ever existed. You can verify again later with the same
+      Run <code>/unverify</code>. The row is deleted, anything mid-verification
+      is cleared, and the role is removed, with no record that it ever existed. You can verify again later with the same
       address or a different one. Leaving the server has the same effect.
     </p>
 
