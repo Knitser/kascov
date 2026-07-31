@@ -221,12 +221,15 @@ async function onVerify(interaction) {
 
   const phrase = challengePhrase(userId, address, nonce);
   return [
-    '**Step 1 of 2.** Sign this exact phrase in your Kaspa wallet:',
-    '',
+    '**Step 1 of 2.** Copy this phrase and sign it in your wallet:',
     `\`\`\`\n${phrase}\n\`\`\``,
-    'Then run `/confirm` with the signature it gives you.',
+    '**Where to sign it** (nothing pops up on its own, you do this in your wallet app):',
+    '• **Kastle** ・ open the extension, account menu, Sign Message',
+    '• **KasWare** ・ open the extension, Settings, Sign Message',
+    '• **kaspa CLI** ・ `message sign <your-address>` then paste the phrase',
     '',
-    '-# Signing a message is free and moves nothing. kascov will never ask for your seed phrase, private key, or a wallet connection. This challenge expires in 15 minutes.',
+    'It gives you back a long hex string. Run `/confirm` and paste it into the form.',
+    '-# Copy the whole phrase, including the numbers at both ends. Signing a message is free, moves no funds, and cannot authorise a transaction. kascov will never ask for your seed phrase or private key. This expires in 15 minutes.',
   ].join('\n');
 }
 
@@ -316,20 +319,41 @@ const MODAL_HANDLERS = { kascov_verify: onVerify, kascov_confirm: onConfirm };
 
 /* ------------------------------------------------------------- the server */
 
+/* fetch only REJECTS on a network error, so a 400 from Discord resolves
+   happily. Checking res.ok is the difference between knowing the reply landed
+   and merely knowing it was sent. */
 async function respondLater(token, content) {
-  await fetch(`${API}/webhooks/${APP_ID}/${token}/messages/@original`, {
-    method: 'PATCH',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ content }),
-  }).catch((e) => console.error(`followup failed: ${e.message}`));
+  const text = String(content ?? '').trim();
+  if (!text) {
+    console.error('followup: handler produced nothing, sending a fallback');
+  }
+  // Discord hard-caps message content at 2000 characters and 400s the whole
+  // edit if it is over, which loses the entire answer rather than the tail.
+  const body = text ? (text.length > 1990 ? `${text.slice(0, 1987)}...` : text)
+    : 'Something went wrong and there is nothing to show. Try again.';
+  try {
+    const res = await fetch(`${API}/webhooks/${APP_ID}/${token}/messages/@original`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content: body }),
+    });
+    if (!res.ok) {
+      console.error(`followup HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error(`followup network error: ${e.message}`);
+    return false;
+  }
 }
 
 /** Run a handler after the ack and deliver whatever it says. */
 async function finish(body, handler, who) {
   try {
     const out = await handler(body);
-    await respondLater(body.token, out);
-    console.log(`  answered ${who}`);
+    const ok = await respondLater(body.token, out);
+    console.log(`  ${ok ? 'answered' : 'FAILED TO ANSWER'} ${who}`);
   } catch (e) {
     console.error(`  handler failed for ${who}: ${e.stack || e.message}`);
     await respondLater(body.token, 'Something went wrong. Try again shortly.');
