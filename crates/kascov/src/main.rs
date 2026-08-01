@@ -4273,6 +4273,55 @@ async fn registry_handler(
                             }
                         }
                     }
+                    // A vested launch mints its allocation into a schedule
+                    // covenant, so the creator's key is absent from the
+                    // genesis owners above — it sits committed inside the
+                    // lock. The list names the key and the schedule; together
+                    // they are a complete candidate for the lock's own genesis
+                    // P2SH commitment, and reproducing that commitment proves
+                    // the listed creator from chain. Every covenant owner at
+                    // genesis other than the stated curve is tried; a lock
+                    // that is not the pinned vesting template, or a wrong
+                    // claim, reproduces nothing and proves nothing.
+                    if let (Some(key), Some(v)) = (&entry.creator_pubkey, &entry.vesting) {
+                        if let Ok(creator) =
+                            <[u8; 32]>::try_from(hex::decode(key).unwrap_or_default().as_slice())
+                        {
+                            for owner in &facts.genesis_owners {
+                                if owner.len() != 66
+                                    || !owner.starts_with("02")
+                                    || Some(&owner[2..]) == entry.curve_covenant_id.as_deref()
+                                {
+                                    continue;
+                                }
+                                let Ok(lock_id) = hex::decode(&owner[2..])
+                                    .map_err(anyhow::Error::from)
+                                    .and_then(|b| Ok(<[u8; 32]>::try_from(b.as_slice())?))
+                                else {
+                                    continue;
+                                };
+                                let proven = store
+                                    .utxos(&kascov_core::CovenantId(lock_id), false)?
+                                    .into_iter()
+                                    .filter(|u| {
+                                        Some(u.outpoint.txid.to_string()) == facts.genesis_txid
+                                    })
+                                    .any(|u| {
+                                        kascov_decode::vesting::prove_genesis_lock(
+                                            &u.spk_script,
+                                            &creator,
+                                            v.total,
+                                            v.start_score,
+                                            v.duration_score,
+                                        )
+                                    });
+                                if proven {
+                                    facts.vested_creators.push(key.clone());
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             checked.push(registry::check(entry, &facts));

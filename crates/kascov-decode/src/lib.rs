@@ -5,6 +5,7 @@ pub mod disasm;
 pub mod kcc1;
 pub mod kcc20;
 pub mod observed;
+pub mod vesting;
 
 use disasm::{disassemble, Instruction, OpGroup};
 

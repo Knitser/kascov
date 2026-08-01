@@ -76,6 +76,19 @@ pub struct ListedToken {
     pub curve_covenant_id: Option<String>,
     pub pool_covenant_id: Option<String>,
     pub creator_pubkey: Option<String>,
+    pub vesting: Option<ListedVesting>,
+}
+
+/// The vesting schedule a list publishes for a vested launch. Not a fact on
+/// its own — it is the CANDIDATE the caller splices into the pinned vesting
+/// template and hashes against the genesis lock's P2SH commitment. A wrong
+/// schedule, like a wrong creator key, simply fails to reproduce the
+/// commitment, so the list can only ever prove itself right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListedVesting {
+    pub total: u64,
+    pub start_score: u64,
+    pub duration_score: u64,
 }
 
 /// What kascov proved about a covenant on its own, ahead of reading anybody's
@@ -90,6 +103,14 @@ pub struct ChainFacts {
     /// Owners written at genesis, same encoding. A creator key that has since
     /// been spent away is here but not in `owners`.
     pub genesis_owners: Vec<String>,
+    /// Creator keys PROVEN through a genesis vesting lock, 64 lowercase hex
+    /// each. A vested launch mints the allocation into a schedule covenant
+    /// instead of the creator's own address, so no key-bearing genesis owner
+    /// exists; the caller proves the creator by splicing the listed key and
+    /// schedule into the pinned vesting template and matching the lock
+    /// output's P2SH commitment. Only a key that reproduced a commitment
+    /// belongs here — this vec is a set of proofs, not of claims.
+    pub vested_creators: Vec<String>,
 }
 
 /// One entry after checking. `name`/`ticker`/`image` are carried through
@@ -206,6 +227,20 @@ pub fn parse_list(body: &str, network: &str) -> Result<Vec<ListedToken>> {
             curve_covenant_id: ext_str("curveCovenantId").as_deref().and_then(norm_id),
             pool_covenant_id: ext_str("poolCovenantId").as_deref().and_then(norm_id),
             creator_pubkey: ext_str("creatorPubkey").as_deref().and_then(norm_key),
+            // The vesting schedule rides inside `curveParams`. It is only a
+            // candidate for the lock-commitment proof, so a malformed block is
+            // simply absent, never an error.
+            vesting: ext
+                .and_then(|e| e.get("curveParams"))
+                .and_then(|c| c.get("vesting"))
+                .and_then(|v| {
+                    let n = |k: &str| v.get(k).and_then(|x| x.as_u64());
+                    Some(ListedVesting {
+                        total: n("total")?,
+                        start_score: n("startScore")?,
+                        duration_score: n("durationScore")?,
+                    })
+                }),
         })
     }
     Ok(out)
@@ -254,9 +289,25 @@ pub fn check(entry: &ListedToken, facts: &ChainFacts) -> CheckedEntry {
     // The creator key is checked against the GENESIS allocation, not against
     // who holds tokens now: a creator who has sold is still the creator, and
     // testing the live balance would report that honest history as a mismatch.
+    //
+    // A vested launch complicates this honestly: the allocation is minted into
+    // a schedule covenant, so no genesis owner carries the creator's key — the
+    // key sits inside the lock's committed state. When the caller reproduced
+    // that commitment from the listed key and schedule, the proof lands in
+    // `vested_creators` and the claim is as chain-checked as a direct cell.
+    // When a covenant the list does not account for owns a genesis allocation
+    // and no proof exists, kascov has not proven who the allocation belongs
+    // to, so the verdict is Unproven — the truthful-but-unproven list and the
+    // lying list both stay short of the badge, and neither is accused.
     let creator_key = match &entry.creator_pubkey {
         None => Checked::NotStated,
         Some(key) => {
+            let unexplained_lock = facts.genesis_owners.iter().any(|o| {
+                o.len() == 66
+                    && o.starts_with("02")
+                    && Some(&o[2..]) != entry.curve_covenant_id.as_deref()
+                    && Some(&o[2..]) != entry.pool_covenant_id.as_deref()
+            });
             if facts.genesis_owners.is_empty() {
                 Checked::Unproven
             } else if facts
@@ -265,6 +316,10 @@ pub fn check(entry: &ListedToken, facts: &ChainFacts) -> CheckedEntry {
                 .any(|o| o.len() == 66 && &o[2..] == key)
             {
                 Checked::Match
+            } else if facts.vested_creators.iter().any(|k| k == key) {
+                Checked::Match
+            } else if unexplained_lock {
+                Checked::Unproven
             } else {
                 Checked::Differ
             }
@@ -347,6 +402,7 @@ mod tests {
             genesis_txid: Some(GENESIS.into()),
             owners: vec![format!("02{CURVE}"), format!("03{CREATOR}")],
             genesis_owners: vec![format!("02{CURVE}"), format!("03{CREATOR}")],
+            vested_creators: vec![],
         }
     }
 
@@ -375,6 +431,47 @@ mod tests {
             "genesis is what fixes the creator"
         );
         assert!(c.all_checks_passed);
+    }
+
+    /// The third mainnet case: a vested launch (ANSEM). The allocation is
+    /// owned by a schedule covenant at genesis, so no genesis owner carries
+    /// the creator's key. With the lock commitment reproduced by the caller,
+    /// the listed creator is proven; the entry must pass, not be called a liar.
+    #[test]
+    fn a_vested_launch_with_a_proven_lock_matches() {
+        const VLOCK: &str = "3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a";
+        let mut f = facts();
+        f.owners = vec![format!("02{CURVE}")];
+        f.genesis_owners = vec![format!("02{CURVE}"), format!("02{VLOCK}")];
+        f.vested_creators = vec![CREATOR.into()];
+        let c = check(&entry(), &f);
+        assert_eq!(c.creator_key, Checked::Match);
+        assert!(c.all_checks_passed);
+    }
+
+    /// The same vested shape WITHOUT the proof must stay Unproven: kascov has
+    /// not shown who the locked allocation belongs to, so a truthful list
+    /// earns no badge — but it is not reported as differing either, because
+    /// nothing on chain contradicts it.
+    #[test]
+    fn a_vested_launch_without_proof_is_unproven_not_differ() {
+        const VLOCK: &str = "3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a";
+        let mut f = facts();
+        f.owners = vec![format!("02{CURVE}")];
+        f.genesis_owners = vec![format!("02{CURVE}"), format!("02{VLOCK}")];
+        let c = check(&entry(), &f);
+        assert_eq!(c.creator_key, Checked::Unproven);
+        assert!(!c.all_checks_passed, "unproven never counts as agreement");
+    }
+
+    /// The lock path must not soften the plain case: a launch whose genesis
+    /// wrote the allocation to a key, with a wrong key listed, is still a
+    /// reportable mismatch — every covenant owner there is accounted for.
+    #[test]
+    fn a_plain_launch_with_a_wrong_key_still_differs() {
+        let mut e = entry();
+        e.creator_pubkey = Some("22".repeat(32));
+        assert_eq!(check(&e, &facts()).creator_key, Checked::Differ);
     }
 
     /// The other mainnet case: a token that has graduated, so a pool covenant
@@ -452,6 +549,7 @@ mod tests {
         assert_eq!(list.len(), 2, "the entry naming no covenant is dropped");
         assert_eq!(list[0].ticker.as_deref(), Some("PUBIC"));
         assert_eq!(list[0].curve_covenant_id.as_deref(), Some(CURVE));
+        assert_eq!(list[0].vesting, None, "no curveParams, no schedule");
         assert_eq!(
             list[0].pool_covenant_id, None,
             "a null extension is absent, not empty"
@@ -467,5 +565,34 @@ mod tests {
     fn a_list_for_another_network_is_refused_whole() {
         let body = serde_json::json!({ "network": "testnet-10", "tokens": [] }).to_string();
         assert!(parse_list(&body, "mainnet").is_err());
+    }
+
+    /// The vesting schedule rides inside `curveParams`, the shape KRON
+    /// publishes for its one vested launch. A partial block is absent, not an
+    /// error: it is only ever a candidate for the commitment proof.
+    #[test]
+    fn a_published_vesting_schedule_is_parsed_from_curve_params() {
+        let body = serde_json::json!({
+            "network": "mainnet",
+            "tokens": [
+                { "covenantId": TOKEN,
+                  "extensions": { "curveParams": { "vKas": 6250000, "vesting": {
+                      "total": 100000000u64, "startScore": 499658470u64,
+                      "durationScore": 298796626u64 } } } },
+                { "covenantId": CURVE,
+                  "extensions": { "curveParams": { "vesting": { "total": 5 } } } },
+            ]
+        })
+        .to_string();
+        let list = parse_list(&body, "mainnet").unwrap();
+        assert_eq!(
+            list[0].vesting,
+            Some(ListedVesting {
+                total: 100_000_000,
+                start_score: 499_658_470,
+                duration_score: 298_796_626
+            })
+        );
+        assert_eq!(list[1].vesting, None, "a partial schedule is no candidate");
     }
 }
