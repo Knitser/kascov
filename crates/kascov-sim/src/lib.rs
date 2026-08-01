@@ -437,6 +437,31 @@ pub fn preflight_execute(
         .collect()
 }
 
+/// Execute one input of a fully-populated transaction and return the per-opcode
+/// TRACE alongside the verdict.
+///
+/// [`preflight_execute`] answers "did this pass?"; when the answer is no, the
+/// next question is always "which rule stopped it?", and a covenant with dozens
+/// of `require`s cannot answer that from a verdict string. The trace shows the
+/// stack at each step, so the failing check is the last one executed.
+pub fn preflight_execute_traced(
+    mtx: &MutableTransaction<Transaction>,
+    idx: usize,
+) -> (InputExec, Vec<TraceStep>) {
+    let limit = mtx.tx.inputs[idx].compute_commit.allowed_script_units();
+    let (pass, verdict, trace, used) = run_engine_at(mtx, idx, true, Some(limit));
+    (
+        InputExec {
+            input_index: idx,
+            pass,
+            verdict,
+            script_units_used: used,
+            allowance: limit.0,
+        },
+        trace,
+    )
+}
+
 /// Execute ONE input in the fabricated 1-in/1-out context `debug_witness`
 /// uses (for transactions where not every input carries a utxo, so the real
 /// tx context can't be populated), limited to the input's own budget.
