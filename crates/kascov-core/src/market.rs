@@ -195,6 +195,13 @@ fn push_units(program: &[u8]) -> Vec<(std::ops::Range<usize>, Vec<u8>)> {
     out
 }
 
+/// The bench diffs raw programs with the exact same push semantics the
+/// matchers use — a different parser would derive slots the matcher then
+/// disagrees with.
+pub(crate) fn push_units_of(program: &[u8]) -> Vec<(std::ops::Range<usize>, Vec<u8>)> {
+    push_units(program)
+}
+
 fn le_i64(bytes: &[u8]) -> Option<i64> {
     if bytes.is_empty() || bytes.len() > 8 {
         return None;

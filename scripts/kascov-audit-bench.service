@@ -1,0 +1,13 @@
+[Unit]
+Description=kascov audit bench: forensics on unmatched market builds
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=kascov
+WorkingDirectory=/home/kascov/kascov
+ExecStart=/bin/bash -c '/home/kascov/kascov/target/release/kascov audit-bench --network mainnet --db /home/kascov/kascov-db/mainnet.db && /home/kascov/kascov/target/release/kascov audit-bench --network testnet-10 --db /home/kascov/kascov-db/testnet-10.db'
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true

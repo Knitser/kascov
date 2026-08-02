@@ -72,6 +72,16 @@ enum Command {
     },
     /// Print a covenant's full lineage (genesis → tip).
     Trace { covenant_id: CovenantId },
+    /// Run the audit bench: automated forensics on every market program the
+    /// matcher gave up on. Recovers each program from its own spend, proves it
+    /// against its commitment, clusters build families, derives slots, and
+    /// trial-replays trades to locate constants. Writes a report the worker
+    /// serves inside verification.json. Proposals only — pinning stays human.
+    AuditBench {
+        /// Output file (default: alongside the database as <network>.bench.json)
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
     /// Fetch a transaction from the node (via its accepting block, known to
     /// the index) and print its full covenant anatomy — bindings, budgets,
     /// payload lanes. The truth tool for classification disputes.
@@ -172,6 +182,25 @@ async fn main() -> Result<()> {
                 cli.network,
                 t0.elapsed().as_secs_f64(),
                 cli.network
+            );
+            Ok(())
+        }
+        Command::AuditBench { ref out } => {
+            let out = out.clone();
+            let store = open_store(&cli)?;
+            let t0 = std::time::Instant::now();
+            let report = store.audit_bench()?;
+            let path = out.unwrap_or_else(|| {
+                db_path(&cli).with_file_name(format!("{}.bench.json", cli.network))
+            });
+            std::fs::write(&path, serde_json::to_vec_pretty(&report)?)?;
+            eprintln!(
+                "{}: bench over {} unmatched covenants ({} families) in {:.1}s -> {}",
+                cli.network,
+                report["unmatched_covenants"],
+                report["families"].as_array().map_or(0, |f| f.len()),
+                t0.elapsed().as_secs_f64(),
+                path.display()
             );
             Ok(())
         }
@@ -5027,6 +5056,7 @@ async fn verification_handler(
         Err(resp) => return resp,
     };
     let db = state.base_dir.join(format!("{network}.db"));
+    let bench_path = state.base_dir.join(format!("{network}.bench.json"));
     let key = format!("{network}/verification");
     let cc = "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
     serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
@@ -5034,6 +5064,13 @@ async fn verification_handler(
         let runs = store.derivation_runs(50)?;
         let unknown = store.unknown_builds(50)?;
         let (unknown_programs, unknown_covenants) = store.unknown_build_totals()?;
+        // The audit bench's newest report, when one has been produced. Its
+        // absence is not an error: the bench is a periodic job, not part of
+        // derivation, and an old worker simply never has the file.
+        let audit_bench: serde_json::Value = std::fs::read(&bench_path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or(serde_json::Value::Null);
         Ok(Some(serde_json::to_string(&serde_json::json!({
             "network": network.to_string(),
             "generated_at_ms": now_ms(),
@@ -5043,6 +5080,7 @@ async fn verification_handler(
             "unknown_programs_total": unknown_programs,
             "unknown_covenants_total": unknown_covenants,
             "unknown_note": "programs kascov could not match to an audited build. a to-audit list ranked by how much activity rides on each, never a trust ranking: nothing here has proven anything, and none of it is priced.",
+            "audit_bench": audit_bench,
         }))?))
     })
     .await

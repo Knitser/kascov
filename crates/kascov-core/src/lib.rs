@@ -1,4 +1,5 @@
 pub mod detect;
+pub mod bench;
 pub mod market;
 pub mod model;
 pub mod node;

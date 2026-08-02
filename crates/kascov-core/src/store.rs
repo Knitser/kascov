@@ -4206,6 +4206,12 @@ impl Store {
     /// left no record, and kascov will not manufacture one. What this gives
     /// you is a fresh, complete, honestly-recorded verification of the state
     /// as it is now — which is the thing an auditor can actually check.
+    /// Run the audit bench: read-only forensics on every unmatched market
+    /// program. Returns the report; writing it somewhere is the caller's job.
+    pub fn audit_bench(&self) -> Result<serde_json::Value> {
+        crate::bench::run_bench(&self.conn)
+    }
+
     pub fn force_reverify(&mut self) -> Result<u64> {
         use crate::tokens::TOKEN_DERIVATION_META;
         self.conn
