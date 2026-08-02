@@ -4865,11 +4865,16 @@ impl Store {
             // program constants out of committed bytes and replay its trades.
             // A failure here downgrades that covenant's figures, never the pass.
             {
+                // Same union as the gated pass above: stored rows whose
+                // covenant no token links any more still deserve the current
+                // matcher's verdict.
                 let markets: std::collections::BTreeSet<[u8; 32]> = self
                     .conn
                     .prepare(
                         "SELECT DISTINCT market_covenant_id FROM tokens
-                         WHERE market_covenant_id IS NOT NULL",
+                         WHERE market_covenant_id IS NOT NULL
+                         UNION
+                         SELECT covenant_id FROM market_programs",
                     )
                     .map_err(db_err)?
                     .query_map([], |r| r.get::<_, [u8; 32]>(0))
