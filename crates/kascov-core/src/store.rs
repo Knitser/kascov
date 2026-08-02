@@ -4746,11 +4746,19 @@ impl Store {
             // stays invisible until each covenant happens to trade again.
             let market_version = crate::market::market_stamp();
             if self.meta(MARKET_META)?.as_deref() != Some(market_version.as_str()) {
+                // Every covenant a token points at today, PLUS every row
+                // already in market_programs. The union is the point: a
+                // graduated token's old curve is nobody's market any more,
+                // and iterating only live links left such rows tagged by a
+                // retired matcher forever — "retry the stored verdicts" has
+                // to mean all of them.
                 let markets: std::collections::BTreeSet<[u8; 32]> = self
                     .conn
                     .prepare(
                         "SELECT DISTINCT market_covenant_id FROM tokens
-                         WHERE market_covenant_id IS NOT NULL",
+                         WHERE market_covenant_id IS NOT NULL
+                         UNION
+                         SELECT covenant_id FROM market_programs",
                     )
                     .map_err(db_err)?
                     .query_map([], |r| r.get::<_, [u8; 32]>(0))
