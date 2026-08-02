@@ -1294,18 +1294,51 @@ pub(crate) fn derive_token(conn: &Connection, token_id: &[u8; 32]) -> Result<()>
     });
 
     // The market link, from the live frontier: the UNIQUE covenant owner with
-    // a nonzero balance. Zero or several means no reserve, no spot, no exit
-    // value can ever be attributed — each trade still carries its own
-    // counterparty, so the trade history survives the ambiguity.
+    // a nonzero balance. Several covenant holders used to mean giving up — but
+    // a vested launch has TWO from genesis (the market and the creator's
+    // vesting lock), which parked every such token on "no market" forever. A
+    // lock is not a market: derive each candidate's program row (skip-gated,
+    // one hash compare in the steady state) and take the UNIQUE holder whose
+    // program byte-matched an audited market build. Zero or several matched
+    // still means no reserve, no spot, no exit value can be attributed — each
+    // trade carries its own counterparty, so history survives the ambiguity.
     let market_covenant_id: Option<Vec<u8>> = {
-        let covs: Vec<&String> = balances
+        let covs: Vec<[u8; 32]> = balances
             .iter()
             .filter(|(k, (bal, _))| k.starts_with("02") && *bal != 0)
-            .map(|(k, _)| k)
+            .filter_map(|(k, _)| {
+                hex::decode(&k[2..])
+                    .ok()
+                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            })
             .collect();
         match covs.as_slice() {
-            [one] => hex::decode(&one[2..]).ok().filter(|b| b.len() == 32),
-            _ => None,
+            [one] => Some(one.to_vec()),
+            [] => None,
+            many => {
+                let mut matched: Vec<Vec<u8>> = Vec::new();
+                for c in many {
+                    crate::market::derive_market_program(conn, c)?;
+                    let skel: Option<String> = conn
+                        .query_row(
+                            "SELECT skeleton FROM market_programs WHERE covenant_id = ?1",
+                            [c.as_slice()],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                        .map_err(db_err)?;
+                    if skel
+                        .as_deref()
+                        .is_some_and(|s| crate::market::MATCHED_SKELETONS.contains(&s))
+                    {
+                        matched.push(c.to_vec());
+                    }
+                }
+                match matched.as_slice() {
+                    [one] => Some(one.clone()),
+                    _ => None,
+                }
+            }
         }
     };
     let trades_stored = trade_rows.len() as i64;

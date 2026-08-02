@@ -4463,7 +4463,7 @@ impl Store {
         before: &std::collections::BTreeMap<[u8; 32], String>,
         error: Option<&str>,
     ) -> Result<()> {
-        let allow = crate::market::MATCHED_SKELETONS;
+        let allow: [&str; 4] = crate::market::MATCHED_SKELETONS;
         let (verified, unvalidated, invalid) = self
             .conn
             .query_row(
@@ -4513,18 +4513,21 @@ impl Store {
         let (m_examined, matched, unmatched, unrevealed, inv_failed) = self
             .conn
             .query_row(
+                // The IN list arity must equal MATCHED_SKELETONS.len() —
+                // the compile-time destructure below fails the build if the
+                // allowlist grows without this query following it.
                 "SELECT
                     COUNT(*),
-                    SUM(CASE WHEN mp.skeleton IN (?1, ?2) THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN mp.skeleton IS NOT NULL AND mp.skeleton NOT IN (?1, ?2)
+                    SUM(CASE WHEN mp.skeleton IN (?1, ?2, ?3, ?4) THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN mp.skeleton IS NOT NULL AND mp.skeleton NOT IN (?1, ?2, ?3, ?4)
                              THEN 1 ELSE 0 END),
                     SUM(CASE WHEN mp.skeleton IS NULL THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN mp.skeleton IN (?1, ?2) AND mp.invariant_ok = 0
+                    SUM(CASE WHEN mp.skeleton IN (?1, ?2, ?3, ?4) AND mp.invariant_ok = 0
                              THEN 1 ELSE 0 END)
                  FROM (SELECT DISTINCT market_covenant_id AS c FROM tokens
                        WHERE market_covenant_id IS NOT NULL) t
                  LEFT JOIN market_programs mp ON mp.covenant_id = t.c",
-                params![allow[0], allow[1]],
+                params![allow[0], allow[1], allow[2], allow[3]],
                 |r| {
                     Ok((
                         r.get::<_, i64>(0)?,

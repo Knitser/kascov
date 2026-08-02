@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260730-ui';
+} from './core/format.js?v=20260802-v2builds';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260730-ui';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260730-ui';
-import { createPendingModel } from './core/pending.js?v=20260730-ui';
+} from './core/state.js?v=20260802-v2builds';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260802-v2builds';
+import { createPendingModel } from './core/pending.js?v=20260802-v2builds';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -36,12 +36,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260730-ui';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260730-ui';
-import { createRefreshGate } from './core/refresh.js?v=20260730-ui';
-import { networkRouteHash } from './core/routing.js?v=20260730-ui';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260730-ui';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260730-ui';
+} from './core/data.js?v=20260802-v2builds';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260802-v2builds';
+import { createRefreshGate } from './core/refresh.js?v=20260802-v2builds';
+import { networkRouteHash } from './core/routing.js?v=20260802-v2builds';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260802-v2builds';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260802-v2builds';
 
 
 
@@ -4728,7 +4728,7 @@ function marketSectionHtml(m, trades, network, toMs, tokenId = '', tradesTotal =
     tiles.push(['pool shares', fmtInt(m.program.shares),
       'the share count the pool states in its own committed state block, as of its newest proven reveal']);
   }
-  if (m.program && m.program.token_reserve != null && m.program.skeleton === 'KRON pool v1') {
+  if (m.program && m.program.token_reserve != null && (m.program.skeleton === 'KRON pool v1' || m.program.skeleton === 'KRON pool v2')) {
     tiles.push(['token reserve', fmtInt(m.program.token_reserve),
       'tokens the pool held when it last committed its state — one spend behind the live cell, which is why the price above uses the covenant’s current balance instead']);
   }
@@ -4737,10 +4737,11 @@ function marketSectionHtml(m, trades, network, toMs, tokenId = '', tradesTotal =
     : '';
   const whyLine = (!tiles.length && m.unpriced_reason)
     ? `<p class="dim">${esc(m.unpriced_reason)}</p>` : '';
-  const progLine = m.program && m.program.skeleton === 'KRON curve v1'
-    ? `<p class="dim market-prog">curve program verified from its own committed bytes: vKas ${esc(fmtInt(m.program.v_kas_units))}, ${esc(fmtInt(m.program.exercised_trades))} trades replayed against its formula${m.program.invariant_ok ? '' : ' — INVARIANT VIOLATION, nothing priced'}.</p>`
-    : m.program && m.program.skeleton === 'KRON pool v1'
-      ? `<p class="dim market-prog">pool program verified from its own committed bytes: ${esc(fmtInt(m.program.exercised_trades))} trades replayed against its constant-product formula, reserves read from its own state block${m.program.invariant_ok ? '' : ' — INVARIANT VIOLATION, nothing priced'}.</p>`
+  const skel = (m.program && m.program.skeleton) || '';
+  const progLine = skel.startsWith('KRON curve')
+    ? `<p class="dim market-prog">curve program (${esc(skel)}) verified from its own committed bytes: vKas ${esc(fmtInt(m.program.v_kas_units))}, ${esc(fmtInt(m.program.exercised_trades))} trades replayed against its formula${m.program.invariant_ok ? '' : ' — INVARIANT VIOLATION, nothing priced'}.</p>`
+    : skel.startsWith('KRON pool')
+      ? `<p class="dim market-prog">pool program (${esc(skel)}) verified from its own committed bytes: ${esc(fmtInt(m.program.exercised_trades))} trades replayed against its constant-product formula, reserves read from its own state block${m.program.invariant_ok ? '' : ' — INVARIANT VIOLATION, nothing priced'}.</p>`
       : '';
   let tradesHtml = '';
   /* When the reader has asked for everything, render the separately-fetched
@@ -5682,7 +5683,10 @@ function auditSectionHtml(t, d, network) {
   const v = d.validation || {};
   const m = d.market || null;
   const prog = m && m.program;
-  const matched = Boolean(prog && (prog.skeleton === 'KRON curve v1' || prog.skeleton === 'KRON pool v1'));
+  /* mirror of the Rust MATCHED_SKELETONS allowlist — an allowlist, never a
+     prefix test, so a future give-up tag can never read as matched */
+  const MATCHED_SKELETONS = ['KRON curve v1', 'KRON pool v1', 'KRON curve v2', 'KRON pool v2'];
+  const matched = Boolean(prog && MATCHED_SKELETONS.includes(prog.skeleton));
   const isShares = Boolean(m && m.phase === 'lp shares');
   const why = (m && m.unpriced_reason) || 'no verified market for this token';
   const rows = [];
@@ -5722,7 +5726,7 @@ function auditSectionHtml(t, d, network) {
     : auditRow('pass', '6 · instrument identified', 'an ordinary token: cells carry an owner and an amount'));
   rows.push(matched
     ? auditRow('pass', '7 · market program identity',
-        `the covenant holding the inventory byte-matches the audited ${prog.skeleton === 'KRON pool v1' ? 'pool' : 'curve'} build outside its declared slots`)
+        `the covenant holding the inventory byte-matches the audited ${prog.skeleton} build outside its declared slots`)
     : auditRow('unknown', '7 · market program identity', isShares ? 'not applicable to share receipts' : why));
   rows.push(matched
     ? auditRow('pass', '8 · constants from bytecode',
