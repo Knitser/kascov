@@ -91,17 +91,21 @@ const IDX2_SELF_LEN: [usize; 10] = [148, 150, 335, 337, 606, 608, 870, 872, 1916
 /// what it displays.
 const IDX2_POOL_TPL: [usize; 2] = [890, 906];
 
-/// The v2 curve's optional fee branch, as a growth cap in bps of the quote.
+/// The curves' optional fee branch, as a growth cap in bps of the quote.
 ///
-/// Evidence, two independent lines agreeing: (1) the curve bytecode carries a
-/// `25 / 2000` fraction cluster (= 1.25%) repeated across its entry branches,
-/// at push positions that are byte-identical in all seven deployments; (2) the
-/// only two mainnet trades whose reserve product grew beyond quantisation both
-/// imply a tokens-side toll of 1.20-1.22% — just under 1.25%, exactly where
-/// constant-product rounding puts a 125 bps fee. Trades that skip the branch
-/// still replay at growth ~0, well inside this cap; extraction (k shrinking)
-/// stays a hard failure regardless.
-const CURVE2_FEE_GROWTH_BPS: i128 = 125;
+/// Evidence, three independent lines agreeing: (1) BOTH curve generations
+/// carry a `25 / 2000` fraction cluster (= 1.25%) in their bytecode — v1 at
+/// pushes 158/430/704/1210, v2 across its five entry branches — at positions
+/// byte-identical in every deployment; (2) the two v2 trades whose reserve
+/// product grew beyond quantisation imply a tokens-side toll of 1.20-1.22%,
+/// just under 1.25% exactly where constant-product rounding puts a 125 bps
+/// fee; (3) the first v1 trade to exercise the branch (2026-08-01) implies
+/// 123 bps — same shape, older build. The branch predates its first use: it
+/// sat unexercised through 4,305 v1 trades, which is why the old 10 ppm
+/// detector only tripped now. Trades that skip the branch still replay at
+/// growth ~0, well inside this cap; extraction (k shrinking) stays a hard
+/// failure regardless.
+const CURVE_FEE_GROWTH_BPS: i128 = 125;
 
 /// Per-skeleton fee model: (bracket_fee_bps, growth_fee_bps). The first is a
 /// fee the trader pays on the quote, so the price bracket slacks for it; the
@@ -112,7 +116,7 @@ const CURVE2_FEE_GROWTH_BPS: i128 = 125;
 fn fee_model(skeleton: &str) -> (i128, i128) {
     match skeleton {
         "KRON pool v1" | "KRON pool v2" => (20, 20),
-        "KRON curve v2" => (0, CURVE2_FEE_GROWTH_BPS),
+        "KRON curve v1" | "KRON curve v2" => (0, CURVE_FEE_GROWTH_BPS),
         _ => (0, 0),
     }
 }
@@ -1384,7 +1388,7 @@ mod tests {
         // bracket slack and reserve-growth allowance per build; the v2 curve
         // is the odd one out (tokens-side partner fee grows the reserve
         // without widening the executed price)
-        assert_eq!(fee_model("KRON curve v1"), (0, 0));
+        assert_eq!(fee_model("KRON curve v1"), (0, 125));
         assert_eq!(fee_model("KRON curve v2"), (0, 125));
         assert_eq!(fee_model("KRON pool v1"), (20, 20));
         assert_eq!(fee_model("KRON pool v2"), (20, 20));
