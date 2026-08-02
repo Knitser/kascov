@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260802-v2builds';
+} from './core/format.js?v=20260803-tnpools';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260802-v2builds';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260802-v2builds';
-import { createPendingModel } from './core/pending.js?v=20260802-v2builds';
+} from './core/state.js?v=20260803-tnpools';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260803-tnpools';
+import { createPendingModel } from './core/pending.js?v=20260803-tnpools';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -36,12 +36,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260802-v2builds';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260802-v2builds';
-import { createRefreshGate } from './core/refresh.js?v=20260802-v2builds';
-import { networkRouteHash } from './core/routing.js?v=20260802-v2builds';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260802-v2builds';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260802-v2builds';
+} from './core/data.js?v=20260803-tnpools';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260803-tnpools';
+import { createRefreshGate } from './core/refresh.js?v=20260803-tnpools';
+import { networkRouteHash } from './core/routing.js?v=20260803-tnpools';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260803-tnpools';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260803-tnpools';
 
 
 
@@ -4728,7 +4728,7 @@ function marketSectionHtml(m, trades, network, toMs, tokenId = '', tradesTotal =
     tiles.push(['pool shares', fmtInt(m.program.shares),
       'the share count the pool states in its own committed state block, as of its newest proven reveal']);
   }
-  if (m.program && m.program.token_reserve != null && (m.program.skeleton === 'KRON pool v1' || m.program.skeleton === 'KRON pool v2')) {
+  if (m.program && m.program.token_reserve != null && (m.program.skeleton === 'KRON pool v1' || m.program.skeleton === 'KRON pool v2' || m.program.skeleton === 'KRON pool tn-a')) {
     tiles.push(['token reserve', fmtInt(m.program.token_reserve),
       'tokens the pool held when it last committed its state — one spend behind the live cell, which is why the price above uses the covenant’s current balance instead']);
   }
@@ -5685,7 +5685,7 @@ function auditSectionHtml(t, d, network) {
   const prog = m && m.program;
   /* mirror of the Rust MATCHED_SKELETONS allowlist — an allowlist, never a
      prefix test, so a future give-up tag can never read as matched */
-  const MATCHED_SKELETONS = ['KRON curve v1', 'KRON pool v1', 'KRON curve v2', 'KRON pool v2'];
+  const MATCHED_SKELETONS = ['KRON curve v1', 'KRON pool v1', 'KRON curve v2', 'KRON pool v2', 'KRON pool tn-a'];
   const matched = Boolean(prog && MATCHED_SKELETONS.includes(prog.skeleton));
   const isShares = Boolean(m && m.phase === 'lp shares');
   const why = (m && m.unpriced_reason) || 'no verified market for this token';

@@ -115,7 +115,7 @@ const CURVE_FEE_GROWTH_BPS: i128 = 125;
 /// moving the executed price beyond ordinary slack.
 fn fee_model(skeleton: &str) -> (i128, i128) {
     match skeleton {
-        "KRON pool v1" | "KRON pool v2" => (20, 20),
+        "KRON pool v1" | "KRON pool v2" | "KRON pool tn-a" => (20, 20),
         "KRON curve v1" | "KRON curve v2" => (0, CURVE_FEE_GROWTH_BPS),
         _ => (0, 0),
     }
@@ -344,6 +344,15 @@ const POOL_FIXTURE: &[u8] = include_bytes!("../../kascov-decode/fixtures/kron_po
 /// held on all 580 replayed trades of the first graduated market.
 const POOL2_FIXTURE: &[u8] = include_bytes!("../../kascov-decode/fixtures/kron_pool_v2.bin");
 const POOL2_TEMPLATE_CREATOR_SLOTS: [usize; 2] = [256, 546];
+/// The oldest KRON pool build, live only on testnet-10: ten deployments, all
+/// recovered from their own spends and hash-proven, byte-identical outside
+/// FOUR creator slots. Same 94-byte state block as every generation since,
+/// same 20 bps LP fee at the same position in its arithmetic (10000-20-10000),
+/// confirmed by replaying all 349 admitted trades with zero invariant breaks.
+/// Named plainly: a testnet build gets a tag, not a marketing name.
+const POOL_TN_A_FIXTURE: &[u8] =
+    include_bytes!("../../kascov-decode/fixtures/kron_pool_tn_a.bin");
+const POOL_TN_A_CREATOR_SLOTS: [usize; 4] = [136, 148, 295, 307];
 /// "unmatched" is a verdict of a particular MATCHER, not of the program: when
 /// the matcher learns a new build, old unmatched rows must be retried even
 /// though neither the program nor its hash moved. The tag records which
@@ -355,14 +364,19 @@ const POOL2_TEMPLATE_CREATOR_SLOTS: [usize; 2] = [256, 546];
 /// it re-tagged nothing, because the gate never noticed and returned early —
 /// the tag existed but the retry it promised could not fire. `market_stamp()`
 /// folds it into that gate so a bump mechanically forces re-verification.
-pub(crate) const MATCHER_VERSION: &str = "3";
+pub(crate) const MATCHER_VERSION: &str = "4";
 
 /// The only skeletons that mean "this program byte-matched an audited build".
 /// Every tally and every publish gate reads this ALLOWLIST rather than testing
 /// `!= unmatched`: a denylist silently promotes a future give-up tag (say
 /// `unmatched:3`) into "matched", which is match-widening by accident.
-pub(crate) const MATCHED_SKELETONS: [&str; 4] =
-    ["KRON curve v1", "KRON pool v1", "KRON curve v2", "KRON pool v2"];
+pub(crate) const MATCHED_SKELETONS: [&str; 5] = [
+    "KRON curve v1",
+    "KRON pool v1",
+    "KRON curve v2",
+    "KRON pool v2",
+    "KRON pool tn-a",
+];
 
 pub(crate) fn unmatched_tag() -> String {
     format!("unmatched:{MATCHER_VERSION}")
@@ -402,10 +416,15 @@ pub fn match_kron_pool_v2(program: &[u8]) -> Option<PoolParams> {
     match_pool_build(program, POOL2_FIXTURE, &POOL2_TEMPLATE_CREATOR_SLOTS)
 }
 
+/// The oldest pool build, testnet-only: same design, four creator slots.
+pub fn match_kron_pool_tn_a(program: &[u8]) -> Option<PoolParams> {
+    match_pool_build(program, POOL_TN_A_FIXTURE, &POOL_TN_A_CREATOR_SLOTS)
+}
+
 fn match_pool_build(
     program: &[u8],
     pool_fixture: &[u8],
-    creator_slots: &[usize; 2],
+    creator_slots: &[usize],
 ) -> Option<PoolParams> {
     if program.len() != POOL_STATE_LEN + pool_fixture.len() || program[0] != 0x6b {
         return None;
@@ -666,6 +685,19 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
         .or_else(|| {
             match_kron_pool(&program).map(|p| Matched {
                 skeleton: "KRON pool v1",
+                token_covenant_id: p.token_covenant_id,
+                v_kas_units: 0,
+                token_reserve: p.token_reserve,
+                graduation_kas_sompi: None,
+                creator: p.creator,
+                kas_reserve_sompi: p.kas_reserve_units.checked_mul(1_000_000),
+                lp_token_covenant_id: Some(p.lp_token_covenant_id),
+                shares: Some(p.shares),
+            })
+        })
+        .or_else(|| {
+            match_kron_pool_tn_a(&program).map(|p| Matched {
+                skeleton: "KRON pool tn-a",
                 token_covenant_id: p.token_covenant_id,
                 v_kas_units: 0,
                 token_reserve: p.token_reserve,
@@ -962,7 +994,7 @@ pub(crate) fn market_summary(
     };
     out.phase = Some(match prog.skeleton.as_str() {
         "KRON curve v1" | "KRON curve v2" => "bonding".into(),
-        "KRON pool v1" | "KRON pool v2" => "graduated".into(),
+        "KRON pool v1" | "KRON pool v2" | "KRON pool tn-a" => "graduated".into(),
         _ => "unknown".into(),
     });
     // Allowlist, never a denylist: testing `!= unmatched` would promote a
@@ -1217,11 +1249,12 @@ mod tests {
     #[test]
     fn a_give_up_tag_is_not_a_match() {
         assert!(!MATCHED_SKELETONS.contains(&unmatched_tag().as_str()));
-        assert!(!MATCHED_SKELETONS.contains(&"unmatched:4"));
+        assert!(!MATCHED_SKELETONS.contains(&"unmatched:5"));
         assert!(MATCHED_SKELETONS.contains(&"KRON curve v1"));
         assert!(MATCHED_SKELETONS.contains(&"KRON pool v1"));
         assert!(MATCHED_SKELETONS.contains(&"KRON curve v2"));
         assert!(MATCHED_SKELETONS.contains(&"KRON pool v2"));
+        assert!(MATCHED_SKELETONS.contains(&"KRON pool tn-a"));
     }
 
     #[test]
@@ -1399,7 +1432,42 @@ mod tests {
         assert_eq!(fee_model("KRON curve v2"), (0, 125));
         assert_eq!(fee_model("KRON pool v1"), (20, 20));
         assert_eq!(fee_model("KRON pool v2"), (20, 20));
+        assert_eq!(fee_model("KRON pool tn-a"), (20, 20));
         assert_eq!(fee_model(&unmatched_tag()), (0, 0));
+    }
+
+    #[test]
+    fn the_tn_a_pool_build_matches_and_reads_its_state() {
+        // A REAL testnet vector: the state block of the 76-trade pool, in
+        // front of the pinned template. Ten deployments share this build.
+        let state = hex::decode(
+            "6b08e62200000000000008950dd40600000000209dad170417bdd934b42df41cbe1dddb23e8d\
+             62ad6b6c8ec761ea812dbb9109dd0840420f000000000020aefbebbe3cffc75c56ec964d8f94\
+             83e6f0027fb7a9821428a6f45db383599e73",
+        )
+        .unwrap();
+        assert_eq!(state.len(), POOL_STATE_LEN);
+        let mut prog = state;
+        prog.extend_from_slice(POOL_TN_A_FIXTURE);
+        let p = match_kron_pool_tn_a(&prog).expect("state + pinned tn-a template must match");
+        assert_eq!(p.kas_reserve_units, 8_934);
+        assert_eq!(p.token_reserve, 114_560_405);
+        assert_eq!(p.shares, 1_000_000);
+        assert_eq!(
+            hex::encode(&p.token_covenant_id[..8]),
+            "9dad170417bdd934"
+        );
+        // never claimed by the other pool builds, and vice versa
+        assert!(match_kron_pool(&prog).is_none());
+        assert!(match_kron_pool_v2(&prog).is_none());
+        // a flipped template byte outside the creator slots is a different build
+        let mut evil = prog.clone();
+        let units = push_units(POOL_TN_A_FIXTURE);
+        let t = (0..units.len())
+            .find(|i| !POOL_TN_A_CREATOR_SLOTS.contains(i) && !units[*i].1.is_empty())
+            .unwrap();
+        evil[POOL_STATE_LEN + units[t].0.end - 1] ^= 0x01;
+        assert!(match_kron_pool_tn_a(&evil).is_none());
     }
 
     /// The donation attack the bracket exists for: buy 1,000, give 999 back
