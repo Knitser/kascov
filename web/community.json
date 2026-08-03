@@ -1,5 +1,15 @@
 [
   {
+    "name": "KRON",
+    "by": "@KronTechnology",
+    "blurb": "the first covenant DEX and launchpad on Kaspa L1 — every token gets its own market UTXO, and kascov has replayed 5,000+ of its trades against the programs' own bytecode",
+    "links": {
+      "site": "https://kron.technology",
+      "example": "#/mainnet/token/7a98370c0d6b037c28089d7b77cd8229120804cb416ef592ddb99e23820544e4"
+    },
+    "date": "2026-08-03"
+  },
+  {
     "name": "Kaspa Covenant Game Kit",
     "by": "@w00c00",
     "blurb": "an SDK for 1v1 games with player-funded covenant escrow and on-chain settlement — the escrow contract verifies byte-identical on kascov",

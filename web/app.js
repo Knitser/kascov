@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260803-tnpools';
+} from './core/format.js?v=20260803-galaxyid';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260803-tnpools';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260803-tnpools';
-import { createPendingModel } from './core/pending.js?v=20260803-tnpools';
+} from './core/state.js?v=20260803-galaxyid';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260803-galaxyid';
+import { createPendingModel } from './core/pending.js?v=20260803-galaxyid';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -36,12 +36,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260803-tnpools';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260803-tnpools';
-import { createRefreshGate } from './core/refresh.js?v=20260803-tnpools';
-import { networkRouteHash } from './core/routing.js?v=20260803-tnpools';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260803-tnpools';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260803-tnpools';
+} from './core/data.js?v=20260803-galaxyid';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260803-galaxyid';
+import { createRefreshGate } from './core/refresh.js?v=20260803-galaxyid';
+import { networkRouteHash } from './core/routing.js?v=20260803-galaxyid';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260803-galaxyid';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260803-galaxyid';
 
 
 
@@ -513,6 +513,35 @@ function ensureScript(src) {
   return scriptPromises[src];
 }
 
+/* Token identity for the galaxy: names, tickers and art for the few dozen
+   dots that are KCC20 tokens, joined CLIENT-side by covenant id from two
+   payloads the site already serves (tokens.json + registry.json). Keying by
+   id — never by node index — means the renderer's own hasIdentity guard
+   protects names and faces too: a placeholder dot has no id to look up.
+   Art tiers keep their meaning: chain-proven art from img/ (immutable),
+   witnessed listed logos from listed-img/ (revalidating), identicons never
+   drawn here (the orb itself is the fallback). */
+function hydrateGalaxyTokenInfo(network) {
+  Promise.all([loadTokens(network), loadRegistry(network).catch(() => null)])
+    .then(([toks]) => {
+      if (galaxyMounted !== network || !galaxyCtrl || !galaxyCtrl.setTokenInfo) return;
+      const map = new Map();
+      /* loadTokens returns a {data, at} cache record, not the payload */
+      const list = (toks && toks.data && toks.data.tokens) || [];
+      list.forEach((t) => {
+        const listed = state.registry[network] ? registryEntry(network, t.covenant_id) : null;
+        const label = t.claimed_name || (listed && listed.name) || null;
+        const ticker = t.claimed_ticker || (listed && listed.ticker) || null;
+        const art = t.claimed_image_hash
+          ? `img/${network}/${t.covenant_id}`
+          : (listed && listed.logo ? `listed-img/${network}/${t.covenant_id}` : null);
+        if (label || ticker || art) map.set(t.covenant_id, { label, ticker, art });
+      });
+      galaxyCtrl.setTokenInfo((id) => map.get(id) || null);
+    })
+    .catch(() => { /* the galaxy works nameless; identity is an upgrade */ });
+}
+
 /* the galaxy — the whole-network map: every app at once, positions +
    weighted edges precomputed by the worker (data/<net>/galaxy.json). Rendered
    lazily by web/galaxy.js when the section is expanded. */
@@ -611,7 +640,7 @@ function renderGalaxy() {
   if (!gsec || !gsec.open || !canvas) return;
   if (!window.kascovGalaxy) {
     /* first open: pull the renderer in, then come back */
-    ensureScript('/galaxy.js').then(() => {
+    ensureScript('/galaxy.js?v=20260803-galaxyid').then(() => {
       if (gsec.open && parseRoute().view === 'explore') renderGalaxy();
     }).catch(() => {});
     return;
@@ -650,6 +679,7 @@ function renderGalaxy() {
     onPickCoin: (id) => { location.hash = `#/${network}/c/${id}`; },
   });
   galaxyMounted = network;
+  hydrateGalaxyTokenInfo(network);
   const isCoreTier = data.tier === 'core';
   galaxyCtrl.load(data);
   // the controller adopted/copied everything into typed arrays — release the
@@ -8147,8 +8177,11 @@ if (galaxySearch) {
       if (!query) {
         galaxyAccessible.textContent = 'Search centers one coin in the map and exposes a precise link here.';
       } else if (id) {
+        const inf = galaxyCtrl && galaxyCtrl.infoOf ? galaxyCtrl.infoOf(id) : null;
+        const label = (inf && inf.label) || friendlyName(id);
+        const tick = inf && inf.ticker ? ` <span class="dim">$${esc(inf.ticker)}</span>` : '';
         galaxyAccessible.innerHTML = `focused: <a href="#/${esc(state.network)}/c/${esc(id)}">` +
-          `${esc(friendlyName(id))}</a> <span class="mono">${esc(shortHex(id, 8, 6))}</span>`;
+          `${esc(label)}</a>${tick} <span class="mono">${esc(shortHex(id, 8, 6))}</span>`;
       } else {
         galaxyAccessible.textContent = galaxyCtrl
           ? `No loaded coin matches “${query}”.`

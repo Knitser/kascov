@@ -94,6 +94,19 @@
     return Math.max(currentScale, desired);
   }
   const hasIdentity = (id) => typeof id === 'string' && id.length > 0;
+
+  /* Does one coin match a search query? Beyond the id prefix and the derived
+     name, a KCC20 token can carry a claimed or listed name and a ticker —
+     "kascov" or "$KASCOV" should land on humble-crimson-tortoise. Pure, so
+     the test file can pin every arm. */
+  function searchMatches(id, friendly, info, q) {
+    if (id.toLowerCase().startsWith(q)) return true;
+    if (friendly.toLowerCase().includes(q)) return true;
+    if (!info) return false;
+    const bare = q.charAt(0) === '$' ? q.slice(1) : q;
+    if (info.label && info.label.toLowerCase().includes(q)) return true;
+    return Boolean(bare && info.ticker && info.ticker.toLowerCase().includes(bare));
+  }
   function visualIds(coreIds, total, preserveCore) {
     const out = new Array(total).fill('');
     if (!preserveCore) return out;
@@ -120,6 +133,10 @@
     const friendlyName = opts.friendlyName || ((id) => id.slice(0, 8));
     const templateColorFn = opts.templateColor || null;
     const onPickCoin = opts.onPickCoin || (() => {});
+    /* id -> {label, ticker, art} | null. Keyed by covenant id, so it rides the
+       same hasIdentity guard as everything else: a placeholder dot has no id,
+       so it can never borrow a token's name or face. */
+    let getTokenInfo = opts.getTokenInfo || null;
 
     const ctx = canvas.getContext('2d');
     const host = canvas.parentElement;
@@ -315,6 +332,7 @@
       // template colors may have changed — cached sprites are stale
       orbCache.clear();
       nebCache.clear();
+      artCache.clear();
       flatCache = [];
       maxAppRadius = 0;
       for (let a = 0; a < apps.length; a++) maxAppRadius = Math.max(maxAppRadius, apps[a].r || 0);
@@ -725,6 +743,29 @@
       ctx.restore();
     }
 
+    const infoFor = (i) => (getTokenInfo && hasIdentity(ids[i]) ? getTokenInfo(ids[i]) : null);
+    const displayName = (i) => {
+      const inf = infoFor(i);
+      return inf && inf.label ? inf.label : friendlyName(ids[i]);
+    };
+
+    /* Token art, drawn over the orb once the camera is close enough that a
+       face-sized sprite reads as a face. Loaded once per id; a failed fetch is
+       remembered so it never retries every frame. */
+    const ART_DETAIL = 18;
+    const artCache = new Map(); // id -> {img, state: 'loading'|'ok'|'err'}
+    function artEntry(id, url) {
+      let e = artCache.get(id);
+      if (e) return e;
+      const img = new Image();
+      e = { img, state: 'loading' };
+      img.onload = () => { e.state = 'ok'; requestDraw(); };
+      img.onerror = () => { e.state = 'err'; };
+      img.src = url;
+      artCache.set(id, e);
+      return e;
+    }
+
     function drawNodes(candidates, vx0, vy0, vx1, vy1, zf, layerAlpha) {
       const mBase = 0.72 + 0.28 * smoothstep(DETAIL_START, 30, zf);
       // small networks: scale sprites up so a handful of coins reads as
@@ -783,6 +824,34 @@
             ctx.drawImage(orbSpriteFor(i, bi), px - HR, py - HR, HR * 2, HR * 2);
           }
         }
+        /* No rr floor here: node radii barely grow with zoom (mBase caps at
+           1.0), so small single-UTXO tokens — exactly the ones with logos —
+           would never qualify. The 9px face floor below keeps them legible. */
+        if (!denseMode && zf >= ART_DETAIL) {
+          const inf = infoFor(i);
+          if (inf && inf.art) {
+            const ent = artEntry(ids[i], inf.art);
+            if (ent.state === 'ok') {
+              /* a face needs a minimum size to read as one — small tokens'
+                 orbs are ~6px, so give art a floor once the camera is this
+                 close. Purely visual: hit-testing still uses the orb. */
+              const ar = Math.max(r * 0.92, 9);
+              if (alpha !== 1) ctx.globalAlpha = alpha;
+              ctx.save();
+              ctx.beginPath();
+              ctx.arc(px, py, ar, 0, TAU);
+              ctx.clip();
+              ctx.drawImage(ent.img, px - ar, py - ar, ar * 2, ar * 2);
+              ctx.restore();
+              ctx.lineWidth = 1;
+              ctx.strokeStyle = 'rgba(233,241,239,0.55)';
+              ctx.beginPath();
+              ctx.arc(px, py, ar, 0, TAU);
+              ctx.stroke();
+              if (alpha !== 1) ctx.globalAlpha = 1;
+            }
+          }
+        }
         if (i === hoverNode) {
           // single hovered node: one-off glow ring (the only shadowBlur draw)
           const pulse = twinkle ? 1.5 + Math.sin(tNow * 0.005) * 1.5 : 0;
@@ -825,7 +894,9 @@
       for (let n = 0; n < ranked.length && boxes.length < 18; n++) {
         const i = ranked[n];
         if (!hasIdentity(ids[i])) continue;
-        const text = friendlyName(ids[i]);
+        const inf = infoFor(i);
+        const base = inf && inf.label ? inf.label : friendlyName(ids[i]);
+        const text = inf && inf.ticker ? `${base} · $${inf.ticker}` : base;
         const width = Math.ceil(ctx.measureText(text).width);
         const px = sx(nx[i]), py = sy(ny[i]);
         const r = Math.max(2, (1.8 + Math.max(0, nr[i] - 4) * 0.55) * radiusMul);
@@ -1308,12 +1379,11 @@
         if (i >= 0) {
           const tname = nt[i] >= 0 ? templates[nt[i]] : 'unrecognized';
           const identified = hasIdentity(ids[i]);
-          showTip(
-            px,
-            py,
-            identified ? friendlyName(ids[i]) : 'coin identity loading…',
-            `${tname} · ${ns[i] ? 'active' : 'burned'}`,
-          );
+          const inf = identified ? infoFor(i) : null;
+          const title = !identified
+            ? 'coin identity loading…'
+            : inf && inf.ticker ? `${displayName(i)} · $${inf.ticker}` : displayName(i);
+          showTip(px, py, title, `${tname} · ${ns[i] ? 'active' : 'burned'}`);
           canvas.style.cursor = identified ? 'pointer' : 'default';
         } else { hideTip(); canvas.style.cursor = 'grab'; }
       }
@@ -1421,7 +1491,7 @@
       }
       for (let i = 0; i < N; i++) {
         if (hasIdentity(ids[i]) &&
-            (ids[i].toLowerCase().startsWith(q) || friendlyName(ids[i]).toLowerCase().includes(q))) {
+            searchMatches(ids[i], friendlyName(ids[i]), infoFor(i), q)) {
           filter = Object.assign(filter, {}); // no filter change
           focusNode = i;
           hoverNode = i;
@@ -1555,8 +1625,15 @@
     }
 
     const colorForTemplate = (i) => (i >= 0 && i < tplColors.length ? tplColors[i] : UNKNOWN_COLOR);
+    function setTokenInfo(fn) {
+      getTokenInfo = typeof fn === 'function' ? fn : null;
+      requestDraw();
+    }
+    const infoOf = (id) => (getTokenInfo && hasIdentity(id) ? getTokenInfo(id) : null);
+
     return {
       load, loadVisual, setFilter, setColorMode, search, focus, zoom, resize, destroy,
+      setTokenInfo, infoOf,
       templates: () => templates, colorForTemplate, _bench, _debug,
     };
   }
@@ -1566,5 +1643,6 @@
     _appFocusScale: appFocusScale,
     _hasIdentity: hasIdentity,
     _visualIds: visualIds,
+    _searchMatches: searchMatches,
   };
 })();

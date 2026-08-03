@@ -44,3 +44,22 @@ test('visual tier preserves the core identity prefix and pads outer nodes', () =
 test('visual tier drops core identities when its layout fingerprint changed', () => {
   assert.deepEqual(Array.from(_visualIds(['aa', 'bb'], 4, false)), ['', '', '', '']);
 });
+
+test('search matches a token by claimed name and by ticker, with or without $', () => {
+  const { _searchMatches } = sandbox.window.kascovGalaxy;
+  const id = 'c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2';
+  const friendly = 'humble-crimson-tortoise';
+  const info = { label: 'kascov', ticker: 'KASCOV', art: null };
+
+  assert.equal(_searchMatches(id, friendly, info, 'kascov'), true);      // name
+  assert.equal(_searchMatches(id, friendly, info, '$kascov'), true);     // $ticker
+  assert.equal(_searchMatches(id, friendly, info, 'kasc'), true);        // partial
+  assert.equal(_searchMatches(id, friendly, info, 'c58c826d'), true);    // id prefix
+  assert.equal(_searchMatches(id, friendly, info, 'tortoise'), true);    // derived name
+  assert.equal(_searchMatches(id, friendly, info, 'nacho'), false);
+  // a coin with no token info still matches id + derived name, nothing else
+  assert.equal(_searchMatches(id, friendly, null, 'kascov'), false);
+  assert.equal(_searchMatches(id, friendly, null, 'tortoise'), true);
+  // a bare "$" must not become match-everything
+  assert.equal(_searchMatches(id, friendly, info, '$'), false);
+});

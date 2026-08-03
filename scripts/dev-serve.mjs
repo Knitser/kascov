@@ -93,7 +93,7 @@ function serveStatic(req, res, pathname) {
 
 /* ------------------------------------------------------- upstream proxy */
 
-const WORKER_PREFIX = /^\/(data|share|og|badge|img)\//;
+const WORKER_PREFIX = /^\/(data|share|og|badge|img|listed-img)\//;
 const WORKER_EXACT = new Set(['/sitemap.xml', '/feed.xml', '/health', '/healthz']);
 const isWorkerRoute = (p) => WORKER_PREFIX.test(p) || WORKER_EXACT.has(p);
 
