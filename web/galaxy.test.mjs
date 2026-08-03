@@ -63,3 +63,17 @@ test('search matches a token by claimed name and by ticker, with or without $', 
   // a bare "$" must not become match-everything
   assert.equal(_searchMatches(id, friendly, info, '$'), false);
 });
+
+test('the focus card market line states phase, graduation percent, holders and trades', () => {
+  const { _marketLine } = sandbox.window.kascovGalaxy;
+  assert.equal(
+    _marketLine({ phase: 'bonding', gradBps: 6628, holders: 96, trades: 557 }),
+    'bonding · 66.3% · 96 holders · 557 trades'
+  );
+  // graduated markets carry no percent; missing figures are simply absent
+  assert.equal(_marketLine({ phase: 'graduated', holders: 355 }), 'graduated · 355 holders');
+  assert.equal(_marketLine({ phase: 'graduated' }), 'graduated');
+  // no market, no line — the card falls back to name and template only
+  assert.equal(_marketLine({ label: 'kascov' }), '');
+  assert.equal(_marketLine(null), '');
+});

@@ -107,6 +107,17 @@
     if (info.label && info.label.toLowerCase().includes(q)) return true;
     return Boolean(bare && info.ticker && info.ticker.toLowerCase().includes(bare));
   }
+  /* One line of market truth for the focus card: phase, graduation percent
+     while bonding, holders, trades — only the parts the directory actually
+     carries. Pure, so the test file can pin the bps→percent math. */
+  function marketLine(info) {
+    if (!info || !info.phase) return '';
+    let line = info.phase;
+    if (info.phase === 'bonding' && info.gradBps != null) line += ` · ${(info.gradBps / 100).toFixed(1)}%`;
+    if (info.holders != null) line += ` · ${info.holders} holders`;
+    if (info.trades != null) line += ` · ${info.trades} trades`;
+    return line;
+  }
   function visualIds(coreIds, total, preserveCore) {
     const out = new Array(total).fill('');
     if (!preserveCore) return out;
@@ -148,6 +159,15 @@
     tip.setAttribute('aria-hidden', 'true');
     if (host) host.appendChild(tip);
 
+    // the focus card — the searched coin's details, pinned beside it and
+    // moving with it. Same escaping discipline as the tip: claimed names
+    // and tickers are chain data, never trusted as markup.
+    const card = document.createElement('div');
+    card.className = 'galaxy-tip galaxy-focus-card';
+    card.setAttribute('aria-hidden', 'true');
+    if (host) host.appendChild(card);
+    let cardKey = '';
+
     // ---- state ----
     let N = 0;
     let nx, ny, nr, nt, ns, na, ids; // typed arrays + id string list
@@ -167,6 +187,7 @@
     let W = 0, H = 0;
     let scale = 1, fitScale = 1, panX = 0, panY = 0;
     let hoverNode = -1, hoverApp = -1, focusNode = -1;
+    let focusAnimAt = 0; // performance.now() when the focus face started growing
     let dragging = false, dragMoved = false, lastX = 0, lastY = 0;
     const activePointers = new Map();
     let pinch = null;
@@ -720,6 +741,7 @@
       }
 
       drawHud();
+      updateFocusCard();
     }
 
     function drawGalaxyHaze() {
@@ -827,6 +849,7 @@
         /* No rr floor here: node radii barely grow with zoom (mBase caps at
            1.0), so small single-UTXO tokens — exactly the ones with logos —
            would never qualify. The 9px face floor below keeps them legible. */
+        let faceR = 0; // the ring below wraps the face when one is drawn
         if (!denseMode && zf >= ART_DETAIL) {
           const inf = infoFor(i);
           if (inf && inf.art) {
@@ -835,7 +858,16 @@
               /* a face needs a minimum size to read as one — small tokens'
                  orbs are ~6px, so give art a floor once the camera is this
                  close. Purely visual: hit-testing still uses the orb. */
-              const ar = Math.max(r * 0.92, 9);
+              let ar = Math.max(r * 0.92, 9);
+              if (i === focusNode && focusAnimAt) {
+                /* the searched coin grows into a hero face, eased over
+                   420ms — the film's move, now real */
+                const ft = Math.min(1, (performance.now() - focusAnimAt) / 420);
+                const fe = 1 - (1 - ft) * (1 - ft) * (1 - ft);
+                ar += (Math.min(34, Math.max(26, rr * 3)) - ar) * fe;
+                if (ft < 1) requestDraw();
+              }
+              faceR = ar;
               if (alpha !== 1) ctx.globalAlpha = alpha;
               ctx.save();
               ctx.beginPath();
@@ -853,7 +885,8 @@
           }
         }
         if (i === hoverNode) {
-          // single hovered node: one-off glow ring (the only shadowBlur draw)
+          // single hovered node: one-off glow ring (the only shadowBlur draw);
+          // wraps the grown face when the coin is wearing one
           const pulse = twinkle ? 1.5 + Math.sin(tNow * 0.005) * 1.5 : 0;
           ctx.save();
           ctx.globalAlpha = 1;
@@ -862,7 +895,7 @@
           ctx.lineWidth = 1.5;
           ctx.strokeStyle = 'rgba(240,255,250,0.95)';
           ctx.beginPath();
-          ctx.arc(px, py, r + 3.5 + pulse, 0, TAU);
+          ctx.arc(px, py, (faceR || r) + 3.5 + pulse, 0, TAU);
           ctx.stroke();
           ctx.restore();
         }
@@ -1468,6 +1501,38 @@
     function hideTip() { tip.style.display = 'none'; }
     function escapeHtml(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
+    /* The searched coin's card: name and ticker, template and status, and
+       the market line when the directory carries one. Rebuilt only when the
+       content changes; repositioned every frame so it rides with the coin. */
+    function updateFocusCard() {
+      if (focusNode < 0 || !visible || !visible[focusNode] || !hasIdentity(ids[focusNode])) {
+        card.style.display = 'none';
+        cardKey = '';
+        return;
+      }
+      const i = focusNode;
+      const inf = infoFor(i);
+      const name = (inf && inf.label) || friendlyName(ids[i]);
+      const title = inf && inf.ticker ? `${name} · $${inf.ticker}` : name;
+      const tname = nt[i] >= 0 && templates[nt[i]]
+        ? templates[nt[i]].replace('SilverScript · ', '')
+        : 'unknown';
+      const sub = `${tname} · ${ns[i] ? 'active' : 'burned'}`;
+      const mkt = marketLine(inf);
+      const key = `${ids[i]}|${title}|${sub}|${mkt}`;
+      if (key !== cardKey) {
+        cardKey = key;
+        card.innerHTML = `<strong>${escapeHtml(title)}</strong><span>${escapeHtml(sub)}</span>` +
+          (mkt ? `<span class="mkt">${escapeHtml(mkt)}</span>` : '');
+      }
+      card.style.display = 'block';
+      const px = sx(nx[i]), py = sy(ny[i]);
+      const left = clamp(px + 26, 8, Math.max(8, W - card.offsetWidth - 8));
+      const top = clamp(py + 30, 8, Math.max(8, H - card.offsetHeight - 8));
+      card.style.left = left + 'px';
+      card.style.top = top + 'px';
+    }
+
     // ---- public controls ----
     function setFilter(f) { filter = Object.assign(filter, f); applyFilter(); requestDraw(); }
     function setColorMode(m) {
@@ -1494,6 +1559,7 @@
             searchMatches(ids[i], friendlyName(ids[i]), infoFor(i), q)) {
           filter = Object.assign(filter, {}); // no filter change
           focusNode = i;
+          focusAnimAt = performance.now();
           hoverNode = i;
           hoverApp = na[i];
           animateTo(Math.max(scale, fitScale * LABEL_DETAIL), nx[i], ny[i]);
@@ -1505,6 +1571,7 @@
     function focus(id) {
       for (let i = 0; i < N; i++) if (ids[i] === id) {
         focusNode = i;
+        focusAnimAt = performance.now();
         animateTo(Math.max(scale, fitScale * LABEL_DETAIL), nx[i], ny[i]);
         return true;
       }
@@ -1601,6 +1668,7 @@
       bgUrls = [];
       canvas.style.background = ''; // resets image/color/repeat/size/position
       if (tip.parentElement) tip.parentElement.removeChild(tip);
+      if (card.parentElement) card.parentElement.removeChild(card);
     }
 
     // debug-only frame timer (not part of the public contract): average
@@ -1644,5 +1712,6 @@
     _hasIdentity: hasIdentity,
     _visualIds: visualIds,
     _searchMatches: searchMatches,
+    _marketLine: marketLine,
   };
 })();

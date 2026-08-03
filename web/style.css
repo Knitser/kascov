@@ -3646,6 +3646,9 @@ details.collapse-sec > summary:hover h2 { color: var(--accent); }
 .galaxy-tip { position: absolute; pointer-events: none; z-index: 6; display: none; max-width: min(250px, calc(100% - 16px)); overflow-wrap: anywhere; padding: 0.3rem 0.5rem; font-size: 0.78rem; line-height: 1.25; color: var(--text); background: rgba(6, 18, 15, 0.94); border: 1px solid var(--border-strong, var(--border)); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.4); backdrop-filter: blur(8px); }
 .galaxy-tip strong { display: block; font-weight: 600; }
 .galaxy-tip span { display: block; color: var(--muted); font-size: 0.72rem; }
+/* the focus card: the searched coin's details, pinned beside it */
+.galaxy-focus-card { border-color: var(--border-strong); padding: 0.45rem 0.65rem; }
+.galaxy-focus-card .mkt { color: var(--accent); font-family: var(--mono); font-size: 0.7rem; margin-top: 0.15rem; }
 @media (max-width: 640px) { .galaxy-canvas { height: 400px; } }
 
 /* SilverScript compiler playground */

@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260803-galaxyid';
+} from './core/format.js?v=20260803-focuscard';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260803-galaxyid';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260803-galaxyid';
-import { createPendingModel } from './core/pending.js?v=20260803-galaxyid';
+} from './core/state.js?v=20260803-focuscard';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260803-focuscard';
+import { createPendingModel } from './core/pending.js?v=20260803-focuscard';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -36,12 +36,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260803-galaxyid';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260803-galaxyid';
-import { createRefreshGate } from './core/refresh.js?v=20260803-galaxyid';
-import { networkRouteHash } from './core/routing.js?v=20260803-galaxyid';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260803-galaxyid';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260803-galaxyid';
+} from './core/data.js?v=20260803-focuscard';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260803-focuscard';
+import { createRefreshGate } from './core/refresh.js?v=20260803-focuscard';
+import { networkRouteHash } from './core/routing.js?v=20260803-focuscard';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260803-focuscard';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260803-focuscard';
 
 
 
@@ -535,7 +535,18 @@ function hydrateGalaxyTokenInfo(network) {
         const art = t.claimed_image_hash
           ? `img/${network}/${t.covenant_id}`
           : (listed && listed.logo ? `listed-img/${network}/${t.covenant_id}` : null);
-        if (label || ticker || art) map.set(t.covenant_id, { label, ticker, art });
+        /* the focus card's market line rides along from the same directory
+           row — phase, graduation progress, holders, lifetime trades */
+        const market = t.market || null;
+        const phase = (market && market.phase) || null;
+        const gradBps = market && market.grad_progress_bps != null ? market.grad_progress_bps : null;
+        const trades = market && market.program && market.program.exercised_trades != null
+          ? market.program.exercised_trades
+          : null;
+        const holders = t.holders != null ? t.holders : null;
+        if (label || ticker || art || phase) {
+          map.set(t.covenant_id, { label, ticker, art, phase, gradBps, holders, trades });
+        }
       });
       galaxyCtrl.setTokenInfo((id) => map.get(id) || null);
     })
@@ -640,7 +651,7 @@ function renderGalaxy() {
   if (!gsec || !gsec.open || !canvas) return;
   if (!window.kascovGalaxy) {
     /* first open: pull the renderer in, then come back */
-    ensureScript('/galaxy.js?v=20260803-galaxyid').then(() => {
+    ensureScript('/galaxy.js?v=20260803-focuscard').then(() => {
       if (gsec.open && parseRoute().view === 'explore') renderGalaxy();
     }).catch(() => {});
     return;
