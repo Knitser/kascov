@@ -11,6 +11,8 @@ EnvironmentFile=/home/kascov/.discord-bot-env
 Environment=KASCOV_BOT_STATE=/home/kascov/kascov-holder-bot.json
 # recheck also writes the tally (auto-close, departures), same served path
 Environment=KASCOV_VOTE_TALLY=/mnt/c/kascov/web/vote-tally.json
+# recheck rebuilds the passport claims file after every pass
+Environment=KASCOV_PASSPORT_OUT=/mnt/c/kascov/web/passport-claims.json
 ExecStart=/usr/bin/node /home/kascov/kascov/scripts/discord-holder-bot.mjs --recheck
 Nice=10
 IOSchedulingClass=idle

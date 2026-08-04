@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>the kascov passport — your reputation, verifiable without us</title>
+  <meta name="description" content="Every earned kascov role becomes a claim keyed to a chain-proven address. Claims are merkleized and the root is published; this page rechecks the math in your browser. The mainnet anchor is not armed yet, and this page says so.">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://kascov.io/passport">
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css?v=20260803-focuscard">
+  <style>
+    /* A standalone page on the vote.html pattern: only what it needs on top
+       of the shared palette. */
+    .doc { max-width: 780px; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+    .doc h1 { font-family: var(--display); font-size: clamp(1.9rem, 5vw, 2.6rem); margin: 0 0 .4rem; }
+    .doc h2 {
+      font-family: var(--display); font-size: 1.45rem; margin: 3rem 0 .75rem;
+      padding-top: 1.25rem; border-top: 1px solid var(--border);
+      scroll-margin-top: 1.5rem;
+    }
+    .doc p, .doc li { color: var(--muted); line-height: 1.65; }
+    .doc li { margin: .35rem 0; }
+    .doc a { color: var(--accent); }
+    .doc code { font-family: var(--mono); font-size: .92em; color: var(--text); word-break: break-all; }
+    .lede { font-size: 1.08rem; color: var(--text); }
+    .home { display: inline-flex; align-items: center; gap: .55rem; margin-bottom: 2rem; color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .85rem; }
+    .home:hover { color: var(--accent); }
+    .honest { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1rem 1.25rem; color: var(--muted); line-height: 1.6; }
+
+    /* the anchor status: a pending fact stated as a pending fact */
+    .arm {
+      display: flex; gap: .8rem; align-items: baseline; flex-wrap: wrap;
+      border: 1px solid var(--watch-border); background: var(--watch-soft);
+      border-radius: var(--radius-sm); padding: .9rem 1.1rem; margin: 1.5rem 0;
+    }
+    .arm .chip {
+      font-family: var(--mono); font-size: .7rem; letter-spacing: .06em; text-transform: uppercase;
+      border-radius: 999px; padding: .2rem .6rem; flex: none;
+      background: var(--watch-soft); color: var(--watch); border: 1px solid var(--watch-border);
+    }
+    .arm p { margin: 0; flex: 1 1 24ch; font-size: .92rem; }
+
+    .lookup { display: flex; gap: .6rem; flex-wrap: wrap; margin: 1.25rem 0 .9rem; }
+    .lookup input {
+      flex: 1 1 30ch; font-family: var(--mono); font-size: .86rem; color: var(--text);
+      background: var(--card); border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm); padding: .7rem .9rem; min-width: 0;
+    }
+    .lookup input:focus { outline: none; border-color: var(--accent); }
+    .lookup button {
+      font-family: var(--mono); font-size: .82rem; cursor: pointer; flex: none;
+      color: var(--text); background: var(--accent-soft); border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm); padding: .7rem 1.1rem;
+    }
+    .lookup button:hover:not(:disabled) { background: rgba(112,199,186,.2); }
+    .lookup button:disabled { opacity: .45; cursor: not-allowed; }
+
+    .claims-box { border: 1px solid var(--border-strong); background: var(--card); border-radius: var(--radius-sm); padding: 1.1rem 1.25rem; margin: 0 0 .75rem; }
+    .claims-box .honest { border: 0; padding: 0; margin: 0; }
+    .rootline { font-family: var(--mono); font-size: .78rem; color: var(--faint); word-break: break-all; margin: 0 0 1rem; }
+    .badge { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-soft); padding: .9rem 1rem; margin: 0 0 .7rem; }
+    .badge:last-child { margin-bottom: 0; }
+    .badge-name { font-weight: 600; color: var(--text); }
+    .badge-meta { font-family: var(--mono); font-size: .78rem; color: var(--faint); margin: .3rem 0 0; }
+    details.check { margin-top: .65rem; }
+    details.check summary { cursor: pointer; font-family: var(--mono); font-size: .8rem; color: var(--accent); }
+    .check .label { font-family: var(--mono); font-size: .7rem; letter-spacing: .07em; text-transform: uppercase; color: var(--faint); margin: .65rem 0 .2rem; }
+    .check pre {
+      font-family: var(--mono); font-size: .74rem; line-height: 1.55; color: var(--text);
+      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: .7rem .8rem; margin: 0; white-space: pre-wrap; word-break: break-all;
+    }
+    .check .recipe { font-size: .85rem; color: var(--faint); margin: .65rem 0 0; }
+    .result { font-size: .88rem; line-height: 1.55; border-radius: var(--radius-sm); padding: .6rem .8rem; margin-top: .65rem; }
+    .result.ok { border: 1px solid var(--born); background: var(--born-soft); color: var(--text); }
+    .result.bad { border: 1px solid var(--burn); background: var(--burn-soft); color: var(--text); }
+    .result.plain { border: 1px solid var(--border); color: var(--muted); }
+
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; margin: 1.25rem 0; }
+    @media (max-width: 700px) { .split { grid-template-columns: 1fr; } }
+    .split > div { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1rem 1.1rem; }
+    .split h3 { font-size: 1rem; margin: 0 0 .4rem; color: var(--text); }
+    .split ul { margin: 0; padding-left: 1.1rem; }
+    .split li { font-size: .92rem; }
+    .never { border: 1px solid var(--burn); background: var(--burn-soft); border-radius: var(--radius-sm); padding: 1rem 1.25rem; margin: 1.5rem 0; }
+    .never strong { color: var(--burn); }
+  </style>
+</head>
+<body>
+  <main class="doc">
+    <a class="home" href="/">&larr; kascov.io</a>
+
+    <h1>your reputation, verifiable without us</h1>
+    <p class="lede">
+      Every role you earn here becomes a claim keyed to the address you proved
+      on chain: the address, the badge, the date, nothing else. The claims are
+      merkleized, the root is published with them, and the math checks out in
+      any browser &mdash; including one that has never heard of kascov.
+    </p>
+
+    <div class="arm">
+      <span class="chip">not yet anchored</span>
+      <p>
+        The mainnet anchor &mdash; the root written into a Kaspa transaction
+        &mdash; arms next. Until it does, the root is published only in the
+        claims file and the public repo&rsquo;s history, which means
+        &ldquo;without us&rdquo; is still partly aspiration: you can already
+        check the math without us, but you still trust us to have published
+        the root when we say we did. This page will say so for exactly as long
+        as that is true.
+      </p>
+    </div>
+
+    <h2 id="lookup">Look up an address</h2>
+    <p>
+      Claims live in <a href="/passport-claims.json"><code>/passport-claims.json</code></a>
+      and this box renders them in your browser. With JavaScript off, read the
+      file directly; it is the same data, proofs and root included.
+    </p>
+    <form class="lookup" id="lookup-form">
+      <input id="addr" name="addr" type="text" autocomplete="off" spellcheck="false"
+             placeholder="kaspa:&hellip; (the address you proved)" aria-label="kaspa address">
+      <button type="submit" id="lookup-btn">show claims</button>
+    </form>
+    <div class="claims-box" id="claims">
+      <p class="honest">
+        Enter the address you proved and this box shows every claim published
+        for it: the badge, the granted date, the merkle root, and a
+        verify-it-yourself block with the proof. Nothing is fetched until you
+        ask.
+      </p>
+    </div>
+    <noscript>
+      <p class="honest">
+        The lookup needs JavaScript, but the claims do not:
+        <a href="/passport-claims.json"><code>/passport-claims.json</code></a>
+        is a plain file and every proof in it can be checked with any SHA-256
+        tool.
+      </p>
+    </noscript>
+
+    <h2 id="how">How a role becomes a claim</h2>
+    <ul>
+      <li><strong>Earn the role.</strong> Today that means the verified-holder
+          role (prove an address with a free signature, <a href="/bot">how it
+          works</a>) and, as the <a href="/unknowns">unknowns board</a> opens,
+          the auditor role for pinning a build. Roles are earned, never
+          bought: the <a href="/token">token</a> buys status, voice and
+          access, not a verdict and not a badge.</li>
+      <li><strong>The role becomes a claim.</strong> A claim is three fields:
+          the proven address, the badge name, the granted date. No Discord id,
+          no balance, no history &mdash; what the bot stores while a role is
+          live is a separate, fully enumerated list at
+          <a href="/bot">/bot</a>.</li>
+      <li><strong>The claims are merkleized.</strong> Each claim hashes to a
+          leaf, the leaves build a tree, and the root is published in the same
+          file as the claims. Change one claim and the root changes; that is
+          the whole trick.</li>
+      <li><strong>The root gets anchored &mdash; next.</strong> A mainnet
+          transaction carrying the root makes the publication itself
+          checkable without this site. It is not armed yet, and the box at
+          the top of this page says so.</li>
+    </ul>
+
+    <h2 id="check">Check the math</h2>
+    <p>
+      The file names its own algorithm in a <code>hash</code> field. This page
+      knows <code>sha256-v1</code> and refuses to guess at anything else:
+    </p>
+    <ul>
+      <li>leaf = SHA-256 of the UTF-8 bytes of the claim object as canonical
+          JSON &mdash; keys recursively sorted, no whitespace, the exact bytes
+          <code>verifyBadge()</code> hashes in the js and py clients</li>
+      <li>each step up hashes the two 32-byte nodes concatenated in ascending
+          byte order &mdash; sorted pairs, so a proof needs no left/right
+          flags and two verifiers cannot disagree</li>
+      <li>the final node must equal the file&rsquo;s
+          <code>merkle_root</code></li>
+    </ul>
+    <p>
+      Every claim this page renders gets a &ldquo;verify it yourself&rdquo;
+      block with the claim JSON, its proof and the root, and the browser
+      recomputes the whole path on the spot. If the recomputed root ever
+      disagrees with the published one, the page says that too, in red.
+    </p>
+
+    <h2 id="today">What is live today, and what is not</h2>
+    <div class="split">
+      <div>
+        <h3>live today</h3>
+        <ul>
+          <li>the claims file and its published root, at
+              <code>/passport-claims.json</code>, regenerated when roles
+              change</li>
+          <li>this page&rsquo;s in-browser recheck of every proof against
+              that root</li>
+          <li>the role flow itself: prove an address, earn the role
+              (<a href="/bot">/bot</a>)</li>
+        </ul>
+      </div>
+      <div>
+        <h3>pending, in the open</h3>
+        <ul>
+          <li>the mainnet anchor transaction &mdash; arms next; until then
+              the root&rsquo;s publication still relies on this site and the
+              repo history</li>
+          <li>claim signatures, so a single claim can travel and be checked
+              alone, without the whole file</li>
+          <li>the KCC convention review &mdash; whether this claim format
+              becomes a shared convention is not kascov&rsquo;s call
+              alone</li>
+        </ul>
+      </div>
+    </div>
+    <div class="never">
+      <p style="margin:0">
+        <strong>A passport claim is a record of something earned, never a
+        verdict about a token or a build.</strong> Verdicts on this site come
+        from the chain and only from the chain. If no claims file exists yet,
+        this page says &ldquo;no claims published yet&rdquo; and shows
+        nothing &mdash; nothing shown is always better than something
+        guessed.
+      </p>
+    </div>
+    <p>
+      What the bot stores and deletes is enumerated at
+      <a href="/bot">kascov.io/bot</a>. What holding the token does and does
+      not do is at <a href="/token">kascov.io/token</a>.
+    </p>
+  </main>
+
+  <script>
+  (function () {
+    var FILE = '/passport-claims.json';
+    var ALGO = 'sha256-v1';
+    var $ = function (id) { return document.getElementById(id); };
+
+    /* ---- pure helpers, kept together so a test harness can lift them ---- */
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+
+    function normAddr(s) { return String(s || '').trim().toLowerCase(); }
+
+    /* the shape gate keeps garbage out of the not-found message; an address
+       is only ever compared and displayed, never executed */
+    function looksLikeAddress(a) { return /^kaspa(?:test)?:[a-z0-9]{20,}$/.test(a); }
+
+    function isHex(s, len) {
+      return typeof s === 'string' && s.length === len && /^[0-9a-f]+$/.test(s);
+    }
+
+    /* the file's contract, checked before anything renders: a malformed file
+       is reported as malformed, never half-read */
+    function fileState(j) {
+      if (!j || typeof j !== 'object' || !Array.isArray(j.claims)) return { mode: 'malformed' };
+      if (!isHex(j.merkle_root, 64)) return { mode: 'malformed' };
+      return {
+        mode: 'ok',
+        algo: typeof j.hash === 'string' ? j.hash : '',
+        root: j.merkle_root,
+        claims: j.claims
+      };
+    }
+
+    /* file rows are {claim: {...}, proof: [hex...]} — the claim object is the
+       thing that gets hashed, so it stays nested and untouched */
+    function claimsFor(state, addr) {
+      return state.claims.filter(function (c) {
+        return !!c && c.claim && typeof c.claim.address === 'string'
+          && normAddr(c.claim.address) === addr;
+      });
+    }
+
+    function proofOk(c) {
+      return !!c && c.claim && typeof c.claim === 'object' && Array.isArray(c.proof)
+        && c.proof.every(function (p) { return isHex(p, 64); });
+    }
+
+    /* canonical JSON: recursively sorted keys, no whitespace — the exact bytes
+       the bot and both clients hash, so all four agree on every leaf */
+    function canonicalJson(v) {
+      if (v === null || typeof v !== 'object') return JSON.stringify(v);
+      if (Array.isArray(v)) return '[' + v.map(canonicalJson).join(',') + ']';
+      return '{' + Object.keys(v).sort().map(function (k) {
+        return JSON.stringify(k) + ':' + canonicalJson(v[k]);
+      }).join(',') + '}';
+    }
+
+    function leafPreimage(c) { return canonicalJson(c.claim); }
+
+    function hexToBytes(h) {
+      var out = new Uint8Array(h.length / 2);
+      for (var i = 0; i < out.length; i++) out[i] = parseInt(h.substr(i * 2, 2), 16);
+      return out;
+    }
+
+    function bytesToHex(u8) {
+      var s = '';
+      for (var i = 0; i < u8.length; i++) s += u8[i].toString(16).padStart(2, '0');
+      return s;
+    }
+
+    /* sorted-pair concatenation: ascending byte order, so the proof carries
+       no left/right flags and two verifiers cannot disagree about order */
+    function pairBytes(a, b) {
+      var first = a, second = b;
+      for (var i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) { if (a[i] > b[i]) { first = b; second = a; } break; }
+      }
+      var out = new Uint8Array(first.length + second.length);
+      out.set(first, 0);
+      out.set(second, first.length);
+      return out;
+    }
+
+    function sha256(bytes) {
+      return crypto.subtle.digest('SHA-256', bytes).then(function (d) { return new Uint8Array(d); });
+    }
+
+    /* the whole recompute, claim to root, from the claim's own fields — the
+       leaf is always derived fresh, never read from the file */
+    function recompute(c) {
+      return sha256(new TextEncoder().encode(leafPreimage(c))).then(function (leaf) {
+        var chain = Promise.resolve(leaf);
+        c.proof.forEach(function (p) {
+          chain = chain.then(function (node) { return sha256(pairBytes(node, hexToBytes(p))); });
+        });
+        return chain.then(function (root) {
+          return { leaf: bytesToHex(leaf), root: bytesToHex(root) };
+        });
+      });
+    }
+
+    function day(v) { return String(v == null ? '' : v).slice(0, 10); }
+
+    function claimHtml(c, i, state) {
+      var badge = c.claim.badge == null ? 'unnamed badge' : c.claim.badge;
+      var granted = c.claim.granted_ms ? day(new Date(Number(c.claim.granted_ms)).toISOString()) : '';
+      return '<div class="badge">'
+        + '<span class="badge-name">' + esc(badge) + '</span>'
+        + '<p class="badge-meta">granted ' + (granted ? esc(granted) : 'date not published') + '</p>'
+        + '<details class="check"><summary>verify it yourself</summary>'
+        + '<p class="label">the claim as published</p>'
+        + '<pre>' + esc(JSON.stringify(c, null, 2)) + '</pre>'
+        + '<p class="label">the published root</p>'
+        + '<pre>' + esc(state.root) + '</pre>'
+        + '<p class="recipe">recipe (' + esc(ALGO) + '): leaf = SHA-256 of the claim object '
+        + 'as canonical JSON (keys sorted, no whitespace); each proof step hashes the two '
+        + '32-byte nodes in ascending byte order; the result must equal the root. the same '
+        + 'walk ships as verifyBadge() in the js and py clients.</p>'
+        + '<p class="result plain" data-check="' + i + '">checking in your browser&hellip;</p>'
+        + '</details></div>';
+    }
+
+    /* ------------------------------- wiring ------------------------------- */
+
+    var box = $('claims');
+    var btn = $('lookup-btn');
+
+    function honest(html) {
+      box.innerHTML = '<p class="honest">' + html + '</p>';
+    }
+
+    function setResult(el, cls, html) {
+      el.className = 'result ' + cls;
+      el.innerHTML = html;
+    }
+
+    function checkClaim(c, state, el) {
+      if (state.algo !== ALGO) {
+        return setResult(el, 'plain', 'the file declares hash <code>'
+          + esc(state.algo || 'none') + '</code>, which this page does not know how to '
+          + 'recompute. the data above is shown unverified; check it with your own tools.');
+      }
+      if (!proofOk(c)) {
+        return setResult(el, 'bad', 'the published claim or proof is malformed, so the math '
+          + 'cannot be checked. that is a bug in the file, not in your address.');
+      }
+      if (!(window.crypto && crypto.subtle)) {
+        return setResult(el, 'plain', 'recomputing needs SubtleCrypto, which browsers only '
+          + 'expose on a secure context. the recipe and the data are above; check them with '
+          + 'your own tools.');
+      }
+      recompute(c).then(function (r) {
+        if (r.root !== state.root) {
+          setResult(el, 'bad', 'the proof path ends at <code>' + esc(r.root)
+            + '</code>, not the published root. do not rely on this claim until that is explained.');
+        } else {
+          setResult(el, 'ok', 'checked in your browser just now: the leaf and the whole proof '
+            + 'path recompute exactly to the published root. no kascov server was involved in '
+            + 'this check.');
+        }
+      }, function () {
+        setResult(el, 'plain', 'the recompute failed in this browser; the recipe and the data '
+          + 'are above, check them with your own tools.');
+      });
+    }
+
+    function renderClaims(state, addr, matches) {
+      var html = '<p class="rootline">published root: ' + esc(state.root) + '</p>';
+      matches.forEach(function (c, i) { html += claimHtml(c, i, state); });
+      box.innerHTML = html;
+      matches.forEach(function (c, i) {
+        var el = box.querySelector('[data-check="' + i + '"]');
+        if (el) checkClaim(c, state, el);
+      });
+    }
+
+    function lookup(addr) {
+      btn.disabled = true;
+      fetch(FILE, { cache: 'no-cache' })
+        .then(function (r) {
+          if (r.status === 404) throw { notYet: true };
+          if (!r.ok) throw new Error('http ' + r.status);
+          return r.json();
+        })
+        .then(function (j) {
+          var state = fileState(j);
+          if (state.mode !== 'ok') {
+            return honest('the claims file loaded but is not in a shape this page knows. '
+              + 'nothing is rendered rather than a misreading; the raw file is at '
+              + '<a href="' + FILE + '"><code>' + FILE + '</code></a>.');
+          }
+          var matches = claimsFor(state, addr);
+          if (!matches.length) {
+            return honest('no claims for <code>' + esc(addr) + '</code> in the published file. '
+              + 'roles land here only after they are earned and the file is regenerated, so a '
+              + 'fresh role can lag the file. how roles are earned is on this page; what the '
+              + 'bot stores is at <a href="/bot">/bot</a>.');
+          }
+          renderClaims(state, addr, matches);
+        })
+        .catch(function (e) {
+          if (e && e.notYet) {
+            honest('no claims published yet: <a href="' + FILE + '"><code>' + FILE
+              + '</code></a> does not exist. the first earned roles create it; until then '
+              + 'there is nothing to show, and this page prefers nothing over a guess.');
+          } else {
+            honest('the claims file could not be loaded or parsed just now. nothing is shown '
+              + 'rather than something guessed; try again, or read <a href="' + FILE
+              + '"><code>' + FILE + '</code></a> directly.');
+          }
+        })
+        .then(function () { btn.disabled = false; });
+    }
+
+    $('lookup-form').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var addr = normAddr($('addr').value);
+      if (!looksLikeAddress(addr)) {
+        return honest('that does not look like a kaspa address, so nothing was fetched. '
+          + 'the format is <code>kaspa:&hellip;</code> (or <code>kaspatest:&hellip;</code>).');
+      }
+      lookup(addr);
+    });
+  })();
+  </script>
+</body>
+</html>

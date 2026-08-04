@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>the unknowns board — every build the bench cannot yet name</title>
+  <meta name="description" content="The open problems of the kascov audit bench: covenant build families no audited source explains yet, per network, each waiting for its first pin. A place here is not an accusation; it is unfinished work.">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://kascov.io/unknowns">
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css?v=20260803-focuscard">
+  <style>
+    /* A standalone page on the vote.html pattern: only what it needs on top
+       of the shared palette. */
+    .doc { max-width: 780px; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+    .doc h1 { font-family: var(--display); font-size: clamp(1.9rem, 5vw, 2.6rem); margin: 0 0 .4rem; }
+    .doc h2 {
+      font-family: var(--display); font-size: 1.45rem; margin: 3rem 0 .75rem;
+      padding-top: 1.25rem; border-top: 1px solid var(--border);
+      scroll-margin-top: 1.5rem;
+    }
+    .doc p, .doc li { color: var(--muted); line-height: 1.65; }
+    .doc li { margin: .35rem 0; }
+    .doc a { color: var(--accent); }
+    .doc code { font-family: var(--mono); font-size: .92em; color: var(--text); word-break: break-all; }
+    .lede { font-size: 1.08rem; color: var(--text); }
+    .home { display: inline-flex; align-items: center; gap: .55rem; margin-bottom: 2rem; color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .85rem; }
+    .home:hover { color: var(--accent); }
+    .honest { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1rem 1.25rem; color: var(--muted); line-height: 1.6; }
+    .never { border: 1px solid var(--burn); background: var(--burn-soft); border-radius: var(--radius-sm); padding: 1rem 1.25rem; margin: 1.5rem 0; }
+    .never strong { color: var(--burn); }
+
+    .deep-links { display: flex; gap: .6rem; flex-wrap: wrap; margin: 1.25rem 0 .5rem; }
+    .deep-links a {
+      font-family: var(--mono); font-size: .82rem; text-decoration: none;
+      border: 1px solid var(--border); border-radius: 999px; padding: .45rem .9rem;
+      color: var(--text); background: var(--bg-soft);
+    }
+    .deep-links a:hover { border-color: var(--border-strong); color: var(--accent); }
+
+    .board { border: 1px solid var(--border-strong); background: var(--card); border-radius: var(--radius-sm); padding: 1.1rem 1.25rem; margin: 1rem 0 1.5rem; }
+    .board .honest { border: 0; padding: 0; margin: 0; }
+    .board .meta { font-family: var(--mono); font-size: .78rem; color: var(--faint); letter-spacing: .03em; margin: 0 0 1rem; }
+    .fams { list-style: none; margin: 0; padding: 0; }
+    .fam { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-soft); padding: .85rem 1rem; margin: 0 0 .7rem; }
+    .fam:last-child { margin-bottom: 0; }
+    .fam-head { display: flex; gap: .7rem; align-items: baseline; flex-wrap: wrap; }
+    .fam-id { font-family: var(--mono); font-weight: 600; font-size: .95rem; color: var(--text); }
+    .fam-tag {
+      font-family: var(--mono); font-size: .68rem; letter-spacing: .06em; text-transform: uppercase;
+      border-radius: 999px; padding: .18rem .55rem; flex: none;
+      background: rgba(255,255,255,.06); color: var(--faint);
+    }
+    .fam-link { font-family: var(--mono); font-size: .78rem; margin-left: auto; }
+    .fam-stats { font-family: var(--mono); font-size: .78rem; color: var(--faint); margin: .45rem 0 0; word-break: break-all; }
+    .fam-pin { font-family: var(--mono); font-size: .78rem; color: var(--faint); border-top: 1px dashed var(--border); margin: .6rem 0 0; padding-top: .55rem; }
+
+    .steps { counter-reset: step; list-style: none; padding: 0; margin: 1.25rem 0; }
+    .steps li { counter-increment: step; position: relative; padding-left: 2.4rem; margin: .8rem 0; }
+    .steps li::before {
+      content: counter(step); position: absolute; left: 0; top: .05rem;
+      width: 1.6rem; height: 1.6rem; border-radius: 999px; text-align: center; line-height: 1.6rem;
+      font-family: var(--mono); font-size: .8rem; color: var(--accent);
+      background: var(--accent-soft); border: 1px solid var(--border-strong);
+    }
+  </style>
+</head>
+<body>
+  <main class="doc">
+    <a class="home" href="/">&larr; kascov.io</a>
+
+    <h1>the unknowns board</h1>
+    <p class="lede">
+      Every build the audit bench cannot yet name. The bench recovers the
+      bytecode of covenants no audited source explains, clusters them into
+      structural families, and lists them here as open problems &mdash; each
+      one waiting for the person who pins it first.
+    </p>
+
+    <div class="never">
+      <p style="margin:0">
+        <strong>A place on this board is not an accusation and not a
+        ranking of trust.</strong> It means one thing: kascov has not matched
+        the build to audited source yet. Families sort by how many trades
+        ride on them &mdash; that measures what is at stake if a build stays
+        unaudited, never how trustworthy it is. Nothing here is priced or
+        published as a verdict until a person reads the build and pins it.
+      </p>
+    </div>
+
+    <div class="deep-links">
+      <a href="/vote">the vote: holders steer which family gets the spotlight &rarr;</a>
+      <a href="https://discord.gg/83RjgQBDEX" rel="noopener">#what-to-audit-next in the Discord</a>
+    </div>
+
+    <h2 id="mainnet">mainnet</h2>
+    <div class="board" id="board-mainnet">
+      <p class="honest">
+        This board renders
+        <a href="/data/mainnet/verification.json"><code>/data/mainnet/verification.json</code></a>
+        in your browser. With JavaScript off, read the file directly; the
+        <code>audit_bench</code> block is the same data.
+      </p>
+    </div>
+
+    <h2 id="testnet-10">testnet-10</h2>
+    <div class="board" id="board-testnet-10">
+      <p class="honest">
+        This board renders
+        <a href="/data/testnet-10/verification.json"><code>/data/testnet-10/verification.json</code></a>
+        in your browser. With JavaScript off, read the file directly; the
+        <code>audit_bench</code> block is the same data.
+      </p>
+    </div>
+
+    <h2 id="how-to-win">How to win a stamp</h2>
+    <ol class="steps">
+      <li><strong>Pick a family.</strong> Win it the spotlight on
+          <a href="/vote">the vote</a>, or just call it in
+          <a href="https://discord.gg/83RjgQBDEX" rel="noopener">#what-to-audit-next</a>.</li>
+      <li><strong>Submit the source you believe it is</strong> in the Discord,
+          naming a compiler from the pinned allowlist &mdash; today that is
+          <code>silverc</code>, the same compiler the builder uses, and the
+          list grows only by a commit to the public repo.</li>
+      <li><strong>kascov recompiles and compares bytes.</strong> Outside a
+          family&rsquo;s parameter slots the match must be byte for byte; a
+          single-deployment family must match its exact program hash.</li>
+      <li><strong>A byte-match earns the auditor role and the permanent
+          stamp.</strong> The family&rsquo;s &ldquo;first pinned by&rdquo;
+          line is written by a reviewed commit &mdash; the match is
+          machine-verified, but the permanent name lands only after a human
+          confirms the pin. No name ever lands here automatically.</li>
+    </ol>
+    <p>
+      The pinned-by slots below every family are empty until someone earns
+      them. That is deliberate: an empty slot is an open problem, and an open
+      problem is an invitation.
+    </p>
+  </main>
+
+  <script>
+  (function () {
+    var NETS = ['mainnet', 'testnet-10'];
+    var $ = function (id) { return document.getElementById(id); };
+
+    /* ---- pure helpers, kept together so a test harness can lift them ---- */
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+
+    function fmtInt(n) { return Number(n).toLocaleString('en-US'); }
+
+    function isHex64(s) { return typeof s === 'string' && /^[0-9a-f]{64}$/.test(s); }
+
+    /* one bench family -> the row this board shows; every field coerced so a
+       half-filled report renders honestly instead of throwing */
+    function rowOf(f) {
+      f = f || {};
+      var hash = isHex64(f.sample_program_hash) ? f.sample_program_hash : null;
+      var instances = Number(f.instances) || 0;
+      return {
+        hash: hash,
+        short: hash ? hash.slice(0, 12) : 'no fingerprint',
+        covenant: isHex64(f.sample_covenant) ? f.sample_covenant : null,
+        instances: instances,
+        pushes: Number(f.push_count) || 0,
+        trades: f.trades == null || !isFinite(Number(f.trades)) ? null : Number(f.trades),
+        pool: !!f.pool_shaped,
+        single: instances === 1
+      };
+    }
+
+    /* the payload -> one of three honest modes; the bench is a periodic job,
+       so an absent block is normal, not an error */
+    function benchState(p) {
+      var b = p && p.audit_bench;
+      if (!b || typeof b !== 'object' || !Array.isArray(b.families)) return { mode: 'absent' };
+      var meta = {
+        unmatched: Number(b.unmatched_covenants) || 0,
+        recovered: Number(b.recovered) || 0,
+        unrecoverable: Number(b.unrecoverable) || 0
+      };
+      if (!b.families.length) return { mode: 'empty', meta: meta };
+      return { mode: 'families', meta: meta, rows: b.families.map(rowOf) };
+    }
+
+    function rowHtml(net, r) {
+      var stats = fmtInt(r.instances) + ' instance' + (r.instances === 1 ? '' : 's')
+        + ' · ' + fmtInt(r.pushes) + ' pushes'
+        + (r.trades == null ? '' : ' · ' + fmtInt(r.trades) + ' trade' + (r.trades === 1 ? '' : 's') + ' ride on it')
+        + (r.hash ? ' · fingerprint ' + esc(r.hash) : '');
+      return '<li class="fam">'
+        + '<div class="fam-head">'
+        + '<span class="fam-id">' + esc(r.short) + '</span>'
+        + (r.pool ? '<span class="fam-tag">pool-shaped</span>' : '')
+        + (r.single ? '<span class="fam-tag" title="one deployment: only an exact byte match can pin it">single deployment</span>' : '')
+        + (r.covenant
+            ? '<a class="fam-link" href="/#/' + esc(net) + '/c/' + esc(r.covenant) + '">sample covenant &rarr;</a>'
+            : '')
+        + '</div>'
+        + '<p class="fam-stats">' + stats + '</p>'
+        + '<p class="fam-pin">first pinned by &mdash;</p>'
+        + '</li>';
+    }
+
+    function boardHtml(net, s) {
+      if (s.mode === 'absent') {
+        return '<p class="honest">the bench has not published a report for this network. '
+          + 'it runs as a periodic job, separate from derivation; no report means it has not '
+          + 'run here yet, not that every build is named.</p>';
+      }
+      var meta = '<p class="meta">' + fmtInt(s.meta.unmatched) + ' unmatched covenants · '
+        + fmtInt(s.meta.recovered) + ' programs recovered · '
+        + fmtInt(s.meta.unrecoverable) + ' unrecoverable</p>';
+      if (s.mode === 'empty') {
+        return meta + '<p class="honest">the bench report for this network lists no open '
+          + 'families. an empty board here is the goal, not a gap.</p>';
+      }
+      return meta + '<ul class="fams">' + s.rows.map(function (r) { return rowHtml(net, r); }).join('') + '</ul>';
+    }
+
+    /* ------------------------------- wiring ------------------------------- */
+
+    function load(net) {
+      var box = $('board-' + net);
+
+      /* fail honest: a board that cannot be loaded says so; it never shows a
+         remembered or guessed family list */
+      function honest() {
+        box.innerHTML = '<p class="honest">could not load '
+          + '<a href="/data/' + net + '/verification.json"><code>/data/' + net
+          + '/verification.json</code></a> just now. nothing is shown rather than '
+          + 'something guessed.</p>';
+      }
+
+      fetch('/data/' + net + '/verification.json', { cache: 'no-cache' })
+        .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+        .then(function (p) { box.innerHTML = boardHtml(net, benchState(p)); })
+        .catch(honest);
+    }
+
+    NETS.forEach(load);
+  })();
+  </script>
+</body>
+</html>

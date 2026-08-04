@@ -1,0 +1,13 @@
+[Unit]
+Description=Post the bench wire every Monday morning
+
+[Timer]
+OnCalendar=Mon *-*-* 09:00:00 UTC
+AccuracySec=5min
+# A box that was off on Monday posts on boot instead of skipping the week;
+# the script's own same-week guard keeps a catch-up from ever double-posting.
+Persistent=true
+Unit=kascov-bench-wire.service
+
+[Install]
+WantedBy=timers.target

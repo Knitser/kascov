@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
-from kascov import Kascov
+from kascov import Kascov, canonical_json, verify_badge
 
 COVENANT = "a" * 64
 
@@ -134,6 +134,110 @@ class PollingRoutes(unittest.TestCase):
         for call, url in cases:
             req = capture(call, response=page)
             self.assertEqual(req.full_url, url)
+
+
+class BadgeVerification(unittest.TestCase):
+    """The scheme here is the spec the bot's merkle publisher
+    (scripts/discord-holder-bot.mjs) must match: sha256 over canonical
+    sorted-key JSON for the leaf, pair-sorted concatenation up the tree.
+    The tree is built with hashlib, independently of the client, and the
+    fixture literals are shared with kascov.test.mjs so the python and js
+    implementations cannot drift apart."""
+
+    CLAIMS = [
+        {"address": "kaspa:qq0badge0", "role": "verified-holder", "since": 1},
+        {"address": "kaspa:qq1badge1", "role": "auditor", "since": 2},
+        {"address": "kaspa:qq2badge2", "role": "voter", "since": 3},
+        {"address": "kaspa:qq3badge3", "role": "watchtower", "since": 4},
+    ]
+    # computed once with node:crypto; pinned verbatim in both clients' tests
+    FIXTURE_PROOF_0 = [
+        "66d4d1b4cf99b94342e50ad8f7703a045562bf8b129e7e7a1a9ecffa0f4e9a04",
+        "8825df4c9aac329f511ffd1f81a0934f1524667fe0d5f02ef8ff974cfb579e7d",
+    ]
+    FIXTURE_ROOT = "064e13348496f570aa3b2d0a9fa33b25f7be66842bef99c7dbba9a4a65e95d4b"
+
+    @staticmethod
+    def _sha(data: bytes) -> str:
+        import hashlib
+
+        return hashlib.sha256(data).hexdigest()
+
+    @classmethod
+    def _pair(cls, a: str, b: str) -> str:
+        lo, hi = sorted((a, b))
+        return cls._sha(bytes.fromhex(lo) + bytes.fromhex(hi))
+
+    @classmethod
+    def _tree(cls):
+        leaves = [cls._sha(canonical_json(c).encode("utf-8")) for c in cls.CLAIMS]
+        n01 = cls._pair(leaves[0], leaves[1])
+        n23 = cls._pair(leaves[2], leaves[3])
+        return leaves, n01, n23, cls._pair(n01, n23)
+
+    def test_canonical_json_pins_the_exact_wire_bytes(self):
+        self.assertEqual(
+            canonical_json(self.CLAIMS[0]),
+            '{"address":"kaspa:qq0badge0","role":"verified-holder","since":1}',
+        )
+        # key order in the source dict must not matter
+        scrambled = {"since": 1, "role": "verified-holder", "address": "kaspa:qq0badge0"}
+        self.assertEqual(canonical_json(scrambled), canonical_json(self.CLAIMS[0]))
+        self.assertEqual(
+            canonical_json({"b": [1, {"z": None, "a": True}]}),
+            '{"b":[1,{"a":true,"z":null}]}',
+        )
+
+    def test_known_good_badge_round_trips_for_every_leaf(self):
+        leaves, n01, n23, root = self._tree()
+        proofs = [
+            [leaves[1], n23],
+            [leaves[0], n23],
+            [leaves[3], n01],
+            [leaves[2], n01],
+        ]
+        for i, claim in enumerate(self.CLAIMS):
+            self.assertTrue(verify_badge(claim, proofs[i], root), f"leaf {i}")
+
+    def test_empty_proof_means_the_claim_is_the_whole_tree(self):
+        root = self._sha(canonical_json(self.CLAIMS[0]).encode("utf-8"))
+        self.assertTrue(verify_badge(self.CLAIMS[0], [], root))
+        self.assertFalse(verify_badge(self.CLAIMS[1], [], root))
+
+    def test_tampering_rejects(self):
+        leaves, n01, n23, root = self._tree()
+        proof = [leaves[1], n23]
+        self.assertTrue(verify_badge(self.CLAIMS[0], proof, root), "baseline")
+        forged = dict(self.CLAIMS[0], role="auditor")
+        self.assertFalse(verify_badge(forged, proof, root))
+        self.assertFalse(verify_badge(self.CLAIMS[0], [leaves[2], n23], root))
+        flipped = ("1" if root[0] == "0" else "0") + root[1:]
+        self.assertFalse(verify_badge(self.CLAIMS[0], proof, flipped))
+        self.assertFalse(verify_badge(self.CLAIMS[0], proof[:1], root))
+
+    def test_malformed_input_fails_closed_never_raises(self):
+        _, _, _, root = self._tree()
+        self.assertFalse(verify_badge(self.CLAIMS[0], "not-a-list", root))
+        self.assertFalse(verify_badge(self.CLAIMS[0], [], "too-short"))
+        self.assertFalse(verify_badge(self.CLAIMS[0], [42], root))
+        self.assertFalse(verify_badge(self.CLAIMS[0], ["zz" * 32], root))
+        self.assertFalse(verify_badge(self.CLAIMS[0], [], None))
+
+    def test_cross_client_fixture_verifies(self):
+        # the same literals live in kascov.test.mjs
+        self.assertTrue(
+            verify_badge(self.CLAIMS[0], self.FIXTURE_PROOF_0, self.FIXTURE_ROOT)
+        )
+        _, _, _, root = self._tree()
+        self.assertEqual(root, self.FIXTURE_ROOT, "rebuilt tree matches the pinned root")
+        # uppercase hex is accepted — the wire may shout, the bytes are the same
+        self.assertTrue(
+            verify_badge(
+                self.CLAIMS[0],
+                [h.upper() for h in self.FIXTURE_PROOF_0],
+                self.FIXTURE_ROOT.upper(),
+            )
+        )
 
 
 if __name__ == "__main__":

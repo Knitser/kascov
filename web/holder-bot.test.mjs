@@ -12,6 +12,8 @@ import {
   VOTE_DUST_FLOOR, VOTE_MAX_AGE_MS, voteEligibility, roundIsOpen, castBallot,
   tallyCounts, buildTally, isOperator, parseSlate,
   balanceBucket, alertsEnabled, cursorDiff, deliverableAlerts,
+  badgesFromRoles, buildPassportFile, canonicalClaim, claimLeaf,
+  merkleProof, merkleRoot, verifyProof,
 } from '../scripts/discord-holder-bot.mjs';
 
 const ADDR = 'kaspa:qzlxrxar9w4z2n5ynmr8n356hawma24k44dedxfuvqfyn0dprn2egpyf9wul9';
@@ -308,4 +310,120 @@ test('an unreachable holder stays silent', () => {
 test('opting out suppresses everything', () => {
   assert.deepEqual(deliverableAlerts({ alerts: false, cursor: BEFORE }, AFTER), []);
   assert.deepEqual(deliverableAlerts({ cursor: BEFORE }, AFTER), []); // never opted in
+});
+
+/* ------------------------------------------------------------- the passport */
+
+/* The passport's whole worth is that a claim proves its own membership: the
+   canonical bytes are stable, the tree commits to the set, and a badge that
+   is gone stops proving. All pure, all pinned here. */
+
+const claimFor = (badge, granted = 1000) => ({
+  v: 1, address: ADDR, badge, granted_ms: granted, source: 'kascov-discord',
+});
+
+// five claims on purpose: an odd count exercises the promoted-node path
+const CLAIMS = [
+  claimFor('verified-holder', 100),
+  claimFor('contributor', 200),
+  claimFor('builder', 300),
+  claimFor('auditor', 400),
+  { v: 1, address: 'kaspa:qother', badge: 'verified-holder', granted_ms: 500, source: 'kascov-discord' },
+];
+
+test('a claim canonicalizes the same whatever order its keys arrived in', () => {
+  const a = canonicalClaim({ v: 1, address: ADDR, badge: 'builder', granted_ms: 5, source: 'kascov-discord' });
+  const b = canonicalClaim({ source: 'kascov-discord', granted_ms: 5, badge: 'builder', address: ADDR, v: 1 });
+  assert.equal(a, b);
+  // and any changed fact is a different leaf
+  assert.notEqual(claimLeaf(claimFor('builder')), claimLeaf(claimFor('auditor')));
+  assert.notEqual(claimLeaf(claimFor('builder', 1)), claimLeaf(claimFor('builder', 2)));
+});
+
+test('every claim in the file proves its way back to the root', () => {
+  const file = buildPassportFile(CLAIMS, 1000);
+  assert.equal(file.generated_ms, 1000);
+  assert.equal(file.claims.length, 5);
+  for (const { claim, proof } of file.claims) {
+    assert.ok(verifyProof(claim, proof, file.merkle_root));
+  }
+  // the anchor states its own absence rather than implying a chain write
+  assert.equal(file.anchor.status, 'pending');
+  assert.match(file.anchor.note, /anchor key/);
+});
+
+test('a tampered claim, proof, or root is rejected', () => {
+  const file = buildPassportFile(CLAIMS, 1000);
+  const { claim, proof } = file.claims[0];
+  assert.ok(!verifyProof({ ...claim, badge: 'auditor' }, proof, file.merkle_root));
+  assert.ok(!verifyProof({ ...claim, granted_ms: 9999 }, proof, file.merkle_root));
+  assert.ok(!verifyProof({ ...claim, address: 'kaspa:qattacker' }, proof, file.merkle_root));
+  const bent = [{ ...proof[0], hash: claimLeaf({ forged: true }) }, ...proof.slice(1)];
+  assert.ok(!verifyProof(claim, bent, file.merkle_root));
+  assert.ok(!verifyProof(claim, proof, claimLeaf({ not: 'the root' })));
+  // malformed inputs fail quietly, never crash
+  assert.ok(!verifyProof(claim, null, file.merkle_root));
+  assert.ok(!verifyProof(claim, proof, null));
+  assert.ok(!verifyProof(claim, [{ pos: 'left' }], file.merkle_root));
+});
+
+test('a single-leaf tree is its own root with an empty proof', () => {
+  const file = buildPassportFile([CLAIMS[0]], 1000);
+  assert.equal(file.merkle_root, claimLeaf(CLAIMS[0]));
+  assert.deepEqual(file.claims[0].proof, []);
+  assert.ok(verifyProof(CLAIMS[0], [], file.merkle_root));
+});
+
+test('revocation is absence: the old proof fails against the newest root', () => {
+  const before = buildPassportFile(CLAIMS, 1000);
+  const revoked = CLAIMS[2]; // the builder badge goes away
+  const after = buildPassportFile(CLAIMS.filter((c) => c !== revoked), 2000);
+  const old = before.claims.find((c) => c.claim.badge === revoked.badge);
+  assert.ok(verifyProof(old.claim, old.proof, before.merkle_root));  // it was real
+  assert.ok(!verifyProof(old.claim, old.proof, after.merkle_root));  // and now it is gone
+  // everyone still in the set keeps proving against the new root
+  for (const { claim, proof } of after.claims) {
+    assert.ok(verifyProof(claim, proof, after.merkle_root));
+  }
+  assert.notEqual(before.merkle_root, after.merkle_root);
+});
+
+test('an empty claims set has no root, honestly', () => {
+  assert.equal(merkleRoot([]), null);
+  assert.equal(merkleRoot(undefined), null);
+  assert.equal(merkleProof([], 0), null);
+  const file = buildPassportFile([], 1000);
+  assert.equal(file.merkle_root, null);
+  assert.deepEqual(file.claims, []);
+});
+
+test('the same claims in any order build the same root', () => {
+  const a = buildPassportFile(CLAIMS, 1000);
+  const b = buildPassportFile(CLAIMS.slice().reverse(), 1000);
+  assert.equal(a.merkle_root, b.merkle_root);
+});
+
+test('role names mint badges; anything else mints nothing', () => {
+  const roles = [
+    { id: '1', name: 'Contributor' }, { id: '2', name: 'builder' },
+    { id: '3', name: 'auditor' }, { id: '4', name: 'verified holder' },
+    { id: '5', name: 'constructor' }, // an Object.prototype name must not leak a badge
+  ];
+  assert.deepEqual(badgesFromRoles(['1', '2'], roles), ['builder', 'contributor']);
+  assert.deepEqual(badgesFromRoles(['3'], roles), ['auditor']);
+  // the verified holder ROLE mints nothing: that badge derives from this
+  // bot's own state, where the proof lives, never from a grantable role
+  assert.deepEqual(badgesFromRoles(['4'], roles), []);
+  assert.deepEqual(badgesFromRoles(['5'], roles), []);
+  assert.deepEqual(badgesFromRoles(['999'], roles), []);
+  assert.deepEqual(badgesFromRoles([], roles), []);
+  assert.deepEqual(badgesFromRoles(undefined, undefined), []);
+});
+
+test('the public file carries addresses and badges, never a Discord identity', () => {
+  const file = buildPassportFile(CLAIMS, 1000);
+  for (const { claim } of file.claims) {
+    assert.deepEqual(Object.keys(claim).sort(), ['address', 'badge', 'granted_ms', 'source', 'v']);
+    assert.equal(claim.source, 'kascov-discord');
+  }
 });

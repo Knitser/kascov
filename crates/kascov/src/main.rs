@@ -7845,7 +7845,7 @@ fn build_sitemap_xml(store: Option<&kascov_core::store::Store>, now: u64) -> Res
     // The other static SPA routes, same deal as the guide: prose ships in
     // index.html, the URL is worth crawling on its own, and the worker has no
     // honest lastmod for any of them.
-    for page in ["token", "vote", "lane", "bot", "verify"] {
+    for page in ["token", "vote", "lane", "bot", "verify", "passport", "unknowns"] {
         xml.push_str(&format!("<url><loc>https://kascov.io/{page}</loc></url>\n"));
     }
     if let Some(store) = store {
@@ -10546,7 +10546,7 @@ mod feed_and_sitemap_tests {
             .children()
             .filter(|n| n.has_tag_name("url"))
             .collect();
-        assert_eq!(urls.len(), 8, "root + the six static routes + the one coin");
+        assert_eq!(urls.len(), 10, "root + the eight static routes + the one coin");
         let lastmod_of = |n: &roxmltree::Node<'_, '_>| {
             n.children()
                 .find(|c| c.has_tag_name("lastmod"))
@@ -10563,18 +10563,20 @@ mod feed_and_sitemap_tests {
         };
         assert_eq!(lastmod_of(&urls[0]), Some(og::iso_date(now)));
         // the static routes are listed right after the root, deliberately undated
-        for (i, page) in ["guide", "token", "vote", "lane", "bot", "verify"]
-            .iter()
-            .enumerate()
+        for (i, page) in [
+            "guide", "token", "vote", "lane", "bot", "verify", "passport", "unknowns",
+        ]
+        .iter()
+        .enumerate()
         {
             assert_eq!(loc_of(&urls[1 + i]), format!("https://kascov.io/{page}"));
             assert_eq!(lastmod_of(&urls[1 + i]), None);
         }
         // tip_ms − (tip_daa − last_activity_daa) × 100ms = 1,700,000,000,000
-        assert_eq!(lastmod_of(&urls[7]), Some(og::iso_date(1_700_000_000_000)));
-        assert!(loc_of(&urls[7]).contains("/share/mainnet/"));
+        assert_eq!(lastmod_of(&urls[9]), Some(og::iso_date(1_700_000_000_000)));
+        assert!(loc_of(&urls[9]).contains("/share/mainnet/"));
         // W3C date shape (YYYY-MM-DD)
-        let lm = lastmod_of(&urls[7]).unwrap();
+        let lm = lastmod_of(&urls[9]).unwrap();
         assert_eq!(lm.len(), 10);
         assert!(lm.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 {
             c == '-'
@@ -10595,11 +10597,13 @@ mod feed_and_sitemap_tests {
             .collect();
         assert_eq!(
             urls.len(),
-            7,
+            9,
             "the root and the static routes need no store"
         );
         assert!(xml.contains("<lastmod>1970-01-01</lastmod>"));
-        for page in ["guide", "token", "vote", "lane", "bot", "verify"] {
+        for page in [
+            "guide", "token", "vote", "lane", "bot", "verify", "passport", "unknowns",
+        ] {
             assert!(xml.contains(&format!("<loc>https://kascov.io/{page}</loc>")));
         }
     }

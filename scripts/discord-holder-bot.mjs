@@ -20,6 +20,8 @@
  *   /vote-open   operator only: open a round with a slate of 2-6 options.
  *   /vote-close  operator only: close the round and freeze the counts.
  *   /alerts      watchtower DMs on or off.
+ *   /passport    your own earned badges, ephemerally, and where the public
+ *                claims file lives.
  *
  *   The 6h recheck keeps two more promises now. A member who LEFT the server
  *   is forgotten exactly as /unverify would forget them, because bot.html
@@ -45,10 +47,11 @@
  * Run:      node scripts/discord-holder-bot.mjs            # serve
  *           node scripts/discord-holder-bot.mjs --register # register commands
  *           node scripts/discord-holder-bot.mjs --recheck  # re-prove everyone
+ *           node scripts/discord-holder-bot.mjs --passport # rebuild the claims file
  */
 
 import { createServer } from 'node:http';
-import { createPublicKey, verify as edVerify, randomBytes } from 'node:crypto';
+import { createHash, createPublicKey, verify as edVerify, randomBytes } from 'node:crypto';
 import { readFile, writeFile, rename } from 'node:fs/promises';
 
 const APP_ID = process.env.DISCORD_APP_ID || '';
@@ -78,6 +81,9 @@ const TALLY_PATH = process.env.KASCOV_VOTE_TALLY || './vote-tally.json';
 /* A second operator besides the guild owner, for the day the owner account is
    not the one at the keyboard. Empty means the owner alone, never everyone. */
 const OPERATOR_ID = process.env.OPERATOR_USER_ID || '';
+/* Where the public passport claims file lands. Same rule as the tally: point
+   it inside the web root so Caddy serves it as /passport-claims.json. */
+const PASSPORT_OUT = process.env.KASCOV_PASSPORT_OUT || './passport-claims.json';
 
 const CHALLENGE_TTL_MS = 15 * 60 * 1000;
 const API = 'https://discord.com/api/v10';
@@ -307,9 +313,138 @@ export function alertMessage(alert, names = {}) {
   return '';
 }
 
+/* ------------------------------------------------------------- passport */
+
+/* PASSPORT v1: every earned status becomes a claim keyed to the holder's
+   PROVEN address — {v, address, badge, granted_ms, source} — and the set is
+   merkleized so one root commits to all of it. The public file carries
+   addresses and badges only, never a Discord identity: the account-to-address
+   link stays this bot's secret, exactly as /verify promised. Revocation is
+   ABSENCE: a badge that is gone simply does not appear in the newest tree,
+   and its old proof stops verifying against the newest root. The mainnet
+   anchor is not armed yet, and the file says so rather than implying it. */
+
+/** The role names that mint a passport claim, and the badge each becomes.
+ *  verified-holder is deliberately NOT here: that badge derives from this
+ *  bot's own state, where the proof lives, never from a role a moderator
+ *  could hand out by hand. */
+export const BADGE_ROLES = { contributor: 'contributor', builder: 'builder', auditor: 'auditor' };
+
+/** Map a member's role ids to badges through the guild's role list. Only a
+ *  name listed in BADGE_ROLES mints anything — checked with Object.hasOwn,
+ *  so a role named "constructor" cannot fish a badge out of the prototype. */
+export function badgesFromRoles(roleIds, guildRoles) {
+  const names = new Map((guildRoles || []).map((r) => [r.id, String(r.name || '').toLowerCase()]));
+  const out = new Set();
+  for (const id of roleIds || []) {
+    const name = names.get(id);
+    if (name !== undefined && Object.hasOwn(BADGE_ROLES, name)) out.add(BADGE_ROLES[name]);
+  }
+  return [...out].sort();
+}
+
+const sha256 = (data) => createHash('sha256').update(data).digest('hex');
+
+/** One claim as its canonical bytes: JSON with every object's keys sorted,
+ *  so the same facts always hash to the same leaf whatever code built the
+ *  object or in what order it assigned the fields. */
+export function canonicalClaim(claim) {
+  const sorted = (v) => {
+    if (Array.isArray(v)) return v.map(sorted);
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted(v[k])]));
+    }
+    return v;
+  };
+  return JSON.stringify(sorted(claim));
+}
+
+export const claimLeaf = (claim) => sha256(canonicalClaim(claim));
+
+/* sha256 over the PAIR-SORTED concatenation of the two hashes — the same
+   scheme the js/py clients pin in verifyBadge, so a proof needs no left/right
+   positions: sorting decides. An odd node is PROMOTED unchanged rather than
+   paired with a copy of itself: the duplicate-last-leaf trick lets two
+   different leaf sets share a root, which a proof format must never allow. */
+const pairHash = (a, b) => {
+  const [lo, hi] = a <= b ? [a, b] : [b, a];
+  return sha256(Buffer.concat([Buffer.from(lo, 'hex'), Buffer.from(hi, 'hex')]));
+};
+
+/** The root over an array of leaf hashes. An empty set has no root, and null
+ *  says so honestly rather than hashing nothing into something. */
+export function merkleRoot(leaves) {
+  if (!Array.isArray(leaves) || !leaves.length) return null;
+  let level = leaves.slice();
+  while (level.length > 1) {
+    const next = [];
+    for (let i = 0; i < level.length; i += 2) {
+      next.push(i + 1 < level.length ? pairHash(level[i], level[i + 1]) : level[i]);
+    }
+    level = next;
+  }
+  return level[0];
+}
+
+/** The sibling path from one leaf to the root: an array of bare hex hashes.
+ *  Pair-sorting makes positions unnecessary. A promoted odd node contributes
+ *  no step, and a single leaf proves itself with an empty path. */
+export function merkleProof(leaves, index) {
+  if (!Array.isArray(leaves) || !Number.isInteger(index)) return null;
+  if (index < 0 || index >= leaves.length) return null;
+  const proof = [];
+  let level = leaves.slice();
+  let i = index;
+  while (level.length > 1) {
+    const sibling = i ^ 1;
+    if (sibling < level.length) proof.push(level[sibling]);
+    const next = [];
+    for (let j = 0; j < level.length; j += 2) {
+      next.push(j + 1 < level.length ? pairHash(level[j], level[j + 1]) : level[j]);
+    }
+    level = next;
+    i = i >> 1;
+  }
+  return proof;
+}
+
+/** Walk a proof from one claim back to a root. Anyone can run this from the
+ *  public file alone — no Discord, no kascov, no trust in either. The same
+ *  walk ships in the js and py clients as verifyBadge. */
+export function verifyProof(claim, proof, root) {
+  if (!root || !Array.isArray(proof)) return false;
+  let h = claimLeaf(claim);
+  for (const step of proof) {
+    if (typeof step !== 'string' || !/^[0-9a-f]{64}$/.test(step)) return false;
+    h = pairHash(h, step);
+  }
+  return h === root;
+}
+
+/** The public passport file, assembled from claims alone. Claims are sorted
+ *  by their canonical bytes first, so the same set always yields the same
+ *  root whatever order the guild answered in. */
+export function buildPassportFile(claims, nowMs) {
+  const sorted = (claims || []).slice()
+    .sort((a, b) => (canonicalClaim(a) < canonicalClaim(b) ? -1 : 1));
+  const leaves = sorted.map(claimLeaf);
+  /* hash names the whole contract (leaf derivation + tree walk); the page and
+     both clients key off it, so it only ever changes with a new version tag */
+  return {
+    hash: 'sha256-v1',
+    generated_ms: nowMs,
+    merkle_root: merkleRoot(leaves),
+    claims: sorted.map((claim, i) => ({ claim, proof: merkleProof(leaves, i) })),
+    anchor: {
+      status: 'pending',
+      note: 'the mainnet anchor arms when the operator funds the anchor key; until then the root is published here and in the git history',
+    },
+  };
+}
+
 /* ---------------------------------------------------------------- state */
 
-let state = { pending: {}, verified: {}, rounds: {} };
+let state = { pending: {}, verified: {}, rounds: {}, passport: {} };
 
 async function loadState() {
   try {
@@ -317,6 +452,7 @@ async function loadState() {
     state.pending ||= {};
     state.verified ||= {};
     state.rounds ||= {};
+    state.passport ||= {};
   } catch { /* first run */ }
 }
 
@@ -499,6 +635,85 @@ function forgetMember(userId) {
     }
   }
   return { hadVerified, ballotDropped };
+}
+
+/* ----------------------------------------------------- passport runtime */
+
+/** One member's role ids, or null when the lookup failed. A failure is NOT
+ *  an empty role list: null lets the caller carry the previous run's badges
+ *  forward, exactly like the phase carry-forward in recheck, so a Discord
+ *  outage never reads as a revocation. */
+async function memberRoleIds(guildId, userId) {
+  try {
+    const member = await discord(`/guilds/${guildId}/members/${userId}`);
+    return Array.isArray(member?.roles) ? member.roles : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Gather every earned status into claims. verified-holder comes from this
+ *  bot's own state; contributor/builder/auditor come from guild roles. The
+ *  grant time of a role badge is FIRST SIGHT, remembered in state, so the
+ *  root does not churn between runs when nothing actually changed. */
+async function gatherClaims() {
+  state.passport ||= {};
+  const claims = [];
+  let guildId = null;
+  let guildRoles = [];
+  try {
+    ({ guildId } = await guildAndRole());
+    guildRoles = await discord(`/guilds/${guildId}/roles`);
+  } catch (e) {
+    // no guild answers means no fresh role reads this run; the holder claims
+    // still build from state, and remembered badges are carried forward.
+    console.error(`passport: ${e.message}`);
+    guildId = null;
+  }
+  const now = Date.now();
+  for (const [userId, rec] of Object.entries(state.verified)) {
+    claims.push({
+      v: 1, address: rec.address, badge: 'verified-holder',
+      granted_ms: Number(rec.verified_ms) || 0, source: 'kascov-discord',
+    });
+    const seen = state.passport[userId] || {};
+    let badges = null;
+    if (guildId) {
+      const roleIds = await memberRoleIds(guildId, userId);
+      if (roleIds) badges = badgesFromRoles(roleIds, guildRoles);
+    }
+    // a failed lookup carries the last known set forward; only an actual
+    // read that came back WITHOUT the role revokes its claim.
+    if (badges === null) badges = Object.keys(seen).sort();
+    const next = {};
+    for (const badge of badges) {
+      next[badge] = Number(seen[badge]) || now;
+      claims.push({
+        v: 1, address: rec.address, badge, granted_ms: next[badge], source: 'kascov-discord',
+      });
+    }
+    // a badge missing from `next` simply never enters the newest tree:
+    // that absence IS the revocation, no tombstone needed.
+    if (Object.keys(next).length) state.passport[userId] = next;
+    else delete state.passport[userId];
+  }
+  // whoever is no longer verified drops out of the badge memory too
+  for (const userId of Object.keys(state.passport)) {
+    if (!state.verified[userId]) delete state.passport[userId];
+  }
+  return claims;
+}
+
+/* The claims file is public and served by Caddy, like the tally. Written
+   write-then-rename for the same reason the state is. */
+async function writePassport() {
+  const claims = await gatherClaims();
+  const file = buildPassportFile(claims, Date.now());
+  const tmp = `${PASSPORT_OUT}.tmp`;
+  await writeFile(tmp, JSON.stringify(file, null, 2));
+  await rename(tmp, PASSPORT_OUT);
+  await saveState(); // the first-sight grant times persist alongside the claims
+  console.log(`passport: ${file.claims.length} claims, root ${file.merkle_root ? `${file.merkle_root.slice(0, 16)}…` : 'none (empty set)'}`);
 }
 
 /* ------------------------------------------------------------- commands */
@@ -727,6 +942,38 @@ async function onAlerts(interaction) {
     : 'Watchtower DMs are **off**. Nothing will be sent.';
 }
 
+async function onPassport(interaction) {
+  const userId = interaction.member?.user?.id || interaction.user?.id;
+  const rec = state.verified[userId];
+  const badges = [];
+  if (rec) badges.push('verified-holder');
+  try {
+    const { guildId } = await guildAndRole();
+    // the interaction already carries the member's role ids; only the guild's
+    // role LIST is fetched, to turn ids into names.
+    const guildRoles = await discord(`/guilds/${guildId}/roles`);
+    const roleIds = Array.isArray(interaction.member?.roles)
+      ? interaction.member.roles
+      : await memberRoleIds(guildId, userId);
+    if (roleIds) badges.push(...badgesFromRoles(roleIds, guildRoles));
+  } catch (e) {
+    // roles unreadable right now: show what state alone can prove, honestly.
+    console.error(`passport lookup: ${e.message}`);
+  }
+  if (!badges.length) {
+    return [
+      'No badges yet. `/verify` proves an address and mints the first one, **verified-holder**.',
+      `-# How the passport works: ${SITE}/passport`,
+    ].join('\n');
+  }
+  return [
+    `Your badges: ${badges.map((b) => `**${b}**`).join(' · ')}`,
+    rec
+      ? `-# Each one is a claim on ${rec.address.slice(0, 18)}…${rec.address.slice(-8)}, merkleized and published. Verify it yourself, without kascov: ${SITE}/passport`
+      : `-# Roles only for now: they become portable claims once \`/verify\` binds them to a proven address. ${SITE}/passport`,
+  ].join('\n');
+}
+
 /** Find whose challenge a nonce belongs to. Single-use by construction: the
  *  entry is deleted the moment it resolves either way. */
 export function pendingByNonce(pending, nonce) {
@@ -803,6 +1050,7 @@ const HANDLERS = {
   'vote-open': onVoteOpen,
   'vote-close': onVoteClose,
   alerts: onAlerts,
+  passport: onPassport,
 };
 
 const MODAL_HANDLERS = { kascov_verify: onVerify, kascov_confirm: onConfirm };
@@ -1022,6 +1270,7 @@ const COMMANDS = [
       choices: [{ name: 'on', value: 'on' }, { name: 'off', value: 'off' }],
     }],
   },
+  { name: 'passport', description: 'Your earned badges, and the public claims file they live in' },
 ];
 
 async function registerCommands() {
@@ -1136,6 +1385,16 @@ async function recheck() {
   await saveState();
   if (ballotsDropped) await writeTally();
   console.log(`rechecked ${ids.length}, dropped ${dropped}, departed ${departed}`);
+
+  /* passport v1 rides the same pass: claims from state + roles, merkleized,
+     published. A failure here is logged and swallowed — the recheck's own
+     promises (roles follow balances, departures forgotten) come first, and
+     a stale public claims file must never undo any of them. */
+  try {
+    await writePassport();
+  } catch (e) {
+    console.error(`passport failed: ${e.message}`);
+  }
 }
 
 async function main() {
@@ -1145,6 +1404,7 @@ async function main() {
   await loadState();
   if (process.argv.includes('--register')) return registerCommands();
   if (process.argv.includes('--recheck')) return recheck();
+  if (process.argv.includes('--passport')) return writePassport();
   serve();
 }
 

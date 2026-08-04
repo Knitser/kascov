@@ -1,0 +1,25 @@
+[Unit]
+Description=kascov bench wire: the weekly verification digest for Discord
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kascov
+WorkingDirectory=/home/kascov/kascov
+# Secrets live here and nowhere else: chmod 600, owned by kascov, never in git.
+# Holds KASCOV_WIRE_WEBHOOK. The leading "-" makes the file optional on
+# purpose: without the webhook the wire reports itself off and exits clean,
+# rather than failing the unit every Monday on a box that never armed it.
+EnvironmentFile=-/home/kascov/.discord-env
+# State outside the checkout, so a git pull never fights the bot for the file
+# that remembers which ISO week already got its post. Lose this file and the
+# worst case is one extra weekly digest, not a flood.
+Environment=KASCOV_WIRE_STATE=/home/kascov/kascov-wire.json
+ExecStart=/usr/bin/node /home/kascov/kascov/scripts/discord-bench-wire.mjs
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/kascov

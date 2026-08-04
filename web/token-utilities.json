@@ -44,6 +44,27 @@
       "desc": "A smoother path from the covenant builder to a live deploy for verified holders. Not started; listed so the plan is public before the code is.",
       "status": "planned",
       "link": null
+    },
+    {
+      "id": "passport",
+      "name": "the passport",
+      "desc": "every earned role becomes a claim keyed to your proven address, merkleized, root published; the mainnet anchor arms next. your reputation, verifiable without us.",
+      "status": "building",
+      "link": "/passport"
+    },
+    {
+      "id": "unknowns-board",
+      "name": "unknowns board",
+      "desc": "every covenant build the bench cannot yet name, as open problems. pin one, get the auditor role and your handle on the family forever.",
+      "status": "building",
+      "link": "/unknowns"
+    },
+    {
+      "id": "bench-wire",
+      "name": "bench wire",
+      "desc": "every monday the bench posts its week in the discord: totals, the top families, a specimen of the week.",
+      "status": "building",
+      "link": "https://discord.gg/83RjgQBDEX"
     }
   ]
 }

@@ -14,6 +14,8 @@ Environment=KASCOV_BOT_STATE=/home/kascov/kascov-holder-bot.json
 Environment=KASCOV_BOT_PORT=8099
 # the public vote tally must land inside the served tree or /vote shows nothing
 Environment=KASCOV_VOTE_TALLY=/mnt/c/kascov/web/vote-tally.json
+# same rule for the passport claims file (/passport-claims.json on the site)
+Environment=KASCOV_PASSPORT_OUT=/mnt/c/kascov/web/passport-claims.json
 ExecStart=/usr/bin/node /home/kascov/kascov/scripts/discord-holder-bot.mjs
 # Discord retries an interaction that times out, so a crash must come back
 # fast or a member sees "the application did not respond".

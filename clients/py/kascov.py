@@ -17,14 +17,21 @@ working without it:
 
     k = Kascov("mainnet", lane_token="...")
 
+Passport badges verify locally — no request, no trust in the server:
+
+    from kascov import verify_badge
+    verify_badge(claim, proof, root)  # True only if the claim is in the tree
+
 Publishing to PyPI is a separate decision — this file is the whole client.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, Optional, Sequence
 
 DEFAULT_BASE = "https://kascov.io"
 
@@ -128,3 +135,50 @@ class Kascov:
                             yield json.loads(payload)
                         except json.JSONDecodeError:
                             continue
+
+
+# ---------------------------------------------------------------------------
+# Passport badge verification — pure and local. The scheme (which the bot's
+# merkle publisher in scripts/discord-holder-bot.mjs must match exactly — the
+# publisher was not yet written when this landed, so this file is the spec
+# both sides pin):
+#
+#     leaf  = sha256(canonical JSON of the claim)   # keys sorted, no spaces
+#     node  = sha256(lo + hi)                       # the PAIR sorted as bytes
+#     root  = the published 32-byte hex string
+#
+# Claims stick to strings, integers, booleans and None — floats serialize
+# differently across languages and would fork the leaf hash.
+
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def canonical_json(value: Any) -> str:
+    """Canonical JSON: recursively sorted keys, no whitespace, raw unicode.
+    Matches the js client's canonicalJson for claims built from the types
+    listed above."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def verify_badge(claim: Any, proof: Sequence[str], root: str) -> bool:
+    """Verify a passport badge against a published merkle root, entirely
+    locally. claim: the claim object as published; proof: sibling hashes
+    leaf->root (64-char hex each); root: the published root (64-char hex).
+    An empty proof means the claim IS the whole tree. Malformed input returns
+    False — the verifier fails closed, it never raises."""
+    if not isinstance(root, str) or not isinstance(proof, (list, tuple)):
+        return False
+    want = root.lower()
+    if not _HEX64.fullmatch(want):
+        return False
+    cur = hashlib.sha256(canonical_json(claim).encode("utf-8")).hexdigest()
+    for step in proof:
+        if not isinstance(step, str):
+            return False
+        sib = step.lower()
+        if not _HEX64.fullmatch(sib):
+            return False
+        # pair-sorted concatenation: lexicographic hex order == byte order here
+        lo, hi = sorted((cur, sib))
+        cur = hashlib.sha256(bytes.fromhex(lo) + bytes.fromhex(hi)).hexdigest()
+    return cur == want
