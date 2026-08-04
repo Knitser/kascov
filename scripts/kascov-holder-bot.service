@@ -12,6 +12,8 @@ WorkingDirectory=/home/kascov/kascov
 EnvironmentFile=/home/kascov/.discord-bot-env
 Environment=KASCOV_BOT_STATE=/home/kascov/kascov-holder-bot.json
 Environment=KASCOV_BOT_PORT=8099
+# the public vote tally must land inside the served tree or /vote shows nothing
+Environment=KASCOV_VOTE_TALLY=/mnt/c/kascov/web/vote-tally.json
 ExecStart=/usr/bin/node /home/kascov/kascov/scripts/discord-holder-bot.mjs
 # Discord retries an interaction that times out, so a crash must come back
 # fast or a member sees "the application did not respond".
@@ -20,7 +22,7 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/home/kascov
+ReadWritePaths=/home/kascov /mnt/c/kascov/web
 
 [Install]
 WantedBy=multi-user.target

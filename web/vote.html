@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>the audit vote — kascov</title>
+  <meta name="description" content="The public tally of the kascov audit vote: counts only, never identities. The vote accelerates the audit queue; it never decides a verdict.">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://kascov.io/vote">
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css?v=20260803-focuscard">
+  <style>
+    /* A standalone page on the bot.html pattern: only what it needs on top of
+       the shared palette. */
+    .doc { max-width: 780px; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+    .doc h1 { font-family: var(--display); font-size: clamp(1.9rem, 5vw, 2.6rem); margin: 0 0 .4rem; }
+    .doc h2 {
+      font-family: var(--display); font-size: 1.45rem; margin: 3rem 0 .75rem;
+      padding-top: 1.25rem; border-top: 1px solid var(--border);
+      scroll-margin-top: 1.5rem;
+    }
+    .doc p, .doc li { color: var(--muted); line-height: 1.65; }
+    .doc li { margin: .35rem 0; }
+    .doc a { color: var(--accent); }
+    .doc code { font-family: var(--mono); font-size: .92em; color: var(--text); }
+    .lede { font-size: 1.08rem; color: var(--text); }
+    .never { border: 1px solid var(--burn); background: var(--burn-soft); border-radius: var(--radius-sm); padding: 1rem 1.25rem; margin: 1.5rem 0; }
+    .never strong { color: var(--burn); }
+    .home { display: inline-flex; align-items: center; gap: .55rem; margin-bottom: 2rem; color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .85rem; }
+    .home:hover { color: var(--accent); }
+
+    .tally { border: 1px solid var(--border-strong); background: var(--card); border-radius: var(--radius-sm); padding: 1.25rem; margin: 1.5rem 0; }
+    .tally .meta { font-family: var(--mono); font-size: .82rem; color: var(--faint); letter-spacing: .04em; margin: 0 0 1rem; }
+    .tally .status-open { color: var(--accent); }
+    .row { margin: .85rem 0; }
+    .row .label { display: flex; justify-content: space-between; gap: 1rem; color: var(--text); margin-bottom: .35rem; }
+    .row .count { font-family: var(--mono); color: var(--faint); white-space: nowrap; }
+    .bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
+    .bar > i { display: block; height: 100%; background: var(--accent); }
+    .honest { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1rem 1.25rem; color: var(--muted); line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <main class="doc">
+    <a class="home" href="/">&larr; kascov.io</a>
+
+    <h1>the audit vote</h1>
+    <p class="lede">
+      Verified holders vote on what kascov audits next. This page is the public
+      tally: counts only, never who voted for what.
+    </p>
+
+    <div class="never">
+      <p style="margin:0">
+        <strong>The vote accelerates the audit queue. It never decides a
+        verdict.</strong> A verdict comes from the chain and only from the
+        chain, and kascov may audit anything at any time, voted for or not.
+        Holding a token buys no influence over what kascov.io reports.
+      </p>
+    </div>
+
+    <!-- The prose on this page is real HTML, so it reads fine with JavaScript
+         off. Only the box below is populated by script, and its default text
+         says exactly where the data would have come from. -->
+    <div class="tally" id="tally">
+      <p class="honest" style="border:0;padding:0;margin:0">
+        The tally lives at <a href="/vote-tally.json">/vote-tally.json</a> and
+        this box renders it in your browser. With JavaScript off, read the
+        file directly; it is the same data, counts and rules included.
+      </p>
+    </div>
+
+    <h2 id="rules">The rules</h2>
+    <ul>
+      <li>One verified holder, one vote per round. Voting again before the
+          round closes replaces the earlier ballot, it never adds a second
+          one.</li>
+      <li>Voting needs a proven balance of at least 100 $KASCOV. The dust
+          floor is policy, not physics, and changes only by a commit to the
+          public repo.</li>
+      <li>Rounds close when the operator closes them, or after five days,
+          whichever comes first. Closing freezes the counts and deletes the
+          ballots themselves.</li>
+      <li>The vote accelerates the audit queue; it never decides a verdict.</li>
+      <li>kascov may audit anything at any time, voted for or not.</li>
+    </ul>
+    <p>
+      The same rules ship inside the tally file itself, so the counts cannot
+      be quoted without their own limits attached.
+    </p>
+
+    <h2 id="how">How to vote</h2>
+    <p>
+      In <a href="https://discord.gg/83RjgQBDEX" rel="noopener">the kascov Discord</a>:
+      verify an address with <code>/verify</code>, then
+      cast with <code>/vote choice:&lt;number&gt;</code>. The bot&rsquo;s full
+      terms and privacy are at <a href="/bot">kascov.io/bot</a>, including
+      exactly what is stored while a round is open.
+    </p>
+  </main>
+
+  <script>
+  (function () {
+    var box = document.getElementById('tally');
+
+    /* Fail honest: when the tally cannot be loaded, say so and say why that
+       can happen. Never render a guessed or remembered number. */
+    function honest() {
+      box.innerHTML = '<p class="honest" style="border:0;padding:0;margin:0">' +
+        'The tally could not be loaded. Either no round has ever been opened, ' +
+        'or <a href="/vote-tally.json">/vote-tally.json</a> is unreachable ' +
+        'right now. Nothing is shown rather than something guessed.</p>';
+    }
+
+    function esc(s) {
+      return String(s).replace(/[&<>"]/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+      });
+    }
+
+    function day(iso) {
+      return iso ? String(iso).slice(0, 10) : '';
+    }
+
+    function render(t) {
+      if (!t || !t.round || !Array.isArray(t.options)) return honest();
+      var total = 0;
+      t.options.forEach(function (o) { total += Number(o.votes) || 0; });
+      var open = t.status === 'open';
+
+      var html = '<p class="meta"><span class="' + (open ? 'status-open' : '') + '">' +
+        esc(t.round) + ' · ' + (open ? 'open' : 'closed') + '</span>' +
+        ' · opened ' + esc(day(t.opened)) +
+        (open ? ' · closes ' + esc(day(t.closes))
+              : (t.closed ? ' · closed ' + esc(day(t.closed)) : '')) +
+        ' · ' + total + ' ballot' + (total === 1 ? '' : 's') + '</p>';
+
+      t.options.forEach(function (o) {
+        var votes = Number(o.votes) || 0;
+        var pct = total > 0 ? Math.round((votes / total) * 100) : 0;
+        html += '<div class="row">' +
+          '<div class="label"><span>' + esc(o.label) + '</span>' +
+          '<span class="count">' + votes + ' · ' + pct + '%</span></div>' +
+          '<div class="bar"><i style="width:' + pct + '%"></i></div></div>';
+      });
+
+      if (open) {
+        html += '<p class="meta" style="margin:1rem 0 0">cast or change your ballot with ' +
+          '<code>/vote</code> in the kascov Discord</p>';
+      } else {
+        html += '<p class="meta" style="margin:1rem 0 0">frozen; the ballots themselves are deleted at close</p>';
+      }
+      box.innerHTML = html;
+    }
+
+    fetch('/vote-tally.json', { cache: 'no-cache' })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(render)
+      .catch(honest);
+  })();
+  </script>
+</body>
+</html>

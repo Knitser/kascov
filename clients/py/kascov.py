@@ -8,6 +8,14 @@ Python 3.9+, stdlib only (urllib). CORS-open API, no keys.
     coin = k.coin(page["covenants"][0]["covenant_id"])
     for ev in k.stream():           # live events (SSE), blocks forever
         print(ev["kind"], ev["covenant_id"])
+    for ev in k.stream(covenant=cid):   # one coin only
+
+The API needs no token. An optional lane token (minted at kascov.io/lane)
+rides along as an X-Kascov-Lane header on every request; it buys extra
+capacity on the holder lane and nothing else — the anonymous tier keeps
+working without it:
+
+    k = Kascov("mainnet", lane_token="...")
 
 Publishing to PyPI is a separate decision — this file is the whole client.
 """
@@ -22,13 +30,27 @@ DEFAULT_BASE = "https://kascov.io"
 
 
 class Kascov:
-    def __init__(self, network: str = "mainnet", base: str = DEFAULT_BASE) -> None:
+    def __init__(
+        self,
+        network: str = "mainnet",
+        base: str = DEFAULT_BASE,
+        lane_token: Optional[str] = None,
+    ) -> None:
         self.network = network
         self.base = base.rstrip("/")
+        self.lane_token = lane_token
+
+    def _headers(self, accept: str) -> Dict[str, str]:
+        # every request goes through here so the lane header can never be
+        # forgotten on one endpoint and sent on another
+        h = {"accept": accept, "user-agent": "kascov-py"}
+        if self.lane_token:
+            h["X-Kascov-Lane"] = self.lane_token
+        return h
 
     def _get(self, path: str) -> Dict[str, Any]:
         req = urllib.request.Request(
-            f"{self.base}{path}", headers={"accept": "application/json", "user-agent": "kascov-py"}
+            f"{self.base}{path}", headers=self._headers("application/json")
         )
         with urllib.request.urlopen(req, timeout=60) as res:
             return json.load(res)
@@ -81,11 +103,20 @@ class Kascov:
         """Births/moves/burns per DAA bucket. range: 1h|6h|24h|48h|all"""
         return self._get(f"/data/{self.network}/activity.json?range={range}")
 
-    def stream(self) -> Iterator[Dict[str, Any]]:
-        """Live events (SSE) as an iterator. Hints only — refetch on receipt."""
+    def stream_url(self, covenant: Optional[str] = None) -> str:
+        """The SSE URL the worker actually serves: /data/{network}/stream, with
+        an optional ?covenant=<64 hex> filter narrowing it to one coin.
+        Extracted so tests pin the shape against the route in main.rs."""
+        q = f"?covenant={urllib.parse.quote(covenant)}" if covenant else ""
+        return f"{self.base}/data/{self.network}/stream{q}"
+
+    def stream(self, covenant: Optional[str] = None) -> Iterator[Dict[str, Any]]:
+        """Live events (SSE) as an iterator. Hints only — refetch on receipt.
+        covenant: exactly 64 hex chars follows ONE coin; anything else is a
+        400 from the server, never a silent firehose."""
         req = urllib.request.Request(
-            f"{self.base}/data/{self.network}/stream",
-            headers={"accept": "text/event-stream", "user-agent": "kascov-py"},
+            self.stream_url(covenant),
+            headers=self._headers("text/event-stream"),
         )
         with urllib.request.urlopen(req, timeout=None) as res:
             for raw in res:

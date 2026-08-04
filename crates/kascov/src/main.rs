@@ -1571,6 +1571,10 @@ async fn serve(
         .route("/data/{network}/verified/{hash}", get(verified_handler))
         .route("/data/{network}/subscribe", post(subscribe_handler))
         .route("/data/{network}/unsubscribe", post(unsubscribe_handler))
+        // static paths beat the {ns} capture below (axum route priority) —
+        // and a KIP-21 namespace is 8 hex chars, so "mint" was never a lane
+        .route("/data/{network}/lane", get(lane_policy_handler))
+        .route("/data/{network}/lane/mint", post(lane_mint_handler))
         .route("/data/{network}/lane/{ns}", get(lane_handler))
         .route("/data/{network}/debug/{txid}", get(debug_handler))
         // static path beats the {file} capture below (axum route priority)
@@ -6133,12 +6137,7 @@ async fn zk_verify_handler(
     if req.program_hex.len() > 8_000 {
         return json_resp(serde_json::json!({ "ok": false, "error": "program too large" }));
     }
-    if let Err(reason) = state
-        .tool_limiter
-        .lock()
-        .await
-        .try_take(&client_ip(&headers))
-    {
+    if let Err(reason) = take_tool_slot(&state, &headers).await {
         return too_many(reason);
     }
     let Ok(bytes) = hex::decode(req.program_hex.trim().trim_start_matches("0x")) else {
@@ -6159,12 +6158,7 @@ async fn compile_handler(
     if req.source.len() > 40_000 || req.args.len() > 16 || req.args.iter().any(|a| a.len() > 200) {
         return json_resp(serde_json::json!({ "ok": false, "error": "input too large" }));
     }
-    if let Err(reason) = state
-        .tool_limiter
-        .lock()
-        .await
-        .try_take(&client_ip(&headers))
-    {
+    if let Err(reason) = take_tool_slot(&state, &headers).await {
         return too_many(reason);
     }
     match run_silverc(req.source, req.args).await {
@@ -6263,6 +6257,10 @@ struct ToolLimiter {
     tokens: f64,
     last_refill: std::time::Instant,
     per_ip: std::collections::HashMap<String, (u64, u32)>, // ip -> (hour, count)
+    /// The holder lane: a SECOND, additive per-key map, keyed by a
+    /// MAC-proven KASCOV holder address instead of a spoofable IP. Kept
+    /// separate from `per_ip` so the anonymous path never changes shape.
+    lane_per_addr: std::collections::HashMap<String, (u64, u32)>, // addr -> (hour, count)
 }
 
 /// Global ceiling: 500 runs/hour, burstable to the full hour's budget.
@@ -6270,6 +6268,11 @@ const TOOL_BUCKET_CAP: f64 = 500.0;
 const TOOL_REFILL_PER_SEC: f64 = 500.0 / 3600.0;
 /// Each client IP gets this many runs per clock hour (UTC) — best-effort.
 const TOOL_PER_IP_PER_HOUR: u32 = 30;
+/// Holder lane: a proven KASCOV holder's per-address budget is this multiple
+/// of the anonymous per-IP budget. /lane publishes both numbers straight from
+/// these constants, so the page can never disagree with the enforcement.
+const LANE_MULTIPLIER: u32 = 5;
+const LANE_PER_ADDR_PER_HOUR: u32 = TOOL_PER_IP_PER_HOUR * LANE_MULTIPLIER;
 
 impl ToolLimiter {
     fn new() -> Self {
@@ -6277,6 +6280,7 @@ impl ToolLimiter {
             tokens: TOOL_BUCKET_CAP,
             last_refill: std::time::Instant::now(),
             per_ip: Default::default(),
+            lane_per_addr: Default::default(),
         }
     }
 
@@ -6305,6 +6309,42 @@ impl ToolLimiter {
         }
         if entry.1 >= TOOL_PER_IP_PER_HOUR {
             return Err("hourly compiler limit reached for your address — try again later");
+        }
+        self.tokens -= 1.0;
+        entry.1 += 1;
+        Ok(())
+    }
+
+    /// Charge one run to a proven holder address's lane bucket — the additive
+    /// 5x tier. It shares the global token bucket with the anonymous path
+    /// (CPU is CPU), but counts per ADDRESS instead of per IP: the allowance
+    /// follows the proof, not the connection.
+    fn try_take_lane(&mut self, addr: &str) -> std::result::Result<(), &'static str> {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.last_refill).as_secs_f64();
+        self.last_refill = now;
+        self.tokens = (self.tokens + dt * TOOL_REFILL_PER_SEC).min(TOOL_BUCKET_CAP);
+        if self.tokens < 1.0 {
+            return Err("compiler rate limit — try again in a few minutes");
+        }
+        let hour = now_ms() / 3_600_000;
+        // Bounded like per_ip, though this map only grows as fast as real
+        // holders mint passes — every key here is MAC-verified, not claimed.
+        if self.lane_per_addr.len() > DEPLOY_IP_MAP_MAX {
+            self.lane_per_addr.retain(|_, (h, _)| *h == hour);
+            if self.lane_per_addr.len() > DEPLOY_IP_MAP_MAX {
+                self.lane_per_addr.clear();
+            }
+        }
+        let entry = self
+            .lane_per_addr
+            .entry(addr.to_string())
+            .or_insert((hour, 0));
+        if entry.0 != hour {
+            *entry = (hour, 0);
+        }
+        if entry.1 >= LANE_PER_ADDR_PER_HOUR {
+            return Err("holder lane hourly limit reached — the anonymous tier still applies");
         }
         self.tokens -= 1.0;
         entry.1 += 1;
@@ -6481,12 +6521,7 @@ async fn publish_handler(
     if req.source.len() > 40_000 {
         return json_resp(serde_json::json!({ "ok": false, "error": "bad request" }));
     }
-    if let Err(reason) = state
-        .tool_limiter
-        .lock()
-        .await
-        .try_take(&client_ip(&headers))
-    {
+    if let Err(reason) = take_tool_slot(&state, &headers).await {
         return too_many(reason);
     }
     let hex = match run_silverc(req.source.clone(), req.args.clone()).await {
@@ -6851,12 +6886,7 @@ async fn preflight_handler(
             serde_json::json!({ "ok": false, "error": "transaction JSON too large (256KB cap)" }),
         );
     }
-    if let Err(reason) = state
-        .tool_limiter
-        .lock()
-        .await
-        .try_take(&client_ip(&headers))
-    {
+    if let Err(reason) = take_tool_slot(&state, &headers).await {
         return too_many(reason);
     }
     match tokio::task::spawn_blocking(move || preflight::run(&body, network)).await {
@@ -7812,6 +7842,12 @@ fn build_sitemap_xml(store: Option<&kascov_core::store::Store>, now: u64) -> Res
     // has no idea when the shipped copy was last edited, and a wrong date is
     // worse than none.
     xml.push_str("<url><loc>https://kascov.io/guide</loc></url>\n");
+    // The other static SPA routes, same deal as the guide: prose ships in
+    // index.html, the URL is worth crawling on its own, and the worker has no
+    // honest lastmod for any of them.
+    for page in ["token", "vote", "lane", "bot", "verify"] {
+        xml.push_str(&format!("<url><loc>https://kascov.io/{page}</loc></url>\n"));
+    }
     if let Some(store) = store {
         let tip = store.tip()?;
         for c in store.list_page(None, 5000)? {
@@ -8416,6 +8452,38 @@ fn parse_addr_or_pubkey(raw: &str, network: Network) -> Option<(String, Vec<u8>)
     ))
 }
 
+/// The one place a caller's (address, message, signature) triple is judged.
+/// Both /prove-holding and /lane/mint go through here, so the two endpoints
+/// can never drift into accepting different proofs. Ok carries (canonical
+/// address for this network, pubkey bytes); Err is a reason a human can act
+/// on, phrased for the endpoints' `reason` field.
+fn check_address_proof(
+    raw_addr: &str,
+    msg: &str,
+    sig_hex: &str,
+    network: Network,
+) -> std::result::Result<(String, Vec<u8>), &'static str> {
+    let Some((canonical, pubkey)) = parse_addr_or_pubkey(raw_addr.trim(), network) else {
+        return Err("not a kaspa address for this network");
+    };
+    // Schnorr is x-only. An ECDSA address carries a parity byte and a different
+    // signing scheme, so it cannot prove anything here; say so rather than
+    // failing as though the signature were wrong.
+    if pubkey.len() != 32 {
+        return Err("only schnorr (kaspa:q...) addresses can sign a message");
+    }
+    let Ok(sig) = hex::decode(sig_hex.trim().trim_start_matches("0x")) else {
+        return Err("signature is not hex");
+    };
+    if sig.len() != 64 {
+        return Err("a schnorr signature is 64 bytes");
+    }
+    if !verify_kaspa_message(&pubkey, msg, &sig) {
+        return Err("signature does not match this address and message");
+    }
+    Ok((canonical, pubkey))
+}
+
 /// Which smart coins has this address/pubkey touched (as a p2pk-state owner)?
 #[derive(serde::Deserialize)]
 struct ProveHoldingReq {
@@ -8450,12 +8518,7 @@ async fn prove_holding_handler(
         Ok(n) => n,
         Err(resp) => return resp,
     };
-    if let Err(reason) = state
-        .tool_limiter
-        .lock()
-        .await
-        .try_take(&client_ip(&headers))
-    {
+    if let Err(reason) = take_tool_slot(&state, &headers).await {
         return too_many(reason);
     }
     // A signature covers any length, but nothing legitimate needs more, and an
@@ -8468,24 +8531,11 @@ async fn prove_holding_handler(
         json_resp(serde_json::json!({ "ok": true, "verified": false, "reason": reason }))
     };
 
-    let Some((canonical, pubkey)) = parse_addr_or_pubkey(req.address.trim(), network) else {
-        return refuse("not a kaspa address for this network");
-    };
-    // Schnorr is x-only. An ECDSA address carries a parity byte and a different
-    // signing scheme, so it cannot prove anything here; say so rather than
-    // failing as though the signature were wrong.
-    if pubkey.len() != 32 {
-        return refuse("only schnorr (kaspa:q...) addresses can sign a message");
-    }
-    let Ok(sig) = hex::decode(req.signature.trim().trim_start_matches("0x")) else {
-        return refuse("signature is not hex");
-    };
-    if sig.len() != 64 {
-        return refuse("a schnorr signature is 64 bytes");
-    }
-    if !verify_kaspa_message(&pubkey, &req.message, &sig) {
-        return refuse("signature does not match this address and message");
-    }
+    let (canonical, pubkey) =
+        match check_address_proof(&req.address, &req.message, &req.signature, network) {
+            Ok(v) => v,
+            Err(reason) => return refuse(reason),
+        };
 
     let db = state.base_dir.join(format!("{network}.db"));
     let holdings = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
@@ -8521,6 +8571,311 @@ async fn prove_holding_handler(
         })),
         _ => json_resp(serde_json::json!({ "ok": false, "error": "could not read holdings" })),
     }
+}
+
+/* ---------------------------------------------------- holder lane */
+
+// The doctrine, enforced in code: the anonymous tier is a floor that can only
+// rise, and holding KASCOV buys CAPACITY, never influence. A proven holder
+// gets a separate, additive rate bucket; with no (valid) pass the request
+// rides the exact anonymous path it always did, same numbers, same code.
+// Passes are stateless — address, expiry, MAC — so the server stores nothing
+// and a restart forgets no one.
+
+/// The KASCOV covenant — the token whose proven holders may mint a lane pass.
+const KASCOV_TOKEN_ID: &str = "c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2";
+
+/// How long a minted pass lives. Long enough that a holder signs once a
+/// month, short enough that an address that sold out drops back to the floor
+/// on its own — expiry IS the revocation mechanism.
+const LANE_EXPIRY_DAYS: u64 = 30;
+
+/// A real pass is under 200 bytes; anything longer is dropped before parsing.
+const LANE_TOKEN_MAX_LEN: usize = 256;
+
+/// The lane MAC key, straight from the environment. `None` — unset or empty —
+/// means the lane is NOT armed: /lane/mint says so and mints nothing, and
+/// every request rides the anonymous bucket. Fail closed, never a crash.
+fn lane_secret() -> Option<String> {
+    std::env::var("KASCOV_LANE_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Minimal base64url (RFC 4648 §5, no padding). A pass travels in a header,
+/// so the address needs a charset-safe wrapper — and these two dozen lines
+/// beat pulling a base64 crate into the tree for one token format.
+fn b64url_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let n = u32::from(chunk[0]) << 16
+            | u32::from(chunk.get(1).copied().unwrap_or(0)) << 8
+            | u32::from(chunk.get(2).copied().unwrap_or(0));
+        for (i, shift) in [18u32, 12, 6, 0].into_iter().enumerate() {
+            // 1 byte -> 2 chars, 2 -> 3, 3 -> 4
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> shift) as usize & 63] as char);
+            }
+        }
+    }
+    out
+}
+
+fn b64url_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        Some(u32::from(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => return None,
+        }))
+    }
+    let bytes = s.as_bytes();
+    // a lone trailing char encodes fewer than 8 bits — never valid
+    if bytes.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3 + 2);
+    for chunk in bytes.chunks(4) {
+        let mut n = 0u32;
+        for &c in chunk {
+            n = n << 6 | val(c)?;
+        }
+        n <<= 6 * (4 - chunk.len()) as u32;
+        let full = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&full[..chunk.len() - 1]);
+    }
+    Some(out)
+}
+
+/// Constant-time equality: xor-fold instead of an early-exit `==`, so a
+/// forged MAC can't be probed byte by byte through response timing.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// MAC over `{address}.{expiry}` — keyed blake2b-256, the same primitive the
+/// KIP signing hash above already trusts, so no new crypto enters the tree.
+/// blake2b keys cap at 64 bytes, so the operator's secret (any length) is
+/// first collapsed to its 32-byte digest.
+fn lane_mac(secret: &str, address: &str, expiry_secs: u64) -> [u8; 32] {
+    let key = blake2b_simd::Params::new()
+        .hash_length(32)
+        .hash(secret.as_bytes());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(
+        blake2b_simd::Params::new()
+            .hash_length(32)
+            .key(key.as_bytes())
+            .to_state()
+            .update(address.as_bytes())
+            .update(b".")
+            .update(expiry_secs.to_string().as_bytes())
+            .finalize()
+            .as_bytes(),
+    );
+    out
+}
+
+/// `base64url(address).expiry-unix-seconds.hex(mac)` — everything a later
+/// request needs to prove itself, nothing the server has to remember.
+fn mint_lane_token(secret: &str, address: &str, expiry_secs: u64) -> String {
+    format!(
+        "{}.{}.{}",
+        b64url_encode(address.as_bytes()),
+        expiry_secs,
+        hex::encode(lane_mac(secret, address, expiry_secs))
+    )
+}
+
+/// Some(proven address) for a well-formed, unexpired, correctly-MACed pass;
+/// None for everything else. One None for every failure mode on purpose —
+/// like the signature check above, telling them apart would be an oracle.
+fn verify_lane_token(secret: &str, token: &str, now_secs: u64) -> Option<String> {
+    if token.len() > LANE_TOKEN_MAX_LEN {
+        return None;
+    }
+    let mut parts = token.split('.');
+    let (addr_b64, expiry_str, mac_hex) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let address = String::from_utf8(b64url_decode(addr_b64)?).ok()?;
+    let expiry: u64 = expiry_str.parse().ok()?;
+    if now_secs >= expiry {
+        return None;
+    }
+    let provided = hex::decode(mac_hex).ok()?;
+    ct_eq(&provided, &lane_mac(secret, &address, expiry)).then_some(address)
+}
+
+/// Which bucket a request charges. Pure, so the decision is a table in a
+/// test: no header → anonymous; a valid unexpired pass → the holder's own
+/// lane; anything malformed, forged or expired → anonymous, SILENTLY. A bad
+/// pass is not an error — the request simply rides the floor like everyone
+/// else's.
+#[derive(Debug, PartialEq, Eq)]
+enum LaneBucket {
+    Anonymous,
+    Holder(String),
+}
+
+fn select_bucket(lane_header: Option<&str>, secret: Option<&str>, now_secs: u64) -> LaneBucket {
+    let (Some(token), Some(secret)) = (lane_header, secret) else {
+        // no pass, or a lane that isn't armed: everyone is anonymous
+        return LaneBucket::Anonymous;
+    };
+    match verify_lane_token(secret, token, now_secs) {
+        Some(address) => LaneBucket::Holder(address),
+        None => LaneBucket::Anonymous,
+    }
+}
+
+/// The tool-limiter gate every guarded endpoint calls. Without a valid pass
+/// this is EXACTLY the old anonymous path: same `try_take`, same per-IP
+/// bucket, same numbers. A valid pass charges the holder's additive 5x bucket
+/// first, and when that runs dry the holder still has the anonymous floor —
+/// capacity only ever stacks, never swaps.
+async fn take_tool_slot(
+    state: &ServeState,
+    headers: &axum::http::HeaderMap,
+) -> std::result::Result<(), &'static str> {
+    let lane_header = headers
+        .get("x-kascov-lane")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let secret = lane_secret();
+    let bucket = select_bucket(lane_header, secret.as_deref(), now_ms() / 1000);
+    let mut limiter = state.tool_limiter.lock().await;
+    match bucket {
+        LaneBucket::Anonymous => limiter.try_take(&client_ip(headers)),
+        LaneBucket::Holder(address) => limiter
+            .try_take_lane(&address)
+            .or_else(|_| limiter.try_take(&client_ip(headers))),
+    }
+}
+
+/// What /lane/mint answers while KASCOV_LANE_SECRET is unset: a 200 that
+/// names the closed gate. Nothing minted, nothing crashed, nothing open.
+fn lane_unarmed_json() -> serde_json::Value {
+    serde_json::json!({ "ok": true, "enabled": false, "minted": false, "reason": "lane not armed" })
+}
+
+#[derive(serde::Deserialize)]
+struct LaneMintReq {
+    address: String,
+    /// The exact string that was signed — the caller's own nonce phrase,
+    /// same contract as /prove-holding's `message`.
+    nonce: String,
+    /// 64-byte schnorr signature, hex.
+    signature: String,
+}
+
+/// POST /data/{network}/lane/mint
+///
+/// Sign a nonce, prove the key holds KASCOV, get a 30-day stateless lane
+/// pass. The proof is judged by the same path as /prove-holding — one
+/// signature oracle in the binary — and the balance is read from the chain
+/// index, never claimed. kascov keeps no list of holders: the pass is the
+/// whole record, and losing it just means signing again.
+async fn lane_mint_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    axum::Json(req): axum::Json<LaneMintReq>,
+) -> axum::response::Response {
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    if let Err(reason) = take_tool_slot(&state, &headers).await {
+        return too_many(reason);
+    }
+    // fail closed, and say so before any crypto runs
+    let Some(secret) = lane_secret() else {
+        return json_resp(lane_unarmed_json());
+    };
+    // same bound as /prove-holding: a signature covers any length, but
+    // nothing legitimate needs more, and an unbounded string is an unbounded
+    // hash on a public endpoint
+    if req.nonce.len() > 512 {
+        return json_resp(serde_json::json!({ "ok": false, "error": "nonce too long" }));
+    }
+    let refuse = |reason: &str| {
+        json_resp(serde_json::json!({ "ok": true, "minted": false, "reason": reason }))
+    };
+    let (canonical, pubkey) =
+        match check_address_proof(&req.address, &req.nonce, &req.signature, network) {
+            Ok(v) => v,
+            Err(reason) => return refuse(reason),
+        };
+
+    // the gate itself: does the proven key hold KASCOV on this network?
+    let db = state.base_dir.join(format!("{network}.db"));
+    let held = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        Ok(store
+            .token_holdings_for_pubkey(&pubkey)?
+            .into_iter()
+            .filter(|h| h.token_id.to_string() == KASCOV_TOKEN_ID)
+            .map(|h| h.balance.max(0))
+            .sum())
+    })
+    .await;
+    let balance = match held {
+        Ok(Ok(b)) => b,
+        _ => return json_resp(serde_json::json!({ "ok": false, "error": "could not read holdings" })),
+    };
+    if balance <= 0 {
+        return refuse("this address holds no KASCOV");
+    }
+
+    let expiry = now_ms() / 1000 + LANE_EXPIRY_DAYS * 86_400;
+    json_resp(serde_json::json!({
+        "ok": true,
+        "minted": true,
+        "address": canonical,
+        "token": mint_lane_token(&secret, &canonical, expiry),
+        "expires_unix": expiry,
+        "expiry_days": LANE_EXPIRY_DAYS,
+        "note": "stateless pass — send it as X-Kascov-Lane; nothing is stored server-side",
+    }))
+}
+
+/// GET /data/{network}/lane — the published holder-lane policy, read from the
+/// SAME constants the limiter enforces, so the numbers on this page cannot
+/// drift from the numbers in the code path.
+async fn lane_policy_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path(net_name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    json_resp(serde_json::json!({
+        "ok": true,
+        "network": network.to_string(),
+        "enabled": lane_secret().is_some(),
+        "anonymous": {
+            "per_ip_per_hour": TOOL_PER_IP_PER_HOUR,
+            "global_per_hour": TOOL_BUCKET_CAP as u64,
+        },
+        "holder": {
+            "multiplier": LANE_MULTIPLIER,
+            "per_address_per_hour": LANE_PER_ADDR_PER_HOUR,
+            "requires": { "token": KASCOV_TOKEN_ID, "min_balance": 1 },
+        },
+        "token_expiry_days": LANE_EXPIRY_DAYS,
+        "mint": "POST /data/{network}/lane/mint with {address, nonce, signature}",
+        "policy": "holder capacity is additive; the anonymous tier is a floor that can only rise; lane tokens are stateless and nothing is stored.",
+        "generated_at_ms": now_ms(),
+    }))
 }
 
 async fn addr_handler(
@@ -10191,7 +10546,7 @@ mod feed_and_sitemap_tests {
             .children()
             .filter(|n| n.has_tag_name("url"))
             .collect();
-        assert_eq!(urls.len(), 3, "root + the builder guide + the one coin");
+        assert_eq!(urls.len(), 8, "root + the six static routes + the one coin");
         let lastmod_of = |n: &roxmltree::Node<'_, '_>| {
             n.children()
                 .find(|c| c.has_tag_name("lastmod"))
@@ -10207,14 +10562,19 @@ mod feed_and_sitemap_tests {
                 .to_string()
         };
         assert_eq!(lastmod_of(&urls[0]), Some(og::iso_date(now)));
-        // the guide is a static route: listed, deliberately undated
-        assert_eq!(loc_of(&urls[1]), "https://kascov.io/guide");
-        assert_eq!(lastmod_of(&urls[1]), None);
+        // the static routes are listed right after the root, deliberately undated
+        for (i, page) in ["guide", "token", "vote", "lane", "bot", "verify"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(loc_of(&urls[1 + i]), format!("https://kascov.io/{page}"));
+            assert_eq!(lastmod_of(&urls[1 + i]), None);
+        }
         // tip_ms − (tip_daa − last_activity_daa) × 100ms = 1,700,000,000,000
-        assert_eq!(lastmod_of(&urls[2]), Some(og::iso_date(1_700_000_000_000)));
-        assert!(loc_of(&urls[2]).contains("/share/mainnet/"));
+        assert_eq!(lastmod_of(&urls[7]), Some(og::iso_date(1_700_000_000_000)));
+        assert!(loc_of(&urls[7]).contains("/share/mainnet/"));
         // W3C date shape (YYYY-MM-DD)
-        let lm = lastmod_of(&urls[2]).unwrap();
+        let lm = lastmod_of(&urls[7]).unwrap();
         assert_eq!(lm.len(), 10);
         assert!(lm.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 {
             c == '-'
@@ -10235,11 +10595,13 @@ mod feed_and_sitemap_tests {
             .collect();
         assert_eq!(
             urls.len(),
-            2,
-            "the root and the builder guide need no store"
+            7,
+            "the root and the static routes need no store"
         );
         assert!(xml.contains("<lastmod>1970-01-01</lastmod>"));
-        assert!(xml.contains("<loc>https://kascov.io/guide</loc>"));
+        for page in ["guide", "token", "vote", "lane", "bot", "verify"] {
+            assert!(xml.contains(&format!("<loc>https://kascov.io/{page}</loc>")));
+        }
     }
 
     #[test]
@@ -10442,5 +10804,147 @@ mod prove_holding_tests {
         let (kp, pk) = kip_keypair();
         let msg = "こんにちは世界";
         assert!(verify_kaspa_message(&pk.serialize(), msg, &sign(&kp, msg)));
+    }
+}
+
+#[cfg(test)]
+mod holder_lane_tests {
+    use super::{
+        b64url_decode, b64url_encode, lane_unarmed_json, mint_lane_token, select_bucket,
+        verify_lane_token, LaneBucket, ToolLimiter, LANE_MULTIPLIER, LANE_PER_ADDR_PER_HOUR,
+        TOOL_PER_IP_PER_HOUR,
+    };
+
+    // Tests pass the secret explicitly rather than mutating the process env:
+    // env vars are global and these tests run in parallel with everything
+    // else. The env plumbing itself is one Option::filter — `lane_secret`.
+    const SECRET: &str = "test-lane-secret";
+    const ADDR: &str = "kaspa:qq2efzv0j7vp7rgyq3cg9cxhcznv3lzsfxg9mfhpr8axm7g6ynwwwmgzsawjm";
+    /// Comfortably in the future for a test clock that reads `now` as 0-ish.
+    const EXPIRY: u64 = 2_000_000_000;
+
+    #[test]
+    fn b64url_round_trips_every_tail_length() {
+        for len in 0..40usize {
+            let data: Vec<u8> = (0..len as u8).collect();
+            assert_eq!(b64url_decode(&b64url_encode(&data)), Some(data), "len {len}");
+        }
+        assert_eq!(b64url_decode("has=padding"), None);
+        assert_eq!(b64url_decode("bad!chars"), None);
+        assert_eq!(b64url_decode("aaaaa"), None); // len % 4 == 1 is never valid
+    }
+
+    #[test]
+    fn a_minted_pass_verifies_and_names_its_address() {
+        let token = mint_lane_token(SECRET, ADDR, EXPIRY);
+        assert_eq!(
+            verify_lane_token(SECRET, &token, EXPIRY - 1),
+            Some(ADDR.to_string())
+        );
+    }
+
+    #[test]
+    fn a_tampered_address_is_rejected() {
+        // splice a different address into an otherwise-valid pass: the MAC
+        // covers the address, so the lane must not follow the swap
+        let token = mint_lane_token(SECRET, ADDR, EXPIRY);
+        let mut parts: Vec<&str> = token.split('.').collect();
+        let other = b64url_encode(b"kaspa:qqsomeotheraddressentirely");
+        parts[0] = &other;
+        assert_eq!(verify_lane_token(SECRET, &parts.join("."), 0), None);
+    }
+
+    #[test]
+    fn a_tampered_expiry_is_rejected() {
+        // pushing the expiry out must break the MAC, or a 30-day pass would
+        // really be a forever pass
+        let token = mint_lane_token(SECRET, ADDR, EXPIRY);
+        let mut parts: Vec<&str> = token.split('.').collect();
+        parts[1] = "9000000000";
+        assert_eq!(verify_lane_token(SECRET, &parts.join("."), 0), None);
+    }
+
+    #[test]
+    fn an_expired_pass_is_rejected() {
+        let token = mint_lane_token(SECRET, ADDR, 1_000);
+        assert!(verify_lane_token(SECRET, &token, 999).is_some());
+        assert_eq!(verify_lane_token(SECRET, &token, 1_000), None); // >= expiry is expired
+        assert_eq!(verify_lane_token(SECRET, &token, 1_001), None);
+    }
+
+    #[test]
+    fn a_rotated_secret_voids_old_passes() {
+        let token = mint_lane_token(SECRET, ADDR, EXPIRY);
+        assert_eq!(verify_lane_token("some-new-secret", &token, 0), None);
+    }
+
+    #[test]
+    fn garbage_is_none_and_never_a_panic() {
+        let long = "x".repeat(10_000);
+        for junk in [
+            "",
+            ".",
+            "..",
+            "a.b.c",
+            "a.b.c.d",
+            "!!!.123.abc",
+            "aGk.notanumber.00",
+            "aGk.123.nothex",
+            long.as_str(),
+        ] {
+            assert_eq!(verify_lane_token(SECRET, junk, 0), None, "{junk:.20}");
+        }
+    }
+
+    #[test]
+    fn bucket_selection_absent_valid_garbage() {
+        let token = mint_lane_token(SECRET, ADDR, EXPIRY);
+        let now = EXPIRY - 1;
+        // header absent -> anonymous, the path that must never change
+        assert_eq!(select_bucket(None, Some(SECRET), now), LaneBucket::Anonymous);
+        // a valid pass -> the holder's own lane, keyed by the PROVEN address
+        assert_eq!(
+            select_bucket(Some(&token), Some(SECRET), now),
+            LaneBucket::Holder(ADDR.to_string())
+        );
+        // garbage and expired are ignored SILENTLY — anonymous, not an error
+        assert_eq!(
+            select_bucket(Some("garbage"), Some(SECRET), now),
+            LaneBucket::Anonymous
+        );
+        assert_eq!(
+            select_bucket(Some(&token), Some(SECRET), EXPIRY + 1),
+            LaneBucket::Anonymous
+        );
+    }
+
+    #[test]
+    fn an_unarmed_lane_is_anonymous_for_everyone() {
+        // fail closed: with no secret even a pass that WOULD verify rides the
+        // floor (a rotated-away secret voids the lane, never opens it)
+        let token = mint_lane_token(SECRET, ADDR, EXPIRY);
+        assert_eq!(select_bucket(Some(&token), None, 0), LaneBucket::Anonymous);
+        // and the mint endpoint's answer names the closed gate, shape pinned
+        let v = lane_unarmed_json();
+        assert_eq!(v["enabled"], false);
+        assert_eq!(v["minted"], false);
+        assert_eq!(v["reason"], "lane not armed");
+    }
+
+    #[test]
+    fn the_lane_bucket_is_5x_and_additive() {
+        assert_eq!(LANE_MULTIPLIER, 5);
+        assert_eq!(LANE_PER_ADDR_PER_HOUR, TOOL_PER_IP_PER_HOUR * 5);
+        let mut limiter = ToolLimiter::new();
+        for i in 0..LANE_PER_ADDR_PER_HOUR {
+            assert!(limiter.try_take_lane(ADDR).is_ok(), "lane take {i}");
+        }
+        assert!(limiter.try_take_lane(ADDR).is_err());
+        // additive means exhausting the lane leaves the anonymous per-IP
+        // bucket untouched: the same person still has the full floor
+        for i in 0..TOOL_PER_IP_PER_HOUR {
+            assert!(limiter.try_take("203.0.113.7").is_ok(), "anon take {i}");
+        }
+        assert!(limiter.try_take("203.0.113.7").is_err());
     }
 }

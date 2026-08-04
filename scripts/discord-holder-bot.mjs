@@ -14,6 +14,18 @@
  *                balance is non-zero.
  *   /holdings    public lookup, no proof, no role.
  *   /unverify    drops the role and deletes the record.
+ *   /vote        the audit vote: verified holders at or above the dust floor
+ *                pick what gets audited next. the tally is published as
+ *                counts only, never identities.
+ *   /vote-open   operator only: open a round with a slate of 2-6 options.
+ *   /vote-close  operator only: close the round and freeze the counts.
+ *   /alerts      watchtower DMs on or off.
+ *
+ *   The 6h recheck keeps two more promises now. A member who LEFT the server
+ *   is forgotten exactly as /unverify would forget them, because bot.html
+ *   says leaving has that effect and a published sentence is a debt. And the
+ *   watchtower DMs holders about changes derived ONLY from already-public
+ *   endpoints, so a DM never carries a fact kascov.io did not already show.
  *
  *   The two sensitive commands take no OPTIONS on purpose. An option's value is
  *   echoed back in the command invocation, and the link between a Discord
@@ -56,6 +68,16 @@ const ROLE_NAME = process.env.KASCOV_ROLE_NAME || 'verified holder';
 /* The coin the role is about. Empty means "any verified token". */
 const TOKEN_ID = process.env.KASCOV_ROLE_TOKEN
   || 'c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2';
+
+/* Where the public audit-vote tally lands. Point it inside the web root so
+   Caddy serves it as /vote-tally.json. Unwritable is a logged no-op: a stale
+   tally page must never block a ballot. */
+/* the public tally must land somewhere the web server actually serves;
+   the deploy points this at the web root (vote.html fetches /vote-tally.json) */
+const TALLY_PATH = process.env.KASCOV_VOTE_TALLY || './vote-tally.json';
+/* A second operator besides the guild owner, for the day the owner account is
+   not the one at the keyboard. Empty means the owner alone, never everyone. */
+const OPERATOR_ID = process.env.OPERATOR_USER_ID || '';
 
 const CHALLENGE_TTL_MS = 15 * 60 * 1000;
 const API = 'https://discord.com/api/v10';
@@ -115,15 +137,186 @@ export function balanceFor(holdings, tokenId) {
 
 export const fmt = (n) => Number(n || 0).toLocaleString('en-US');
 
+/* ------------------------------------------------- leave-server cleanup */
+
+/** Only an explicit 404 from the members endpoint proves departure. A 403, a
+ *  500, or a network failure proves nothing about the member, and a lookup
+ *  that failed must never delete anyone's record. */
+export function leftTheServer(status) {
+  return status === 404;
+}
+
+/* ----------------------------------------------------------- audit vote */
+
+/* The dust floor is POLICY, not physics: 100 KASCOV keeps a wallet of dust
+   from being a ballot. Adjustable by commit only, and the number published on
+   kascov.io/bot and /vote must follow this constant, never lead it. */
+export const VOTE_DUST_FLOOR = 100;
+/* A round the operator forgets is not a round that runs forever. */
+export const VOTE_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1000;
+
+/* Shipped inside every tally file, so the counts can never be quoted without
+   their own limits attached. */
+export const VOTE_RULES = [
+  'one verified holder, one vote per round; voting again before close replaces the earlier ballot',
+  `voting needs a proven balance of at least ${VOTE_DUST_FLOOR} KASCOV, a dust floor that is policy and changes only by commit`,
+  'the vote accelerates the audit queue; it never decides a verdict',
+  'kascov may audit anything at any time, voted for or not',
+];
+
+/** Whether this record may vote. The floor is compared against the balance
+ *  the last proof or recheck actually SHOWED, never against a claim. */
+export function voteEligibility(record, floor = VOTE_DUST_FLOOR) {
+  if (!record) return { ok: false, reason: 'you are not verified. Run `/verify` first.' };
+  const balance = Number(record.balance || 0);
+  if (balance < floor) {
+    return {
+      ok: false,
+      reason: `the audit vote needs at least ${fmt(floor)} proven $KASCOV and your last proven balance is ${fmt(balance)}.`,
+    };
+  }
+  return { ok: true };
+}
+
+/** A round is closed when the operator closed it OR its five days ran out,
+ *  whichever comes first. Expiry needs no timer: it is a fact about the
+ *  clock, so a ballot after the deadline bounces even if nothing ran. */
+export function roundIsOpen(round, nowMs) {
+  if (!round || round.status !== 'open') return false;
+  return nowMs < Number(round.closes_ms || 0);
+}
+
+/** Cast or replace one ballot. Pure: returns a new ballots map, never
+ *  mutating its input. One-holder-one-vote is a map key, so a second ballot
+ *  from the same holder REPLACES the first by construction. */
+export function castBallot(round, userId, choice, nowMs) {
+  if (!roundIsOpen(round, nowMs)) {
+    return { ok: false, reason: 'this round is closed. Ballots only count while a round is open.' };
+  }
+  const idx = Number(choice) - 1;
+  if (!Number.isInteger(idx) || idx < 0 || idx >= round.options.length) {
+    return { ok: false, reason: `pick a number between 1 and ${round.options.length}.` };
+  }
+  return { ok: true, ballots: { ...round.ballots, [userId]: idx }, label: round.options[idx] };
+}
+
+/** Counts per option. An open round counts live ballots; a closed round
+ *  carries counts frozen at close, because the ballots themselves are
+ *  deleted the moment they stop being needed. */
+export function tallyCounts(round) {
+  if (Array.isArray(round.counts)) return round.counts;
+  const counts = round.options.map(() => 0);
+  for (const idx of Object.values(round.ballots || {})) {
+    if (Number.isInteger(idx) && idx >= 0 && idx < counts.length) counts[idx] += 1;
+  }
+  return counts;
+}
+
+/** The public tally. Counts only, NEVER voter identities: the file is
+ *  world-readable and who voted for what is nobody's business but theirs. */
+export function buildTally(round, nowMs) {
+  const counts = tallyCounts(round);
+  return {
+    round: round.id,
+    status: roundIsOpen(round, nowMs) ? 'open' : 'closed',
+    opened: new Date(Number(round.opened_ms)).toISOString(),
+    closes: new Date(Number(round.closes_ms)).toISOString(),
+    closed: round.closed_ms ? new Date(Number(round.closed_ms)).toISOString() : null,
+    options: round.options.map((label, i) => ({ label, votes: counts[i] })),
+    total_ballots: counts.reduce((a, b) => a + b, 0),
+    rules: VOTE_RULES,
+  };
+}
+
+/** The operator gate: the guild owner, or the explicit OPERATOR_USER_ID.
+ *  Empty ids never authorize anyone. */
+export function isOperator(userId, ownerId, operatorId) {
+  if (!userId) return false;
+  return userId === ownerId || (Boolean(operatorId) && userId === operatorId);
+}
+
+/** A slate is 2 to 6 labels separated by `|`. Anything else is refused
+ *  rather than guessed at. */
+export function parseSlate(text) {
+  const labels = String(text || '').split('|').map((s) => s.trim()).filter(Boolean);
+  if (labels.length < 2 || labels.length > 6) return null;
+  return labels;
+}
+
+/* ----------------------------------------------------------- watchtower */
+
+/** Which side of the two lines a balance sits on. The lines are the only
+ *  thing worth a DM: exact numbers wobble with every trade, buckets do not. */
+export function balanceBucket(balance, floor = VOTE_DUST_FLOOR) {
+  const b = Number(balance || 0);
+  if (b <= 0) return 'zero';
+  return b < floor ? 'dust' : 'above';
+}
+
+/** Alerts opt-in. An ABSENT preference means the record predates the
+ *  watchtower, and silence is the only polite default for someone who never
+ *  agreed to DMs. New verifications write an explicit true. */
+export function alertsEnabled(record) {
+  return record?.alerts === true;
+}
+
+/** Diff two cursors into the alerts worth sending. Fires only on CHANGE: a
+ *  first snapshot has nothing to differ from, so standing the watchtower up
+ *  messages nobody. */
+export function cursorDiff(prev, next) {
+  const alerts = [];
+  const before = prev?.phases || {};
+  for (const [tokenId, phase] of Object.entries(next?.phases || {})) {
+    if (before[tokenId] && phase && before[tokenId] !== phase) {
+      alerts.push({ kind: 'phase', token_id: tokenId, from: before[tokenId], to: phase });
+    }
+  }
+  if (prev?.bucket && next?.bucket && prev.bucket !== next.bucket) {
+    alerts.push({ kind: 'balance', from: prev.bucket, to: next.bucket });
+  }
+  /* RESERVED: claim events. When a public claims endpoint exists, the cursor
+     grows a `claims` field and this function diffs it exactly like phases.
+     Deliberately NO live code path until then: an alert kind that cannot be
+     derived from a public endpoint is not allowed to exist here. */
+  return alerts;
+}
+
+/** The delivery gate. Opt-out and unreachability are decided HERE so every
+ *  caller inherits them: a holder who said no, or whose DMs bounced, gets
+ *  silence no matter what changed. */
+export function deliverableAlerts(record, next) {
+  if (!alertsEnabled(record) || record?.unreachable) return [];
+  return cursorDiff(record?.cursor, next);
+}
+
+/** One alert as one DM line. Every line cites its public page, because a DM
+ *  that cannot point at the free site has no business being sent. */
+export function alertMessage(alert, names = {}) {
+  if (alert.kind === 'phase') {
+    const name = names[alert.token_id] || `${String(alert.token_id).slice(0, 8)}…`;
+    return `**${name}** moved from ${alert.from} to ${alert.to}: ${SITE}/#/${NETWORK}/token/${alert.token_id}`;
+  }
+  if (alert.kind === 'balance') {
+    const words = {
+      zero: 'zero',
+      dust: `below the ${fmt(VOTE_DUST_FLOOR)} dust floor`,
+      above: `at or above the ${fmt(VOTE_DUST_FLOOR)} floor`,
+    };
+    return `Your proven $KASCOV balance moved from ${words[alert.from] || alert.from} to ${words[alert.to] || alert.to}.`;
+  }
+  return '';
+}
+
 /* ---------------------------------------------------------------- state */
 
-let state = { pending: {}, verified: {} };
+let state = { pending: {}, verified: {}, rounds: {} };
 
 async function loadState() {
   try {
     state = JSON.parse(await readFile(STATE_PATH, 'utf8'));
     state.pending ||= {};
     state.verified ||= {};
+    state.rounds ||= {};
   } catch { /* first run */ }
 }
 
@@ -156,17 +349,21 @@ async function discord(path, opts = {}) {
 /* Guild and role are DISCOVERED rather than configured. Two fewer ids for a
    human to look up and mistype, and the role can be renamed without an edit
    here as long as ROLE_NAME follows. */
-let cache = { guildId: null, roleId: null, at: 0 };
+let cache = { guildId: null, roleId: null, ownerId: null, at: 0 };
 async function guildAndRole() {
   if (cache.guildId && Date.now() - cache.at < 600_000) return cache;
   const guilds = await discord('/users/@me/guilds');
   if (!guilds.length) throw new Error('the bot is not in any server yet');
   const guildId = guilds[0].id;
-  const roles = await discord(`/guilds/${guildId}/roles`);
+  // The owner id gates /vote-open and /vote-close; discovered, like the role.
+  const [roles, guild] = await Promise.all([
+    discord(`/guilds/${guildId}/roles`),
+    discord(`/guilds/${guildId}`),
+  ]);
   const want = ROLE_NAME.toLowerCase();
   const role = roles.find((r) => r.name.toLowerCase() === want);
   if (!role) throw new Error(`no role named "${ROLE_NAME}" in ${guilds[0].name}`);
-  cache = { guildId, roleId: role.id, at: Date.now() };
+  cache = { guildId, roleId: role.id, ownerId: guild.owner_id, at: Date.now() };
   return cache;
 }
 
@@ -178,6 +375,39 @@ const revokeRole = async (userId) => {
   const { guildId, roleId } = await guildAndRole();
   await discord(`/guilds/${guildId}/members/${userId}/roles/${roleId}`, { method: 'DELETE' });
 };
+
+/** Raw status of the members endpoint: the one call where a 404 is an ANSWER
+ *  (they left) rather than an error, so it cannot go through discord(). */
+async function memberStatus(guildId, userId) {
+  const res = await fetch(`${API}/guilds/${guildId}/members/${userId}`, {
+    headers: { authorization: `Bot ${BOT_TOKEN}` },
+    signal: AbortSignal.timeout(15_000),
+  });
+  await res.text(); // drain the body so the socket is reusable
+  return res.status;
+}
+
+/** Open (or reuse) the DM channel and send. Returns 'sent'; 'unreachable'
+ *  when the member's privacy settings refuse bot DMs, which is a decision to
+ *  respect, not an error to retry; or 'failed' for anything transient. */
+async function sendDm(userId, content) {
+  const post = (path, body) => fetch(`${API}${path}`, {
+    method: 'POST',
+    headers: { authorization: `Bot ${BOT_TOKEN}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
+  });
+  try {
+    const ch = await post('/users/@me/channels', { recipient_id: userId });
+    if (!ch.ok) return ch.status === 403 ? 'unreachable' : 'failed';
+    const channel = await ch.json();
+    const msg = await post(`/channels/${channel.id}/messages`, { content });
+    if (msg.ok) return 'sent';
+    return msg.status === 403 ? 'unreachable' : 'failed';
+  } catch {
+    return 'failed';
+  }
+}
 
 /* ---------------------------------------------------------------- kascov */
 
@@ -198,6 +428,77 @@ async function holdingsOf(address) {
   });
   if (!res.ok) throw new Error(`kascov ${res.status}`);
   return res.json();
+}
+
+/* --------------------------------------------------------- vote runtime */
+
+/** The round the tally file describes: the most recently opened, whether it
+ *  is still open or already frozen. */
+function currentRound() {
+  const rounds = Object.values(state.rounds || {});
+  if (!rounds.length) return null;
+  return rounds.reduce((a, b) => (Number(a.opened_ms) >= Number(b.opened_ms) ? a : b));
+}
+
+/* The tally page is dumb on purpose: everything it shows is computed here,
+   where the ballots are. A write failure is logged and swallowed, because a
+   stale public page must never block a ballot. */
+async function writeTally() {
+  const round = currentRound();
+  if (!round) return;
+  try {
+    const tmp = `${TALLY_PATH}.tmp`;
+    await writeFile(tmp, JSON.stringify(buildTally(round, Date.now()), null, 2));
+    await rename(tmp, TALLY_PATH);
+  } catch (e) {
+    console.error(`tally write failed: ${e.message}`);
+  }
+}
+
+/* Freeze a round: counts are computed one last time and the ballots are
+   DELETED, so who voted for what stops existing the moment it stops being
+   needed. The public file never carried identities to begin with. */
+function finalizeRound(round, nowMs) {
+  round.counts = tallyCounts(round);
+  round.status = 'closed';
+  round.closed_ms = round.closed_ms || Math.min(nowMs, Number(round.closes_ms) || nowMs);
+  delete round.ballots;
+}
+
+/* The five-day auto-close, applied lazily: every vote command and every
+   recheck sweeps first, so an expired round is frozen by whichever runs
+   next rather than by a timer that could silently not exist. */
+async function finalizeExpiredRounds() {
+  const now = Date.now();
+  let changed = false;
+  for (const round of Object.values(state.rounds || {})) {
+    if (round.status === 'open' && !roundIsOpen(round, now)) {
+      finalizeRound(round, now);
+      changed = true;
+    }
+  }
+  if (changed) {
+    await saveState();
+    await writeTally();
+  }
+}
+
+/* Forget everything about a member: record (with its alert preference and
+   cursor), pending challenge, and any ballot in a round that still holds
+   ballots. The single definition /unverify and the leave-server cleanup
+   share, so the two paths cannot drift apart. */
+function forgetMember(userId) {
+  const hadVerified = Boolean(state.verified[userId]);
+  delete state.verified[userId];
+  delete state.pending[userId];
+  let ballotDropped = false;
+  for (const round of Object.values(state.rounds || {})) {
+    if (round.ballots && userId in round.ballots) {
+      delete round.ballots[userId];
+      ballotDropped = true;
+    }
+  }
+  return { hadVerified, ballotDropped };
 }
 
 /* ------------------------------------------------------------- commands */
@@ -282,11 +583,13 @@ async function onConfirm(interaction) {
     return 'Proof accepted, but I could not add the role. My own role probably sits below `verified holder` in the server settings, which Discord refuses. Tell an admin.';
   }
   delete state.pending[userId];
-  state.verified[userId] = { address: pending.address, verified_ms: Date.now(), balance };
+  // alerts default ON for NEW verifications only; anyone verified before the
+  // watchtower existed stays silent until they opt in themselves.
+  state.verified[userId] = { address: pending.address, verified_ms: Date.now(), balance, alerts: true };
   await saveState();
   return [
     `Verified. **${fmt(balance)} $KASCOV**, proven from chain.`,
-    `-# ${pending.address.slice(0, 18)}…${pending.address.slice(-8)} · re-checked periodically, so the role follows what you actually hold. \`/unverify\` removes it.`,
+    `-# ${pending.address.slice(0, 18)}…${pending.address.slice(-8)} · re-checked periodically, so the role follows what you actually hold. \`/unverify\` removes it. Watchtower DMs are on by default; \`/alerts off\` stops them.`,
   ].join('\n');
 }
 
@@ -312,16 +615,116 @@ async function onHoldings(interaction) {
 
 async function onUnverify(interaction) {
   const userId = interaction.member?.user?.id || interaction.user?.id;
-  const had = state.verified[userId];
-  delete state.verified[userId];
-  delete state.pending[userId];
+  const { hadVerified, ballotDropped } = forgetMember(userId);
   await saveState();
+  // a forgotten member's ballot leaves the counts too, so the public file
+  // never claims a vote from someone who no longer exists here.
+  if (ballotDropped) await writeTally();
   try {
     await revokeRole(userId);
   } catch { /* already gone, or never had it */ }
-  return had
+  return hadVerified
     ? 'Done. Role removed and your address forgotten.'
     : 'You were not verified, but anything pending is cleared.';
+}
+
+async function onVote(interaction) {
+  const userId = interaction.member?.user?.id || interaction.user?.id;
+  await finalizeExpiredRounds();
+  const now = Date.now();
+  const round = currentRound();
+  if (!round || !roundIsOpen(round, now)) {
+    return `No audit-vote round is open right now. The last tally stays public at ${SITE}/vote.`;
+  }
+  const gate = voteEligibility(state.verified[userId]);
+  if (!gate.ok) return `You cannot vote in this round: ${gate.reason}`;
+
+  const slate = round.options.map((label, i) => `**${i + 1}.** ${label}`).join('\n');
+  const choice = opt(interaction.data, 'choice');
+  if (choice == null) {
+    return [
+      `**Audit vote, ${round.id}.** Open until ${new Date(Number(round.closes_ms)).toISOString().slice(0, 16).replace('T', ' ')} UTC:`,
+      slate,
+      '',
+      'Cast with `/vote choice:<number>`. Voting again before close replaces your earlier ballot.',
+      `-# ${VOTE_RULES.join(' · ')}.`,
+    ].join('\n');
+  }
+  const replaced = Boolean(round.ballots && userId in round.ballots);
+  const cast = castBallot(round, userId, choice, now);
+  if (!cast.ok) return `That ballot did not count: ${cast.reason}`;
+  round.ballots = cast.ballots;
+  await saveState();
+  await writeTally();
+  return [
+    `Ballot ${replaced ? 'replaced' : 'cast'}: **${cast.label}**.`,
+    `-# One holder, one vote. The vote accelerates the audit queue; it never decides a verdict, and kascov may audit anything at any time. Public tally, counts only: ${SITE}/vote`,
+  ].join('\n');
+}
+
+async function onVoteOpen(interaction) {
+  const userId = interaction.member?.user?.id || interaction.user?.id;
+  await finalizeExpiredRounds();
+  const { ownerId } = await guildAndRole();
+  if (!isOperator(userId, ownerId, OPERATOR_ID)) return 'Only the operator can open a round.';
+  const now = Date.now();
+  const open = currentRound();
+  if (open && roundIsOpen(open, now)) {
+    return `**${open.id}** is still open. Close it with \`/vote-close\` before opening another.`;
+  }
+  const labels = parseSlate(opt(interaction.data, 'slate'));
+  if (!labels) return 'Give 2 to 6 option labels separated by `|`, for example `token-a | token-b | token-c`.';
+  state.voteSeq = Number(state.voteSeq || 0) + 1;
+  const round = {
+    id: `round-${state.voteSeq}`,
+    options: labels,
+    opened_ms: now,
+    closes_ms: now + VOTE_MAX_AGE_MS,
+    closed_ms: null,
+    status: 'open',
+    ballots: {},
+  };
+  state.rounds[round.id] = round;
+  await saveState();
+  await writeTally();
+  return [
+    `**${round.id} is open** with ${labels.length} options:`,
+    labels.map((l, i) => `**${i + 1}.** ${l}`).join('\n'),
+    '',
+    `Verified holders with at least ${fmt(VOTE_DUST_FLOOR)} proven $KASCOV cast with \`/vote choice:<number>\`. Auto-closes in 5 days, or earlier with \`/vote-close\`. Tally: ${SITE}/vote`,
+  ].join('\n');
+}
+
+async function onVoteClose(interaction) {
+  const userId = interaction.member?.user?.id || interaction.user?.id;
+  const { ownerId } = await guildAndRole();
+  if (!isOperator(userId, ownerId, OPERATOR_ID)) return 'Only the operator can close a round.';
+  const round = currentRound();
+  if (!round || round.status !== 'open') return 'No round is open.';
+  finalizeRound(round, Date.now());
+  await saveState();
+  await writeTally();
+  const lines = round.options.map((l, i) => `**${round.counts[i]}** · ${l}`).join('\n');
+  return [
+    `**${round.id} closed.** Final counts:`,
+    lines,
+    `-# Frozen, and the ballots themselves are deleted. Counts stay public at ${SITE}/vote.`,
+  ].join('\n');
+}
+
+async function onAlerts(interaction) {
+  const userId = interaction.member?.user?.id || interaction.user?.id;
+  const rec = state.verified[userId];
+  if (!rec) return 'Alerts ride on verification. Run `/verify` first.';
+  const setting = String(opt(interaction.data, 'setting') || '').toLowerCase();
+  if (setting !== 'on' && setting !== 'off') return 'Say `on` or `off`.';
+  rec.alerts = setting === 'on';
+  // an explicit opt-in is also permission to try DMs again after a bounce
+  if (rec.alerts) delete rec.unreachable;
+  await saveState();
+  return rec.alerts
+    ? 'Watchtower DMs are **on**: a market-phase change on a token you hold, or your own proven balance crossing zero or the dust floor. Everything derives from public endpoints, so a DM never tells you anything kascov.io does not already show. `/alerts off` any time.'
+    : 'Watchtower DMs are **off**. Nothing will be sent.';
 }
 
 /** Find whose challenge a nonce belongs to. Single-use by construction: the
@@ -376,7 +779,8 @@ async function completeFromPage({ nonce, signature }) {
     return { ok: false, message: 'Proof accepted, but the role could not be added. Tell an admin the bot role may sit too low.', log: 'grant failed' };
   }
   delete state.pending[userId];
-  state.verified[userId] = { address: challenge.address, verified_ms: Date.now(), balance };
+  // same default as /confirm: new records opt in, old records never do.
+  state.verified[userId] = { address: challenge.address, verified_ms: Date.now(), balance, alerts: true };
   await saveState();
 
   /* Close the loop in Discord. The member is looking at a browser tab, and the
@@ -392,7 +796,14 @@ async function completeFromPage({ nonce, signature }) {
 
 /* Slash commands that answer directly. verify/confirm are not here: they open
    a modal first, and their handlers are reached by the form's custom_id. */
-const HANDLERS = { holdings: onHoldings, unverify: onUnverify };
+const HANDLERS = {
+  holdings: onHoldings,
+  unverify: onUnverify,
+  vote: onVote,
+  'vote-open': onVoteOpen,
+  'vote-close': onVoteClose,
+  alerts: onAlerts,
+};
 
 const MODAL_HANDLERS = { kascov_verify: onVerify, kascov_confirm: onConfirm };
 
@@ -587,6 +998,30 @@ const COMMANDS = [
     options: [{ name: 'address', description: 'Any Kaspa address', type: 3, required: true }],
   },
   { name: 'unverify', description: 'Drop your verified holder role and forget your address' },
+  {
+    // The choice is a number, not a label: labels change per round, and
+    // Discord fixes option choices at registration time.
+    name: 'vote', description: 'Audit vote: see the open round, or cast your ballot',
+    options: [{
+      name: 'choice', description: 'Option number from the slate (leave empty to see the round)',
+      type: 4, required: false, min_value: 1, max_value: 6,
+    }],
+  },
+  {
+    name: 'vote-open', description: 'Operator: open an audit-vote round',
+    options: [{
+      name: 'slate', description: 'Two to six option labels, separated by |',
+      type: 3, required: true,
+    }],
+  },
+  { name: 'vote-close', description: 'Operator: close the round and freeze the counts' },
+  {
+    name: 'alerts', description: 'Watchtower DMs on or off',
+    options: [{
+      name: 'setting', description: 'on or off', type: 3, required: true,
+      choices: [{ name: 'on', value: 'on' }, { name: 'off', value: 'off' }],
+    }],
+  },
 ];
 
 async function registerCommands() {
@@ -600,21 +1035,98 @@ async function registerCommands() {
 
 /** Re-prove every verified holder and drop the role from anyone who sold out.
  *  No signature needed: we already know the address is theirs, and a balance is
- *  public. Only the LINK between account and address ever needed proving. */
+ *  public. Only the LINK between account and address ever needed proving.
+ *
+ *  The same pass keeps the other two promises: a member who left the server is
+ *  forgotten like /unverify, and the watchtower DMs whoever asked for DMs about
+ *  changes derived only from public endpoints. */
 async function recheck() {
+  await finalizeExpiredRounds();
   const ids = Object.keys(state.verified);
   let dropped = 0;
+  let departed = 0;
+  let guildId = null;
+  try {
+    ({ guildId } = await guildAndRole());
+  } catch (e) {
+    // no guild means no membership answers; balances still get rechecked.
+    console.error(`recheck: ${e.message}`);
+  }
+
+  /* one phase lookup per token per RUN, not per holder: holders share tokens. */
+  const phaseCache = new Map();
+  const phaseOf = async (tokenId) => {
+    if (phaseCache.has(tokenId)) return phaseCache.get(tokenId);
+    let phase = null;
+    try {
+      const res = await fetch(`${KASCOV}/data/${NETWORK}/token/${tokenId}`, {
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.ok) phase = (await res.json())?.market?.phase || null;
+    } catch { /* unknown stays unknown; never alert off a failed lookup */ }
+    phaseCache.set(tokenId, phase);
+    return phase;
+  };
+
+  let ballotsDropped = false;
   for (const userId of ids) {
     const rec = state.verified[userId];
+
+    /* leave-server cleanup: bot.html promises that leaving deletes the
+       record, and this loop is where the promise is kept. Only an explicit
+       404 counts; an outage deletes nobody. */
+    if (guildId) {
+      try {
+        if (leftTheServer(await memberStatus(guildId, userId))) {
+          ballotsDropped = forgetMember(userId).ballotDropped || ballotsDropped;
+          departed += 1;
+          continue;
+        }
+      } catch (e) {
+        console.error(`member check ${userId}: ${e.message}`);
+      }
+    }
+
     try {
       const data = await holdingsOf(rec.address);
-      const balance = balanceFor(data.token_holdings, TOKEN_ID);
+      const holdings = data.token_holdings || [];
+      const balance = balanceFor(holdings, TOKEN_ID);
+
+      /* watchtower: snapshot, diff, DM, then move the cursor. The cap bounds
+         the extra lookups for an address holding half the galaxy. */
+      const phases = {};
+      for (const h of holdings.slice(0, 25)) {
+        const p = await phaseOf(h.token_id);
+        if (p) phases[h.token_id] = p;
+        // a failed lookup carries the old phase forward so the change still
+        // fires (once) when the endpoint answers again.
+        else if (rec.cursor?.phases?.[h.token_id]) phases[h.token_id] = rec.cursor.phases[h.token_id];
+      }
+      const next = { phases, bucket: balanceBucket(balance) };
+      const alerts = deliverableAlerts(rec, next);
+      if (alerts.length) {
+        const names = Object.fromEntries(holdings.map((h) => [h.token_id, h.name]));
+        const outcome = await sendDm(userId, [
+          ...alerts.map((a) => alertMessage(a, names)).filter(Boolean),
+          '-# Derived from public endpoints, so kascov.io knew first. `/alerts off` in the server stops these.',
+        ].join('\n'));
+        // a refused DM is a decision: stop trying, silently, until /alerts on.
+        if (outcome === 'unreachable') rec.unreachable = true;
+      }
+      /* the cursor advances even when a send failed, making delivery
+         at-most-once: a transient error costs one alert, never a double DM.
+         the free site published the fact either way. and it advances for
+         opted-out holders too, so opting in later never unleashes a backlog. */
+      rec.cursor = next;
+
       if (balance > 0) {
         state.verified[userId] = { ...rec, balance, checked_ms: Date.now() };
         continue;
       }
+      /* the crossing-to-zero DM above was this record's last act; the record
+         itself goes, exactly as before the watchtower existed. */
       await revokeRole(userId).catch(() => {});
-      delete state.verified[userId];
+      ballotsDropped = forgetMember(userId).ballotDropped || ballotsDropped;
       dropped += 1;
     } catch (e) {
       // A failed lookup must never cost someone their role: leave it alone.
@@ -622,7 +1134,8 @@ async function recheck() {
     }
   }
   await saveState();
-  console.log(`rechecked ${ids.length}, dropped ${dropped}`);
+  if (ballotsDropped) await writeTally();
+  console.log(`rechecked ${ids.length}, dropped ${dropped}, departed ${departed}`);
 }
 
 async function main() {

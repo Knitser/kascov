@@ -19,6 +19,15 @@
  * Setup (never commit these):
  *   KASCOV_CHANGELOG_WEBHOOK=https://discord.com/api/webhooks/...
  *   KASCOV_CHANGELOG_STATE=/home/kascov/kascov-changelog-bot.json  (optional)
+ *   KASCOV_DISCORD_WEBHOOK_HOLDERS=https://discord.com/api/webhooks/...  (optional)
+ *   KASCOV_HOLDER_LEAD_SECONDS=0  (optional; only read when the holder webhook is set)
+ *
+ * The holder webhook is an early-access channel for ship notes about TOOLS —
+ * per the /bot doctrine it never carries findings about live mainnet tokens,
+ * and the public channel always gets every entry. When it is set, each run
+ * posts new entries to the holder channel first, then to the public one after
+ * KASCOV_HOLDER_LEAD_SECONDS (default 0 = simultaneous; the operator sets the
+ * lead per release). Unset means exactly the old single-channel behavior.
  *
  * Run:    node scripts/discord-changelog-bot.mjs
  *         node scripts/discord-changelog-bot.mjs --dry-run   # print, don't post
@@ -30,6 +39,11 @@ import { readFile, writeFile } from 'node:fs/promises';
 
 const SITE = process.env.KASCOV_BASE || 'https://kascov.io';
 const WEBHOOK = process.env.KASCOV_CHANGELOG_WEBHOOK || '';
+/* Optional second channel. Empty means the feature is off and the bot behaves
+   exactly as it always has — no crash, no half-open gate. */
+const HOLDER_WEBHOOK = process.env.KASCOV_DISCORD_WEBHOOK_HOLDERS || '';
+/* A malformed or negative lead degrades to 0 (simultaneous), never to a wait. */
+const HOLDER_LEAD_MS = Math.max(0, Number(process.env.KASCOV_HOLDER_LEAD_SECONDS) || 0) * 1000;
 const STATE_PATH = process.env.KASCOV_CHANGELOG_STATE
   || new URL('../.kascov-changelog-bot.json', import.meta.url).pathname;
 const DRY = process.argv.includes('--dry-run');
@@ -61,6 +75,30 @@ export function pendingEntries(list, seen, { firstRun = false } = {}) {
   const fresh = list.filter((e) => e && !seen.has(stampOf(e)));
   // changelog.json is newest-first; post in the order things happened.
   return fresh.slice().reverse();
+}
+
+/**
+ * The channels one run must serve, in send order.
+ *
+ * Each channel keeps its OWN seen-set and its own first-run silence, so
+ * standing up the holder webhook months after the public one floods nothing.
+ * The holder channel, when configured, always comes first — the caller sleeps
+ * the published lead between the two passes. Without a holder webhook the
+ * plan is exactly the old single-channel behavior.
+ */
+export function deliveryPlan(list, {
+  seen, firstRun = false,
+  holdersEnabled = false, holdersSeen = new Set(), holdersFirstRun = false,
+} = {}) {
+  const plan = [];
+  if (holdersEnabled) {
+    plan.push({
+      channel: 'holders',
+      entries: pendingEntries(list, holdersSeen, { firstRun: holdersFirstRun }),
+    });
+  }
+  plan.push({ channel: 'public', entries: pendingEntries(list, seen, { firstRun }) });
+  return plan;
 }
 
 /** One entry as a Discord embed. */
@@ -135,17 +173,28 @@ export async function postEmbed(embed, { webhook = WEBHOOK, fetchImpl = fetch, s
 async function loadState() {
   try {
     const raw = JSON.parse(await readFile(STATE_PATH, 'utf8'));
-    return { seen: new Set(raw.seen || []), known: true };
+    return {
+      seen: new Set(raw.seen || []),
+      known: true,
+      // the holder channel has its own baseline: a state file written before
+      // the holder webhook existed has no `holders` key, and that absence is
+      // what makes the holder channel's first run silent.
+      holdersSeen: new Set(raw.holders || []),
+      holdersKnown: Array.isArray(raw.holders),
+    };
   } catch {
-    return { seen: new Set(), known: false };
+    return { seen: new Set(), known: false, holdersSeen: new Set(), holdersKnown: false };
   }
 }
 
-async function saveState(seen) {
+async function saveState(seen, holdersSeen = null) {
   // Keep the tail bounded; the changelog only ever grows.
-  const list = [...seen].slice(-500);
+  const state = { seen: [...seen].slice(-500) };
+  // only write the holders key once that channel has a baseline — writing an
+  // empty one early would silently skip its first-run silence later.
+  if (holdersSeen) state.holders = [...holdersSeen].slice(-500);
   try {
-    await writeFile(STATE_PATH, JSON.stringify({ seen: list }), 'utf8');
+    await writeFile(STATE_PATH, JSON.stringify(state), 'utf8');
   } catch (e) {
     console.warn(`could not persist state to ${STATE_PATH}: ${e.message}`);
   }
@@ -167,39 +216,69 @@ async function main() {
   const list = await res.json();
   if (!Array.isArray(list) || !list.length) throw new Error('changelog.json was empty');
 
-  const { seen, known } = await loadState();
+  const { seen, known, holdersSeen, holdersKnown } = await loadState();
   const firstRun = !known;
+  const holdersEnabled = Boolean(HOLDER_WEBHOOK);
+  const holdersFirstRun = holdersEnabled && !holdersKnown;
+  // Once the holder channel has a baseline it keeps being persisted even with
+  // the webhook unset for a release — re-enabling must not replay history.
+  const holdersState = () => (holdersEnabled || holdersKnown ? holdersSeen : null);
 
-  let toPost = pendingEntries(list, seen, { firstRun });
-  if (REPLAY > 0) toPost = list.slice(0, REPLAY).reverse(); // deliberate re-post
+  let plan = deliveryPlan(list, { seen, firstRun, holdersEnabled, holdersSeen, holdersFirstRun });
+  if (REPLAY > 0) {
+    const replayed = list.slice(0, REPLAY).reverse(); // deliberate re-post
+    plan = plan.map((pass) => ({ ...pass, entries: replayed }));
+  }
 
+  // Each channel's FIRST sighting is silent: record its baseline, post nothing
+  // there. The two baselines are independent, so wiring up the holder webhook
+  // months after the public one floods neither channel.
+  if (holdersFirstRun && !REPLAY) {
+    for (const e of list) holdersSeen.add(stampOf(e));
+    console.log(`holder channel first run: recorded ${list.length} existing entries, posting nothing there`);
+  }
   if (firstRun && !REPLAY) {
     for (const e of list) seen.add(stampOf(e));
-    await saveState(seen);
+    await saveState(seen, holdersState());
     console.log(`first run: recorded ${list.length} existing entries, posted nothing`);
     return;
   }
+  if (holdersFirstRun && !REPLAY) await saveState(seen, holdersState());
 
-  if (!toPost.length) {
+  if (!plan.some((pass) => pass.entries.length)) {
     console.log('nothing new');
     return;
   }
 
-  for (const e of toPost) {
-    const embed = buildEntryEmbed(e);
-    if (DRY) {
-      console.log(`[dry-run] ${embed.footer.text} — ${embed.title}`);
-    } else {
-      // A rejected send is retried; a timed-out one never is, because its
-      // outcome is unknown and a repeat lands twice in a channel people read.
-      await postEmbed(embed);
-      await sleep(DELAY_MS);
+  let posted = 0;
+  for (const [i, pass] of plan.entries()) {
+    // The published lead separates the holder pass from the public one, and
+    // only when this run actually posted holders first — after a crash mid-lead
+    // the next run delivers the public backlog immediately, no second wait.
+    if (i > 0 && posted > 0 && pass.entries.length && HOLDER_LEAD_MS > 0 && !DRY) {
+      console.log(`holder lead: waiting ${HOLDER_LEAD_MS / 1000}s before the public pass`);
+      await sleep(HOLDER_LEAD_MS);
     }
-    // Only marked seen once Discord actually took it.
-    seen.add(stampOf(e));
-    await saveState(seen);
+    const webhook = pass.channel === 'holders' ? HOLDER_WEBHOOK : WEBHOOK;
+    const channelSeen = pass.channel === 'holders' ? holdersSeen : seen;
+    for (const e of pass.entries) {
+      const embed = buildEntryEmbed(e);
+      if (DRY) {
+        console.log(`[dry-run] [${pass.channel}] ${embed.footer.text} — ${embed.title}`);
+      } else {
+        // A rejected send is retried; a timed-out one never is, because its
+        // outcome is unknown and a repeat lands twice in a channel people read.
+        await postEmbed(embed, { webhook });
+        await sleep(DELAY_MS);
+      }
+      // Only marked seen once Discord actually took it — per channel.
+      channelSeen.add(stampOf(e));
+      await saveState(seen, holdersState());
+      posted += 1;
+    }
   }
-  console.log(`posted ${toPost.length} entr${toPost.length === 1 ? 'y' : 'ies'}`);
+  const channels = plan.filter((pass) => pass.entries.length).length;
+  console.log(`posted ${posted} message${posted === 1 ? '' : 's'} across ${channels} channel${channels === 1 ? '' : 's'}`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

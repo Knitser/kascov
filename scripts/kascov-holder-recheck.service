@@ -9,10 +9,12 @@ User=kascov
 WorkingDirectory=/home/kascov/kascov
 EnvironmentFile=/home/kascov/.discord-bot-env
 Environment=KASCOV_BOT_STATE=/home/kascov/kascov-holder-bot.json
+# recheck also writes the tally (auto-close, departures), same served path
+Environment=KASCOV_VOTE_TALLY=/mnt/c/kascov/web/vote-tally.json
 ExecStart=/usr/bin/node /home/kascov/kascov/scripts/discord-holder-bot.mjs --recheck
 Nice=10
 IOSchedulingClass=idle
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/home/kascov
+ReadWritePaths=/home/kascov /mnt/c/kascov/web

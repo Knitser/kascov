@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "updated": "2026-08-04",
+  "note": "the utility slots /token renders. a status flips to 'live' only in a reviewed ship commit — never ahead of the code that runs. statuses: live | building | planned. the static rows in token.html mirror this file for the no-JS fallback; keep them in sync when editing.",
+  "slots": [
+    {
+      "id": "verified-holder-role",
+      "name": "verified holder role",
+      "desc": "Hold any amount, prove the address once with a free signature, keep the role while the balance stays.",
+      "status": "live",
+      "link": "/bot"
+    },
+    {
+      "id": "audit-vote",
+      "name": "audit vote",
+      "desc": "Verified holders point the audit bench at the next unknown build. One holder, one vote, above a dust floor of 100 KASCOV (adjustable by commit) so a ballot cannot be stuffed for free.",
+      "status": "building",
+      "link": "/vote"
+    },
+    {
+      "id": "watchtower",
+      "name": "watchtower",
+      "desc": "The bot watches the tokens your proven address holds and DMs you when one changes phase or your balance crosses a line — alerts derived from public data, never private findings.",
+      "status": "building",
+      "link": "/bot"
+    },
+    {
+      "id": "early-access",
+      "name": "early access",
+      "desc": "New tools land for verified holders a short window before everyone else. Tools only, never findings about live mainnet tokens — anything scarce or competitive launches for everyone at once.",
+      "status": "building",
+      "link": "/bot"
+    },
+    {
+      "id": "holder-lane",
+      "name": "holder lane",
+      "desc": "Extra API capacity on top of the anonymous floor — today 5x the published floor, and the floor itself only ever rises.",
+      "status": "building",
+      "link": "/lane"
+    },
+    {
+      "id": "deploy-lane",
+      "name": "deploy lane",
+      "desc": "A smoother path from the covenant builder to a live deploy for verified holders. Not started; listed so the plan is public before the code is.",
+      "status": "planned",
+      "link": null
+    }
+  ]
+}

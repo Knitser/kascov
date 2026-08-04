@@ -44,12 +44,13 @@
 
     <h1>the kascov Discord bot</h1>
     <p class="lede">
-      It answers one question: does this Kaspa address really hold this token?
-      It checks a signature against the address&rsquo;s own key, reads the balance
-      from chain, and grants a role only if both hold up. Nothing is taken on
-      trust, including your word for it.
+      At its core it answers one question: does this Kaspa address really hold
+      this token? It checks a signature against the address&rsquo;s own key, reads
+      the balance from chain, and grants a role only if both hold up. Nothing is
+      taken on trust, including your word for it. Everything else it does, the
+      audit vote and the watchtower DMs, rides on that same proof.
     </p>
-    <p class="updated">last updated 2026-07-31</p>
+    <p class="updated">last updated 2026-08-04</p>
 
     <div class="never">
       <p style="margin:0">
@@ -76,16 +77,59 @@
       The check repeats on a schedule. The role reflects what you hold now, not
       what you held once, so it is removed when the balance goes.
     </p>
+    <p>
+      On top of verification it runs two things for verified holders, both
+      described below: <a href="#vote">the audit vote</a> and
+      <a href="#watchtower">watchtower DMs</a>.
+    </p>
 
     <h3>What it does not do</h3>
     <ul>
       <li>It does not move funds. It cannot: a signed message is not a transaction.</li>
       <li>It does not read your messages, or anything in any other channel.</li>
       <li>It does not give anyone influence over what kascov.io reports. Holding a
-          token buys a role, a vote on what gets audited next, and early access to
-          new tools. It does not buy a verdict, and asking for one is the fastest
-          way to lose the role.</li>
+          token buys a role, <a href="#vote">a vote on what gets audited next</a>,
+          and <a href="#lanes">early access to new tools</a>. It does not buy a
+          verdict, and asking for one is the fastest way to lose the role.</li>
     </ul>
+
+    <h3 id="vote">The audit vote</h3>
+    <p>
+      Verified holders whose proven balance is at least 100 $KASCOV can vote on
+      what gets audited next with <code>/vote</code>. The floor keeps a wallet
+      of dust from being a ballot; it is policy, not physics, and it changes
+      only by a commit to the public repo. One holder, one vote per round.
+      Voting again before the round closes replaces the earlier ballot, it
+      never adds a second one. Rounds are opened by the operator with a slate
+      of two to six options, and close when the operator closes them or after
+      five days, whichever comes first.
+    </p>
+    <p>
+      The tally is public at <a href="/vote">kascov.io/vote</a> as counts only.
+      Who voted for what is never published, and when a round closes the
+      ballots themselves are deleted; only the counts survive. The disclaimers
+      are part of the rules and ship inside the tally file itself: the vote
+      accelerates the audit queue, it never decides a verdict, and kascov may
+      audit anything at any time, voted for or not.
+    </p>
+
+    <h3 id="watchtower">Watchtower DMs</h3>
+    <p>
+      Verified holders can get a Discord DM when something they already care
+      about changes: a token they hold moves market phase (bonding to
+      graduated), or their own proven balance crosses zero or the 100 dust
+      floor. Every alert derives from endpoints anyone can read on kascov.io,
+      so a DM never tells a holder anything the free site does not already
+      show. It is a convenience, not an edge.
+    </p>
+    <p>
+      New verifications start with alerts on, and <code>/alerts off</code>
+      stops them. Anyone verified before this feature existed is off until
+      they opt in with <code>/alerts on</code>: nobody gets messages they
+      never agreed to. If your Discord privacy settings refuse the DM, the bot
+      marks you unreachable and quietly stops trying; <code>/alerts on</code>
+      makes it try again.
+    </p>
 
     <h3>No warranty</h3>
     <p>
@@ -104,6 +148,31 @@
       kascov.io stays free and open whether you hold a token or not.
     </p>
 
+    <h2 id="lanes">Early access: the lane policy</h2>
+    <p>
+      Holding $KASCOV can put you first in line for new <em>tools</em>. It
+      never puts you first in line for <em>findings</em>. That line is the
+      whole policy:
+    </p>
+    <ul>
+      <li>Holder-first early access covers tools only: interfaces, bots,
+          dashboards, conveniences. Never findings about live mainnet
+          tokens.</li>
+      <li>A tool that computes new facts about live mainnet tokens previews on
+          testnet data, or its findings publish to everyone at the same
+          moment. There is no window in which a holder can read something
+          about a mainnet token that the public site does not show.</li>
+      <li>Anything scarce or competitive on chain launches for everyone
+          simultaneously. Early access is never a head start in a race.</li>
+      <li>Windows are discretionary and announced per release.</li>
+    </ul>
+    <p>
+      Beneath the policy sits the standing doctrine: kascov.io stays free for
+      everyone, the token buys no influence over verdicts ever, and holder
+      lanes only add capacity on top of the anonymous tier, which is a floor
+      that can only rise.
+    </p>
+
     <h2 id="privacy">Privacy</h2>
 
     <div class="keeps">
@@ -113,6 +182,14 @@
         <li>the Kaspa address you proved</li>
         <li>the time you proved it</li>
         <li>the balance it read at that moment</li>
+        <li>your alert preference, on or off</li>
+        <li>your alert cursor: the last market phase and balance bucket the
+            watchtower told you about, kept so it messages you on change only</li>
+        <li>your ballot in the current round, while that round is open; closing
+            a round keeps the counts and deletes the ballots</li>
+        <li>the time of the last periodic re-check</li>
+        <li>an unreachable flag, set if your DMs are closed so the watchtower
+            stops trying; <code>/alerts on</code> clears it</li>
       </ul>
     </div>
 
@@ -157,8 +234,11 @@
     <h3>Deleting it</h3>
     <p>
       Run <code>/unverify</code>. The row is deleted, anything mid-verification
-      is cleared, and the role is removed, with no record that it ever existed. You can verify again later with the same
-      address or a different one. Leaving the server has the same effect.
+      is cleared, your ballot leaves any open round, and the role is removed,
+      with no record that it ever existed. You can verify again later with the
+      same address or a different one. Leaving the server has the same effect,
+      applied at the next periodic check, so within a few hours rather than
+      instantly.
     </p>
 
     <h3>Analytics on the site</h3>
@@ -170,8 +250,9 @@
 
     <h3>Contact</h3>
     <p>
-      <a href="https://x.com/0xKnitser" rel="noopener">@0xKnitser</a> on X, or the
-      kascov Discord. Anything wrong on this page is a bug, so please say so.
+      <a href="https://x.com/0xKnitser" rel="noopener">@0xKnitser</a> on X, or
+      <a href="https://discord.gg/83RjgQBDEX" rel="noopener">the kascov Discord</a>.
+      Anything wrong on this page is a bug, so please say so.
     </p>
   </main>
 </body>

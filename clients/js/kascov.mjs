@@ -6,19 +6,36 @@
      const { covenants, next_after_daa } = await k.coins({ limit: 100 });
      const coin = await k.coin(covenants[0].covenant_id);
      for await (const ev of k.stream()) console.log(ev.kind, ev.covenant_id);
+     for await (const ev of k.stream({ covenant: id })) ...  // one coin only
+
+   The API needs no token. An optional lane token (minted at kascov.io/lane)
+   rides along as an X-Kascov-Lane header on every request; it buys extra
+   capacity on the holder lane and nothing else — the anonymous tier keeps
+   working without it:
+
+     const k = new Kascov('mainnet', 'https://kascov.io', { laneToken: '...' });
 
    Publishing to npm is a separate decision — this file is the whole client. */
 
 const DEFAULT_BASE = 'https://kascov.io';
 
 export class Kascov {
-  constructor(network = 'mainnet', base = DEFAULT_BASE) {
+  constructor(network = 'mainnet', base = DEFAULT_BASE, { laneToken = '' } = {}) {
     this.network = network;
     this.base = base.replace(/\/$/, '');
+    this.laneToken = laneToken;
+  }
+
+  /* every request goes through here so the lane header can never be forgotten
+     on one endpoint and sent on another */
+  #headers(accept) {
+    const h = { accept };
+    if (this.laneToken) h['x-kascov-lane'] = this.laneToken;
+    return h;
   }
 
   async #get(path) {
-    const res = await fetch(`${this.base}${path}`, { headers: { accept: 'application/json' } });
+    const res = await fetch(`${this.base}${path}`, { headers: this.#headers('application/json') });
     if (!res.ok) throw new Error(`kascov: ${path} → HTTP ${res.status}`);
     return res.json();
   }
@@ -63,11 +80,21 @@ export class Kascov {
   /** Births/moves/burns per DAA bucket. range: 1h|6h|24h|48h|all */
   activity(range = '24h') { return this.#get(`/data/${this.network}/activity.json?range=${range}`); }
 
+  /** The SSE URL the worker actually serves: /data/{network}/stream, with an
+      optional ?covenant=<64 hex> filter narrowing it to one coin. Extracted so
+      tests pin the shape against the route registered in main.rs. */
+  streamUrl(covenant) {
+    const q = covenant ? `?covenant=${encodeURIComponent(covenant)}` : '';
+    return `${this.base}/data/${this.network}/stream${q}`;
+  }
+
   /** Live events as an async iterator (SSE). Yields {covenant_id, kind,
-      txid, accepting_daa}. Hints only — refetch details on receipt. */
-  async *stream({ signal } = {}) {
-    const res = await fetch(`${this.base}/data/${this.network}/stream`, {
-      headers: { accept: 'text/event-stream' },
+      txid, accepting_daa}. Hints only — refetch details on receipt.
+      opts.covenant: exactly 64 hex chars follows ONE coin; anything else is
+      a 400 from the server, never a silent firehose. */
+  async *stream({ covenant, signal } = {}) {
+    const res = await fetch(this.streamUrl(covenant), {
+      headers: this.#headers('text/event-stream'),
       signal,
     });
     if (!res.ok || !res.body) throw new Error(`kascov: stream → HTTP ${res.status}`);

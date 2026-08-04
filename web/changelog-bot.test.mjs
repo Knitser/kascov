@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  buildEntryEmbed, pendingEntries, postEmbed, stampOf,
+  buildEntryEmbed, deliveryPlan, pendingEntries, postEmbed, stampOf,
 } from '../scripts/discord-changelog-bot.mjs';
 
 /* A fake Discord that answers with a scripted list of responses. */
@@ -110,4 +110,54 @@ test('a malformed feed is survived, never thrown on', () => {
   assert.deepEqual(pendingEntries(null, new Set()), []);
   assert.deepEqual(pendingEntries(undefined, new Set()), []);
   assert.equal(stampOf(undefined), '|');
+});
+
+/* The holder webhook is additive: without it the plan must be EXACTLY the old
+   single-channel behavior, and with it the holder pass comes first while each
+   channel keeps its own baseline and its own first-run silence. */
+
+test('no holder webhook: one public pass, identical to the old behavior', () => {
+  const seen = new Set([stampOf(FEED[1]), stampOf(FEED[2])]);
+  const plan = deliveryPlan(FEED, { seen });
+  assert.deepEqual(plan.map((p) => p.channel), ['public']);
+  assert.deepEqual(plan[0].entries, pendingEntries(FEED, seen));
+});
+
+test('with the holder webhook set, the holder pass comes first', () => {
+  const plan = deliveryPlan(FEED, {
+    seen: new Set(), holdersEnabled: true, holdersSeen: new Set(),
+  });
+  assert.deepEqual(plan.map((p) => p.channel), ['holders', 'public']);
+});
+
+test('both channels post oldest first, independently', () => {
+  // the public channel is ahead of the holder one; each still reads in order
+  const plan = deliveryPlan(FEED, {
+    seen: new Set([stampOf(FEED[1]), stampOf(FEED[2])]),
+    holdersEnabled: true,
+    holdersSeen: new Set([stampOf(FEED[2])]),
+  });
+  assert.deepEqual(plan[0].entries.map((e) => e.body), ['b', 'c']); // holders
+  assert.deepEqual(plan[1].entries.map((e) => e.body), ['c']);      // public
+});
+
+test('the holder channel is stood up silently while the public one keeps posting', () => {
+  // a state file from before the holder webhook existed: public has a
+  // baseline, holders do not — the holder pass must stay empty
+  const plan = deliveryPlan(FEED, {
+    seen: new Set([stampOf(FEED[1]), stampOf(FEED[2])]),
+    holdersEnabled: true,
+    holdersSeen: new Set(),
+    holdersFirstRun: true,
+  });
+  assert.deepEqual(plan[0].entries, []);
+  assert.equal(plan[1].entries.length, 1);
+});
+
+test('a shared first run silences both channels', () => {
+  const plan = deliveryPlan(FEED, {
+    seen: new Set(), firstRun: true,
+    holdersEnabled: true, holdersSeen: new Set(), holdersFirstRun: true,
+  });
+  assert.deepEqual(plan.map((p) => p.entries), [[], []]);
 });

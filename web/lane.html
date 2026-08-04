@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>the holder lane — kascov</title>
+  <meta name="description" content="Extra API capacity for verified $KASCOV holders. Additive only: the anonymous floor can only rise, the lane token is stateless, and nothing about you is stored.">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://kascov.io/lane">
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css?v=20260803-focuscard">
+  <style>
+    .wrap { max-width: 680px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    .wrap h1 { font-family: var(--display); font-size: clamp(1.7rem, 5vw, 2.3rem); margin: 0 0 .5rem; }
+    .lede { color: var(--muted); line-height: 1.6; margin: 0 0 1.75rem; }
+    .wrap p, .wrap li { color: var(--muted); line-height: 1.6; }
+    .wrap code { font-family: var(--mono); font-size: .92em; color: var(--text); }
+    .phrase {
+      font-family: var(--mono); font-size: .84rem; line-height: 1.6; word-break: break-all;
+      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: .9rem 1rem; color: var(--text); margin: 0 0 1rem;
+    }
+    .btn {
+      display: block; width: 100%; box-sizing: border-box; text-align: center;
+      font-family: var(--sans); font-size: 1.02rem; font-weight: 600;
+      padding: .95rem 1.25rem; border-radius: var(--radius-sm); cursor: pointer;
+      border: 1px solid var(--border-strong); background: var(--accent-soft); color: var(--text);
+      margin-bottom: .6rem;
+    }
+    .btn:hover:not(:disabled) { background: rgba(112,199,186,.2); }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); color: #06201c; border-color: var(--accent); }
+    .btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+    .note { color: var(--faint); font-size: .87rem; line-height: 1.55; margin: .5rem 0 0; }
+    .step { border-top: 1px solid var(--border); margin-top: 2rem; padding-top: 1.5rem; }
+    .step h2 { font-family: var(--display); font-size: 1.1rem; margin: 0 0 .75rem; }
+    .out {
+      display: none; font-family: var(--mono); font-size: .8rem; word-break: break-all;
+      background: var(--card); border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+      padding: .9rem 1rem; color: var(--accent); margin: 0 0 .75rem;
+    }
+    .msg { display: none; border-radius: var(--radius-sm); padding: .85rem 1rem; margin: 1rem 0 0; line-height: 1.55; }
+    .msg.ok { display: block; border: 1px solid var(--born); background: var(--born-soft); color: var(--text); }
+    .msg.bad { display: block; border: 1px solid var(--burn); background: var(--burn-soft); color: var(--text); }
+    .safety { border: 1px solid var(--burn); background: var(--burn-soft); border-radius: var(--radius-sm); padding: .85rem 1rem; margin: 1.75rem 0 0; }
+    .safety p { margin: 0; color: var(--muted); font-size: .9rem; line-height: 1.55; }
+    .safety strong { color: var(--burn); }
+    .home { display: inline-block; margin-bottom: 1.5rem; color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .82rem; }
+    .home:hover { color: var(--accent); }
+    .curl {
+      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: .9rem 1rem; margin: .75rem 0; font-family: var(--mono); font-size: .78rem;
+      line-height: 1.6; color: var(--text); word-break: break-all; white-space: pre-wrap;
+    }
+    .facts { margin: 0 0 .5rem; padding-left: 1.2rem; }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <a class="home" href="/">&larr; kascov.io</a>
+    <h1>the holder lane</h1>
+    <p class="lede">
+      Verified $KASCOV holders get extra capacity on kascov's metered tool
+      endpoints: preflight, compile, zk-verify, publish and prove-holding.
+      That is the whole feature: more room, for people who proved an address.
+      Plain data reads are free for everyone, are not metered, and need no
+      lane. Nothing else on this site knows or cares whether you hold anything.
+    </p>
+
+    <ul class="facts">
+      <li><strong>Additive only.</strong> The lane sits on top of the anonymous
+          tier, never instead of it. The anonymous floor is published, and it
+          can only rise &mdash; today the lane is 5&times; that floor, a number
+          set by commit like everything else here.</li>
+      <li><strong>The token is stateless.</strong> It names your address and an
+          expiry and is signed by kascov. The server verifies the signature on
+          each request instead of looking you up, so there is no account, no
+          row, and nothing to delete.</li>
+      <li><strong>Nothing is stored when you mint.</strong> The mint call
+          checks your address and one message signature, answers with the
+          token, and keeps no record of either. When the token expires you
+          simply mint another.</li>
+    </ul>
+
+    <div id="disabled" class="msg bad">
+      The lane is not switched on right now. That is a fact, not an error page:
+      the anonymous tier keeps working, the site does not gate on the lane, and
+      when it comes back this page will mint again.
+    </div>
+
+    <div id="app">
+      <div class="step">
+        <h2>Mint a lane token</h2>
+        <p class="note" style="margin:0 0 .75rem">
+          Your wallet signs a one-time phrase of the form
+          <code>kascov lane: &lt;address&gt; &lt;nonce&gt;</code>. The signature
+          proves the address is yours; kascov checks the balance from chain and
+          answers with the token.
+        </p>
+        <div class="phrase" id="phrase" style="display:none"></div>
+        <button class="btn btn-primary" id="sign" type="button">sign with my wallet</button>
+        <p class="note" id="walletnote">Looking for a wallet&hellip;</p>
+        <noscript><p class="note">Minting needs JavaScript: the phrase is built and signed in your browser, and this page never sees a key either way.</p></noscript>
+
+        <div class="out" id="tokenout"></div>
+        <button class="btn" id="copytoken" type="button" style="display:none">copy the lane token</button>
+        <p class="note" id="expiry" style="display:none"></p>
+        <div class="msg" id="result"></div>
+      </div>
+
+      <div class="step">
+        <h2>Use it</h2>
+        <p class="note" style="margin:0 0 .25rem">
+          Send the token in the <code>X-Kascov-Lane</code> header on any of the
+          metered tool endpoints. Without the header the same request still
+          works &mdash; it just rides the anonymous tier. The header does
+          nothing on plain data reads, because those are never metered.
+        </p>
+        <div class="curl" id="curl">curl -X POST -H 'X-Kascov-Lane: &lt;lane token&gt;' \
+  -H 'content-type: application/json' -d '{&hellip;}' \
+  'https://kascov.io/data/mainnet/preflight'</div>
+      </div>
+    </div>
+
+    <div class="safety">
+      <p>
+        <strong>Signing a message is free and moves no funds.</strong> It cannot
+        authorise a transaction. kascov will never ask for your seed phrase or
+        private key, and this page never sees either. If anything asks you for
+        one, it is not us.
+      </p>
+    </div>
+
+    <p class="note" style="margin-top:1.5rem">
+      Privacy: the mint call sees the address you chose to prove and one
+      signature, verifies both, and drops them. The lane keeps no table of
+      holders and no record of mints; a request carrying the header reveals the
+      token, not your Discord and not your history. Your address and its
+      balances were already public on chain before any of this.
+    </p>
+  </main>
+
+  <script>
+  (function () {
+    var MINT_URL = '/data/mainnet/lane/mint';
+
+    var $ = function (id) { return document.getElementById(id); };
+    var note = $('walletnote');
+    var result = $('result');
+    var laneToken = '';
+
+    function say(kind, html) { result.className = 'msg ' + kind; result.innerHTML = html; }
+
+    /* ---- pure helpers, kept together so a test harness can lift them ---- */
+
+    /* the phrase format is a contract with the mint endpoint: change it there
+       and here together or signatures stop matching */
+    function lanePhrase(address, nonce) {
+      return 'kascov lane: ' + address + ' ' + nonce;
+    }
+
+    function randomNonce(bytes) {
+      var out = '';
+      for (var i = 0; i < bytes.length; i++) {
+        out += (bytes[i] + 256).toString(16).slice(1);
+      }
+      return out;
+    }
+
+    /* the mint endpoint states expiry as expires_unix (seconds) + expiry_days;
+       admit it when neither is there, rather than inventing a deadline */
+    function expiryText(d) {
+      if (!d) return null;
+      if (d.expires_unix != null) return 'expires ' + new Date(d.expires_unix * 1000).toUTCString();
+      if (d.expiry_days != null) return 'expires in ' + d.expiry_days + ' days';
+      return 'the server did not state an expiry';
+    }
+
+    /* ------------------------- fail-honest gating ------------------------- */
+
+    function showDisabled(reason) {
+      $('disabled').style.display = 'block';
+      if (reason) $('disabled').innerHTML += ' <span class="dim">(' + String(reason).replace(/</g, '&lt;') + ')</span>';
+      $('sign').disabled = true;
+      note.textContent = 'Minting is off while the lane is disabled.';
+    }
+
+    /* asks the policy endpoint whether the lane is armed BEFORE offering a
+       signature, so nobody signs into a lane that cannot mint. the mint POST
+       is still the final word; this probe only spares the wallet popup */
+    var POLICY_URL = MINT_URL.replace(/\/mint$/, '');
+    fetch(POLICY_URL, { cache: 'no-cache' })
+      .then(function (r) {
+        if (r.status === 404) { showDisabled('this deployment does not serve the lane yet'); return null; }
+        return r.json().catch(function () { return null; });
+      })
+      .then(function (d) {
+        if (d && d.enabled === false) showDisabled(d.reason || null);
+      })
+      .catch(function () {
+        showDisabled('could not reach the lane endpoint');
+      });
+
+    /* --------------------------- wallet wiring --------------------------- */
+
+    /* only KasWare's injected API is exercised, same as /verify: it is the
+       one whose shape is documented and stable */
+    function wallet() {
+      if (window.kasware && typeof window.kasware.signMessage === 'function') {
+        return { name: 'KasWare', api: window.kasware };
+      }
+      return null;
+    }
+
+    function refresh() {
+      if ($('sign').disabled && $('disabled').style.display === 'block') return;
+      var w = wallet();
+      if (w) {
+        note.textContent = w.name + ' detected. Signing opens its popup; nothing is sent until you approve.';
+        $('sign').disabled = false;
+      } else {
+        note.innerHTML = 'No browser wallet detected. Install <a href="https://kasware.xyz" target="_blank" rel="noopener noreferrer">KasWare</a> to mint a lane token.';
+        $('sign').disabled = true;
+      }
+    }
+    refresh();
+    /* extensions inject late; check again rather than telling someone with a
+       wallet installed that they do not have one */
+    setTimeout(refresh, 600);
+    setTimeout(refresh, 1800);
+
+    $('sign').addEventListener('click', function () {
+      var w = wallet();
+      if (!w) return refresh();
+      $('sign').disabled = true;
+      $('sign').textContent = 'waiting for ' + w.name + '…';
+
+      var address = '';
+      var phrase = '';
+      var bytes = new Uint8Array(8);
+      crypto.getRandomValues(bytes);
+      var nonce = randomNonce(bytes);
+
+      Promise.resolve()
+        .then(function () {
+          return w.api.requestAccounts ? w.api.requestAccounts() : null;
+        })
+        .then(function (accounts) {
+          address = accounts && accounts.length ? String(accounts[0]) : '';
+          if (!address) throw new Error('the wallet reported no accounts');
+          phrase = lanePhrase(address, nonce);
+          /* show the exact bytes being signed before the popup opens */
+          $('phrase').style.display = 'block';
+          $('phrase').textContent = phrase;
+          return w.api.signMessage(phrase);
+        })
+        .then(function (sig) {
+          var signature = String(sig || '').trim();
+          if (!signature) throw new Error('the wallet returned nothing');
+          $('sign').textContent = 'minting…';
+          /* the server verifies the signature over the `nonce` field verbatim,
+             so the field carries the FULL signed phrase, not the random part */
+          return fetch(MINT_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ address: address, nonce: phrase, signature: signature })
+          });
+        })
+        .then(function (r) { return r.json().catch(function () { return {}; }); })
+        .then(function (d) {
+          if (d && d.enabled === false) {
+            $('sign').textContent = 'sign with my wallet';
+            showDisabled(d.reason || d.message || null);
+            return;
+          }
+          if (d && d.ok && d.token) {
+            laneToken = String(d.token);
+            $('tokenout').style.display = 'block';
+            $('tokenout').textContent = laneToken;
+            $('copytoken').style.display = 'block';
+            $('expiry').style.display = 'block';
+            $('expiry').textContent = expiryText(d);
+            $('curl').textContent = "curl -X POST -H 'X-Kascov-Lane: " + laneToken + "' \\\n  -H 'content-type: application/json' -d '{…}' \\\n  'https://kascov.io/data/mainnet/preflight'";
+            $('sign').textContent = 'minted';
+            say('ok', 'Minted. The token lives only on this screen and in your clipboard — kascov kept no copy, so store it where you keep such things.');
+          } else {
+            $('sign').disabled = false;
+            $('sign').textContent = 'sign with my wallet';
+            say('bad', (d && (d.reason || d.message || d.error)) || 'That did not check out. Nothing was stored; you can simply try again.');
+          }
+        })
+        .catch(function (e) {
+          $('sign').disabled = false;
+          $('sign').textContent = 'sign with my wallet';
+          say('bad', 'Minting did not complete: ' + (e && e.message ? e.message : 'cancelled') + '.');
+        });
+    });
+
+    $('copytoken').addEventListener('click', function () {
+      navigator.clipboard.writeText(laneToken).then(function () {
+        var btn = $('copytoken');
+        var old = btn.textContent;
+        btn.textContent = 'copied';
+        setTimeout(function () { btn.textContent = old; }, 1600);
+      }, function () { say('bad', 'Could not reach the clipboard. Select the token and copy it manually.'); });
+    });
+  })();
+  </script>
+</body>
+</html>

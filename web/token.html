@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>the $KASCOV token — the token that cannot buy a verdict</title>
+  <meta name="description" content="What the $KASCOV token is, what holding it does, and the lines it can never cross: no verdict influence, no revenue share, and kascov.io stays free for everyone.">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://kascov.io/token">
+  <meta property="og:title" content="the $KASCOV token — the token that cannot buy a verdict">
+  <meta property="og:description" content="Status, voice and access for the people who use kascov. Never influence over what it reports: verdicts are derived from the chain, and the chain does not take payment.">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="kascov">
+  <meta property="og:url" content="https://kascov.io/token">
+  <meta property="og:image" content="https://kascov.io/og.png?v=20260728-scoped">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:site" content="@0xKnitser">
+  <meta name="twitter:creator" content="@0xKnitser">
+  <meta name="twitter:title" content="the $KASCOV token — the token that cannot buy a verdict">
+  <meta name="twitter:description" content="Status, voice and access for the people who use kascov. Never influence over what it reports.">
+  <meta name="twitter:image" content="https://kascov.io/og.png?v=20260728-scoped">
+  <script type="application/ld+json">
+    {"@context":"https://schema.org","@type":"WebPage","name":"the $KASCOV token","url":"https://kascov.io/token","isPartOf":{"@type":"WebSite","name":"kascov","url":"https://kascov.io/"}}
+  </script>
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css?v=20260803-focuscard">
+  <style>
+    /* A standalone page like /bot: it carries only what it needs on top of
+       the shared palette rather than pulling the app's whole layout. */
+    .doc { max-width: 860px; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+    .doc h1 { font-family: var(--display); font-size: clamp(1.9rem, 5vw, 2.6rem); margin: 0 0 .4rem; }
+    .doc h2 {
+      font-family: var(--display); font-size: 1.45rem; margin: 3rem 0 .75rem;
+      padding-top: 1.25rem; border-top: 1px solid var(--border);
+      scroll-margin-top: 1.5rem;
+    }
+    .doc p, .doc li { color: var(--muted); line-height: 1.65; }
+    .doc li { margin: .35rem 0; }
+    .doc a { color: var(--accent); }
+    .doc code { font-family: var(--mono); font-size: .92em; color: var(--text); }
+    .lede { font-size: 1.08rem; color: var(--text); }
+    .home { display: inline-flex; align-items: center; gap: .55rem; margin-bottom: 2rem; color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .85rem; }
+    .home:hover { color: var(--accent); }
+
+    .cov-id {
+      display: flex; gap: .6rem; align-items: center; flex-wrap: wrap;
+      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: .8rem 1rem; margin: 1.25rem 0 .9rem;
+    }
+    .cov-id code { flex: 1 1 24ch; font-size: .82rem; word-break: break-all; line-height: 1.55; }
+    .copybtn {
+      font-family: var(--mono); font-size: .78rem; cursor: pointer; flex: none;
+      color: var(--text); background: var(--accent-soft); border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm); padding: .45rem .8rem;
+    }
+    .copybtn:hover { background: rgba(112,199,186,.2); }
+    .deep-links { display: flex; gap: .6rem; flex-wrap: wrap; margin: 0 0 .5rem; }
+    .deep-links a {
+      font-family: var(--mono); font-size: .82rem; text-decoration: none;
+      border: 1px solid var(--border); border-radius: 999px; padding: .45rem .9rem;
+      color: var(--text); background: var(--bg-soft);
+    }
+    .deep-links a:hover { border-color: var(--border-strong); color: var(--accent); }
+
+    .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: .7rem; margin: 1.25rem 0 .75rem; }
+    @media (max-width: 700px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 430px) { .tiles { grid-template-columns: 1fr; } }
+    .tile {
+      display: block; text-decoration: none; color: inherit;
+      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: .85rem 1rem;
+    }
+    .tile:hover { border-color: var(--border-strong); background: var(--card-hover); }
+    .tile-label { font-family: var(--mono); font-size: .7rem; letter-spacing: .07em; text-transform: uppercase; color: var(--faint); }
+    .tile-n { font-family: var(--mono); font-size: 1.15rem; font-weight: 600; color: var(--text); margin-top: .35rem; word-break: break-word; }
+    .tile-n.soft { color: var(--faint); font-size: .88rem; font-weight: 400; }
+    .tile-prove { display: block; margin-top: .4rem; font-family: var(--mono); font-size: .7rem; color: var(--faint); }
+    .tile:hover .tile-prove { color: var(--accent); }
+    .freshness { font-family: var(--mono); font-size: .78rem; color: var(--faint); margin: .25rem 0 0; }
+    .caveat { font-size: .88rem; color: var(--faint); margin-top: .6rem; }
+
+    .gradbar { height: 12px; border-radius: 999px; background: var(--bg-soft); border: 1px solid var(--border); overflow: hidden; margin: 1rem 0 .5rem; }
+    .gradbar-fill { height: 100%; width: 0; background: var(--accent); transition: width .6s ease; }
+    .gradline { font-family: var(--mono); font-size: .82rem; color: var(--muted); }
+
+    .cards { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; margin: 1.25rem 0; }
+    @media (max-width: 700px) { .cards { grid-template-columns: 1fr; } }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1rem 1.1rem; }
+    .card h3 { font-size: 1rem; margin: 0 0 .4rem; color: var(--text); }
+    .card p { margin: 0; font-size: .92rem; }
+
+    .slots { list-style: none; margin: 1.25rem 0; padding: 0; }
+    .slot {
+      display: flex; gap: .9rem; align-items: baseline; flex-wrap: wrap;
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      background: var(--card); padding: .8rem 1rem; margin: 0 0 .6rem;
+    }
+    .slot-name { font-weight: 600; color: var(--text); flex: none; }
+    .slot-desc { flex: 1 1 24ch; color: var(--muted); font-size: .92rem; line-height: 1.55; margin: 0; }
+    .chip {
+      font-family: var(--mono); font-size: .7rem; letter-spacing: .06em; text-transform: uppercase;
+      border-radius: 999px; padding: .2rem .6rem; flex: none;
+    }
+    .chip-live { background: var(--born-soft); color: var(--born); }
+    .chip-building { background: var(--watch-soft); color: var(--watch); border: 1px solid var(--watch-border); }
+    .chip-planned { background: rgba(255,255,255,.06); color: var(--faint); }
+
+    .steps { counter-reset: step; list-style: none; padding: 0; margin: 1.25rem 0; }
+    .steps li {
+      counter-increment: step; position: relative; padding-left: 2.4rem; margin: .8rem 0;
+    }
+    .steps li::before {
+      content: counter(step); position: absolute; left: 0; top: .05rem;
+      width: 1.6rem; height: 1.6rem; border-radius: 999px; text-align: center; line-height: 1.6rem;
+      font-family: var(--mono); font-size: .8rem; color: var(--accent);
+      background: var(--accent-soft); border: 1px solid var(--border-strong);
+    }
+    .never { border: 1px solid var(--burn); background: var(--burn-soft); border-radius: var(--radius-sm); padding: 1rem 1.25rem; margin: 1.5rem 0; }
+    .never strong { color: var(--burn); }
+    .never p, .never li { margin: 0; }
+    .never ul { margin: .5rem 0 0; }
+
+    .curl {
+      position: relative; background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: .9rem 1rem; margin: 1rem 0;
+      font-family: var(--mono); font-size: .8rem; line-height: 1.6; color: var(--text);
+      word-break: break-all; white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <main class="doc">
+    <a class="home" href="/">&larr; kascov.io</a>
+
+    <!-- 1 · hero -->
+    <h1>the token that cannot buy a verdict</h1>
+    <p class="lede">
+      $KASCOV is a KCC20 covenant token on Kaspa mainnet, launched on a public
+      curve like any other token. It exists so the people who use kascov can
+      carry status, a voice, and access. It cannot carry influence: every
+      verdict on this site is derived from the chain, and the chain does not
+      take payment.
+    </p>
+    <div class="cov-id">
+      <code id="covid">c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2</code>
+      <button class="copybtn" id="copyid" type="button" hidden>copy</button>
+    </div>
+    <div class="deep-links">
+      <a href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2">see it live on the explorer &rarr;</a>
+      <a href="/verify">prove an address at /verify</a>
+      <a href="/bot">the bot&rsquo;s terms &amp; privacy at /bot</a>
+    </div>
+
+    <!-- 2 · live stat tiles, filled by one fetch of the token endpoint -->
+    <h2 id="numbers">The numbers, read from the chain</h2>
+    <p>
+      Everything below comes from one public endpoint that anyone can call,
+      refreshed every minute. Each tile links to the explorer view that proves
+      it, so you never have to take this page&rsquo;s word for anything.
+    </p>
+    <div class="tiles">
+      <a class="tile" id="tile-supply" href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2" title="the token page replays every event and proves the supply is conserved">
+        <span class="tile-label">supply</span>
+        <span class="tile-n soft" data-tile>&hellip;</span>
+        <span class="tile-prove">proof &rarr;</span>
+      </a>
+      <a class="tile" id="tile-holders" href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2" title="the token page lists every balance the derivation proved">
+        <span class="tile-label">holders</span>
+        <span class="tile-n soft" data-tile>&hellip;</span>
+        <span class="tile-prove">proof &rarr;</span>
+      </a>
+      <a class="tile" id="tile-price" href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2" title="the newest verified trade, checked against the curve's own formula">
+        <span class="tile-label">last price</span>
+        <span class="tile-n soft" data-tile>&hellip;</span>
+        <span class="tile-prove">proof &rarr;</span>
+      </a>
+      <a class="tile" id="tile-reserve" href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2" title="the market covenant's single live cell holds the KAS reserve">
+        <span class="tile-label">KAS reserve</span>
+        <span class="tile-n soft" data-tile>&hellip;</span>
+        <span class="tile-prove">proof &rarr;</span>
+      </a>
+      <a class="tile" id="tile-trades" href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2" title="every trade in the window, listed with its transaction">
+        <span class="tile-label">24h trades</span>
+        <span class="tile-n soft" data-tile>&hellip;</span>
+        <span class="tile-prove">proof &rarr;</span>
+      </a>
+      <a class="tile" id="tile-phase" href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2" title="the phase is read from the covenant that actually holds the inventory">
+        <span class="tile-label">phase</span>
+        <span class="tile-n soft" data-tile>&hellip;</span>
+        <span class="tile-prove">proof &rarr;</span>
+      </a>
+    </div>
+    <p class="freshness" id="freshness">reading the chain&hellip;</p>
+    <noscript>
+      <p class="caveat">
+        JavaScript is off, so the live numbers stay blank. Nothing is hidden:
+        every figure is one click away on the tiles above, read straight from
+        the chain by the explorer.
+      </p>
+    </noscript>
+    <p class="caveat">
+      A token only gets a price here when the covenant holding its inventory
+      runs a program kascov verified byte for byte: no verified market program
+      means no price. There is deliberately no market cap and no FDV anywhere
+      on this page &mdash; kascov does not publish numbers it can prove wrong.
+    </p>
+
+    <!-- 3 · graduation as a chain event -->
+    <h2 id="graduation">Graduation is a chain event</h2>
+    <p>
+      $KASCOV sells from a bonding curve: a covenant that prices each sale by a
+      formula written in its own bytecode. When its KAS reserve reaches the
+      target those same bytes state, the liquidity moves to a trading pool.
+      That moment is a transaction anyone can verify, not an announcement
+      anyone has to make.
+    </p>
+    <div class="gradbar" aria-hidden="true"><div class="gradbar-fill" id="gradfill"></div></div>
+    <p class="gradline" id="gradline">reading the curve&rsquo;s progress&hellip;</p>
+    <noscript><p class="gradline">progress needs JavaScript to display; the curve itself is on the explorer link above.</p></noscript>
+    <p>
+      The curve is <a href="https://kron.gg" rel="noopener">KRON</a>&rsquo;s
+      launch covenant &mdash; an ecosystem peer whose builds kascov verified
+      against the chain, byte for byte. The display name
+      <em>KASCOV</em> comes from KRON&rsquo;s signed token list, and it is
+      exactly that: a claim from their list, cross-checked but not something
+      the chain itself proves. kascov&rsquo;s own canonical name for this
+      covenant, derived from nothing but its id, is
+      <code>humble-crimson-tortoise</code>.
+    </p>
+
+    <!-- 4 · the doctrine -->
+    <h2 id="doctrine">The doctrine</h2>
+    <p>
+      These four lines are published on <a href="/bot">/bot</a> and they do not
+      move. Every future utility is checked against them before it ships.
+    </p>
+    <div class="cards">
+      <div class="card">
+        <h3>free for everyone</h3>
+        <p>kascov.io stays free and whole whether you hold a token or not.
+           The anonymous tier is a floor, and that floor can only rise.</p>
+      </div>
+      <div class="card">
+        <h3>no revenue share</h3>
+        <p>The token pays no dividends and carries no share of anything kascov
+           earns. Nothing about it is engineered to go up.</p>
+      </div>
+      <div class="card">
+        <h3>no verdict influence, ever</h3>
+        <p>Verdicts are derived from the chain and published with their proofs.
+           Holding any amount changes nothing about them, and asking it to is
+           the fastest way to lose the role.</p>
+      </div>
+      <div class="card">
+        <h3>the lanes are status, voice and access</h3>
+        <p>A verified-holder role, a vote on what gets audited next, early
+           access to new tools, extra capacity. Additive, all of it &mdash;
+           nothing is taken from anyone else.</p>
+      </div>
+    </div>
+
+    <!-- 5 · utility slots, rendered from token-utilities.json; the static
+         rows below are the noscript fallback and mirror that file at ship
+         time — the JSON stays the source of truth and JS re-renders from it -->
+    <h2 id="utility">What holding actually does</h2>
+    <p>
+      Each slot below is version-controlled in
+      <a href="/token-utilities.json"><code>token-utilities.json</code></a>.
+      A status flips to <em>live</em> only in a reviewed ship commit, so this
+      list cannot quietly promise more than what runs.
+    </p>
+    <ul class="slots" id="slots">
+      <li class="slot">
+        <span class="slot-name">verified holder role</span>
+        <p class="slot-desc">Hold any amount, prove the address once with a free signature, keep the role while the balance stays. <a href="/bot">how it works &rarr;</a></p>
+        <span class="chip chip-live">live</span>
+      </li>
+      <li class="slot">
+        <span class="slot-name">audit vote</span>
+        <p class="slot-desc">Verified holders point the audit bench at the next unknown build. One holder, one vote, above a dust floor of 100 KASCOV (adjustable by commit) so a ballot cannot be stuffed for free. <a href="/vote">the vote &rarr;</a></p>
+        <span class="chip chip-building">building</span>
+      </li>
+      <li class="slot">
+        <span class="slot-name">watchtower</span>
+        <p class="slot-desc">The bot watches the tokens your proven address holds and DMs you when one changes phase or your balance crosses a line &mdash; alerts derived from public data, never private findings. <a href="/bot">the bot &rarr;</a></p>
+        <span class="chip chip-building">building</span>
+      </li>
+      <li class="slot">
+        <span class="slot-name">early access</span>
+        <p class="slot-desc">New tools land for verified holders a short window before everyone else. Tools only, never findings about live mainnet tokens &mdash; anything scarce or competitive launches for everyone at once. <a href="/bot">the bot &rarr;</a></p>
+        <span class="chip chip-building">building</span>
+      </li>
+      <li class="slot">
+        <span class="slot-name">holder lane</span>
+        <p class="slot-desc">Extra API capacity on top of the anonymous floor &mdash; today 5&times; the published floor, and the floor itself only ever rises. <a href="/lane">the lane &rarr;</a></p>
+        <span class="chip chip-building">building</span>
+      </li>
+      <li class="slot">
+        <span class="slot-name">deploy lane</span>
+        <p class="slot-desc">A smoother path from the covenant builder to a live deploy for verified holders. Not started; listed so the plan is public before the code is.</p>
+        <span class="chip chip-planned">planned</span>
+      </li>
+    </ul>
+
+    <!-- 6 · the verified-holder path -->
+    <h2 id="verify">Become a verified holder</h2>
+    <ol class="steps">
+      <li><strong>Hold $KASCOV</strong> in a wallet whose keys are yours. Any amount counts.</li>
+      <li><strong>Run <code>/verify</code></strong> in <a href="https://discord.gg/83RjgQBDEX" rel="noopener">the kascov Discord</a>. The bot hands you a one-time phrase with a random nonce.</li>
+      <li><strong>Sign the phrase</strong> in your own wallet. Signing a message is free and moves nothing.</li>
+      <li><strong>The role lands.</strong> The bot checks the signature against your address&rsquo;s own key, reads the balance from chain, and re-checks on a schedule &mdash; the role reflects what you hold now, not what you held once.</li>
+    </ol>
+    <div class="never">
+      <p>
+        <strong>It will never ask you for a seed phrase, a private key, or a
+        wallet connection.</strong> Signing a message cannot authorise a
+        transaction and moves nothing. Anything asking for more is not us
+        &mdash; check <a href="/">kascov.io</a> and the official links channel
+        before trusting any link that claims to be kascov.
+      </p>
+    </div>
+    <p>
+      Privacy is a handful of fields: your Discord user id, the address you
+      proved, the time you proved it, the balance read at that moment, plus
+      your alert preference and any ballot in an open vote round. The complete
+      enumeration lives at <a href="/bot">/bot</a>, and <code>/unverify</code>
+      deletes all of it.
+    </p>
+
+    <!-- 7 · the honest box -->
+    <h2 id="before-you-buy">Read this before you buy anything</h2>
+    <div class="never">
+      <ul>
+        <li>It pays <strong>no dividends</strong> and shares no fees and no revenue.</li>
+        <li>It buys <strong>no influence</strong> over any verdict, listing, or finding &mdash; not with one token, not with the whole supply.</li>
+        <li>The site <strong>never locks</strong> for non-holders. Everything kascov reports stays public and free.</li>
+        <li>It is <strong>not an investment product</strong>, and nobody involved promises it will be worth more tomorrow.</li>
+      </ul>
+      <p style="margin-top:.75rem">
+        If a future utility would break any line above, the utility is wrong,
+        not the lines.
+      </p>
+    </div>
+
+    <!-- 8 · verify everything -->
+    <h2 id="verify-everything">Verify everything</h2>
+    <p>
+      This page reads one public endpoint, and so can you:
+    </p>
+    <div class="curl" id="curl">curl -s https://kascov.io/data/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2</div>
+    <button class="copybtn" id="copycurl" type="button" hidden>copy the curl</button>
+    <p>
+      If a number here ever disagrees with the chain, the chain is right and we
+      have a bug. Please say so: <a href="https://x.com/0xKnitser" rel="noopener">@0xKnitser</a>
+      on X, or <a href="https://discord.gg/83RjgQBDEX" rel="noopener">the kascov Discord</a>.
+      The source is at
+      <a href="https://github.com/Knitser/kascov" rel="noopener">github.com/Knitser/kascov</a>.
+    </p>
+  </main>
+
+  <script>
+  (function () {
+    var TOKEN_ID = 'c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2';
+    /* one fetch fills every tile; the params only trim the balance/event
+       pages this landing page never shows, the endpoint stays the same one
+       the curl above names */
+    var API = '/data/mainnet/token/' + TOKEN_ID + '?limit=1&events_limit=1';
+    var FAIL = 'could not read the chain just now';
+
+    var $ = function (id) { return document.getElementById(id); };
+
+    /* ---- pure helpers, kept together so a test harness can lift them ---- */
+
+    function fmtInt(n) { return Number(n).toLocaleString('en-US'); }
+
+    function fmtKas(sompi) {
+      return (Number(sompi) / 1e8).toLocaleString('en-US', { maximumFractionDigits: 2 }) + ' KAS';
+    }
+
+    /* the same rendering the explorer uses, so the two pages can never
+       disagree about the same trade */
+    function fmtPrice(quoteSompi, baseAmount) {
+      var px = Number(quoteSompi) / Number(baseAmount) / 1e8;
+      if (!isFinite(px) || px <= 0) return null;
+      var digits = px >= 1 ? 4 : px >= 0.0001 ? 6 : 8;
+      return px.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '') + ' KAS';
+    }
+
+    /* display scale only: the chain integer stays the number that was
+       verified, claimed decimals are a presentation claim from the payload */
+    function supplyText(token) {
+      if (!token || token.supply == null) return null;
+      var d = token.claimed_decimals;
+      if (d != null && d > 0) {
+        return (Number(token.supply) / Math.pow(10, d))
+          .toLocaleString('en-US', { maximumFractionDigits: d });
+      }
+      return fmtInt(token.supply);
+    }
+
+    function phaseText(m) {
+      if (!m || !m.phase || m.phase === 'unknown') return null;
+      if (m.phase === 'bonding') {
+        var pct = m.grad_progress_bps != null ? ' · ' + (m.grad_progress_bps / 100).toFixed(0) + '%' : '';
+        return 'bonding' + pct;
+      }
+      if (m.phase === 'graduated') return 'graduated';
+      if (m.phase === 'lp shares') return 'pool shares';
+      return m.phase;
+    }
+
+    /* payload -> the six tiles; every gap carries its honest reason so a
+       missing figure is never rendered as a zero */
+    function tileValues(p) {
+      var t = (p && p.token) || null;
+      var m = (p && p.market) || null;
+      var out = {};
+      out.supply = t && t.supply != null
+        ? { text: supplyText(t) }
+        : { text: 'not proven', soft: true, title: 'the derivation has not proven a supply for this token' };
+      out.holders = t && t.holders != null
+        ? { text: fmtInt(t.holders) }
+        : { text: 'not proven', soft: true };
+      var px = m && m.last_quote_sompi != null && m.last_base_amount
+        ? fmtPrice(m.last_quote_sompi, m.last_base_amount) : null;
+      out.price = px
+        ? { text: px }
+        : { text: 'not priced', soft: true,
+            title: (m && m.unpriced_reason) || 'no verified market program means no price' };
+      out.reserve = m && m.reserve_sompi != null
+        ? { text: fmtKas(m.reserve_sompi),
+            href: m.program && m.program.covenant_id
+              ? '/#/mainnet/c/' + m.program.covenant_id : null }
+        : { text: 'not shown', soft: true, title: (m && m.reserve_note) || 'no single verified covenant holds the reserve' };
+      out.trades = m && m.window_note
+        ? { text: 'not counted', soft: true, title: m.window_note }
+        : m
+          ? { text: fmtInt(m.trades_24h || 0) }
+          : { text: 'not counted', soft: true, title: 'no verified market program' };
+      out.phase = { text: phaseText(m) || 'no verified market', soft: !phaseText(m) };
+      return out;
+    }
+
+    /* the graduation section's one honest line, for either side of the event */
+    function gradState(m) {
+      if (!m || !m.phase) return { mode: 'unknown' };
+      if (m.phase === 'bonding' && m.grad_progress_bps != null) {
+        return {
+          mode: 'bar',
+          bps: m.grad_progress_bps,
+          reserve: m.reserve_sompi != null ? m.reserve_sompi : null,
+          target: m.program && m.program.graduation_kas_sompi != null ? m.program.graduation_kas_sompi : null
+        };
+      }
+      if (m.phase === 'graduated') {
+        /* the payload does not promise a graduation timestamp; take whatever
+           field it carries and say less rather than guessing */
+        return {
+          mode: 'graduated',
+          atMs: m.graduated_at_ms != null ? m.graduated_at_ms : null,
+          atDaa: m.graduated_at_daa != null ? m.graduated_at_daa
+               : m.graduated_daa != null ? m.graduated_daa : null,
+          pool: m.program && m.program.covenant_id ? m.program.covenant_id : null
+        };
+      }
+      return { mode: 'unknown' };
+    }
+
+    /* ------------------------------- wiring ------------------------------- */
+
+    var TILE_IDS = { supply: 'tile-supply', holders: 'tile-holders', price: 'tile-price',
+                     reserve: 'tile-reserve', trades: 'tile-trades', phase: 'tile-phase' };
+
+    function setTile(id, v) {
+      var el = $(TILE_IDS[id]);
+      if (!el) return;
+      var n = el.querySelector('[data-tile]');
+      n.textContent = v.text;
+      n.className = 'tile-n' + (v.soft ? ' soft' : '');
+      if (v.title) el.title = v.title;
+      if (v.href) el.href = v.href;
+    }
+
+    function showFailure() {
+      /* never stale numbers: a failed read blanks every tile, it does not
+         leave the last answer standing as if it were current */
+      Object.keys(TILE_IDS).forEach(function (k) {
+        setTile(k, { text: FAIL, soft: true });
+      });
+      $('freshness').textContent = FAIL + ' — retrying in 60s';
+      $('gradline').textContent = FAIL;
+      $('gradfill').style.width = '0';
+    }
+
+    function showGrad(g) {
+      var line = $('gradline');
+      var fill = $('gradfill');
+      if (g.mode === 'bar') {
+        var pct = Math.max(0, Math.min(100, g.bps / 100));
+        fill.style.width = pct + '%';
+        var detail = (g.reserve != null && g.target != null)
+          ? ' — ' + fmtKas(g.reserve) + ' of the ' + fmtKas(g.target) + ' target, read from the curve’s own bytes'
+          : '';
+        line.textContent = pct.toFixed(2) + '% of the way to graduation' + detail;
+      } else if (g.mode === 'graduated') {
+        fill.style.width = '100%';
+        var when = g.atMs != null ? ' on ' + new Date(g.atMs).toISOString().slice(0, 10)
+                 : g.atDaa != null ? ' at DAA ' + fmtInt(g.atDaa)
+                 : '';
+        line.innerHTML = 'graduated' + when + ': the curve reached its target and closed, and a pool holds the liquidity now'
+          + (g.pool ? ' — <a href="/#/mainnet/pool/' + g.pool + '">see the pool &rarr;</a>' : '');
+      } else {
+        line.textContent = 'no verified market program, so no graduation progress to show';
+        fill.style.width = '0';
+      }
+    }
+
+    function load() {
+      fetch(API, { cache: 'no-cache' })
+        .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+        .then(function (p) {
+          var v = tileValues(p);
+          Object.keys(v).forEach(function (k) { setTile(k, v[k]); });
+          showGrad(gradState(p.market || null));
+          $('freshness').textContent = 'read from the chain at '
+            + new Date(p.generated_at_ms || Date.now()).toLocaleTimeString('en-US', { hour12: false })
+            + ' — refreshes every 60s';
+        })
+        .catch(showFailure);
+    }
+    load();
+    setInterval(load, 60000);
+
+    /* the utility slots re-render from the version-controlled JSON so the
+       file stays the single source of truth; the static rows above are the
+       no-JS fallback and mirror it at ship time */
+    function chip(status) {
+      var ok = { live: 1, building: 1, planned: 1 };
+      var s = ok[status] ? status : 'planned';
+      return '<span class="chip chip-' + s + '">' + s + '</span>';
+    }
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+    fetch('/token-utilities.json', { cache: 'no-cache' })
+      .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+      .then(function (j) {
+        if (!j || !Array.isArray(j.slots) || !j.slots.length) return;
+        $('slots').innerHTML = j.slots.map(function (s) {
+          var link = s.link ? ' <a href="' + esc(s.link) + '">more &rarr;</a>' : '';
+          return '<li class="slot"><span class="slot-name">' + esc(s.name) + '</span>'
+            + '<p class="slot-desc">' + esc(s.desc) + link + '</p>'
+            + chip(s.status) + '</li>';
+        }).join('');
+      })
+      .catch(function () { /* the static rows stay; they are the same list */ });
+
+    /* copy buttons only exist when JS runs; without it the text is selectable */
+    function copyWire(btnId, text) {
+      var btn = $(btnId);
+      btn.hidden = false;
+      btn.addEventListener('click', function () {
+        navigator.clipboard.writeText(text).then(function () {
+          var old = btn.textContent;
+          btn.textContent = 'copied';
+          setTimeout(function () { btn.textContent = old; }, 1600);
+        }, function () { /* clipboard refused; the text stays selectable */ });
+      });
+    }
+    copyWire('copyid', TOKEN_ID);
+    copyWire('copycurl', $('curl').textContent);
+  })();
+  </script>
+</body>
+</html>
