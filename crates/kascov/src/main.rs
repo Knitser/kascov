@@ -82,6 +82,18 @@ enum Command {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
+    /// Anchor the passport claims root into a Kaspa MAINNET transaction: a
+    /// self-send from the dedicated anchor key whose payload carries
+    /// kascov:passport:v1:<root>. Skips quietly when the root is already
+    /// anchored; never overwrites a good anchor record on failure. The
+    /// unattended daily timer running this was approved by the operator by
+    /// name; --init generates the key ON THIS MACHINE and prints only the
+    /// address to fund.
+    AnchorPassport {
+        /// Generate the anchor key if missing and print the funding address
+        #[arg(long)]
+        init: bool,
+    },
     /// Fetch a transaction from the node (via its accepting block, known to
     /// the index) and print its full covenant anatomy — bindings, budgets,
     /// payload lanes. The truth tool for classification disputes.
@@ -185,6 +197,7 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+        Command::AnchorPassport { init } => anchor_passport(init).await,
         Command::AuditBench { ref out } => {
             let out = out.clone();
             let store = open_store(&cli)?;
@@ -708,6 +721,111 @@ fn db_path(cli: &Cli) -> std::path::PathBuf {
 
 fn open_store(cli: &Cli) -> Result<Store> {
     Ok(Store::open(&db_path(cli), cli.network)?)
+}
+
+/* ------------------------------------------------------ passport anchor */
+
+/// The payload the anchor writes into the transaction. The format is part of
+/// the public contract: /passport describes it, and anyone diffing chain
+/// bytes greps for this prefix.
+fn anchor_payload(root: &str) -> String {
+    format!("kascov:passport:v1:{root}")
+}
+
+/// The merkle root out of the served claims file, or None for anything that
+/// is not a 64-hex root — a malformed file must never get anchored.
+fn parse_claims_root(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let root = v.get("merkle_root")?.as_str()?;
+    let ok = root.len() == 64 && root.bytes().all(|b| b.is_ascii_hexdigit());
+    (ok && root == root.to_lowercase()).then(|| root.to_string())
+}
+
+/// Anchor only when the root actually changed: an unreadable or absent
+/// anchor record means "anchor now", a record carrying the same root means
+/// "done already". Pure, so the skip logic is testable without a network.
+fn should_anchor(current_root: &str, existing_anchor_json: Option<&str>) -> bool {
+    let Some(json) = existing_anchor_json else { return true };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return true };
+    let anchored = v
+        .get("merkle_root")
+        .or_else(|| v.get("root"))
+        .and_then(|r| r.as_str());
+    anchored != Some(current_root)
+}
+
+/// The daily anchor run. Reads the served claims file, skips quietly when the
+/// root is already anchored, otherwise broadcasts one mainnet self-send whose
+/// payload carries the root, and records the txid where /passport reads it.
+/// A failed run exits nonzero and leaves the last good record untouched: the
+/// record is only ever rewritten AFTER a successful submit.
+async fn anchor_passport(init: bool) -> Result<()> {
+    let key_path = std::path::PathBuf::from(
+        std::env::var("KASCOV_ANCHOR_KEY_FILE")
+            .unwrap_or_else(|_| "/home/kascov/.anchor-key".into()),
+    );
+    if !key_path.exists() && !init {
+        anyhow::bail!("no anchor key at {} — run anchor-passport --init first", key_path.display());
+    }
+    let keypair = kascov_labkit::load_or_create_key(&key_path, init)?;
+    // the key file must never be group/world readable, however it was made
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+    }
+    let address = kascov_labkit::address_of_mainnet(&keypair);
+    if init {
+        println!("anchor address (fund with ~1 KAS from the dev wallet): {address}");
+        return Ok(());
+    }
+
+    let claims_path = std::env::var("KASCOV_PASSPORT_FILE")
+        .unwrap_or_else(|_| "/mnt/c/kascov/web/passport-claims.json".into());
+    let claims = std::fs::read_to_string(&claims_path)
+        .with_context(|| format!("cannot read {claims_path}"))?;
+    let root = parse_claims_root(&claims)
+        .context("claims file has no valid merkle_root; refusing to anchor")?;
+
+    let out_path = std::env::var("KASCOV_ANCHOR_OUT")
+        .unwrap_or_else(|_| "/mnt/c/kascov/web/passport-anchor.json".into());
+    let existing = std::fs::read_to_string(&out_path).ok();
+    if !should_anchor(&root, existing.as_deref()) {
+        eprintln!("root {root} already anchored; nothing to do");
+        return Ok(());
+    }
+
+    let rpc = std::env::var("KASCOV_RPC_MAINNET")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .context("KASCOV_RPC_MAINNET is not set; the anchor only talks to our own node")?;
+    let client = kascov_labkit::connect_mainnet(&rpc).await?;
+    // flat 0.0001 KAS: generous for a 1-in-1-out with a ~90 byte payload
+    let txid = kascov_labkit::anchor_self_send(
+        &client,
+        &keypair,
+        anchor_payload(&root).into_bytes(),
+        10_000,
+    )
+    .await?;
+
+    let record = serde_json::json!({
+        "v": 1,
+        "merkle_root": root,
+        "txid": txid,
+        "address": address.to_string(),
+        "network": "mainnet",
+        "anchored_ms": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        "note": "the payload of this transaction carries kascov:passport:v1:<root>; verify it from raw chain bytes",
+    });
+    let tmp = format!("{out_path}.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&record)?)?;
+    std::fs::rename(&tmp, &out_path)?;
+    eprintln!("anchored {root} in {txid}");
+    Ok(())
 }
 
 /// Ground truth for one transaction: bindings, budgets, payload/lane.
@@ -9438,6 +9556,44 @@ async fn stream_handler(
         HeaderValue::from_static("no"),
     );
     resp
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+
+    const ROOT: &str = "c04060a3d709849b38036be3c42f2d16030e89efe03f82ff262ea8a446ccc7e6";
+
+    #[test]
+    fn payload_carries_the_versioned_prefix_and_the_root() {
+        let p = anchor_payload(ROOT);
+        assert_eq!(p, format!("kascov:passport:v1:{ROOT}"));
+        assert!(p.is_ascii());
+    }
+
+    #[test]
+    fn claims_root_parses_only_a_lowercase_64_hex_root() {
+        let good = format!("{{\"merkle_root\":\"{ROOT}\"}}");
+        assert_eq!(parse_claims_root(&good).as_deref(), Some(ROOT));
+        assert!(parse_claims_root("{}").is_none());
+        assert!(parse_claims_root("not json").is_none());
+        assert!(parse_claims_root("{\"merkle_root\":\"abc\"}").is_none());
+        let upper = format!("{{\"merkle_root\":\"{}\"}}", ROOT.to_uppercase());
+        assert!(parse_claims_root(&upper).is_none());
+    }
+
+    #[test]
+    fn anchoring_skips_only_a_record_carrying_the_same_root() {
+        // no record, unreadable record, wrong-root record: all anchor
+        assert!(should_anchor(ROOT, None));
+        assert!(should_anchor(ROOT, Some("garbage")));
+        assert!(should_anchor(ROOT, Some("{\"merkle_root\":\"other\"}")));
+        // same root under either accepted field name: done already
+        let a = format!("{{\"merkle_root\":\"{ROOT}\"}}");
+        let b = format!("{{\"root\":\"{ROOT}\"}}");
+        assert!(!should_anchor(ROOT, Some(&a)));
+        assert!(!should_anchor(ROOT, Some(&b)));
+    }
 }
 
 #[cfg(test)]

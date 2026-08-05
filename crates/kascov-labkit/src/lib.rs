@@ -285,6 +285,103 @@ pub async fn submit(client: &KaspaRpcClient, tx: &Transaction) -> Result<String>
     Ok(id.to_string())
 }
 
+/// The keypair's MAINNET address — the one place labkit speaks mainnet.
+/// Everything else here is deliberately testnet-only; the passport anchor is
+/// the sole mainnet writer, and it was approved by name.
+pub fn address_of_mainnet(keypair: &Keypair) -> Address {
+    let (xonly, _) = keypair.public_key().x_only_public_key();
+    Address::new(Prefix::Mainnet, AddrVersion::PubKey, &xonly.serialize())
+}
+
+/// Connect a borsh wRPC client to MAINNET. Unlike `connect`, the node url is
+/// required: an unattended signer must never wander onto a resolver-picked
+/// public node.
+pub async fn connect_mainnet(rpc: &str) -> Result<KaspaRpcClient> {
+    let network_id = NetworkId::new(NetworkType::Mainnet);
+    let client = KaspaRpcClient::new(WrpcEncoding::Borsh, Some(rpc), None, Some(network_id), None)?;
+    client
+        .connect(Some(ConnectOptions {
+            block_async_connect: true,
+            connect_timeout: Some(Duration::from_millis(15_000)),
+            strategy: ConnectStrategy::Fallback,
+            ..Default::default()
+        }))
+        .await
+        .context("mainnet rpc connect failed")?;
+    Ok(client)
+}
+
+/// The largest plain (non-covenant) UTXO on an arbitrary address, as a
+/// spendable — `spendable_balance` is testnet-address-bound, the anchor is
+/// not.
+pub async fn largest_plain_utxo(client: &KaspaRpcClient, address: &Address) -> Result<SpendableUtxo> {
+    let utxos = client
+        .get_utxos_by_addresses(vec![address.clone().into()])
+        .await?;
+    let best = utxos
+        .iter()
+        .filter(|u| u.utxo_entry.covenant_id.is_none())
+        .max_by_key(|u| u.utxo_entry.amount)
+        .with_context(|| format!("no spendable UTXOs on {address} — fund it first"))?;
+    Ok(SpendableUtxo {
+        outpoint: TransactionOutpoint::new(best.outpoint.transaction_id, best.outpoint.index),
+        entry: UtxoEntry::new(
+            best.utxo_entry.amount,
+            best.utxo_entry.script_public_key.clone(),
+            best.utxo_entry.block_daa_score,
+            best.utxo_entry.is_coinbase,
+            None,
+        ),
+    })
+}
+
+/// `build_signed`, plus a payload: the anchor writes the passport root into
+/// the transaction itself, so the claim history is checkable from raw chain
+/// bytes with no kascov server anywhere in the loop.
+pub fn build_signed_with_payload(
+    keypair: &Keypair,
+    from: &SpendableUtxo,
+    outputs: Vec<TransactionOutput>,
+    payload: Vec<u8>,
+) -> Result<Transaction> {
+    let input = TransactionInput::new(from.outpoint, vec![], 0, 1);
+    let tx = Transaction::new(
+        TX_VERSION_TOCCATA,
+        vec![input],
+        outputs,
+        0,
+        SUBNETWORK_ID_NATIVE,
+        0,
+        payload,
+    );
+    let signable = MutableTransaction::with_entries(tx, vec![from.entry.clone()]);
+    let signed = sign(signable, *keypair);
+    Ok(signed.tx)
+}
+
+/// One anchor broadcast: find the anchor key's largest mainnet UTXO, send it
+/// back to itself minus a flat fee, carrying `payload`, and return the txid.
+/// The caller owns the decision to call this at all; nothing here retries.
+pub async fn anchor_self_send(
+    client: &KaspaRpcClient,
+    keypair: &Keypair,
+    payload: Vec<u8>,
+    fee: u64,
+) -> Result<String> {
+    let address = address_of_mainnet(keypair);
+    let funding = largest_plain_utxo(client, &address).await?;
+    if funding.entry.amount <= fee * 2 {
+        bail!(
+            "anchor fuel low: largest UTXO holds {:.8} KAS on {address}; top it up",
+            funding.entry.amount as f64 / 1e8
+        );
+    }
+    let spk = pay_to_address_script(&address);
+    let out = TransactionOutput::new(funding.entry.amount - fee, spk);
+    let tx = build_signed_with_payload(keypair, &funding, vec![out], payload)?;
+    submit(client, &tx).await
+}
+
 /// Run the full covenant lifecycle: genesis → N transitions → burn.
 pub async fn demo(client: &KaspaRpcClient, keypair: &Keypair, transitions: u32) -> Result<()> {
     let address = address_of(keypair);

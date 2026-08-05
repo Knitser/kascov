@@ -1,0 +1,21 @@
+[Unit]
+Description=kascov passport anchor: write the claims root into a mainnet tx when it changed
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=kascov
+WorkingDirectory=/home/kascov/kascov
+# the anchor key lives on this box only; the rpc url comes from the same env
+# the worker uses, mirrored into this file at deploy time
+EnvironmentFile=-/home/kascov/.anchor-env
+Environment=KASCOV_ANCHOR_KEY_FILE=/home/kascov/.anchor-key
+Environment=KASCOV_PASSPORT_FILE=/mnt/c/kascov/web/passport-claims.json
+Environment=KASCOV_ANCHOR_OUT=/mnt/c/kascov/web/passport-anchor.json
+ExecStart=/home/kascov/kascov/target/release/kascov anchor-passport --network mainnet --db /home/kascov/kascov-db/mainnet.db
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/kascov /mnt/c/kascov/web

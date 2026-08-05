@@ -1,0 +1,11 @@
+[Unit]
+Description=Anchor the kascov passport root daily (only when it changed)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+AccuracySec=10min
+Persistent=true
+Unit=kascov-passport-anchor.service
+
+[Install]
+WantedBy=timers.target
