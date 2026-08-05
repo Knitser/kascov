@@ -800,12 +800,14 @@ async fn anchor_passport(init: bool) -> Result<()> {
         .filter(|s| !s.trim().is_empty())
         .context("KASCOV_RPC_MAINNET is not set; the anchor only talks to our own node")?;
     let client = kascov_labkit::connect_mainnet(&rpc).await?;
-    // flat 0.0001 KAS: generous for a 1-in-1-out with a ~90 byte payload
+    // flat 0.0025 KAS: our node's standardness floor is 100 sompi/gram and
+    // this 1-in-1-out with its ~90 byte payload masses ~1,709 grams, so the
+    // flat fee clears it with headroom. one KAS of fuel is ~400 anchors.
     let txid = kascov_labkit::anchor_self_send(
         &client,
         &keypair,
         anchor_payload(&root).into_bytes(),
-        10_000,
+        250_000,
     )
     .await?;
 
