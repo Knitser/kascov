@@ -1,6 +1,11 @@
 [
   {
     "date": "2026-08-05",
+    "title": "the passport touched mainnet",
+    "body": "the anchor is live: a transaction from the published anchor address carries kascov:passport:v1:<root> in its payload, and /passport shows the green anchored state with the txid. the root re-anchors daily whenever it changes, and it already has, twice. a badge on any passport now verifies against raw chain bytes with no kascov server in the loop. reputation, notarized by the chain it lives on."
+  },
+  {
+    "date": "2026-08-05",
     "title": "voting writes itself into your passport",
     "body": "closing a vote round now mints a participation claim for every ballot: voted-round-N, naming the round and nothing else. the choice is never stored and never published, ballots are still deleted at close, and nothing mints for rounds closed before today. the passport page also learned to tell the truth harder: until the mainnet anchor arms, the root lives only in the file this site serves, and the page now says exactly that."
   },
