@@ -85,6 +85,12 @@
       <li>Rounds close when the operator closes them, or after five days,
           whichever comes first. Closing freezes the counts and deletes the
           ballots themselves.</li>
+      <li>Casting a ballot adds a participation claim to your public
+          <a href="/passport">passport</a> when the round closes:
+          <code>voted-round-N</code>, naming the round and nothing else. The
+          claim never says what you picked; the ballot itself is deleted at
+          close, and the claim appears in the public file on the next
+          passport rebuild, within about six hours.</li>
       <li>The vote accelerates the audit queue; it never decides a verdict.</li>
       <li>kascov may audit anything at any time, voted for or not.</li>
     </ul>

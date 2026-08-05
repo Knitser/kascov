@@ -249,6 +249,49 @@ export function parseSlate(text) {
   return labels;
 }
 
+/* ---------------------------------------------------- participation claims */
+
+/* the no-retroactivity line: participation mints only for rounds closed at or
+   after the day this shipped. Ballots from rounds closed earlier were deleted
+   under the old contract, and deleted ballots mint nothing — reconstructing
+   them is exactly what the published privacy contract forbids. */
+export const PARTICIPATION_EPOCH_MS = Date.parse('2026-08-05T00:00:00Z');
+
+/** The participation mint, run at the moment a round closes and BEFORE its
+ *  ballots are deleted. Pure: returns a new verified map where every holder
+ *  with a ballot in the round gains one {round_id, closed_ms} entry. The
+ *  entry records THAT they voted, never WHAT: the ballot's value is not read
+ *  here, so the choice cannot leak into state that outlives the round. */
+export function mintParticipation(verified, round, epoch = PARTICIPATION_EPOCH_MS) {
+  const closedMs = Number(round?.closed_ms) || 0;
+  if (closedMs < epoch) return verified; // the no-retroactivity line holds
+  let out = verified;
+  for (const userId of Object.keys(round.ballots || {})) {
+    const rec = verified[userId];
+    if (!rec) continue; // a ballot without a record mints nothing for nobody
+    const prev = Array.isArray(rec.participation) ? rec.participation : [];
+    // a round already minted stays minted once: double-close cannot duplicate
+    if (prev.some((p) => p.round_id === round.id)) continue;
+    if (out === verified) out = { ...verified };
+    out[userId] = { ...rec, participation: [...prev, { round_id: round.id, closed_ms: closedMs }] };
+  }
+  return out;
+}
+
+/** One holder's participation as passport claims: voted-round-1 says a ballot
+ *  was cast in round-1, dated the close. The badge names the ROUND and never
+ *  the choice — the tally publishes counts, this publishes presence, and
+ *  nothing anywhere links an address to an option. */
+export function participationClaims(record) {
+  return (record?.participation || []).map((p) => ({
+    v: 1,
+    address: record.address,
+    badge: `voted-${p.round_id}`,
+    granted_ms: Number(p.closed_ms) || 0,
+    source: 'kascov-discord',
+  }));
+}
+
 /* ----------------------------------------------------------- watchtower */
 
 /** Which side of the two lines a balance sits on. The lines are the only
@@ -322,7 +365,10 @@ export function alertMessage(alert, names = {}) {
    link stays this bot's secret, exactly as /verify promised. Revocation is
    ABSENCE: a badge that is gone simply does not appear in the newest tree,
    and its old proof stops verifying against the newest root. The mainnet
-   anchor is not armed yet, and the file says so rather than implying it. */
+   anchor is not armed yet, and the file says so rather than implying it.
+   Participation in a closed audit-vote round mints voted-<round-id> — the
+   round and the close time, never the choice, which is deleted with the
+   ballots and mints for no round closed before PARTICIPATION_EPOCH_MS. */
 
 /** The role names that mint a passport claim, and the badge each becomes.
  *  verified-holder is deliberately NOT here: that badge derives from this
@@ -437,7 +483,7 @@ export function buildPassportFile(claims, nowMs) {
     claims: sorted.map((claim, i) => ({ claim, proof: merkleProof(leaves, i) })),
     anchor: {
       status: 'pending',
-      note: 'the mainnet anchor arms when the operator funds the anchor key; until then the root is published here and in the git history',
+      note: 'the mainnet anchor arms when the operator funds the anchor key; until then the root is published only in this served file, and /passport says exactly what that means',
     },
   };
 }
@@ -598,6 +644,10 @@ function finalizeRound(round, nowMs) {
   round.counts = tallyCounts(round);
   round.status = 'closed';
   round.closed_ms = round.closed_ms || Math.min(nowMs, Number(round.closes_ms) || nowMs);
+  // the fact of voting outlives the ballots; the choice does not. minted here
+  // because this is the last moment the ballots exist, so the operator close
+  // and the five-day auto-close cannot drift apart.
+  state.verified = mintParticipation(state.verified, round);
   delete round.ballots;
 }
 
@@ -676,6 +726,10 @@ async function gatherClaims() {
       v: 1, address: rec.address, badge: 'verified-holder',
       granted_ms: Number(rec.verified_ms) || 0, source: 'kascov-discord',
     });
+    // participation rides the same proven address: one claim per round a
+    // ballot was cast in, minted at close. the choice was never stored, so
+    // no code path here could publish it even by accident.
+    claims.push(...participationClaims(rec));
     const seen = state.passport[userId] || {};
     let badges = null;
     if (guildId) {
@@ -946,7 +1000,12 @@ async function onPassport(interaction) {
   const userId = interaction.member?.user?.id || interaction.user?.id;
   const rec = state.verified[userId];
   const badges = [];
-  if (rec) badges.push('verified-holder');
+  if (rec) {
+    badges.push('verified-holder');
+    // the ephemeral view shows what the public file will carry: the round
+    // a ballot was cast in, never the choice.
+    badges.push(...participationClaims(rec).map((c) => c.badge));
+  }
   try {
     const { guildId } = await guildAndRole();
     // the interaction already carries the member's role ids; only the guild's

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>the kascov passport — your reputation, verifiable without us</title>
-  <meta name="description" content="Every earned kascov role becomes a claim keyed to a chain-proven address. Claims are merkleized and the root is published; this page rechecks the math in your browser. The mainnet anchor is not armed yet, and this page says so.">
+  <meta name="description" content="Every earned kascov role becomes a claim keyed to a chain-proven address. Claims are merkleized and the root is published; this page rechecks the math in your browser and shows the live status of the mainnet anchor.">
   <meta name="robots" content="index, follow">
   <link rel="canonical" href="https://kascov.io/passport">
   <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
@@ -44,6 +44,9 @@
       background: var(--watch-soft); color: var(--watch); border: 1px solid var(--watch-border);
     }
     .arm p { margin: 0; flex: 1 1 24ch; font-size: .92rem; }
+    /* the anchored state: same box, the calm color of a settled fact */
+    .arm.ok { border-color: var(--born); background: var(--born-soft); }
+    .arm.ok .chip { background: var(--born-soft); color: var(--born); border-color: var(--born); }
 
     .lookup { display: flex; gap: .6rem; flex-wrap: wrap; margin: 1.25rem 0 .9rem; }
     .lookup input {
@@ -103,16 +106,19 @@
       any browser &mdash; including one that has never heard of kascov.
     </p>
 
-    <div class="arm">
+    <div class="arm" id="anchor-box">
       <span class="chip">not yet anchored</span>
       <p>
         The mainnet anchor &mdash; the root written into a Kaspa transaction
         &mdash; arms next. Until it does, the root is published only in the
-        claims file and the public repo&rsquo;s history, which means
-        &ldquo;without us&rdquo; is still partly aspiration: you can already
-        check the math without us, but you still trust us to have published
-        the root when we say we did. This page will say so for exactly as long
-        as that is true.
+        claims file this site serves: the file never enters git, so there is
+        no repo history to fall back on, and &ldquo;without us&rdquo; is
+        still partly aspiration. You can already check the math without us,
+        but you still trust this site to be serving the root it says it is.
+        The anchor&rsquo;s status lives at
+        <a href="/passport-anchor.json"><code>/passport-anchor.json</code></a>;
+        this box checks it against the claims file in your browser and says
+        exactly what it finds.
       </p>
     </div>
 
@@ -131,8 +137,8 @@
       <p class="honest">
         Enter the address you proved and this box shows every claim published
         for it: the badge, the granted date, the merkle root, and a
-        verify-it-yourself block with the proof. Nothing is fetched until you
-        ask.
+        verify-it-yourself block with the proof. The lookup runs entirely in
+        your browser; the address you type never leaves it.
       </p>
     </div>
     <noscript>
@@ -153,18 +159,24 @@
           bought: the <a href="/token">token</a> buys status, voice and
           access, not a verdict and not a badge.</li>
       <li><strong>The role becomes a claim.</strong> A claim is three fields:
-          the proven address, the badge name, the granted date. No Discord id,
-          no balance, no history &mdash; what the bot stores while a role is
-          live is a separate, fully enumerated list at
+          the proven address, the badge name, the granted date. Voting mints
+          one too: when a round closes, a participation claim &mdash;
+          <code>voted-round-N</code>, naming the round &mdash; lands next to
+          your badges. It never says what you picked, and it exists only for
+          rounds closed after participation claims shipped: earlier rounds
+          deleted their ballots, so there is nothing to mint from. No Discord
+          id, no balance, no history &mdash; what the bot stores while a role
+          is live is a separate, fully enumerated list at
           <a href="/bot">/bot</a>.</li>
       <li><strong>The claims are merkleized.</strong> Each claim hashes to a
           leaf, the leaves build a tree, and the root is published in the same
           file as the claims. Change one claim and the root changes; that is
           the whole trick.</li>
-      <li><strong>The root gets anchored &mdash; next.</strong> A mainnet
-          transaction carrying the root makes the publication itself
-          checkable without this site. It is not armed yet, and the box at
-          the top of this page says so.</li>
+      <li><strong>The root gets anchored.</strong> A mainnet transaction
+          carrying the root makes the publication itself checkable without
+          this site. The box at the top of this page checks whether that has
+          happened for the root currently served, and says exactly what it
+          finds.</li>
     </ul>
 
     <h2 id="check">Check the math</h2>
@@ -199,6 +211,9 @@
               change</li>
           <li>this page&rsquo;s in-browser recheck of every proof against
               that root</li>
+          <li>the anchor box at the top, which checks
+              <code>/passport-anchor.json</code> against the served root and
+              reports exactly what it finds</li>
           <li>the role flow itself: prove an address, earn the role
               (<a href="/bot">/bot</a>)</li>
         </ul>
@@ -206,9 +221,9 @@
       <div>
         <h3>pending, in the open</h3>
         <ul>
-          <li>the mainnet anchor transaction &mdash; arms next; until then
-              the root&rsquo;s publication still relies on this site and the
-              repo history</li>
+          <li>the mainnet anchor cadence &mdash; the box at the top shows the
+              live status; between anchors the newest root&rsquo;s
+              publication relies on this site alone</li>
           <li>claim signatures, so a single claim can travel and be checked
               alone, without the whole file</li>
           <li>the KCC convention review &mdash; whether this claim format
@@ -342,6 +357,43 @@
 
     function day(v) { return String(v == null ? '' : v).slice(0, 10); }
 
+    /* the anchor file's contract, checked before anything is claimed from it:
+       the root the transaction carries and the txid are required; the sending
+       address and the date render only when published. malformed is reported
+       as malformed, never half-read */
+    function anchorState(j) {
+      if (!j || typeof j !== 'object') return { mode: 'malformed' };
+      var root = isHex(j.merkle_root, 64) ? j.merkle_root : (isHex(j.root, 64) ? j.root : '');
+      var txid = isHex(j.txid, 64) ? j.txid : '';
+      if (!root || !txid) return { mode: 'malformed' };
+      return {
+        mode: 'ok',
+        root: root,
+        txid: txid,
+        address: typeof j.address === 'string' && /^kaspa:[a-z0-9]{20,}$/.test(j.address) ? j.address : '',
+        date: anchorDay(j),
+        network: typeof j.network === 'string' && /^[a-z0-9-]{2,20}$/.test(j.network) ? j.network : 'mainnet'
+      };
+    }
+
+    /* the anchor's date from whichever field the file carries; empty when it
+       cannot be read, never guessed */
+    function anchorDay(j) {
+      if (Number.isFinite(j.anchored_ms)) {
+        var d = new Date(Number(j.anchored_ms));
+        return isNaN(d.getTime()) ? '' : day(d.toISOString());
+      }
+      var s = typeof j.anchored_at === 'string' ? j.anchored_at
+        : typeof j.anchored === 'string' ? j.anchored : '';
+      return /^\d{4}-\d{2}-\d{2}/.test(s) ? day(s) : '';
+    }
+
+    /* display shortening only: the full value always rides in the title and,
+       for the txid, in the link target */
+    function shortMid(s) {
+      return s.length > 30 ? s.slice(0, 18) + '…' + s.slice(-8) : s;
+    }
+
     function claimHtml(c, i, state) {
       var badge = c.claim.badge == null ? 'unnamed badge' : c.claim.badge;
       var granted = c.claim.granted_ms ? day(new Date(Number(c.claim.granted_ms)).toISOString()) : '';
@@ -421,6 +473,10 @@
         .then(function (r) {
           if (r.status === 404) throw { notYet: true };
           if (!r.ok) throw new Error('http ' + r.status);
+          /* a missing file answers as the SPA shell (200, text/html) in
+             production, so "not json" is the same fact as a 404 */
+          var ct = String(r.headers.get('content-type') || '').toLowerCase();
+          if (ct.indexOf('json') === -1) throw { notYet: true };
           return r.json();
         })
         .then(function (j) {
@@ -461,6 +517,79 @@
           + 'the format is <code>kaspa:&hellip;</code> (or <code>kaspatest:&hellip;</code>).');
       }
       lookup(addr);
+    });
+
+    /* ---- the anchor box: both files fetched once, compared in the browser ---- */
+
+    var ANCHOR_FILE = '/passport-anchor.json';
+    var armBox = $('anchor-box');
+
+    function armSay(cls, chip, html) {
+      armBox.className = 'arm' + (cls ? ' ' + cls : '');
+      armBox.innerHTML = '<span class="chip">' + esc(chip) + '</span><p>' + html + '</p>';
+    }
+
+    /* a fetch that cannot settle the question resolves to its own honest
+       shape; nothing here throws and nothing is guessed either way. a missing
+       file answers as the SPA shell (200, text/html) in production — caddy's
+       try_files falls back to index.html — so "not json" means absent, the
+       same as a plain 404 */
+    function fetchState(url) {
+      return fetch(url, { cache: 'no-cache' }).then(function (r) {
+        if (r.status === 404) return { absent: true };
+        if (!r.ok) return { error: true };
+        var ct = String(r.headers.get('content-type') || '').toLowerCase();
+        if (ct.indexOf('json') === -1) return { absent: true };
+        return r.json().then(function (j) { return { json: j }; }, function () { return { error: true }; });
+      }, function () { return { error: true }; });
+    }
+
+    function renderAnchor(a, c) {
+      /* absent is the static copy already on the page: not yet anchored */
+      if (a.absent) return;
+      if (a.error) {
+        return armSay('', 'anchor status unknown',
+          'reading <a href="' + ANCHOR_FILE + '"><code>' + ANCHOR_FILE + '</code></a> failed '
+          + 'just now, so this box claims nothing either way. try again, or read the file directly.');
+      }
+      var st = anchorState(a.json);
+      if (st.mode !== 'ok') {
+        return armSay('', 'anchor status unknown',
+          'an anchor file exists but is not in a shape this page knows, so nothing is claimed '
+          + 'from it. the raw file is at <a href="' + ANCHOR_FILE + '"><code>' + ANCHOR_FILE
+          + '</code></a>.');
+      }
+      var tx = '<a href="/#/' + esc(st.network) + '/tx/' + esc(st.txid) + '" title="' + esc(st.txid)
+        + '"><code>' + esc(shortMid(st.txid)) + '</code></a>';
+      var sent = (st.address
+        ? ', sent from <code title="' + esc(st.address) + '">' + esc(shortMid(st.address)) + '</code>'
+        : '') + (st.date ? ' on ' + esc(st.date) : '');
+      var current = c.json && isHex(c.json.merkle_root, 64) ? c.json.merkle_root : null;
+      if (!current) {
+        var why = c.absent ? 'no claims file is published right now'
+          : c.error ? 'the claims file could not be read just now'
+          : 'the claims file serves no comparable root right now';
+        return armSay('', 'anchor found',
+          'an anchor exists: transaction ' + tx + sent + ' carries root <code>' + esc(st.root)
+          + '</code>. but ' + why + ', so this box cannot compare that root to a current one, '
+          + 'and claims nothing further.');
+      }
+      if (st.root === current) {
+        return armSay('ok', 'anchored',
+          'the current root is anchored: transaction ' + tx + sent + ' carries <code>'
+          + esc(st.root) + '</code>, the same root the claims file serves right now. this box '
+          + 'compares the two files in your browser; it does not read the chain, so follow the '
+          + 'transaction to check the payload yourself.');
+      }
+      armSay('', 'anchor behind',
+        'the last anchor covers an older root: transaction ' + tx + sent + ' anchored <code>'
+        + esc(st.root) + '</code>, while the claims file now serves <code>' + esc(current)
+        + '</code>. claims changed since that transaction and the next anchor is due; until it '
+        + 'lands, the newest root is published only in the served claims file.');
+    }
+
+    Promise.all([fetchState(ANCHOR_FILE), fetchState(FILE)]).then(function (rs) {
+      renderAnchor(rs[0], rs[1]);
     });
   })();
   </script>

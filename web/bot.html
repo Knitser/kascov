@@ -50,7 +50,7 @@
       taken on trust, including your word for it. Everything else it does, the
       audit vote and the watchtower DMs, rides on that same proof.
     </p>
-    <p class="updated">last updated 2026-08-04</p>
+    <p class="updated">last updated 2026-08-05</p>
 
     <div class="never">
       <p style="margin:0">
@@ -107,7 +107,10 @@
     <p>
       The tally is public at <a href="/vote">kascov.io/vote</a> as counts only.
       Who voted for what is never published, and when a round closes the
-      ballots themselves are deleted; only the counts survive. The disclaimers
+      ballots themselves are deleted. Two things survive a close: the counts,
+      and the fact that you took part &mdash; a <code>voted-round-N</code>
+      claim in your public <a href="/passport">passport</a> that names the
+      round, never the choice. The disclaimers
       are part of the rules and ship inside the tally file itself: the vote
       accelerates the audit queue, it never decides a verdict, and kascov may
       audit anything at any time, voted for or not.
@@ -187,6 +190,10 @@
             watchtower told you about, kept so it messages you on change only</li>
         <li>your ballot in the current round, while that round is open; closing
             a round keeps the counts and deletes the ballots</li>
+        <li>the rounds you have voted in &mdash; the round name and its close
+            date, kept after close so your passport can carry its
+            <code>voted-round-N</code> claim; the choice itself is deleted
+            with the ballot</li>
         <li>the time of the last periodic re-check</li>
         <li>an unreachable flag, set if your DMs are closed so the watchtower
             stops trying; <code>/alerts on</code> clears it</li>
@@ -197,6 +204,19 @@
       That is the whole record. It exists so the role can be re-checked later
       without asking you to sign again, and so the same address cannot be claimed
       by two different accounts.
+    </p>
+
+    <h3 id="passport">What becomes public: the passport</h3>
+    <p>
+      One derived slice of that record is published on purpose, in the claims
+      file at <a href="/passport-claims.json"><code>/passport-claims.json</code></a>
+      and rendered at <a href="/passport">kascov.io/passport</a>: the address
+      you proved, each badge you have earned, the date it was granted, and
+      &mdash; for rounds closed after this notice first shipped &mdash; a
+      <code>voted-round-N</code> participation claim naming the round you
+      voted in. The file never carries your Discord identity, and a
+      participation claim never says what you picked: the account-to-address
+      link and the ballot itself stay unpublished.
     </p>
 
     <h3>While you are mid-verification</h3>
@@ -224,7 +244,8 @@
 
     <h3>Who else sees it</h3>
     <p>
-      Nobody. The record is not sold, shared, or sent anywhere. It lives on the
+      Beyond the passport slice above, nobody. The record itself is not sold,
+      shared, or sent anywhere. It lives on the
       same server that runs kascov.io. Note that your Kaspa address and its
       balances were already public on chain before any of this: the bot learns
       which Discord account goes with an address, and that link is the only new
@@ -235,7 +256,9 @@
     <p>
       Run <code>/unverify</code>. The row is deleted, anything mid-verification
       is cleared, your ballot leaves any open round, and the role is removed,
-      with no record that it ever existed. You can verify again later with the
+      with no record that it ever existed. Passport claims derive from that
+      record, so they leave the public claims file the next time it
+      regenerates: revocation is absence. You can verify again later with the
       same address or a different one. Leaving the server has the same effect,
       applied at the next periodic check, so within a few hours rather than
       instantly.

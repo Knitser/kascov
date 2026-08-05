@@ -1,6 +1,11 @@
 [
   {
     "date": "2026-08-05",
+    "title": "voting writes itself into your passport",
+    "body": "closing a vote round now mints a participation claim for every ballot: voted-round-N, naming the round and nothing else. the choice is never stored and never published, ballots are still deleted at close, and nothing mints for rounds closed before today. the passport page also learned to tell the truth harder: until the mainnet anchor arms, the root lives only in the file this site serves, and the page now says exactly that."
+  },
+  {
+    "date": "2026-08-05",
     "title": "the pocket fix",
     "body": "on a phone, an address page's copy button now sits where a thumb expects it, and the token tables stop letting a long name column swallow the screen: names compact, balances stay visible, and the sideways scroll actually shows you something."
   },

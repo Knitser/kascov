@@ -14,6 +14,7 @@ import {
   balanceBucket, alertsEnabled, cursorDiff, deliverableAlerts,
   badgesFromRoles, buildPassportFile, canonicalClaim, claimLeaf,
   merkleProof, merkleRoot, verifyProof,
+  PARTICIPATION_EPOCH_MS, mintParticipation, participationClaims,
 } from '../scripts/discord-holder-bot.mjs';
 
 const ADDR = 'kaspa:qzlxrxar9w4z2n5ynmr8n356hawma24k44dedxfuvqfyn0dprn2egpyf9wul9';
@@ -426,4 +427,123 @@ test('the public file carries addresses and badges, never a Discord identity', (
     assert.deepEqual(Object.keys(claim).sort(), ['address', 'badge', 'granted_ms', 'source', 'v']);
     assert.equal(claim.source, 'kascov-discord');
   }
+});
+
+/* ---------------------------------------------------- participation claims */
+
+/* The privacy contract, pinned: a participation claim names the round and
+   NEVER the choice. The choice lives only in the ballots map, which dies at
+   close, and these tests prove the mint copies nothing from its values. */
+
+const closedRound = (closedMs, ballots = { u1: 0, u2: 2 }) => ({
+  id: 'round-1', status: 'closed', options: ['token-a', 'token-b', 'token-c'],
+  opened_ms: 0, closes_ms: VOTE_MAX_AGE_MS, closed_ms: closedMs, ballots,
+});
+
+test('closing a round mints participation, never the choice', () => {
+  const verified = {
+    u1: { address: ADDR, balance: 500 },
+    u2: { address: 'kaspa:qother', balance: 200 },
+  };
+  const out = mintParticipation(verified, closedRound(50, { u1: 0, u2: 2, ghost: 1 }), 0);
+  // the stored entry is the round and the close time, and NOTHING else: no
+  // option index, no choice field, nothing derived from the ballot's value
+  assert.deepEqual(out.u1.participation, [{ round_id: 'round-1', closed_ms: 50 }]);
+  assert.deepEqual(Object.keys(out.u1.participation[0]).sort(), ['closed_ms', 'round_id']);
+  // u1 voted option 1 and u2 voted option 3, yet their entries are
+  // IDENTICAL: the mint is blind to the choice by construction
+  assert.deepEqual(out.u2.participation, out.u1.participation);
+  // a ballot without a verified record mints nothing for nobody
+  assert.ok(!('ghost' in out));
+  // pure: the input map was not touched
+  assert.equal(verified.u1.participation, undefined);
+});
+
+test('a participation claim carries the round, the address, and no choice', () => {
+  const rec = {
+    address: ADDR,
+    participation: [
+      { round_id: 'round-1', closed_ms: 50 },
+      { round_id: 'round-2', closed_ms: 90 },
+    ],
+  };
+  const claims = participationClaims(rec);
+  assert.deepEqual(claims, [
+    { v: 1, address: ADDR, badge: 'voted-round-1', granted_ms: 50, source: 'kascov-discord' },
+    { v: 1, address: ADDR, badge: 'voted-round-2', granted_ms: 90, source: 'kascov-discord' },
+  ]);
+  // same shape as every other claim, and nothing choice-shaped rides along
+  for (const claim of claims) {
+    assert.deepEqual(Object.keys(claim).sort(), ['address', 'badge', 'granted_ms', 'source', 'v']);
+  }
+  const json = JSON.stringify(claims);
+  assert.ok(!json.includes('choice'));
+  assert.ok(!json.includes('option'));
+  // no participation means no claims, quietly
+  assert.deepEqual(participationClaims({ address: ADDR }), []);
+  assert.deepEqual(participationClaims(undefined), []);
+});
+
+test('the five-day auto-close mints exactly like an operator close', () => {
+  // the expiry sweep clamps closed_ms to the deadline: Math.min(now, closes_ms).
+  // a round swept late still mints, dated the deadline it actually closed at.
+  const deadline = VOTE_MAX_AGE_MS;
+  const sweptAt = deadline + 36 * 60 * 60 * 1000; // the sweep ran late
+  const out = mintParticipation(
+    { u1: { address: ADDR } },
+    closedRound(Math.min(sweptAt, deadline)),
+    0,
+  );
+  assert.deepEqual(out.u1.participation, [{ round_id: 'round-1', closed_ms: deadline }]);
+});
+
+test('a round closed before the epoch mints nothing, retroactively or otherwise', () => {
+  const verified = { u1: { address: ADDR } };
+  // one millisecond before the no-retroactivity line: nothing mints, and the
+  // input comes back untouched rather than copied
+  assert.equal(mintParticipation(verified, closedRound(PARTICIPATION_EPOCH_MS - 1)), verified);
+  // exactly AT the line: mints, because the guard is at-or-after
+  const out = mintParticipation(verified, closedRound(PARTICIPATION_EPOCH_MS));
+  assert.deepEqual(out.u1.participation,
+    [{ round_id: 'round-1', closed_ms: PARTICIPATION_EPOCH_MS }]);
+  // and the epoch is the real ship date, not a placeholder
+  assert.equal(PARTICIPATION_EPOCH_MS, Date.parse('2026-08-05T00:00:00Z'));
+});
+
+test('double-close does not duplicate participation', () => {
+  const verified = { u1: { address: ADDR } };
+  const once = mintParticipation(verified, closedRound(50), 0);
+  // worst case: the ballots somehow survive into a second close
+  const twice = mintParticipation(once, closedRound(50), 0);
+  assert.deepEqual(twice.u1.participation, [{ round_id: 'round-1', closed_ms: 50 }]);
+  // normal case: the ballots are already deleted, so there is nothing to mint
+  const bare = closedRound(50);
+  delete bare.ballots;
+  assert.equal(mintParticipation(once, bare, 0), once);
+  // a DIFFERENT round appends rather than replaces
+  const second = mintParticipation(once, { ...closedRound(90), id: 'round-2' }, 0);
+  assert.deepEqual(second.u1.participation, [
+    { round_id: 'round-1', closed_ms: 50 },
+    { round_id: 'round-2', closed_ms: 90 },
+  ]);
+});
+
+test('unverify removes participation with the record: revocation is absence', () => {
+  const verified = mintParticipation(
+    { u1: { address: ADDR }, u2: { address: 'kaspa:qother' } },
+    closedRound(50),
+    0,
+  );
+  const claimsOf = (v) => Object.values(v).flatMap(participationClaims);
+  const before = buildPassportFile(claimsOf(verified), 1000);
+  const mine = before.claims.find((c) => c.claim.address === ADDR);
+  assert.equal(mine.claim.badge, 'voted-round-1');
+  assert.equal(mine.claim.granted_ms, 50);
+  assert.ok(verifyProof(mine.claim, mine.proof, before.merkle_root));
+  // forgetMember deletes the whole record and participation goes with it,
+  // so the next rebuild simply does not contain the claim
+  delete verified.u1;
+  const after = buildPassportFile(claimsOf(verified), 2000);
+  assert.ok(!JSON.stringify(after).includes(ADDR));
+  assert.ok(!verifyProof(mine.claim, mine.proof, after.merkle_root));
 });

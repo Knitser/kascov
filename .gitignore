@@ -47,3 +47,4 @@ test-results/
 # generated at deploy time by the holder bot, never committed
 web/vote-tally.json
 web/passport-claims.json
+web/passport-anchor.json
