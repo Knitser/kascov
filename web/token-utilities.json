@@ -14,14 +14,14 @@
       "id": "audit-vote",
       "name": "audit vote",
       "desc": "Verified holders point the audit bench at the next unknown build. One holder, one vote, above a dust floor of 100 KASCOV (adjustable by commit) so a ballot cannot be stuffed for free.",
-      "status": "building",
+      "status": "live",
       "link": "/vote"
     },
     {
       "id": "watchtower",
       "name": "watchtower",
       "desc": "The bot watches the tokens your proven address holds and DMs you when one changes phase or your balance crosses a line — alerts derived from public data, never private findings.",
-      "status": "building",
+      "status": "live",
       "link": "/bot"
     },
     {
@@ -35,7 +35,7 @@
       "id": "holder-lane",
       "name": "holder lane",
       "desc": "Extra API capacity on top of the anonymous floor — today 5x the published floor, and the floor itself only ever rises.",
-      "status": "building",
+      "status": "live",
       "link": "/lane"
     },
     {
@@ -49,21 +49,21 @@
       "id": "passport",
       "name": "the passport",
       "desc": "every earned role becomes a claim keyed to your proven address, merkleized, root published; the mainnet anchor arms next. your reputation, verifiable without us.",
-      "status": "building",
+      "status": "live",
       "link": "/passport"
     },
     {
       "id": "unknowns-board",
       "name": "unknowns board",
       "desc": "every covenant build the bench cannot yet name, as open problems. pin one, get the auditor role and your handle on the family forever.",
-      "status": "building",
+      "status": "live",
       "link": "/unknowns"
     },
     {
       "id": "bench-wire",
       "name": "bench wire",
       "desc": "every monday the bench posts its week in the discord: totals, the top families, a specimen of the week.",
-      "status": "building",
+      "status": "live",
       "link": "https://discord.gg/83RjgQBDEX"
     }
   ]
