@@ -1,6 +1,11 @@
 [
   {
     "date": "2026-08-05",
+    "title": "the pocket fix",
+    "body": "on a phone, an address page's copy button now sits where a thumb expects it, and the token tables stop letting a long name column swallow the screen: names compact, balances stay visible, and the sideways scroll actually shows you something."
+  },
+  {
+    "date": "2026-08-05",
     "title": "the passport, the unknowns board, and the bench wire",
     "body": "three community programs land. the passport: every earned role becomes a claim keyed to your chain-proven address, merkleized, the root published, and the same verification ships in the js and py clients, so a badge checks out with zero trust in kascov's servers; the mainnet anchor arms next. the unknowns board lists every covenant build the bench cannot yet name, as open problems: pin one and the family carries your handle forever. and every monday the bench posts its week to the discord, whether or not anyone was watching."
   },

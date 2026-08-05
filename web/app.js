@@ -10,16 +10,16 @@ import {
   esc, ordinal, fmtInt,
   relTime, relTimeShort, fmtClock, fmtSpan, shortHex, leAmount,
   lineageBadge, payloadPeek, utcTitle, absShort,
-} from './core/format.js?v=20260803-focuscard';
+} from './core/format.js?v=20260805-mobilefit';
 import {
   NETWORKS, MS_PER_DAA, PAGE_SIZE, GRID_PAGE, STORY_COUNT, TEASER_COUNT,
   PULSE_BUCKETS, ACTIVITY_RANGES, ACTIVITY_LABELS, ACTIVITY_PHRASE,
   ACTIVITY_TTL_MS, ACTIVITY_MAX_COLS, ADDR_RE, PUBKEY_RE,
   fmtAmount, makeAnchor, daaToMs, txUrl,
   state, loadWatch, saveWatch,
-} from './core/state.js?v=20260803-focuscard';
-import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260803-focuscard';
-import { createPendingModel } from './core/pending.js?v=20260803-focuscard';
+} from './core/state.js?v=20260805-mobilefit';
+import { loadPrice, amountWithUsd, usdToggleHtml, toggleUsd } from './core/price.js?v=20260805-mobilefit';
+import { createPendingModel } from './core/pending.js?v=20260805-mobilefit';
 import {
   isAlive,
   buildIndex, fetchGridPage, loadNetwork, loadMoreGrid,
@@ -36,12 +36,12 @@ import {
   loadCommunity,
   loadLaunchpads,
   loadRegistry, registryEntry,
-} from './core/data.js?v=20260803-focuscard';
-import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260803-focuscard';
-import { createRefreshGate } from './core/refresh.js?v=20260803-focuscard';
-import { networkRouteHash } from './core/routing.js?v=20260803-focuscard';
-import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260803-focuscard';
-import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260803-focuscard';
+} from './core/data.js?v=20260805-mobilefit';
+import { galaxyPreloadPolicy, routeNeedsSnapshot } from './core/loading.js?v=20260805-mobilefit';
+import { createRefreshGate } from './core/refresh.js?v=20260805-mobilefit';
+import { networkRouteHash } from './core/routing.js?v=20260805-mobilefit';
+import { selectTokens, tokenLifecycle } from './core/token-directory.js?v=20260805-mobilefit';
+import { createHolderBubbleMap } from './core/holder-bubbles.js?v=20260805-mobilefit';
 
 
 
@@ -651,7 +651,7 @@ function renderGalaxy() {
   if (!gsec || !gsec.open || !canvas) return;
   if (!window.kascovGalaxy) {
     /* first open: pull the renderer in, then come back */
-    ensureScript('/galaxy.js?v=20260803-focuscard').then(() => {
+    ensureScript('/galaxy.js?v=20260805-mobilefit').then(() => {
       if (gsec.open && parseRoute().view === 'explore') renderGalaxy();
     }).catch(() => {});
     return;

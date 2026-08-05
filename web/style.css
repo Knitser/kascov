@@ -2115,7 +2115,17 @@ a.btn:hover { text-decoration: none; }
 
   /* detail: avatar above the name, everything tightens a notch */
   .detail-head { flex-direction: column; align-items: flex-start; gap: 0.6rem; }
-  .id-chip { flex-wrap: wrap; max-width: 100%; row-gap: 0.25rem; }
+  /* a wrapped pill orphans its copy button under three lines of hash; at
+     phone width the chip becomes a small card with the button pinned
+     top-right, so the value flows and the button stays findable */
+  .id-chip {
+    position: relative;
+    display: block;
+    max-width: 100%;
+    border-radius: 12px;
+    padding: 0.55rem 3.4rem 0.55rem 0.8rem;
+  }
+  .id-chip .copy-btn { position: absolute; top: 0.45rem; right: 0.5rem; }
   .tl-item { gap: 0.75rem; }
   .tl-text { font-size: 0.92rem; }
   .tl-meta { font-size: 0.8rem; }
@@ -4618,3 +4628,18 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
   cursor: pointer;
 }
 .back-btn:hover { text-decoration: underline; }
+
+/* Phones: the token tables' identity column must never swallow the viewport.
+   The sticky-first-column scaffold (above, at 840px) only works if the column
+   is narrower than the screen — so the launchpad alias hides and the column
+   caps, which puts balances back on screen and makes the sideways scroll
+   actually reveal something. */
+@media (max-width: 700px) {
+  .tokens-table .token-alias { display: none; }
+  .tokens-table th:first-child,
+  .tokens-table td:first-child {
+    max-width: 55vw;
+    overflow: hidden;
+  }
+  .tokens-table td:first-child .token-coin { max-width: 100%; }
+}
