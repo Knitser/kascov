@@ -208,7 +208,7 @@ async fn main() -> Result<()> {
         Command::DumpProgram { covenant_id, ref out } => {
             let out = out.clone();
             let store = open_store(&cli)?;
-            let id: [u8; 32] = *covenant_id.as_ref();
+            let id: [u8; 32] = covenant_id.0;
             let Some(program) = store.recover_program(&id)? else {
                 anyhow::bail!(
                     "{covenant_id}: no spend of this covenant reveals a program — \
