@@ -121,6 +121,45 @@ const KCM_IDX_CREATOR: [usize; 2] = [10, 736];
 /// The seed the launch put in, which this family excludes from its raise target.
 const KCM_IDX_SEED: [usize; 3] = [779, 781, 783];
 
+/// A RESTING LIMIT ORDER, which is a market of a different shape: not a pool with a
+/// price curve but a single offer at a single price, filled once and gone.
+///
+/// Worth recognising for a reason the pools do not have. A pool is one cell, so an
+/// indexer that finds it has found the whole market; an order book is many cells and
+/// an indexer that cannot enumerate them leaves the book invisible to everyone but
+/// whoever posted it. Recognition is not a convenience here, it is the difference
+/// between a book existing and not.
+const KCM_ORDER_FIXTURE: &[u8] = include_bytes!("../../kascov-decode/fixtures/kcm_order_v1.bin");
+const KCM_ORDER_PUSHES: usize = 413;
+const KCM_ORDER_SLOTS: [usize; 20] = [
+    0, 4, 6, 112, 118, 122, 123, 126, 133, 135, 242, 248, 252, 255, 259, 265, 294, 298, 403, 409,
+];
+const KCM_ORD_SIZE: usize = 0;
+const KCM_ORD_PRICE: [usize; 4] = [4, 6, 122, 123];
+const KCM_ORD_MAKER: [usize; 4] = [126, 252, 259, 298];
+const KCM_ORD_EXPIRY: [usize; 2] = [133, 135];
+const KCM_ORD_TOKEN: [usize; 9] = [112, 118, 242, 248, 255, 265, 294, 403, 409];
+
+/// What a matched order states about itself, all from committed bytes.
+#[derive(Clone, Debug)]
+pub struct OrderParams {
+    pub token_covenant_id: [u8; 32],
+    pub maker: [u8; 32],
+    /// Total sompi the taker must pay the maker for the whole parcel.
+    pub price_sompi: i64,
+    pub size: i64,
+    /// DAA score after which anyone may return the parcel to the maker.
+    pub expiry_daa: i64,
+}
+
+impl OrderParams {
+    /// Sompi per token — what a book sorts by. Integer division would collapse
+    /// distinct price levels, so this is the one place a float is the right answer.
+    pub fn unit_price(&self) -> f64 {
+        if self.size <= 0 { 0.0 } else { self.price_sompi as f64 / self.size as f64 }
+    }
+}
+
 /// The curves' optional fee branch, as a growth cap in bps of the quote.
 ///
 /// Evidence, three independent lines agreeing: (1) BOTH curve generations
@@ -508,6 +547,64 @@ pub fn match_kcm_curve(program: &[u8]) -> Option<CurveParams> {
         creator_fee_owner,
         token_reserve,
     })
+}
+
+/// Match a resting limit order and read the offer it commits to.
+pub fn match_kcm_order(program: &[u8]) -> Option<OrderParams> {
+    let cand = push_units(program);
+    if cand.len() != KCM_ORDER_PUSHES {
+        return None;
+    }
+    let fixture = push_units(KCM_ORDER_FIXTURE);
+    debug_assert_eq!(fixture.len(), KCM_ORDER_PUSHES);
+    let slots: BTreeSet<usize> = KCM_ORDER_SLOTS.into_iter().collect();
+
+    let mut fpos = 0usize;
+    let mut cpos = 0usize;
+    for i in 0..KCM_ORDER_PUSHES {
+        let (fr, fdata) = &fixture[i];
+        let (cr, cdata) = &cand[i];
+        if KCM_ORDER_FIXTURE[fpos..fr.start] != program[cpos..cr.start] {
+            return None;
+        }
+        if !slots.contains(&i)
+            && (fdata != cdata || KCM_ORDER_FIXTURE[fr.clone()] != program[cr.clone()])
+        {
+            return None;
+        }
+        fpos = fr.end;
+        cpos = cr.end;
+    }
+    if KCM_ORDER_FIXTURE[fpos..] != program[cpos..] {
+        return None;
+    }
+
+    // Every repeated slot must agree with itself.
+    let one_i64 = |idx: &[usize]| -> Option<i64> {
+        let vals: BTreeSet<Option<i64>> = idx.iter().map(|&i| le_i64(&cand[i].1)).collect();
+        match *vals.into_iter().collect::<Vec<_>>().as_slice() {
+            [Some(v)] => Some(v),
+            _ => None,
+        }
+    };
+    let one_32 = |idx: &[usize]| -> Option<[u8; 32]> {
+        let vals: BTreeSet<&Vec<u8>> = idx.iter().map(|&i| &cand[i].1).collect();
+        match *vals.into_iter().collect::<Vec<_>>().as_slice() {
+            [v] => v.as_slice().try_into().ok(),
+            _ => None,
+        }
+    };
+
+    let price_sompi = one_i64(&KCM_ORD_PRICE)?;
+    let expiry_daa = one_i64(&KCM_ORD_EXPIRY)?;
+    let maker = one_32(&KCM_ORD_MAKER)?;
+    let token_covenant_id = one_32(&KCM_ORD_TOKEN)?;
+    let size = le_i64(&cand[KCM_ORD_SIZE].1)?;
+    if price_sompi <= 0 || size <= 0 || expiry_daa <= 0 {
+        return None;
+    }
+
+    Some(OrderParams { token_covenant_id, maker, price_sompi, size, expiry_daa })
 }
 
 pub fn match_kron_pool(program: &[u8]) -> Option<PoolParams> {
@@ -1787,5 +1884,77 @@ mod kcm_live_tests {
         // and it is not any of the KRON families
         assert!(match_kron_curve(live).is_none());
         assert!(match_kron_curve_v2(live).is_none());
+    }
+}
+
+#[cfg(test)]
+mod kcm_order_tests {
+    use super::*;
+
+    #[test]
+    fn the_order_fixture_matches_itself() {
+        let o = match_kcm_order(KCM_ORDER_FIXTURE).expect("the fixture IS the build");
+        assert_eq!(o.price_sompi, 250_000_000);
+        assert_eq!(o.size, 10_000);
+        assert_eq!(o.expiry_daa, 536_000_000);
+        assert_eq!(o.maker, [0x11; 32]);
+        assert_eq!(o.token_covenant_id, [0x66; 32]);
+        // 25,000 sompi per token, which is what a book would sort on
+        assert!((o.unit_price() - 25_000.0).abs() < 1e-9);
+    }
+
+    /// The slot table is COMPLETE, not merely sufficient: a build of the same source
+    /// with every parameter different still matches, so no varying position was missed.
+    #[test]
+    fn a_differently_priced_order_of_the_same_source_matches() {
+        let v = include_bytes!("../../kascov-decode/fixtures/kcm_order_v1_variant.bin");
+        let o = match_kcm_order(v).expect("same source, different offer");
+        assert_eq!(o.price_sompi, 777_000_001);
+        assert_eq!(o.size, 33_333);
+        assert_eq!(o.maker, [0xA1; 32]);
+    }
+
+    #[test]
+    fn a_byte_outside_the_slots_breaks_the_order_match() {
+        let units = push_units(KCM_ORDER_FIXTURE);
+        let victim = (0..units.len())
+            .find(|i| !KCM_ORDER_SLOTS.contains(i) && !units[*i].1.is_empty())
+            .expect("some non-slot push carries data");
+        let mut evil = KCM_ORDER_FIXTURE.to_vec();
+        evil[units[victim].0.start] ^= 0xFF;
+        assert!(match_kcm_order(&evil).is_none());
+    }
+
+    /// The maker is inlined at four sites and the token at nine. A program where the
+    /// copies disagree is not a build of this source — and for an order that matters
+    /// more than usual, since a book would otherwise show one maker and pay another.
+    #[test]
+    fn disagreeing_copies_of_the_maker_are_rejected() {
+        let units = push_units(KCM_ORDER_FIXTURE);
+        let mut evil = KCM_ORDER_FIXTURE.to_vec();
+        evil[units[KCM_ORD_MAKER[2]].0.start] ^= 0x01;
+        assert!(match_kcm_order(&evil).is_none(), "the maker disagreed with itself and matched");
+    }
+
+    /// An order is not a curve and a curve is not an order. A decoder that confuses
+    /// them would price a single fixed offer as if it had a bonding curve.
+    #[test]
+    fn orders_and_curves_do_not_match_each_other() {
+        assert!(match_kcm_order(KCM_CURVE_FIXTURE).is_none());
+        assert!(match_kcm_curve(KCM_ORDER_FIXTURE).is_none());
+        assert!(match_kron_curve(KCM_ORDER_FIXTURE).is_none());
+        assert!(match_kcm_order(CURVE_FIXTURE).is_none());
+        assert!(match_kcm_order(&[]).is_none());
+    }
+
+    /// A real order posted to Testnet-10 and filled there, recovered from its reveal.
+    #[test]
+    fn a_live_testnet_order_is_recognised() {
+        let live = include_bytes!("../../kascov-decode/fixtures/kcm_order_live_tn10.bin");
+        let o = match_kcm_order(live).expect("a real posted order must be recognised");
+        assert_eq!(o.size, 15_000, "fifteen thousand tokens were offered");
+        assert_eq!(o.price_sompi, 450_000_000, "for four and a half TKAS");
+        assert_ne!(o.maker, [0u8; 32], "a real key, not a sentinel");
+        assert!(o.unit_price() > 0.0);
     }
 }
