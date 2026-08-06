@@ -38,6 +38,27 @@ struct Specimen {
 const FEE_TRIALS: [(i128, i128, &str); 3] =
     [(0, 0, "no fee"), (0, 125, "curve 125bps growth"), (20, 20, "pool 20bps")];
 
+/// One covenant's program, recovered from its own most recent spends. The
+/// bench uses this over every unmatched covenant; `dump-program` uses it to
+/// lift a fixture for a human to pin. Same reveal path either way: the bytes
+/// are the ones the chain accepted against the commitment.
+pub fn recover_program(conn: &Connection, covenant_id: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+    let rows: Vec<(Vec<u8>, Vec<u8>)> = conn
+        .prepare_cached(
+            "SELECT spk_script, spent_sig FROM covenant_utxos
+             WHERE covenant_id = ?1 AND spent_sig IS NOT NULL
+             ORDER BY created_daa DESC LIMIT 8",
+        )
+        .map_err(db_err)?
+        .query_map([covenant_id.as_slice()], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(db_err)?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(db_err)?;
+    Ok(rows
+        .iter()
+        .find_map(|(spk, sig)| kascov_decode::p2sh_reveal(spk, sig)))
+}
+
 /// Run the bench over every unmatched market program. Returns the report as
 /// JSON; the caller decides where it lives.
 pub fn run_bench(conn: &Connection) -> Result<serde_json::Value> {

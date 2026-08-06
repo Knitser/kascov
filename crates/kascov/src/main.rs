@@ -94,6 +94,14 @@ enum Command {
         #[arg(long)]
         init: bool,
     },
+    /// Lift one covenant's program out of its own on-chain reveal and write it
+    /// to a file. The first step of pinning a new build: the fixture a matcher
+    /// is later written against comes from the chain, never from a website.
+    DumpProgram {
+        covenant_id: CovenantId,
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
     /// Fetch a transaction from the node (via its accepting block, known to
     /// the index) and print its full covenant anatomy — bindings, budgets,
     /// payload lanes. The truth tool for classification disputes.
@@ -194,6 +202,30 @@ async fn main() -> Result<()> {
                 cli.network,
                 t0.elapsed().as_secs_f64(),
                 cli.network
+            );
+            Ok(())
+        }
+        Command::DumpProgram { covenant_id, ref out } => {
+            let out = out.clone();
+            let store = open_store(&cli)?;
+            let id: [u8; 32] = *covenant_id.as_ref();
+            let Some(program) = store.recover_program(&id)? else {
+                anyhow::bail!(
+                    "{covenant_id}: no spend of this covenant reveals a program — \
+it has never been spent, or the index has not walked the spend yet"
+                );
+            };
+            let digest = blake2b_simd::Params::new()
+                .hash_length(32)
+                .hash(&program)
+                .as_bytes()
+                .to_vec();
+            std::fs::write(&out, &program)?;
+            eprintln!(
+                "{covenant_id}: {} bytes -> {}\nblake2b: {}",
+                program.len(),
+                out.display(),
+                hex::encode(digest)
             );
             Ok(())
         }
@@ -811,16 +843,18 @@ async fn anchor_passport(init: bool) -> Result<()> {
     )
     .await?;
 
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     let record = serde_json::json!({
         "v": 1,
         "merkle_root": root,
         "txid": txid,
         "address": address.to_string(),
         "network": "mainnet",
-        "anchored_ms": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
+        "anchored_ms": now_ms,
+        "history": anchor_history(existing.as_deref(), &root, &txid, now_ms),
         "note": "the payload of this transaction carries kascov:passport:v1:<root>; verify it from raw chain bytes",
     });
     let tmp = format!("{out_path}.tmp");
@@ -828,6 +862,41 @@ async fn anchor_passport(init: bool) -> Result<()> {
     std::fs::rename(&tmp, &out_path)?;
     eprintln!("anchored {root} in {txid}");
     Ok(())
+}
+
+/// Every anchor ever made, oldest first: the prior record's history plus its
+/// own latest entry plus the new one. A record from before history existed
+/// still contributes its top-level anchor, so the lineage never loses its
+/// first link.
+fn anchor_history(
+    existing_json: Option<&str>,
+    new_root: &str,
+    new_txid: &str,
+    now_ms: u64,
+) -> serde_json::Value {
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    if let Some(json) = existing_json {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
+            if let Some(h) = v.get("history").and_then(|h| h.as_array()) {
+                entries.extend(h.iter().cloned());
+            } else if let (Some(r), Some(t)) = (
+                v.get("merkle_root").and_then(|r| r.as_str()),
+                v.get("txid").and_then(|t| t.as_str()),
+            ) {
+                entries.push(serde_json::json!({
+                    "merkle_root": r,
+                    "txid": t,
+                    "anchored_ms": v.get("anchored_ms").and_then(|m| m.as_u64()).unwrap_or(0),
+                }));
+            }
+        }
+    }
+    entries.push(serde_json::json!({
+        "merkle_root": new_root,
+        "txid": new_txid,
+        "anchored_ms": now_ms,
+    }));
+    serde_json::Value::Array(entries)
 }
 
 /// Ground truth for one transaction: bindings, budgets, payload/lane.
@@ -9582,6 +9651,27 @@ mod anchor_tests {
         assert!(parse_claims_root("{\"merkle_root\":\"abc\"}").is_none());
         let upper = format!("{{\"merkle_root\":\"{}\"}}", ROOT.to_uppercase());
         assert!(parse_claims_root(&upper).is_none());
+    }
+
+    #[test]
+    fn history_grows_oldest_first_and_keeps_the_pre_history_anchor() {
+        // a record from before history existed contributes its own anchor
+        let old = format!("{{\"merkle_root\":\"{ROOT}\",\"txid\":\"aa\",\"anchored_ms\":5}}");
+        let h = anchor_history(Some(&old), "newroot", "bb", 9);
+        let arr = h.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["txid"], "aa");
+        assert_eq!(arr[1]["txid"], "bb");
+        // an existing history is extended, not replaced
+        let with = serde_json::json!({"history": arr, "merkle_root": "newroot", "txid": "bb"});
+        let h2 = anchor_history(Some(&with.to_string()), "third", "cc", 12);
+        let arr2 = h2.as_array().unwrap();
+        assert_eq!(arr2.len(), 3);
+        assert_eq!(arr2[2]["merkle_root"], "third");
+        // no record at all: history starts at one
+        assert_eq!(anchor_history(None, "r", "t", 1).as_array().unwrap().len(), 1);
+        // garbage never panics
+        assert_eq!(anchor_history(Some("junk"), "r", "t", 1).as_array().unwrap().len(), 1);
     }
 
     #[test]

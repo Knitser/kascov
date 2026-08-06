@@ -4212,6 +4212,14 @@ impl Store {
         crate::bench::run_bench(&self.conn)
     }
 
+    /// Recover one covenant's program from its own spends, the same way the
+    /// bench does. Pinning a new build starts here: the bytes come out of the
+    /// chain's own reveal, never out of a launchpad's website, so the fixture
+    /// a matcher is later built against is itself chain-proven.
+    pub fn recover_program(&self, covenant_id: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        crate::bench::recover_program(&self.conn, covenant_id)
+    }
+
     pub fn force_reverify(&mut self) -> Result<u64> {
         use crate::tokens::TOKEN_DERIVATION_META;
         self.conn
