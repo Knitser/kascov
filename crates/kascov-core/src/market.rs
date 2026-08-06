@@ -91,6 +91,35 @@ const IDX2_SELF_LEN: [usize; 10] = [148, 150, 335, 337, 606, 608, 870, 872, 1916
 /// what it displays.
 const IDX2_POOL_TPL: [usize; 2] = [890, 906];
 
+/// The third-generation KRON curve build: v2 plus the value-continuation fix
+/// KRON announced on 2026-08-04. Three copies of a nine-byte check ending in
+/// GREATERTHANOREQUAL VERIFY (the continuation output's value must cover the
+/// input's) are inserted into the v2 opcode stream — each contributes three
+/// small-constant pushes, so v2's 2,645 pushes become 2,654 and every v2 slot
+/// keeps its role at a shifted position. Pinned from THREE mainnet
+/// deployments, each recovered from its own spend and blake2b-proven against
+/// its P2SH commitment: opcode gaps byte-identical across all three,
+/// divergent at exactly the same 33 roles as v2.
+const CURVE3_FIXTURE: &[u8] = include_bytes!("../../kascov-decode/fixtures/kron_curve_v3.bin");
+const CURVE3_PUSHES: usize = 2654;
+const CURVE3_SLOTS: [usize; 33] = [
+    1, 2, 25, 88, 148, 150, 192, 194, 320, 322, 335, 337, 403, 469, 471, 593, 596, 609, 611, 682,
+    741, 876, 878, 896, 897, 912, 1042, 1044, 1908, 1911, 1925, 1927, 2612,
+];
+const IDX3_TOKEN_COVENANT: usize = 1;
+const IDX3_TOKEN_RESERVE: usize = 2;
+const IDX3_CREATOR: [usize; 5] = [25, 88, 403, 682, 2612];
+const IDX3_VKAS: [usize; 12] = [
+    192, 194, 320, 322, 469, 471, 593, 596, 1042, 1044, 1908, 1911,
+];
+const IDX3_GRADUATION: usize = 741;
+/// The three specimens happen to share one byte length, so these ten never
+/// show up as cross-instance diffs — they are the pushes whose value IS the
+/// program's length, same ten-position structure as v2 shifted by the
+/// insertions, and the matcher still demands they tell the truth.
+const IDX3_SELF_LEN: [usize; 10] = [148, 150, 335, 337, 609, 611, 876, 878, 1925, 1927];
+const IDX3_POOL_TPL: [usize; 2] = [896, 912];
+
 /// The curves' optional fee branch, as a growth cap in bps of the quote.
 ///
 /// Evidence, three independent lines agreeing: (1) BOTH curve generations
@@ -115,8 +144,8 @@ const CURVE_FEE_GROWTH_BPS: i128 = 125;
 /// moving the executed price beyond ordinary slack.
 fn fee_model(skeleton: &str) -> (i128, i128) {
     match skeleton {
-        "KRON pool v1" | "KRON pool v2" | "KRON pool tn-a" => (20, 20),
-        "KRON curve v1" | "KRON curve v2" => (0, CURVE_FEE_GROWTH_BPS),
+        "KRON pool v1" | "KRON pool v2" | "KRON pool v3" | "KRON pool tn-a" => (20, 20),
+        "KRON curve v1" | "KRON curve v2" | "KRON curve v3" => (0, CURVE_FEE_GROWTH_BPS),
         _ => (0, 0),
     }
 }
@@ -329,6 +358,66 @@ pub fn match_kron_curve_v2(program: &[u8]) -> Option<CurveParams> {
     })
 }
 
+/// Match a revealed program against the pinned v3 curve build. Identical
+/// discipline to v2: lockstep byte walk outside the slots, repeated slots must
+/// agree with themselves, the ten self-length pushes must state the program's
+/// real byte length, and the two embedded pool templates must be identical.
+pub fn match_kron_curve_v3(program: &[u8]) -> Option<CurveParams> {
+    let cand = push_units(program);
+    if cand.len() != CURVE3_PUSHES {
+        return None;
+    }
+    let fixture = push_units(CURVE3_FIXTURE);
+    debug_assert_eq!(fixture.len(), CURVE3_PUSHES);
+    let slots: BTreeSet<usize> = CURVE3_SLOTS.into_iter().collect();
+
+    let mut fpos = 0usize;
+    let mut cpos = 0usize;
+    for i in 0..CURVE3_PUSHES {
+        let (fr, fdata) = &fixture[i];
+        let (cr, cdata) = &cand[i];
+        if CURVE3_FIXTURE[fpos..fr.start] != program[cpos..cr.start] {
+            return None;
+        }
+        if !slots.contains(&i)
+            && (fdata != cdata || CURVE3_FIXTURE[fr.clone()] != program[cr.clone()])
+        {
+            return None;
+        }
+        fpos = fr.end;
+        cpos = cr.end;
+    }
+    if CURVE3_FIXTURE[fpos..] != program[cpos..] {
+        return None;
+    }
+
+    let vkas_vals: BTreeSet<Option<i64>> = IDX3_VKAS.iter().map(|&i| le_i64(&cand[i].1)).collect();
+    let [Some(v_kas_units)] = *vkas_vals.into_iter().collect::<Vec<_>>().as_slice() else {
+        return None;
+    };
+    let creators: BTreeSet<&Vec<u8>> = IDX3_CREATOR.iter().map(|&i| &cand[i].1).collect();
+    let [creator] = *creators.into_iter().collect::<Vec<_>>().as_slice() else {
+        return None;
+    };
+    let self_lens: BTreeSet<Option<i64>> =
+        IDX3_SELF_LEN.iter().map(|&i| le_i64(&cand[i].1)).collect();
+    if self_lens != BTreeSet::from([Some(program.len() as i64)]) {
+        return None;
+    }
+    if cand[IDX3_POOL_TPL[0]].1 != cand[IDX3_POOL_TPL[1]].1 {
+        return None;
+    }
+    let creator_fee_owner: [u8; 32] = creator.as_slice().try_into().ok()?;
+    let token_covenant_id: [u8; 32] = cand[IDX3_TOKEN_COVENANT].1.as_slice().try_into().ok()?;
+    Some(CurveParams {
+        token_covenant_id,
+        v_kas_units,
+        graduation_kas_sompi: le_i64(&cand[IDX3_GRADUATION].1)?,
+        creator_fee_owner,
+        token_reserve: le_i64(&cand[IDX3_TOKEN_RESERVE].1)?,
+    })
+}
+
 /// The pool build the curve graduates into: a 94-byte state block (guard,
 /// kasReserve, tokenReserve, tokenCovenantId, shares, lpTokenCovenantId) in
 /// front of the same 57,475-byte template every curve embeds. The template is
@@ -344,6 +433,14 @@ const POOL_FIXTURE: &[u8] = include_bytes!("../../kascov-decode/fixtures/kron_po
 /// held on all 580 replayed trades of the first graduated market.
 const POOL2_FIXTURE: &[u8] = include_bytes!("../../kascov-decode/fixtures/kron_pool_v2.bin");
 const POOL2_TEMPLATE_CREATOR_SLOTS: [usize; 2] = [256, 546];
+/// The v3 pool: same design once more — a 59,089-byte template carrying the
+/// same value-continuation insertion as the v3 curve, pinned from the copy
+/// embedded (twice, byte-identically) inside the blake2b-proven v3 curve
+/// fixture. Creator slots at [259, 552]; the same 94-byte state block in
+/// front. The first v3-graduated mainnet pool matches this template outside
+/// those two slots exactly.
+const POOL3_FIXTURE: &[u8] = include_bytes!("../../kascov-decode/fixtures/kron_pool_v3.bin");
+const POOL3_TEMPLATE_CREATOR_SLOTS: [usize; 2] = [259, 552];
 /// The oldest KRON pool build, live only on testnet-10: ten deployments, all
 /// recovered from their own spends and hash-proven, byte-identical outside
 /// FOUR creator slots. Same 94-byte state block as every generation since,
@@ -364,17 +461,19 @@ const POOL_TN_A_CREATOR_SLOTS: [usize; 4] = [136, 148, 295, 307];
 /// it re-tagged nothing, because the gate never noticed and returned early —
 /// the tag existed but the retry it promised could not fire. `market_stamp()`
 /// folds it into that gate so a bump mechanically forces re-verification.
-pub(crate) const MATCHER_VERSION: &str = "4";
+pub(crate) const MATCHER_VERSION: &str = "5";
 
 /// The only skeletons that mean "this program byte-matched an audited build".
 /// Every tally and every publish gate reads this ALLOWLIST rather than testing
 /// `!= unmatched`: a denylist silently promotes a future give-up tag (say
 /// `unmatched:3`) into "matched", which is match-widening by accident.
-pub(crate) const MATCHED_SKELETONS: [&str; 5] = [
+pub(crate) const MATCHED_SKELETONS: [&str; 7] = [
     "KRON curve v1",
     "KRON pool v1",
     "KRON curve v2",
     "KRON pool v2",
+    "KRON curve v3",
+    "KRON pool v3",
     "KRON pool tn-a",
 ];
 
@@ -414,6 +513,11 @@ pub fn match_kron_pool(program: &[u8]) -> Option<PoolParams> {
 /// The v2 pool build: identical design, its own fixture and creator slots.
 pub fn match_kron_pool_v2(program: &[u8]) -> Option<PoolParams> {
     match_pool_build(program, POOL2_FIXTURE, &POOL2_TEMPLATE_CREATOR_SLOTS)
+}
+
+/// The v3 pool build: identical design, its own fixture and creator slots.
+pub fn match_kron_pool_v3(program: &[u8]) -> Option<PoolParams> {
+    match_pool_build(program, POOL3_FIXTURE, &POOL3_TEMPLATE_CREATOR_SLOTS)
 }
 
 /// The oldest pool build, testnet-only: same design, four creator slots.
@@ -683,6 +787,19 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
             })
         })
         .or_else(|| {
+            match_kron_curve_v3(&program).map(|c| Matched {
+                skeleton: "KRON curve v3",
+                token_covenant_id: c.token_covenant_id,
+                v_kas_units: c.v_kas_units,
+                token_reserve: c.token_reserve,
+                graduation_kas_sompi: Some(c.graduation_kas_sompi),
+                creator: c.creator_fee_owner,
+                kas_reserve_sompi: None,
+                lp_token_covenant_id: None,
+                shares: None,
+            })
+        })
+        .or_else(|| {
             match_kron_pool(&program).map(|p| Matched {
                 skeleton: "KRON pool v1",
                 token_covenant_id: p.token_covenant_id,
@@ -711,6 +828,19 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
         .or_else(|| {
             match_kron_pool_v2(&program).map(|p| Matched {
                 skeleton: "KRON pool v2",
+                token_covenant_id: p.token_covenant_id,
+                v_kas_units: 0,
+                token_reserve: p.token_reserve,
+                graduation_kas_sompi: None,
+                creator: p.creator,
+                kas_reserve_sompi: p.kas_reserve_units.checked_mul(1_000_000),
+                lp_token_covenant_id: Some(p.lp_token_covenant_id),
+                shares: Some(p.shares),
+            })
+        })
+        .or_else(|| {
+            match_kron_pool_v3(&program).map(|p| Matched {
+                skeleton: "KRON pool v3",
                 token_covenant_id: p.token_covenant_id,
                 v_kas_units: 0,
                 token_reserve: p.token_reserve,
@@ -1249,11 +1379,13 @@ mod tests {
     #[test]
     fn a_give_up_tag_is_not_a_match() {
         assert!(!MATCHED_SKELETONS.contains(&unmatched_tag().as_str()));
-        assert!(!MATCHED_SKELETONS.contains(&"unmatched:5"));
+        assert!(!MATCHED_SKELETONS.contains(&"unmatched:6"));
         assert!(MATCHED_SKELETONS.contains(&"KRON curve v1"));
         assert!(MATCHED_SKELETONS.contains(&"KRON pool v1"));
         assert!(MATCHED_SKELETONS.contains(&"KRON curve v2"));
         assert!(MATCHED_SKELETONS.contains(&"KRON pool v2"));
+        assert!(MATCHED_SKELETONS.contains(&"KRON curve v3"));
+        assert!(MATCHED_SKELETONS.contains(&"KRON pool v3"));
         assert!(MATCHED_SKELETONS.contains(&"KRON pool tn-a"));
     }
 
@@ -1430,8 +1562,10 @@ mod tests {
         // without widening the executed price)
         assert_eq!(fee_model("KRON curve v1"), (0, 125));
         assert_eq!(fee_model("KRON curve v2"), (0, 125));
+        assert_eq!(fee_model("KRON curve v3"), (0, 125));
         assert_eq!(fee_model("KRON pool v1"), (20, 20));
         assert_eq!(fee_model("KRON pool v2"), (20, 20));
+        assert_eq!(fee_model("KRON pool v3"), (20, 20));
         assert_eq!(fee_model("KRON pool tn-a"), (20, 20));
         assert_eq!(fee_model(&unmatched_tag()), (0, 0));
     }
@@ -1502,5 +1636,114 @@ mod tests {
             !invariant_holds(v, k0, k1 + k1 / 100, b0, b1, quote, 0),
             "an in-covenant fee grows k past the cap and refuses the parameters"
         );
+    }
+
+    #[test]
+    fn the_v3_fixture_matches_itself_and_reads_its_own_constants() {
+        let p = match_kron_curve_v3(CURVE3_FIXTURE).expect("the v3 fixture IS the build");
+        // the fixture is shy-teal-raven's curve, recovered from its own spend
+        // and blake2b-proven against its P2SH commitment
+        assert_eq!(p.v_kas_units, 6_750_000);
+        assert_eq!(p.graduation_kas_sompi, 27_000_000_000_000);
+        assert_eq!(p.token_reserve, 928_003_055);
+        assert_eq!(
+            hex::encode(p.token_covenant_id),
+            "b7da7284276b33b755d2306bb9a0d4842dcf6327626e4aa1e46231f9f31a1b55"
+        );
+        assert_eq!(
+            hex::encode(p.creator_fee_owner),
+            "be16dc3acc4e64eb98fb1f72bce279e54bb5c26655608c9f40dc0308e55ec0bd"
+        );
+        // no generation ever claims another generation's programs
+        assert!(match_kron_curve(CURVE3_FIXTURE).is_none());
+        assert!(match_kron_curve_v2(CURVE3_FIXTURE).is_none());
+        assert!(match_kron_curve_v3(CURVE_FIXTURE).is_none());
+        assert!(match_kron_curve_v3(CURVE2_FIXTURE).is_none());
+    }
+
+    #[test]
+    fn v3_one_flipped_byte_outside_the_slots_is_a_different_program() {
+        let units = push_units(CURVE3_FIXTURE);
+        let target = (0..CURVE3_PUSHES)
+            .find(|i| !CURVE3_SLOTS.contains(i) && !units[*i].1.is_empty())
+            .expect("a non-slot data push exists");
+        let mut evil = CURVE3_FIXTURE.to_vec();
+        let at = units[target].0.end - 1;
+        evil[at] ^= 0x01;
+        assert!(match_kron_curve_v3(&evil).is_none());
+        assert!(match_kron_curve_v3(&[]).is_none());
+    }
+
+    #[test]
+    fn v3_a_program_lying_about_its_own_length_is_rejected() {
+        // The three specimens share one byte length, so these ten positions
+        // never differed across instances — they are pinned as slots anyway
+        // because their VALUE is the program's length. The consistency check
+        // is what makes that pin safe: state 185,892 in a program of 185,891
+        // bytes and the match dies.
+        let units = push_units(CURVE3_FIXTURE);
+        let (range, data) = &units[IDX3_SELF_LEN[0]];
+        let honest = le_i64(data).unwrap();
+        assert_eq!(honest, CURVE3_FIXTURE.len() as i64, "fixture tells the truth");
+        let mut evil = CURVE3_FIXTURE.to_vec();
+        let lie = (honest + 1).to_le_bytes();
+        let width = data.len();
+        evil[range.end - width..range.end].copy_from_slice(&lie[..width]);
+        assert!(match_kron_curve_v3(&evil).is_none());
+    }
+
+    #[test]
+    fn v3_mismatched_embedded_pool_templates_are_rejected() {
+        let units = push_units(CURVE3_FIXTURE);
+        let mut evil = CURVE3_FIXTURE.to_vec();
+        let at = units[IDX3_POOL_TPL[1]].0.end - 1;
+        evil[at] ^= 0x01;
+        assert!(match_kron_curve_v3(&evil).is_none());
+    }
+
+    #[test]
+    fn the_v3_pool_build_matches_and_reads_its_state() {
+        // The pool fixture's provenance is the curve itself: it must BE the
+        // template the blake2b-proven v3 curve fixture embeds (twice).
+        let curve_units = push_units(CURVE3_FIXTURE);
+        assert_eq!(curve_units[IDX3_POOL_TPL[0]].1.as_slice(), POOL3_FIXTURE);
+        assert_eq!(curve_units[IDX3_POOL_TPL[1]].1.as_slice(), POOL3_FIXTURE);
+
+        // The REAL mainnet state of the first v3-graduated pool, in front of
+        // the pinned template. That pool belongs to a DIFFERENT deployment
+        // than the fixture's curve, so this also proves the creator slots are
+        // the only bytes that vary.
+        let state = hex::decode(
+            "6b0852fc00000000000008586f78090000000020d101341bc8c9ed351cc5f5dd6e6a813a41\
+             5e2facb80a907be517ccfa0b7d64d8087e6810000000000020ac0e1d57dc2e2d56260dc913\
+             e14288500670d56f46a0a961cb701a29408bd01d",
+        )
+        .unwrap();
+        assert_eq!(state.len(), POOL_STATE_LEN);
+        let mut prog = state;
+        prog.extend_from_slice(POOL3_FIXTURE);
+        let p = match_kron_pool_v3(&prog).expect("state + pinned v3 template must match");
+        assert_eq!(p.kas_reserve_units, 64_594);
+        assert_eq!(p.token_reserve, 158_887_768);
+        assert_eq!(p.shares, 1_075_326);
+        assert_eq!(
+            hex::encode(p.token_covenant_id),
+            "d101341bc8c9ed351cc5f5dd6e6a813a415e2facb80a907be517ccfa0b7d64d8"
+        );
+        assert_eq!(
+            hex::encode(p.lp_token_covenant_id),
+            "ac0e1d57dc2e2d56260dc913e14288500670d56f46a0a961cb701a29408bd01d"
+        );
+        // the pool generations never claim each other's programs
+        assert!(match_kron_pool(&prog).is_none());
+        assert!(match_kron_pool_v2(&prog).is_none());
+        // a flipped byte outside the creator slots is a different build
+        let mut evil = prog.clone();
+        let units = push_units(POOL3_FIXTURE);
+        let t = (0..units.len())
+            .find(|i| !POOL3_TEMPLATE_CREATOR_SLOTS.contains(i) && !units[*i].1.is_empty())
+            .unwrap();
+        evil[POOL_STATE_LEN + units[t].0.end - 1] ^= 0x01;
+        assert!(match_kron_pool_v3(&evil).is_none());
     }
 }

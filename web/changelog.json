@@ -1,5 +1,10 @@
 [
   {
+    "date": "2026-08-06",
+    "title": "the matcher learns the third generation",
+    "body": "KRON shipped a new build generation and kascov can now prove it: curve v3 is v2 plus the value-continuation fix announced on august 4, visible in the bytecode as three inserted copies of a nine-byte check ending in GREATERTHANOREQUAL VERIFY. pinned from three mainnet deployments, each recovered from its own spend and blake2b-proven against its P2SH commitment: 2,654 pushes, opcode gaps byte-identical across all three, the same 33 parameter roles as v2 at shifted positions. the pool it graduates into is pinned from the template the proven curve itself embeds, and the first v3-graduated mainnet pool matches it outside exactly the two creator slots. the matcher version bumps to 5, so every stored unmatched program gets re-read: Entity X, KREX and their siblings move from unknown to priced-and-verified on the next pass."
+  },
+  {
     "date": "2026-08-05",
     "title": "the passport touched mainnet",
     "body": "the anchor is live: a transaction from the published anchor address carries kascov:passport:v1:<root> in its payload, and /passport shows the green anchored state with the txid. the root re-anchors daily whenever it changes, and it already has, twice. a badge on any passport now verifies against raw chain bytes with no kascov server in the loop. reputation, notarized by the chain it lives on."

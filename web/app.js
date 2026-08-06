@@ -4769,7 +4769,7 @@ function marketSectionHtml(m, trades, network, toMs, tokenId = '', tradesTotal =
     tiles.push(['pool shares', fmtInt(m.program.shares),
       'the share count the pool states in its own committed state block, as of its newest proven reveal']);
   }
-  if (m.program && m.program.token_reserve != null && (m.program.skeleton === 'KRON pool v1' || m.program.skeleton === 'KRON pool v2' || m.program.skeleton === 'KRON pool tn-a')) {
+  if (m.program && m.program.token_reserve != null && (m.program.skeleton === 'KRON pool v1' || m.program.skeleton === 'KRON pool v2' || m.program.skeleton === 'KRON pool v3' || m.program.skeleton === 'KRON pool tn-a')) {
     tiles.push(['token reserve', fmtInt(m.program.token_reserve),
       'tokens the pool held when it last committed its state — one spend behind the live cell, which is why the price above uses the covenant’s current balance instead']);
   }
@@ -5726,7 +5726,7 @@ function auditSectionHtml(t, d, network) {
   const prog = m && m.program;
   /* mirror of the Rust MATCHED_SKELETONS allowlist — an allowlist, never a
      prefix test, so a future give-up tag can never read as matched */
-  const MATCHED_SKELETONS = ['KRON curve v1', 'KRON pool v1', 'KRON curve v2', 'KRON pool v2', 'KRON pool tn-a'];
+  const MATCHED_SKELETONS = ['KRON curve v1', 'KRON pool v1', 'KRON curve v2', 'KRON pool v2', 'KRON curve v3', 'KRON pool v3', 'KRON pool tn-a'];
   const matched = Boolean(prog && MATCHED_SKELETONS.includes(prog.skeleton));
   const isShares = Boolean(m && m.phase === 'lp shares');
   const why = (m && m.unpriced_reason) || 'no verified market for this token';
