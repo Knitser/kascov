@@ -481,6 +481,20 @@ pub(crate) fn unmatched_tag() -> String {
     format!("unmatched:{MATCHER_VERSION}")
 }
 
+/// Every pinned skeleton is either a launch curve (phase "bonding", with a
+/// graduation target read from its slots) or a pool ("graduated"). A new
+/// generation must be added HERE as well as to MATCHED_SKELETONS — the v3 pin
+/// missed this map on its first pass and every v3 market served phase
+/// "unknown" with no graduation progress; the test that walks the allowlist
+/// through this map is what keeps that from happening again.
+fn phase_for_skeleton(skeleton: &str) -> Option<&'static str> {
+    match skeleton {
+        "KRON curve v1" | "KRON curve v2" | "KRON curve v3" => Some("bonding"),
+        "KRON pool v1" | "KRON pool v2" | "KRON pool v3" | "KRON pool tn-a" => Some("graduated"),
+        _ => None,
+    }
+}
+
 /// The market verification gate, composite so that either half moving forces
 /// every stored market program to be read again.
 pub(crate) fn market_stamp() -> String {
@@ -1122,11 +1136,11 @@ pub(crate) fn market_summary(
         out.unpriced_reason = Some("the market covenant's program is not yet verified".into());
         return Ok(out);
     };
-    out.phase = Some(match prog.skeleton.as_str() {
-        "KRON curve v1" | "KRON curve v2" => "bonding".into(),
-        "KRON pool v1" | "KRON pool v2" | "KRON pool tn-a" => "graduated".into(),
-        _ => "unknown".into(),
-    });
+    out.phase = Some(
+        phase_for_skeleton(&prog.skeleton)
+            .unwrap_or("unknown")
+            .into(),
+    );
     // Allowlist, never a denylist: testing `!= unmatched` would promote a
     // future give-up tag into "priceable", which is match-widening by accident.
     if !MATCHED_SKELETONS.contains(&prog.skeleton.as_str()) {
@@ -1247,9 +1261,9 @@ pub(crate) fn market_summary(
         .is_some_and(|t| t == *token_id);
     if cells == 1 && names_this_token {
         out.reserve_sompi = Some(value);
-        if let (Some(grad), true) = (
+        if let (Some(grad), Some("bonding")) = (
         prog.graduation_kas_sompi,
-        prog.skeleton == "KRON curve v1" || prog.skeleton == "KRON curve v2",
+        phase_for_skeleton(&prog.skeleton),
     ) {
             if grad > 0 {
                 out.grad_progress_bps = (value as i128)
@@ -1387,6 +1401,22 @@ mod tests {
         assert!(MATCHED_SKELETONS.contains(&"KRON curve v3"));
         assert!(MATCHED_SKELETONS.contains(&"KRON pool v3"));
         assert!(MATCHED_SKELETONS.contains(&"KRON pool tn-a"));
+    }
+
+    /// A build the matcher proves must also have a lifecycle phase, or the
+    /// directory shows a verified market with a dash where bonding progress
+    /// belongs — which is exactly what happened the day v3 landed.
+    #[test]
+    fn every_pinned_skeleton_has_a_phase() {
+        for s in MATCHED_SKELETONS {
+            assert!(
+                phase_for_skeleton(s).is_some(),
+                "{s} is matched but has no phase — its markets would serve 'unknown'"
+            );
+        }
+        assert_eq!(phase_for_skeleton("KRON curve v3"), Some("bonding"));
+        assert_eq!(phase_for_skeleton("KRON pool v3"), Some("graduated"));
+        assert!(phase_for_skeleton(&unmatched_tag()).is_none());
     }
 
     #[test]
