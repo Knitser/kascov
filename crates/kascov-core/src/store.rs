@@ -4477,7 +4477,7 @@ impl Store {
         before: &std::collections::BTreeMap<[u8; 32], String>,
         error: Option<&str>,
     ) -> Result<()> {
-        let allow: [&str; 5] = crate::market::MATCHED_SKELETONS;
+        let allow: [&str; 6] = crate::market::MATCHED_SKELETONS;
         let (verified, unvalidated, invalid) = self
             .conn
             .query_row(

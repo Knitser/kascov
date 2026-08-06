@@ -91,6 +91,36 @@ const IDX2_SELF_LEN: [usize; 10] = [148, 150, 335, 337, 606, 608, 870, 872, 1916
 /// what it displays.
 const IDX2_POOL_TPL: [usize; 2] = [890, 906];
 
+/// A THIRD-PARTY covenant curve family, recognised on the same terms as any other.
+///
+/// Its slots were not reverse-engineered from deployments the way KRON's had to be:
+/// this family publishes its sources and its compiler pin, so the positions were
+/// derived by compiling the same source twice with deliberately different arguments
+/// and taking the pushes that moved. That is why there are fifty eight of them and
+/// why every one has a name — a slot nobody can name is a slot nobody audited.
+///
+/// Recognising a family is not endorsing it. This decoder reads what the bytes commit
+/// to and nothing else; the fixture is checkable by anyone who compiles the published
+/// source with the pinned compiler and compares.
+const KCM_CURVE_FIXTURE: &[u8] = include_bytes!("../../kascov-decode/fixtures/kcm_curve_v1.bin");
+const KCM_CURVE_PUSHES: usize = 992;
+const KCM_CURVE_SLOTS: [usize; 58] = [
+    1, 2, 3, 10, 129, 131, 133, 135, 137, 139, 141, 142, 143, 158, 160, 288, 290, 295, 298, 301,
+    407, 409, 411, 413, 415, 417, 419, 420, 421, 436, 438, 562, 565, 569, 572, 575, 691, 693, 695,
+    697, 699, 701, 703, 704, 705, 708, 709, 710, 722, 725, 736, 742, 747, 779, 781, 783, 784, 898,
+];
+/// State block, spliced per trade: `graduated` is not a slot (it is a fixed byte in
+/// the pre-graduation program), the rest move.
+const KCM_IDX_TOKEN_COVENANT: usize = 1;
+const KCM_IDX_TOKEN_RESERVE: usize = 2;
+/// Constructor values, each repeated at every site the compiler inlined it. Repetition
+/// is a free lie detector: within one program they must all agree.
+const KCM_IDX_VKAS: [usize; 8] = [158, 160, 288, 290, 436, 438, 562, 565];
+const KCM_IDX_GRADUATION: usize = 784;
+const KCM_IDX_CREATOR: [usize; 2] = [10, 736];
+/// The seed the launch put in, which this family excludes from its raise target.
+const KCM_IDX_SEED: [usize; 3] = [779, 781, 783];
+
 /// The curves' optional fee branch, as a growth cap in bps of the quote.
 ///
 /// Evidence, three independent lines agreeing: (1) BOTH curve generations
@@ -117,6 +147,12 @@ fn fee_model(skeleton: &str) -> (i128, i128) {
     match skeleton {
         "KRON pool v1" | "KRON pool v2" | "KRON pool tn-a" => (20, 20),
         "KRON curve v1" | "KRON curve v2" => (0, CURVE_FEE_GROWTH_BPS),
+        // This family accrues its fees INSIDE the covenant rather than paying them out
+        // per trade, so the quote the trader pays carries no bracket fee, and the
+        // reserve grows by the accrual until a sweep releases it. 125 bps is its
+        // aggregate cap (creator + platform + dev), read from the same source the
+        // fixture came from.
+        "KCM curve v1" => (0, 125),
         _ => (0, 0),
     }
 }
@@ -364,18 +400,19 @@ const POOL_TN_A_CREATOR_SLOTS: [usize; 4] = [136, 148, 295, 307];
 /// it re-tagged nothing, because the gate never noticed and returned early —
 /// the tag existed but the retry it promised could not fire. `market_stamp()`
 /// folds it into that gate so a bump mechanically forces re-verification.
-pub(crate) const MATCHER_VERSION: &str = "4";
+pub(crate) const MATCHER_VERSION: &str = "5";
 
 /// The only skeletons that mean "this program byte-matched an audited build".
 /// Every tally and every publish gate reads this ALLOWLIST rather than testing
 /// `!= unmatched`: a denylist silently promotes a future give-up tag (say
 /// `unmatched:3`) into "matched", which is match-widening by accident.
-pub(crate) const MATCHED_SKELETONS: [&str; 5] = [
+pub(crate) const MATCHED_SKELETONS: [&str; 6] = [
     "KRON curve v1",
     "KRON pool v1",
     "KRON curve v2",
     "KRON pool v2",
     "KRON pool tn-a",
+    "KCM curve v1",
 ];
 
 pub(crate) fn unmatched_tag() -> String {
@@ -407,6 +444,72 @@ pub struct PoolParams {
 /// parsed at fixed offsets (its five pushes have fixed widths), the template
 /// part must byte-equal the fixture outside the two creator slots, and the
 /// two creator slots must agree with each other.
+/// Match the third-party curve family and read its committed parameters.
+///
+/// Same discipline as the KRON matchers: every byte outside a declared slot must equal
+/// the fixture, repeated slots must agree with themselves, and nothing is taken from a
+/// published list. A program that passes is provably that build with only its declared
+/// parameters changed.
+pub fn match_kcm_curve(program: &[u8]) -> Option<CurveParams> {
+    let cand = push_units(program);
+    if cand.len() != KCM_CURVE_PUSHES {
+        return None;
+    }
+    let fixture = push_units(KCM_CURVE_FIXTURE);
+    debug_assert_eq!(fixture.len(), KCM_CURVE_PUSHES);
+    let slots: BTreeSet<usize> = KCM_CURVE_SLOTS.into_iter().collect();
+
+    let mut fpos = 0usize;
+    let mut cpos = 0usize;
+    for i in 0..KCM_CURVE_PUSHES {
+        let (fr, fdata) = &fixture[i];
+        let (cr, cdata) = &cand[i];
+        if KCM_CURVE_FIXTURE[fpos..fr.start] != program[cpos..cr.start] {
+            return None;
+        }
+        if !slots.contains(&i)
+            && (fdata != cdata || KCM_CURVE_FIXTURE[fr.clone()] != program[cr.clone()])
+        {
+            return None;
+        }
+        fpos = fr.end;
+        cpos = cr.end;
+    }
+    if KCM_CURVE_FIXTURE[fpos..] != program[cpos..] {
+        return None;
+    }
+
+    // Internal consistency: a value inlined at several sites must be one value.
+    let vkas: BTreeSet<Option<i64>> = KCM_IDX_VKAS.iter().map(|&i| le_i64(&cand[i].1)).collect();
+    let [Some(v_kas_units)] = *vkas.into_iter().collect::<Vec<_>>().as_slice() else {
+        return None;
+    };
+    let creators: BTreeSet<&Vec<u8>> = KCM_IDX_CREATOR.iter().map(|&i| &cand[i].1).collect();
+    let [creator] = *creators.into_iter().collect::<Vec<_>>().as_slice() else {
+        return None;
+    };
+    let seeds: BTreeSet<Option<i64>> = KCM_IDX_SEED.iter().map(|&i| le_i64(&cand[i].1)).collect();
+    let [Some(_seed_kas)] = *seeds.into_iter().collect::<Vec<_>>().as_slice() else {
+        return None;
+    };
+
+    let token_covenant_id: [u8; 32] = cand[KCM_IDX_TOKEN_COVENANT].1.as_slice().try_into().ok()?;
+    let creator_fee_owner: [u8; 32] = creator.as_slice().try_into().ok()?;
+    let token_reserve = le_i64(&cand[KCM_IDX_TOKEN_RESERVE].1)?;
+    let graduation_kas_sompi = le_i64(&cand[KCM_IDX_GRADUATION].1)?;
+    if v_kas_units <= 0 || token_reserve < 0 || graduation_kas_sompi <= 0 {
+        return None;
+    }
+
+    Some(CurveParams {
+        token_covenant_id,
+        v_kas_units,
+        graduation_kas_sompi,
+        creator_fee_owner,
+        token_reserve,
+    })
+}
+
 pub fn match_kron_pool(program: &[u8]) -> Option<PoolParams> {
     match_pool_build(program, POOL_FIXTURE, &POOL_TEMPLATE_CREATOR_SLOTS)
 }
@@ -672,6 +775,19 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
         .or_else(|| {
             match_kron_curve_v2(&program).map(|c| Matched {
                 skeleton: "KRON curve v2",
+                token_covenant_id: c.token_covenant_id,
+                v_kas_units: c.v_kas_units,
+                token_reserve: c.token_reserve,
+                graduation_kas_sompi: Some(c.graduation_kas_sompi),
+                creator: c.creator_fee_owner,
+                kas_reserve_sompi: None,
+                lp_token_covenant_id: None,
+                shares: None,
+            })
+        })
+        .or_else(|| {
+            match_kcm_curve(&program).map(|c| Matched {
+                skeleton: "KCM curve v1",
                 token_covenant_id: c.token_covenant_id,
                 v_kas_units: c.v_kas_units,
                 token_reserve: c.token_reserve,
@@ -1229,6 +1345,59 @@ pub(crate) fn market_program_row(
 mod tests {
     use super::*;
 
+    /// Scratch: derive a new build's slot list from specimens on disk, using
+    /// the SAME push semantics the matcher will use. Set KASCOV_PIN_DIR to a
+    /// directory of *.bin specimens and run with --nocapture; unset, it does
+    /// nothing, so it cannot break a normal test run.
+    #[test]
+    fn pin_report() {
+        let Ok(dir) = std::env::var("KASCOV_PIN_DIR") else {
+            return;
+        };
+        let mut specimens: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
+            .expect("pin dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "bin"))
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    std::fs::read(e.path()).expect("read"),
+                )
+            })
+            .collect();
+        specimens.sort_by(|a, b| a.0.cmp(&b.0));
+        let group: Vec<_> = specimens
+            .iter()
+            .filter(|(n, _)| n.starts_with(&std::env::var("KASCOV_PIN_PREFIX").unwrap_or_default()))
+            .collect();
+        let units: Vec<_> = group.iter().map(|(_, b)| push_units(b)).collect();
+        println!("\n=== pin report over {} specimens", group.len());
+        for ((n, b), u) in group.iter().zip(&units) {
+            println!("  {n}: {} bytes, {} pushes", b.len(), u.len());
+        }
+        let n_push = units[0].len();
+        if !units.iter().all(|u| u.len() == n_push) {
+            println!("  !! push counts differ — not one family");
+            return;
+        }
+        let mut slots = Vec::new();
+        for i in 0..n_push {
+            let first = &units[0][i].1;
+            if units.iter().any(|u| &u[i].1 != first) {
+                slots.push(i);
+            }
+        }
+        println!("  PUSHES = {n_push}");
+        println!("  SLOTS ({}) = {slots:?}", slots.len());
+        for &i in &slots {
+            let widths: Vec<usize> = units.iter().map(|u| u[i].1.len()).collect();
+            println!(
+                "    idx {i:5} widths {widths:?} first {}",
+                hex::encode(&units[0][i].1[..units[0][i].1.len().min(12)])
+            );
+        }
+    }
+
     /// The retry promise the 'unmatched:N' tag makes is only kept if bumping
     /// the matcher also invalidates the market gate. While MATCHER_VERSION was
     /// a local const inside the matcher, a bump re-tagged nothing: the gate in
@@ -1502,5 +1671,121 @@ mod tests {
             !invariant_holds(v, k0, k1 + k1 / 100, b0, b1, quote, 0),
             "an in-covenant fee grows k past the cap and refuses the parameters"
         );
+    }
+}
+
+#[cfg(test)]
+mod kcm_tests {
+    use super::*;
+
+    /// The fixture IS the build, so it must match itself and read back its own
+    /// sentinels. If this fails the fixture and the slot table disagree.
+    #[test]
+    fn the_kcm_fixture_matches_itself() {
+        let p = match_kcm_curve(KCM_CURVE_FIXTURE).expect("the fixture IS the build");
+        assert_eq!(p.v_kas_units, 1_000);
+        assert_eq!(p.graduation_kas_sompi, 500_000_000);
+        assert_eq!(p.token_reserve, 1_000_000);
+        assert_eq!(p.token_covenant_id, [0x66; 32]);
+        assert_eq!(p.creator_fee_owner, [0x11; 32]);
+    }
+
+    /// The variant differs from the fixture at EVERY declared slot and nowhere else,
+    /// which is the whole claim the slot table makes. It was compiled from the same
+    /// source with different arguments, so a match proves the slots are complete: if
+    /// any varying position were missing from the table, this would be rejected.
+    #[test]
+    fn a_differently_parameterised_build_of_the_same_source_matches() {
+        let variant = include_bytes!("../../kascov-decode/fixtures/kcm_curve_v1_variant.bin");
+        let p = match_kcm_curve(variant).expect("same source, different arguments");
+        assert_eq!(p.v_kas_units, 1_234);
+        assert_eq!(p.graduation_kas_sompi, 777_000_000);
+        assert_eq!(p.token_covenant_id, [0xA6; 32]);
+        assert_eq!(p.creator_fee_owner, [0xA1; 32]);
+        assert_ne!(p.token_reserve, 1_000_000, "the state moved too");
+    }
+
+    /// A byte outside every slot is not negotiable. Flipping one must break the match,
+    /// or the fixture is decoration rather than a commitment.
+    #[test]
+    fn a_byte_outside_the_slots_breaks_the_match() {
+        let units = push_units(KCM_CURVE_FIXTURE);
+        let victim = (0..units.len())
+            .find(|i| !KCM_CURVE_SLOTS.contains(i) && !units[*i].1.is_empty())
+            .expect("some non-slot push carries data");
+        let mut evil = KCM_CURVE_FIXTURE.to_vec();
+        let r = units[victim].0.clone();
+        evil[r.start] ^= 0xFF;
+        assert!(match_kcm_curve(&evil).is_none(), "a non-slot byte moved and matched anyway");
+    }
+
+    /// Repeated slots are a free lie detector: vKas is inlined at eight sites and a
+    /// program where they disagree is not a build of this source.
+    #[test]
+    fn disagreeing_copies_of_a_repeated_slot_are_rejected() {
+        let units = push_units(KCM_CURVE_FIXTURE);
+        let mut evil = KCM_CURVE_FIXTURE.to_vec();
+        let r = units[KCM_IDX_VKAS[3]].0.clone();
+        evil[r.start] ^= 0x01;
+        assert!(match_kcm_curve(&evil).is_none(), "vKas disagreed with itself and matched");
+    }
+
+    /// Families must not match each other. A decoder that confuses two builds prices
+    /// one market with another's arithmetic.
+    #[test]
+    fn the_families_do_not_match_each_other() {
+        assert!(match_kcm_curve(CURVE_FIXTURE).is_none());
+        assert!(match_kcm_curve(CURVE2_FIXTURE).is_none());
+        assert!(match_kron_curve(KCM_CURVE_FIXTURE).is_none());
+        assert!(match_kron_curve_v2(KCM_CURVE_FIXTURE).is_none());
+        assert!(match_kcm_curve(&[]).is_none());
+        assert!(match_kcm_curve(&[0u8; 64]).is_none());
+    }
+
+    /// The allowlist and the version gate move together, or a bump re-verifies nothing.
+    #[test]
+    fn the_new_family_is_allowlisted_and_the_gate_moved() {
+        assert!(MATCHED_SKELETONS.contains(&"KCM curve v1"));
+        assert!(!MATCHED_SKELETONS.contains(&unmatched_tag().as_str()));
+        assert!(market_stamp().ends_with(&format!("/{MATCHER_VERSION}")));
+        assert_eq!(MATCHER_VERSION, "5", "adding a family must force re-verification");
+    }
+}
+
+#[cfg(test)]
+mod kcm_live_tests {
+    use super::*;
+
+    /// A REAL deployed program, taken from a live Testnet-10 market, not a fixture
+    /// this repository generated. It is the pre-genesis state the curve was deployed
+    /// at, so its token covid is still zero and its reserve still empty — which is
+    /// exactly the shape an indexer meets first, before any launch has bound a token.
+    ///
+    /// This is the test that matters. Everything above proves the matcher is
+    /// self-consistent; this proves it recognises the chain.
+    #[test]
+    fn a_live_testnet_deployment_is_recognised() {
+        let live = include_bytes!("../../kascov-decode/fixtures/kcm_curve_live_tn10.bin");
+        let p = match_kcm_curve(live).expect("a real deployed curve must be recognised");
+
+        // Read straight off the committed bytes — no published list consulted.
+        assert_eq!(p.v_kas_units, 1_000, "vKas, agreeing across all eight inlined sites");
+        assert_eq!(p.graduation_kas_sompi, 500_000_000, "the 5 TKAS raise target");
+        assert_eq!(p.token_covenant_id, [0u8; 32], "deployed pre-genesis: no token bound yet");
+        assert_eq!(p.token_reserve, 0, "and no inventory until initZero runs");
+        assert_ne!(p.creator_fee_owner, [0u8; 32], "a real key, not a sentinel");
+    }
+
+    /// And the skeleton it earns is the allowlisted one, so the tally and the publish
+    /// gate both count it. A matcher whose result is not allowlisted recognises
+    /// nothing in practice.
+    #[test]
+    fn the_live_deployment_earns_an_allowlisted_skeleton() {
+        let live = include_bytes!("../../kascov-decode/fixtures/kcm_curve_live_tn10.bin");
+        assert!(match_kcm_curve(live).is_some());
+        assert!(MATCHED_SKELETONS.contains(&"KCM curve v1"));
+        // and it is not any of the KRON families
+        assert!(match_kron_curve(live).is_none());
+        assert!(match_kron_curve_v2(live).is_none());
     }
 }
