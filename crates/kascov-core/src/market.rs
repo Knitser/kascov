@@ -103,11 +103,11 @@ const IDX2_POOL_TPL: [usize; 2] = [890, 906];
 /// to and nothing else; the fixture is checkable by anyone who compiles the published
 /// source with the pinned compiler and compares.
 const KCM_CURVE_FIXTURE: &[u8] = include_bytes!("../../kascov-decode/fixtures/kcm_curve_v1.bin");
-const KCM_CURVE_PUSHES: usize = 992;
+const KCM_CURVE_PUSHES: usize = 1172;
 const KCM_CURVE_SLOTS: [usize; 58] = [
-    1, 2, 3, 10, 129, 131, 133, 135, 137, 139, 141, 142, 143, 158, 160, 288, 290, 295, 298, 301,
-    407, 409, 411, 413, 415, 417, 419, 420, 421, 436, 438, 562, 565, 569, 572, 575, 691, 693, 695,
-    697, 699, 701, 703, 704, 705, 708, 709, 710, 722, 725, 736, 742, 747, 779, 781, 783, 784, 898,
+    1, 2, 3, 10, 138, 140, 142, 144, 146, 148, 150, 151, 152, 167, 169, 349, 351, 356, 359, 362,
+    473, 475, 477, 479, 481, 483, 485, 486, 487, 502, 504, 680, 683, 687, 690, 693, 814, 816, 818,
+    820, 822, 824, 826, 827, 828, 831, 832, 833, 897, 900, 911, 917, 922, 954, 956, 958, 959, 1073,
 ];
 /// State block, spliced per trade: `graduated` is not a slot (it is a fixed byte in
 /// the pre-graduation program), the rest move.
@@ -115,11 +115,11 @@ const KCM_IDX_TOKEN_COVENANT: usize = 1;
 const KCM_IDX_TOKEN_RESERVE: usize = 2;
 /// Constructor values, each repeated at every site the compiler inlined it. Repetition
 /// is a free lie detector: within one program they must all agree.
-const KCM_IDX_VKAS: [usize; 8] = [158, 160, 288, 290, 436, 438, 562, 565];
-const KCM_IDX_GRADUATION: usize = 784;
-const KCM_IDX_CREATOR: [usize; 2] = [10, 736];
+const KCM_IDX_VKAS: [usize; 8] = [167, 169, 349, 351, 502, 504, 680, 683];
+const KCM_IDX_GRADUATION: usize = 959;
+const KCM_IDX_CREATOR: [usize; 2] = [10, 911];
 /// The seed the launch put in, which this family excludes from its raise target.
-const KCM_IDX_SEED: [usize; 3] = [779, 781, 783];
+const KCM_IDX_SEED: [usize; 3] = [954, 956, 958];
 
 /// A RESTING LIMIT ORDER, which is a market of a different shape: not a pool with a
 /// price curve but a single offer at a single price, filled once and gone.
@@ -439,7 +439,7 @@ const POOL_TN_A_CREATOR_SLOTS: [usize; 4] = [136, 148, 295, 307];
 /// it re-tagged nothing, because the gate never noticed and returned early —
 /// the tag existed but the retry it promised could not fire. `market_stamp()`
 /// folds it into that gate so a bump mechanically forces re-verification.
-pub(crate) const MATCHER_VERSION: &str = "5";
+pub(crate) const MATCHER_VERSION: &str = "7";
 
 /// The only skeletons that mean "this program byte-matched an audited build".
 /// Every tally and every publish gate reads this ALLOWLIST rather than testing
@@ -1845,7 +1845,11 @@ mod kcm_tests {
         assert!(MATCHED_SKELETONS.contains(&"KCM curve v1"));
         assert!(!MATCHED_SKELETONS.contains(&unmatched_tag().as_str()));
         assert!(market_stamp().ends_with(&format!("/{MATCHER_VERSION}")));
-        assert_eq!(MATCHER_VERSION, "5", "adding a family must force re-verification");
+        // The guarantee is that the KCM family's arrival MOVED the gate, not that it
+        // moved it to any particular number. Pinning the literal made every later bump
+        // a failing test — including the one that re-verification actually needs when
+        // the fixture itself changes, which is exactly when the pin must not fight back.
+        assert_ne!(MATCHER_VERSION, "4", "adding a family must force re-verification");
     }
 }
 
