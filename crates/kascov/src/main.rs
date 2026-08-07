@@ -1,7 +1,12 @@
+#![recursion_limit = "512"]
+
+mod api;
 mod og;
 mod preflight;
 mod registry;
 mod witness;
+
+use api::*;
 
 use std::collections::{HashSet, VecDeque};
 
@@ -205,7 +210,10 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::DumpProgram { covenant_id, ref out } => {
+        Command::DumpProgram {
+            covenant_id,
+            ref out,
+        } => {
             let out = out.clone();
             let store = open_store(&cli)?;
             let id: [u8; 32] = covenant_id.0;
@@ -777,8 +785,12 @@ fn parse_claims_root(json: &str) -> Option<String> {
 /// anchor record means "anchor now", a record carrying the same root means
 /// "done already". Pure, so the skip logic is testable without a network.
 fn should_anchor(current_root: &str, existing_anchor_json: Option<&str>) -> bool {
-    let Some(json) = existing_anchor_json else { return true };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return true };
+    let Some(json) = existing_anchor_json else {
+        return true;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return true;
+    };
     let anchored = v
         .get("merkle_root")
         .or_else(|| v.get("root"))
@@ -797,7 +809,10 @@ async fn anchor_passport(init: bool) -> Result<()> {
             .unwrap_or_else(|_| "/home/kascov/.anchor-key".into()),
     );
     if !key_path.exists() && !init {
-        anyhow::bail!("no anchor key at {} — run anchor-passport --init first", key_path.display());
+        anyhow::bail!(
+            "no anchor key at {} — run anchor-passport --init first",
+            key_path.display()
+        );
     }
     let keypair = kascov_labkit::load_or_create_key(&key_path, init)?;
     // the key file must never be group/world readable, however it was made
@@ -1745,6 +1760,7 @@ async fn serve(
         // the container — /health is the path that actually works in prod.
         .route("/healthz", get(healthz_handler))
         .route("/health", get(healthz_handler))
+        .route("/openapi.json", get(openapi_handler))
         .route("/data/{network}/simulate", post(simulate_handler))
         .route(
             "/data/{network}/preflight",
@@ -1795,6 +1811,33 @@ async fn serve(
             "/data/{network}/token/{id}/trades.json",
             get(token_trades_handler),
         )
+        .route(
+            "/data/{network}/token/{id}/trades",
+            get(token_trades_handler),
+        )
+        .route(
+            "/data/{network}/token/{id}/holders",
+            get(token_holders_handler),
+        )
+        .route(
+            "/data/{network}/token/{id}/events",
+            get(token_events_handler),
+        )
+        .route(
+            "/data/{network}/token/{id}/market",
+            get(token_market_handler),
+        )
+        .route("/data/{network}/trades", get(trades_handler))
+        .route("/data/{network}/markets", get(markets_handler))
+        .route("/data/{network}/market/{id}", get(market_handler))
+        .route("/data/{network}/pools", get(pools_handler))
+        .route("/data/{network}/pool/{id}", get(pool_handler))
+        .route("/data/{network}/vesting", get(vesting_handler))
+        .route(
+            "/data/{network}/vesting/{id}/claims",
+            get(vesting_claims_handler),
+        )
+        .route("/data/{network}/vesting/{id}", get(vesting_detail_handler))
         .route("/data/{network}/token/{id}", get(token_handler))
         .route("/data/{network}/consistency.json", get(consistency_handler))
         .route("/data/{network}/events", get(events_handler))
@@ -4402,6 +4445,106 @@ fn registry_cache() -> &'static tokio::sync::Mutex<Option<ListState>> {
     CACHE.get_or_init(|| tokio::sync::Mutex::new(None))
 }
 
+async fn cached_registry_body() -> Option<String> {
+    let mut cache = registry_cache().lock().await;
+    let stale = match &*cache {
+        Some(s) => {
+            let ttl = if s.body.is_some() {
+                registry::LIST_TTL_OK
+            } else {
+                registry::LIST_TTL_ERR
+            };
+            s.fetched_at.elapsed() >= ttl
+        }
+        None => true,
+    };
+    if stale {
+        let fetched = match registry_client() {
+            Some(client) => registry::fetch_list(client).await.ok(),
+            None => None,
+        };
+        *cache = Some(ListState {
+            fetched_at: std::time::Instant::now(),
+            body: fetched,
+        });
+    }
+    cache.as_ref().and_then(|s| s.body.clone())
+}
+
+/// Persist only schedule candidates whose complete state reproduces a genesis
+/// lock commitment. This is shared by the checked registry and vesting APIs,
+/// so either surface can warm the durable proof cache.
+fn prove_listed_vesting_schedules(store: &Store, entries: &[registry::ListedToken]) -> Result<()> {
+    for entry in entries {
+        let (Some(key), Some(v)) = (&entry.creator_pubkey, &entry.vesting) else {
+            continue;
+        };
+        let Ok(token_bytes) = hex::decode(&entry.covenant_id) else {
+            continue;
+        };
+        let Ok(token_raw) = <[u8; 32]>::try_from(token_bytes.as_slice()) else {
+            continue;
+        };
+        let token_id = kascov_core::CovenantId(token_raw);
+        if store.token_row(&token_id)?.is_none() {
+            continue;
+        }
+        let Ok(creator_bytes) = hex::decode(key) else {
+            continue;
+        };
+        let Ok(creator) = <[u8; 32]>::try_from(creator_bytes.as_slice()) else {
+            continue;
+        };
+        let genesis: Vec<_> = store
+            .token_events_page(&token_id, None, 1024)?
+            .into_iter()
+            .filter(|ev| ev.seq == 0 && ev.event_kind == "genesis")
+            .collect();
+        let Some(genesis_txid) = genesis.first().map(|ev| ev.txid) else {
+            continue;
+        };
+        let mut lock_ids = std::collections::BTreeSet::new();
+        for owner in genesis.iter().filter_map(|ev| ev.owner_to.as_deref()) {
+            if owner.len() != 66 || !owner.starts_with("02") {
+                continue;
+            }
+            let id_hex = &owner[2..];
+            if Some(id_hex) == entry.curve_covenant_id.as_deref()
+                || Some(id_hex) == entry.pool_covenant_id.as_deref()
+            {
+                continue;
+            }
+            if let Ok(bytes) = hex::decode(id_hex) {
+                if let Ok(id) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                    lock_ids.insert(id);
+                }
+            }
+        }
+        for lock_id in lock_ids.into_iter().map(kascov_core::CovenantId) {
+            for utxo in store
+                .utxos(&lock_id, false)?
+                .into_iter()
+                .filter(|u| u.outpoint.txid == genesis_txid)
+            {
+                if store.prove_and_put_vesting_schedule(
+                    &token_id,
+                    &lock_id,
+                    &creator,
+                    v.total,
+                    v.start_score,
+                    v.duration_score,
+                    &genesis_txid,
+                    utxo.outpoint.index,
+                    "KRON registry (commitment-proven)",
+                )? {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A launchpad's published token list, with every structural statement in it
 /// tested against kascov's own index. See `registry.rs` for why the checking is
 /// the feature and the names are the byproduct.
@@ -4433,31 +4576,7 @@ async fn registry_handler(
             .into_response()
     };
 
-    let body = {
-        let mut cache = registry_cache().lock().await;
-        let stale = match &*cache {
-            Some(s) => {
-                let ttl = if s.body.is_some() {
-                    registry::LIST_TTL_OK
-                } else {
-                    registry::LIST_TTL_ERR
-                };
-                s.fetched_at.elapsed() >= ttl
-            }
-            None => true,
-        };
-        if stale {
-            let fetched = match registry_client() {
-                Some(client) => registry::fetch_list(client).await.ok(),
-                None => None,
-            };
-            *cache = Some(ListState {
-                fetched_at: std::time::Instant::now(),
-                body: fetched,
-            });
-        }
-        cache.as_ref().and_then(|s| s.body.clone())
-    };
+    let body = cached_registry_body().await;
     let Some(body) = body else {
         return fail("token list unavailable");
     };
@@ -4473,6 +4592,7 @@ async fn registry_handler(
     let db2 = db.clone();
     let built = tokio::task::spawn_blocking(move || -> Result<String> {
         let store = kascov_core::store::Store::open(&db, network)?;
+        prove_listed_vesting_schedules(&store, &entries)?;
         let mut checked = Vec::with_capacity(entries.len());
         for entry in &entries {
             let mut facts = registry::ChainFacts::default();
@@ -4495,53 +4615,9 @@ async fn registry_handler(
                             }
                         }
                     }
-                    // A vested launch mints its allocation into a schedule
-                    // covenant, so the creator's key is absent from the
-                    // genesis owners above — it sits committed inside the
-                    // lock. The list names the key and the schedule; together
-                    // they are a complete candidate for the lock's own genesis
-                    // P2SH commitment, and reproducing that commitment proves
-                    // the listed creator from chain. Every covenant owner at
-                    // genesis other than the stated curve is tried; a lock
-                    // that is not the pinned vesting template, or a wrong
-                    // claim, reproduces nothing and proves nothing.
-                    if let (Some(key), Some(v)) = (&entry.creator_pubkey, &entry.vesting) {
-                        if let Ok(creator) =
-                            <[u8; 32]>::try_from(hex::decode(key).unwrap_or_default().as_slice())
-                        {
-                            for owner in &facts.genesis_owners {
-                                if owner.len() != 66
-                                    || !owner.starts_with("02")
-                                    || Some(&owner[2..]) == entry.curve_covenant_id.as_deref()
-                                {
-                                    continue;
-                                }
-                                let Ok(lock_id) = hex::decode(&owner[2..])
-                                    .map_err(anyhow::Error::from)
-                                    .and_then(|b| Ok(<[u8; 32]>::try_from(b.as_slice())?))
-                                else {
-                                    continue;
-                                };
-                                let proven = store
-                                    .utxos(&kascov_core::CovenantId(lock_id), false)?
-                                    .into_iter()
-                                    .filter(|u| {
-                                        Some(u.outpoint.txid.to_string()) == facts.genesis_txid
-                                    })
-                                    .any(|u| {
-                                        kascov_decode::vesting::prove_genesis_lock(
-                                            &u.spk_script,
-                                            &creator,
-                                            v.total,
-                                            v.start_score,
-                                            v.duration_score,
-                                        )
-                                    });
-                                if proven {
-                                    facts.vested_creators.push(key.clone());
-                                    break;
-                                }
-                            }
+                    if let Some(schedule) = store.vesting_schedule(&id)? {
+                        if entry.creator_pubkey.as_deref() == Some(&schedule.creator_pubkey) {
+                            facts.vested_creators.push(schedule.creator_pubkey);
                         }
                     }
                 }
@@ -5228,6 +5304,173 @@ fn token_row_json(
     row
 }
 
+#[derive(Clone, Debug, Default)]
+struct TokenDirectoryQuery {
+    limit: Option<u64>,
+    cursor: Option<(u64, String)>,
+    status: Option<String>,
+    phase: Option<String>,
+    kind: Option<String>,
+    search: Option<String>,
+}
+
+fn parse_token_directory_query(
+    query: &std::collections::HashMap<String, String>,
+) -> std::result::Result<TokenDirectoryQuery, axum::response::Response> {
+    use axum::response::IntoResponse;
+    let bad = |message| (axum::http::StatusCode::BAD_REQUEST, message).into_response();
+    let limit = match query.get("limit") {
+        Some(value) => Some(
+            value
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .map(|value| value.min(500))
+                .ok_or_else(|| bad("limit must be a positive integer"))?,
+        ),
+        None if query.is_empty() => None,
+        None => Some(100),
+    };
+    let cursor = match (query.get("after_daa"), query.get("after_id")) {
+        (None, None) => None,
+        (Some(daa), Some(id)) => {
+            let daa = daa
+                .parse::<u64>()
+                .map_err(|_| bad("after_daa must be a non-negative integer"))?;
+            let id = id
+                .parse::<kascov_core::CovenantId>()
+                .map_err(|_| bad("after_id must be a covenant id"))?
+                .to_string();
+            Some((daa, id))
+        }
+        _ => return Err(bad("after_daa and after_id must be supplied together")),
+    };
+    let status = query.get("status").map(|value| value.to_ascii_lowercase());
+    if status.as_deref().is_some_and(|status| {
+        !matches!(
+            status,
+            "verified" | "invalid" | "unvalidated" | "active" | "burned"
+        )
+    }) {
+        return Err(bad(
+            "status must be verified, invalid, unvalidated, active, or burned",
+        ));
+    }
+    let phase = query.get("phase").map(|value| value.to_ascii_lowercase());
+    if phase
+        .as_deref()
+        .is_some_and(|phase| !matches!(phase, "bonding" | "graduated"))
+    {
+        return Err(bad("phase must be bonding or graduated"));
+    }
+    let kind = query.get("kind").map(|value| value.to_ascii_lowercase());
+    if kind
+        .as_deref()
+        .is_some_and(|kind| !matches!(kind, "token" | "minter"))
+    {
+        return Err(bad("kind must be token or minter"));
+    }
+    let search = query
+        .get("q")
+        .map(|value| value.trim().to_ascii_lowercase());
+    if search.as_ref().is_some_and(|value| value.is_empty()) {
+        return Err(bad("q must not be empty"));
+    }
+    if search.as_ref().is_some_and(|value| value.len() > 128) {
+        return Err(bad("q must be at most 128 characters"));
+    }
+    Ok(TokenDirectoryQuery {
+        limit,
+        cursor,
+        status,
+        phase,
+        kind,
+        search,
+    })
+}
+
+fn token_directory_row_matches(
+    row: &serde_json::Value,
+    kind: &str,
+    query: &TokenDirectoryQuery,
+) -> bool {
+    if query.kind.as_deref().is_some_and(|wanted| wanted != kind) {
+        return false;
+    }
+    if query
+        .status
+        .as_deref()
+        .is_some_and(|wanted| row["status"].as_str() != Some(wanted))
+    {
+        return false;
+    }
+    if query
+        .phase
+        .as_deref()
+        .is_some_and(|wanted| row["market"]["phase"].as_str() != Some(wanted))
+    {
+        return false;
+    }
+    query.search.as_deref().is_none_or(|needle| {
+        [
+            "covenant_id",
+            "name",
+            "claimed_name",
+            "claimed_ticker",
+            "template",
+        ]
+        .iter()
+        .filter_map(|key| row[*key].as_str())
+        .any(|value| value.to_ascii_lowercase().contains(needle))
+    })
+}
+
+#[cfg(test)]
+mod token_directory_query_tests {
+    use super::*;
+
+    #[test]
+    fn empty_query_preserves_the_unbounded_legacy_directory() {
+        let query = parse_token_directory_query(&std::collections::HashMap::new()).unwrap();
+        assert_eq!(query.limit, None);
+        assert_eq!(query.cursor, None);
+    }
+
+    #[test]
+    fn filters_opt_into_a_bounded_page_and_validate_compound_cursors() {
+        let query =
+            std::collections::HashMap::from([("status".to_string(), "verified".to_string())]);
+        assert_eq!(
+            parse_token_directory_query(&query).unwrap().limit,
+            Some(100)
+        );
+
+        let incomplete =
+            std::collections::HashMap::from([("after_daa".to_string(), "7".to_string())]);
+        assert!(parse_token_directory_query(&incomplete).is_err());
+    }
+
+    #[test]
+    fn row_filters_cover_kind_status_phase_and_search() {
+        let row = serde_json::json!({
+            "covenant_id": "11".repeat(32),
+            "name": "Forest Coin",
+            "claimed_ticker": "TREE",
+            "status": "verified",
+            "market": { "phase": "bonding" },
+        });
+        let query = TokenDirectoryQuery {
+            kind: Some("token".into()),
+            status: Some("verified".into()),
+            phase: Some("bonding".into()),
+            search: Some("tree".into()),
+            ..Default::default()
+        };
+        assert!(token_directory_row_matches(&row, "token", &query));
+        assert!(!token_directory_row_matches(&row, "minter", &query));
+    }
+}
+
 /// GET /data/{network}/tokens.json — the derived KCC20 token directory:
 /// every token with its validation verdict, proven supply/holders where
 /// provable, plus the minter/vault covenants (legacy row shape, no verdict)
@@ -5282,18 +5525,28 @@ async fn verification_handler(
 async fn tokens_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path(net_name): axum::extract::Path<String>,
+    axum::extract::Query(raw_query): axum::extract::Query<
+        std::collections::HashMap<String, String>,
+    >,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     let network = match resolve_network(&state, &net_name) {
         Ok(n) => n,
         Err(resp) => return resp,
     };
+    let query = match parse_token_directory_query(&raw_query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let db = state.base_dir.join(format!("{network}.db"));
-    let key = format!("{network}/tokens");
+    let key = format!(
+        "{network}/tokens?limit={:?}&cursor={:?}&status={:?}&phase={:?}&kind={:?}&q={:?}",
+        query.limit, query.cursor, query.status, query.phase, query.kind, query.search,
+    );
     let cc = "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
     serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
-        let mut tokens: Vec<(u64, String, serde_json::Value)> = Vec::new();
+        let mut tokens: Vec<(u64, String, &'static str, serde_json::Value)> = Vec::new();
         for t in store.token_directory()? {
             let claimed = store.claimed_token_meta(&t.token_id)?;
             let mut row = token_row_json(&t, claimed.as_ref());
@@ -5304,7 +5557,8 @@ async fn tokens_handler(
                     row["market"] = serde_json::to_value(&m)?;
                 }
             }
-            tokens.push((t.last_activity_daa, t.token_id.to_string(), row));
+            row["kind"] = serde_json::json!("token");
+            tokens.push((t.last_activity_daa, t.token_id.to_string(), "token", row));
         }
         // Vault/"minter" covenants keep their legacy row shape (liveness in
         // `status`, no verdict) so old and new frontends render them as
@@ -5315,6 +5569,7 @@ async fn tokens_handler(
             let mut row = serde_json::json!({
                 "covenant_id": id_hex,
                 "name": og::friendly_name(&id_hex),
+                "kind": "minter",
                 "template": "KCC20 minter",
                 "status": if m.live_utxos > 0 { "active" } else { "burned" },
                 "live_value": m.live_value,
@@ -5329,19 +5584,33 @@ async fn tokens_handler(
                     "kcc20_covenant_b": governs[1],
                 });
             }
-            tokens.push((m.last_activity_daa, id_hex, row));
+            tokens.push((m.last_activity_daa, id_hex, "minter", row));
         }
         tokens.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        tokens.retain(|(_, _, kind, row)| token_directory_row_matches(row, kind, &query));
+        let tokens_total = tokens.len();
+        if let Some((after_daa, after_id)) = query.cursor.as_ref() {
+            tokens.retain(|(daa, id, _, _)| daa < after_daa || (daa == after_daa && id < after_id));
+        }
+        let mut more = false;
+        if let Some(limit) = query.limit {
+            more = tokens.len() as u64 > limit;
+            tokens.truncate(limit as usize);
+        }
+        let next = more
+            .then(|| tokens.last().map(|(daa, id, _, _)| (*daa, id.clone())))
+            .flatten();
         let derivation_version = store.token_derivation_version()?;
         let pending =
             derivation_version.as_deref() != Some(kascov_core::tokens::TOKEN_DERIVATION_VERSION);
         let tip = store.tip()?;
-        Ok(Some(serde_json::to_string(&serde_json::json!({
+        let mut out = serde_json::json!({
             "network": network.to_string(),
             "generated_at_ms": now_ms(),
             "tip_daa": tip.map(|t| t.0),
             "tip_at_ms": tip.map(|t| t.1),
-            "tokens": tokens.into_iter().map(|(_, _, row)| row).collect::<Vec<_>>(),
+            "tokens_total": tokens_total,
+            "tokens": tokens.into_iter().map(|(_, _, _, row)| row).collect::<Vec<_>>(),
             "note": "validated from chain — “verified” means every event in the token’s history \
                      matched the KCC20 rules with every state hash-proven and supply is conserved; \
                      anything kascov could not prove stays unvalidated with the reason",
@@ -5350,7 +5619,12 @@ async fn tokens_handler(
                 "current": kascov_core::tokens::TOKEN_DERIVATION_VERSION,
                 "pending": pending,
             },
-        }))?))
+        });
+        if let Some((daa, id)) = next {
+            out["next_after_daa"] = serde_json::json!(daa);
+            out["next_after_id"] = serde_json::json!(id);
+        }
+        Ok(Some(serde_json::to_string(&out)?))
     })
     .await
 }
@@ -5380,6 +5654,7 @@ const TOKEN_EVENTS_MAX: u64 = 1000;
 async fn token_trades_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     let network = match resolve_network(&state, &net_name) {
@@ -5394,25 +5669,63 @@ async fn token_trades_handler(
     let Ok(token_id) = id_hex.parse::<kascov_core::CovenantId>() else {
         return (StatusCode::BAD_REQUEST, "bad token id").into_response();
     };
+    let before_seq = match q.get("before_seq") {
+        Some(value) => match value.parse::<u64>() {
+            Ok(value) => Some(value),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "before_seq must be a non-negative integer",
+                )
+                    .into_response()
+            }
+        },
+        None => None,
+    };
+    // No query keeps the historical "all trades" response. Supplying a
+    // cursor or limit opts into bounded pagination.
+    let limit = match q.get("limit") {
+        Some(value) => match value.parse::<u64>().ok().filter(|value| *value > 0) {
+            Some(value) => value.min(1000),
+            None => {
+                return (StatusCode::BAD_REQUEST, "limit must be a positive integer")
+                    .into_response()
+            }
+        },
+        None if before_seq.is_some() => 100,
+        None => i64::MAX as u64 - 1,
+    };
     let db = state.base_dir.join(format!("{network}.db"));
-    let key = format!("{network}/token/{}/trades", token_id);
+    let key = format!(
+        "{network}/token/{token_id}/trades?limit={limit}&before_seq={}",
+        before_seq.map_or(String::new(), |value| value.to_string())
+    );
     let cc = "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
     serve_cached(&state, key, 60, cc, accepts_gzip(&headers), move || {
         let store = kascov_core::store::Store::open(&db, network)?;
-        // Bounded, but far above any real token's history so "all" means all.
-        // If a token ever exceeds this the count below still tells the truth.
-        let rows = store
-            .token_trades_page(&token_id, 20_000)?
+        if store.token_row(&token_id)?.is_none() {
+            return Ok(None);
+        }
+        let mut page = store.token_trades_page_before(&token_id, before_seq, limit + 1)?;
+        let more = page.len() as u64 > limit;
+        page.truncate(limit as usize);
+        let rows = page
             .iter()
             .map(|tr| trade_json(tr, network))
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(Some(serde_json::to_string(&serde_json::json!({
+        let mut out = serde_json::json!({
             "network": network.to_string(),
             "token_id": token_id,
             "generated_at_ms": now_ms(),
             "trades_total": store.token_trades_count(&token_id)?,
             "trades": rows,
-        }))?))
+        });
+        if more {
+            if let Some(last) = page.last() {
+                out["next_before_seq"] = serde_json::json!(last.seq);
+            }
+        }
+        Ok(Some(serde_json::to_string(&out)?))
     })
     .await
 }
@@ -5440,14 +5753,55 @@ async fn token_handler(
         None => Ok(default),
         Some(s) => s
             .parse::<u64>()
-            .map(|l| l.clamp(1, max))
-            .map_err(|_| name.to_string()),
+            .ok()
+            .filter(|limit| *limit > 0)
+            .map(|limit| limit.min(max))
+            .ok_or_else(|| name.to_string()),
     };
+    let parse_cursor = |name: &str| -> std::result::Result<Option<u64>, axum::response::Response> {
+        q.get(name)
+            .map(|value| {
+                value.parse::<u64>().map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "event cursor must be a non-negative integer",
+                    )
+                        .into_response()
+                })
+            })
+            .transpose()
+    };
+    let before_seq = match parse_cursor("before_seq") {
+        Ok(cursor) => cursor,
+        Err(response) => return response,
+    };
+    let after_seq = match parse_cursor("after_seq") {
+        Ok(cursor) => cursor,
+        Err(response) => return response,
+    };
+    if before_seq.is_some() && after_seq.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "after_seq and before_seq are mutually exclusive",
+        )
+            .into_response();
+    }
+    if q.get("order").is_some_and(|order| {
+        !order.eq_ignore_ascii_case("asc") && !order.eq_ignore_ascii_case("desc")
+    }) {
+        return (StatusCode::BAD_REQUEST, "order must be asc or desc").into_response();
+    }
     // `order=desc` (or a `before_seq` cursor) reads the history newest first.
-    let before_seq = q.get("before_seq").and_then(|s| s.parse::<u64>().ok());
     let newest_first = before_seq.is_some()
         || q.get("order")
             .is_some_and(|o| o.eq_ignore_ascii_case("desc"));
+    if newest_first && after_seq.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "after_seq cannot be used with descending order",
+        )
+            .into_response();
+    }
     let (limit, events_limit) = match (
         parse_limit("limit", TOKEN_BALANCES_DEFAULT, TOKEN_BALANCES_MAX),
         parse_limit("events_limit", TOKEN_EVENTS_DEFAULT, TOKEN_EVENTS_MAX),
@@ -5456,12 +5810,11 @@ async fn token_handler(
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                "limit must be a non-negative integer",
+                "limit and events_limit must be positive integers",
             )
                 .into_response()
         }
     };
-    let after_seq = q.get("after_seq").and_then(|s| s.parse::<u64>().ok());
     let db = state.base_dir.join(format!("{network}.db"));
     let key = format!(
         "{network}/token/{token_id}?limit={limit}&after_seq={}&before_seq={}&desc={newest_first}&events_limit={events_limit}",
@@ -5499,36 +5852,12 @@ async fn token_handler(
         // default so existing callers are untouched. Descending walks back from
         // the tip, which is how a history is actually read: an active token's
         // first ascending page is its first few minutes and nothing since.
-        let mut rows = if newest_first {
+        let rows = if newest_first {
             store.token_events_page_before(&token_id, before_seq, events_limit + 1)?
         } else {
             store.token_events_page(&token_id, after_seq, events_limit + 1)?
         };
-        let more = rows.len() as u64 > events_limit;
-        let boundary_seq = if more {
-            rows.truncate(events_limit as usize);
-            let boundary = rows.last().map(|r| r.seq);
-            if let Some(boundary) = boundary {
-                // descending: the straddled seq is the LOWEST one here
-                let complete: Vec<_> = rows
-                    .iter()
-                    .filter(|r| {
-                        if newest_first {
-                            r.seq > boundary
-                        } else {
-                            r.seq < boundary
-                        }
-                    })
-                    .cloned()
-                    .collect();
-                if !complete.is_empty() {
-                    rows = complete;
-                }
-            }
-            rows.last().map(|r| r.seq)
-        } else {
-            None
-        };
+        let (rows, boundary_seq) = trim_complete_event_page(rows, events_limit);
         let (next_after_seq, next_before_seq) = if newest_first {
             (None, boundary_seq)
         } else {
@@ -7551,7 +7880,7 @@ async fn data_index_handler(
     let body = serde_json::json!({
         "network": n,
         "docs": "https://kascov.io/#/dev",
-        "openapi": null,
+        "openapi": "/openapi.json",
         "endpoints": {
             "snapshot": format!("/data/{n}.json"),
             "live": format!("/data/{n}-live.json"),
@@ -7559,8 +7888,22 @@ async fn data_index_handler(
             "coin": format!("/data/{n}/c/{{covenant_id}}.json"),
             "coins_batch": format!("/data/{n}/coins?ids="),
             "tx": format!("/data/{n}/tx/{{txid}}.json"),
-            "tokens": format!("/data/{n}/tokens.json"),
+            "tokens": format!("/data/{n}/tokens.json?limit=&after_daa=&after_id=&status=&phase=&kind=&q="),
             "token": format!("/data/{n}/token/{{token_id}}.json"),
+            "token_holders": format!("/data/{n}/token/{{token_id}}/holders?limit=&after_balance=&after_owner="),
+            "token_events": format!("/data/{n}/token/{{token_id}}/events?limit=&after_seq=&before_seq=&order="),
+            "token_trades": format!("/data/{n}/token/{{token_id}}/trades?limit=&before_seq="),
+            "token_market": format!("/data/{n}/token/{{token_id}}/market"),
+            "trades": format!("/data/{n}/trades?limit=&token_id=&market_id=&side=&before_daa=&before_token=&before_seq="),
+            "markets": format!("/data/{n}/markets?limit=&after_id=&phase=&priced="),
+            "market": format!("/data/{n}/market/{{market_id}}"),
+            "pools": format!("/data/{n}/pools?limit=&after_id=&priced="),
+            "pool": format!("/data/{n}/pool/{{pool_id}}"),
+            "vesting": format!("/data/{n}/vesting?limit=&after_id="),
+            "vesting_detail": format!("/data/{n}/vesting/{{token_or_lock_id}}"),
+            "vesting_claims": format!("/data/{n}/vesting/{{token_or_lock_id}}/claims"),
+            "verification": format!("/data/{n}/verification.json"),
+            "registry": format!("/data/{n}/registry.json"),
             "templates": format!("/data/{n}/templates.json"),
             "template_by_kcc1_hash": format!("/data/{n}/template/{{hash}}.json"),
             "search": format!("/data/{n}/search?q="),
@@ -8034,7 +8377,9 @@ fn build_sitemap_xml(store: Option<&kascov_core::store::Store>, now: u64) -> Res
     // The other static SPA routes, same deal as the guide: prose ships in
     // index.html, the URL is worth crawling on its own, and the worker has no
     // honest lastmod for any of them.
-    for page in ["token", "vote", "lane", "bot", "verify", "passport", "unknowns"] {
+    for page in [
+        "token", "vote", "lane", "bot", "verify", "passport", "unknowns",
+    ] {
         xml.push_str(&format!("<url><loc>https://kascov.io/{page}</loc></url>\n"));
     }
     if let Some(store) = store {
@@ -8795,8 +9140,7 @@ fn lane_secret() -> Option<String> {
 /// so the address needs a charset-safe wrapper — and these two dozen lines
 /// beat pulling a base64 crate into the tree for one token format.
 fn b64url_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let n = u32::from(chunk[0]) << 16
@@ -9018,7 +9362,11 @@ async fn lane_mint_handler(
     .await;
     let balance = match held {
         Ok(Ok(b)) => b,
-        _ => return json_resp(serde_json::json!({ "ok": false, "error": "could not read holdings" })),
+        _ => {
+            return json_resp(
+                serde_json::json!({ "ok": false, "error": "could not read holdings" }),
+            )
+        }
     };
     if balance <= 0 {
         return refuse("this address holds no KASCOV");
@@ -9669,9 +10017,18 @@ mod anchor_tests {
         assert_eq!(arr2.len(), 3);
         assert_eq!(arr2[2]["merkle_root"], "third");
         // no record at all: history starts at one
-        assert_eq!(anchor_history(None, "r", "t", 1).as_array().unwrap().len(), 1);
+        assert_eq!(
+            anchor_history(None, "r", "t", 1).as_array().unwrap().len(),
+            1
+        );
         // garbage never panics
-        assert_eq!(anchor_history(Some("junk"), "r", "t", 1).as_array().unwrap().len(), 1);
+        assert_eq!(
+            anchor_history(Some("junk"), "r", "t", 1)
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -10794,7 +11151,11 @@ mod feed_and_sitemap_tests {
             .children()
             .filter(|n| n.has_tag_name("url"))
             .collect();
-        assert_eq!(urls.len(), 10, "root + the eight static routes + the one coin");
+        assert_eq!(
+            urls.len(),
+            10,
+            "root + the eight static routes + the one coin"
+        );
         let lastmod_of = |n: &roxmltree::Node<'_, '_>| {
             n.children()
                 .find(|c| c.has_tag_name("lastmod"))
@@ -11079,7 +11440,11 @@ mod holder_lane_tests {
     fn b64url_round_trips_every_tail_length() {
         for len in 0..40usize {
             let data: Vec<u8> = (0..len as u8).collect();
-            assert_eq!(b64url_decode(&b64url_encode(&data)), Some(data), "len {len}");
+            assert_eq!(
+                b64url_decode(&b64url_encode(&data)),
+                Some(data),
+                "len {len}"
+            );
         }
         assert_eq!(b64url_decode("has=padding"), None);
         assert_eq!(b64url_decode("bad!chars"), None);
@@ -11153,7 +11518,10 @@ mod holder_lane_tests {
         let token = mint_lane_token(SECRET, ADDR, EXPIRY);
         let now = EXPIRY - 1;
         // header absent -> anonymous, the path that must never change
-        assert_eq!(select_bucket(None, Some(SECRET), now), LaneBucket::Anonymous);
+        assert_eq!(
+            select_bucket(None, Some(SECRET), now),
+            LaneBucket::Anonymous
+        );
         // a valid pass -> the holder's own lane, keyed by the PROVEN address
         assert_eq!(
             select_bucket(Some(&token), Some(SECRET), now),

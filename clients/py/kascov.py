@@ -62,6 +62,14 @@ class Kascov:
         with urllib.request.urlopen(req, timeout=60) as res:
             return json.load(res)
 
+    def _get_with_query(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        clean = {}
+        for key, value in params.items():
+            if value is not None:
+                clean[key] = str(value).lower() if isinstance(value, bool) else value
+        qs = f"?{urllib.parse.urlencode(clean)}" if clean else ""
+        return self._get(f"{path}{qs}")
+
     def live(self) -> Dict[str, Any]:
         """Small fast feed: stats + chain tip + newest ~150 events."""
         return self._get(f"/data/{self.network}-live.json")
@@ -105,6 +113,86 @@ class Kascov:
     def templates(self) -> Dict[str, Any]:
         """Contract-type analytics (what's running on this network)."""
         return self._get(f"/data/{self.network}/templates.json")
+
+    def tokens(
+        self, limit=None, after_daa=None, after_id=None, status=None,
+        phase=None, kind=None, q=None,
+    ) -> Dict[str, Any]:
+        """Derived token/minter directory. Any option opts into a bounded page."""
+        return self._get_with_query(f"/data/{self.network}/tokens.json", {
+            "limit": limit, "after_daa": after_daa, "after_id": after_id,
+            "status": status, "phase": phase, "kind": kind, "q": q,
+        })
+
+    def token(
+        self, covenant_id: str, limit=None, events_limit=None,
+        after_seq=None, before_seq=None, order=None,
+    ) -> Dict[str, Any]:
+        return self._get_with_query(f"/data/{self.network}/token/{covenant_id}", {
+            "limit": limit, "events_limit": events_limit, "after_seq": after_seq,
+            "before_seq": before_seq, "order": order,
+        })
+
+    def token_holders(self, covenant_id: str, limit=None, after_balance=None, after_owner=None) -> Dict[str, Any]:
+        return self._get_with_query(f"/data/{self.network}/token/{covenant_id}/holders", {
+            "limit": limit, "after_balance": after_balance, "after_owner": after_owner,
+        })
+
+    def token_events(self, covenant_id: str, limit=None, after_seq=None, before_seq=None, order=None) -> Dict[str, Any]:
+        return self._get_with_query(f"/data/{self.network}/token/{covenant_id}/events", {
+            "limit": limit, "after_seq": after_seq, "before_seq": before_seq, "order": order,
+        })
+
+    def token_trades(self, covenant_id: str, limit=None, before_seq=None) -> Dict[str, Any]:
+        return self._get_with_query(f"/data/{self.network}/token/{covenant_id}/trades", {
+            "limit": limit, "before_seq": before_seq,
+        })
+
+    def trades(
+        self, limit=None, token_id=None, market_id=None, side=None,
+        before_daa=None, before_token=None, before_seq=None,
+    ) -> Dict[str, Any]:
+        return self._get_with_query(f"/data/{self.network}/trades", {
+            "limit": limit, "token_id": token_id, "market_id": market_id,
+            "side": side, "before_daa": before_daa,
+            "before_token": before_token, "before_seq": before_seq,
+        })
+
+    def markets(self, limit=None, after_id=None, phase=None, priced=None) -> Dict[str, Any]:
+        return self._get_with_query(f"/data/{self.network}/markets", {
+            "limit": limit, "after_id": after_id, "phase": phase, "priced": priced,
+        })
+
+    def market(self, covenant_id: str) -> Dict[str, Any]:
+        return self._get(f"/data/{self.network}/market/{covenant_id}")
+
+    def token_market(self, covenant_id: str) -> Dict[str, Any]:
+        return self._get(f"/data/{self.network}/token/{covenant_id}/market")
+
+    def pools(self, limit=None, after_id=None, priced=None) -> Dict[str, Any]:
+        return self._get_with_query(f"/data/{self.network}/pools", {
+            "limit": limit, "after_id": after_id, "priced": priced,
+        })
+
+    def pool(self, covenant_id: str) -> Dict[str, Any]:
+        return self._get(f"/data/{self.network}/pool/{covenant_id}")
+
+    def vesting(self, limit=None, after_id=None) -> Dict[str, Any]:
+        return self._get_with_query(f"/data/{self.network}/vesting", {
+            "limit": limit, "after_id": after_id,
+        })
+
+    def vesting_detail(self, token_or_lock_id: str) -> Dict[str, Any]:
+        return self._get(f"/data/{self.network}/vesting/{token_or_lock_id}")
+
+    def vesting_claims(self, token_or_lock_id: str) -> Dict[str, Any]:
+        return self._get(f"/data/{self.network}/vesting/{token_or_lock_id}/claims")
+
+    def index(self) -> Dict[str, Any]:
+        return self._get(f"/data/{self.network}/index.json")
+
+    def openapi(self) -> Dict[str, Any]:
+        return self._get("/openapi.json")
 
     def activity(self, range: str = "24h") -> Dict[str, Any]:
         """Births/moves/burns per DAA bucket. range: 1h|6h|24h|48h|all"""

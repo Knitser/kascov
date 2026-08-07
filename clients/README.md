@@ -5,9 +5,29 @@ Tiny, zero-dependency wrappers over the [kascov JSON API](https://kascov.io/#/de
 - **`js/kascov.mjs`** — Node 18+ / browser, native fetch, SSE via async iterator.
 - **`py/kascov.py`** — Python 3.9+, stdlib urllib only.
 
-Both cover: live feed, paginated coin summaries (compound cursor), per-coin detail
-(events/UTXOs/holders), tx & address lookup, digest, galaxy, reorgs, templates,
-activity, and the live SSE stream.
+Both cover: live feed, paginated coin summaries, per-coin detail, tx/address
+lookup, analytics, and the live SSE stream. They also expose the complete token
+surface: token search and pagination; dedicated holders, events, and trades;
+global trades; verified markets and graduated pools; commitment-proven vesting;
+the machine index; and the OpenAPI 3.1 document.
+
+```js
+const page = await k.tokens({ status: 'verified', phase: 'bonding', limit: 50 });
+const holders = await k.tokenHolders(page.tokens[0].covenant_id, { limit: 100 });
+const markets = await k.markets({ priced: true });
+const schedules = await k.vesting({ limit: 100 });
+```
+
+```py
+page = k.tokens(status="verified", phase="bonding", limit=50)
+holders = k.token_holders(page["tokens"][0]["covenant_id"], limit=100)
+markets = k.markets(priced=True)
+schedules = k.vesting(limit=100)
+```
+
+All amounts remain exact JSON integers. Market prices remain exact
+`quote_sompi / base_amount` pairs, and vesting coordinates are DAA scores rather
+than timestamps.
 
 The stream is `GET /data/{network}/stream` — the same route the worker registers
 and the site itself uses. An optional per-covenant filter narrows it to one coin:

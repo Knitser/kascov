@@ -13,8 +13,16 @@ node_modules/
 __pycache__/
 *.py[cod]
 
-# local editor/agent config and internal audit notes — not for the public repo
-.claude/
+# Local Claude settings and audit notes stay private. The GitNexus-generated
+# code-navigation skills are deliberately portable so Codex and Claude get the
+# same repository map after a fresh clone.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/generated/
+!.claude/skills/generated/**
+!.claude/skills/gitnexus/
+!.claude/skills/gitnexus/**
 HANDOFF-AUDIT.md
 
 # Remotion promo-video project — rendered locally, not tracked
@@ -48,3 +56,4 @@ test-results/
 web/vote-tally.json
 web/passport-claims.json
 web/passport-anchor.json
+.gitnexus

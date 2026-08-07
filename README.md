@@ -111,6 +111,9 @@ curl -s https://kascov.io/data/mainnet.json | jq '.covenants[0]'
 
 # what this worker offers, per network
 curl -s https://kascov.io/data/mainnet/index.json | jq .endpoints
+
+# standard OpenAPI 3.1 contract (all project identity, no generated branding)
+curl -s https://kascov.io/openapi.json | jq .openapi
 ```
 
 | endpoint | returns |
@@ -121,7 +124,11 @@ curl -s https://kascov.io/data/mainnet/index.json | jq .endpoints
 | `/data/{net}/coins?ids=` | Batch coin summaries. |
 | `/data/{net}/events?after_daa=&after_seq=&limit=` | The raw event log, forward-paginated. |
 | `/data/{net}/tx/{txid}`, `/data/{net}/addr/{address}` | Transaction and address views. |
-| `/data/{net}/tokens.json`, `/data/{net}/token/{id}` | Token directory and one token's whole story, with validation verdicts. |
+| `/data/{net}/tokens.json`, `/data/{net}/token/{id}` | Filterable, cursor-paginated token directory and one token's whole story, with validation verdicts. |
+| `/data/{net}/token/{id}/holders`, `/events`, `/trades` | Stable pages over hash-proven holders, whole classified events, and admitted trades. |
+| `/data/{net}/trades`, `/markets`, `/market/{id}` | Global admitted-trade feed and verified bonding/pool market directory and detail. |
+| `/data/{net}/pools`, `/pool/{id}`, `/token/{id}/market` | Graduated pools and token-to-market resolution. |
+| `/data/{net}/vesting`, `/vesting/{id}`, `/vesting/{id}/claims` | Schedules, states, and claims published only after reproducing their on-chain P2SH commitments. |
 | `/data/{net}/search?q=` | Ids, friendly names and templates. |
 | `/data/{net}/galaxy.json?tier=core&fmt=2` | Network graph geometry. `tier=core` returns only the larger clusters for a fast first paint; `fmt=2` switches to a columnar shape (parallel arrays instead of per-node objects), and `tier=visual` adds the outer geometry as a small delta over core. |
 | `/data/{net}/lanes.json`, `/data/{net}/lane/{ns}` | Payload lanes — inscriptions and namespace tags with their own volumes. |
@@ -132,6 +139,7 @@ curl -s https://kascov.io/data/mainnet/index.json | jq .endpoints
 | `/data/{net}/simulate`, `debug/{txid}`, `zk-verify`, `compile`, `publish` | Off-chain script-engine execution, replay, proof verification, contract compilation. |
 | `/data/{net}/subscribe`, `unsubscribe` | Webhooks (`{url, covenant_id?, kind?}`), delivered with SSRF guards. |
 | `/share/{net}/{id}`, `/og/{net}/{id}`, `/badge/{net}/{id}`, `/img/{net}/{id}` | Shareable coin page, rendered OG PNG, SVG badge, hash-verified token art. |
+| `/openapi.json`, `/data/{net}/index.json` | OpenAPI 3.1 contract and compact per-network endpoint discovery. |
 | `/healthz`, `/sitemap.xml`, `/feed.xml` | Sync state per network, crawlable coin index, changelog feed. |
 
 **Pagination.** A bare grid request returns a first page capped at 20,000 rows, newest activity first. When more remain, the response carries `next_after_daa` + `next_after_id`; pass them back as `?after_daa=&after_id=&limit=` to keep walking (default page 5,000). `/events` uses the same shape with `after_seq`.
