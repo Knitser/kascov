@@ -1,5 +1,10 @@
 [
   {
+    "date": "2026-08-07",
+    "title": "the whole token market has an API",
+    "body": "the public API no longer stops at token summaries. every token can now be searched and paged with stable cursors, then opened for its holders, complete event history and verified trades. there is a global trade feed, a market directory covering bonding curves and graduated pools, and commitment-proven vesting schedules with their claim history. filters cover phase, pricing, side, token and market without turning exact integers into floats. every path is documented in the live API reference and OpenAPI document, and the JavaScript and Python clients speak it too. unverified programs still fail closed: they stay unpriced and out of the trade feed."
+  },
+  {
     "date": "2026-08-06",
     "title": "the matcher learns the third generation",
     "body": "KRON shipped a new build generation and kascov can now prove it: curve v3 is v2 plus the value-continuation fix announced on august 4, visible in the bytecode as three inserted copies of a nine-byte check ending in GREATERTHANOREQUAL VERIFY. pinned from three mainnet deployments, each recovered from its own spend and blake2b-proven against its P2SH commitment: 2,654 pushes, opcode gaps byte-identical across all three, the same 33 parameter roles as v2 at shifted positions. the pool it graduates into is pinned from the template the proven curve itself embeds, and the first v3-graduated mainnet pool matches it outside exactly the two creator slots. the matcher version bumps to 5, so every stored unmatched program gets re-read: Entity X, KREX and their siblings move from unknown to priced-and-verified on the next pass."
