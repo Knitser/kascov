@@ -28,7 +28,7 @@ kascov.io, www.kascov.io {
 	}
 
 	@worker {
-		path /data/* /share/* /og/* /badge/* /img/* /sitemap.xml /feed.xml /health /healthz
+		path /data/* /share/* /og/* /badge/* /img/* /openapi.json /sitemap.xml /feed.xml /health /healthz
 	}
 	handle @worker {
 		reverse_proxy 127.0.0.1:8080 {

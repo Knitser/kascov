@@ -184,7 +184,7 @@ python3 -m unittest scripts/test_traffic_report.py  # log-parsing privacy rules
 
 None of this needs a Kaspa node. `ChainSource` is a boundary trait, so the sync engine is driven by scripted virtual chains against temporary SQLite stores — including reorgs, rollback and re-acceptance convergence. The web tests are dependency-free and assert against the real `web/` sources rather than a copy.
 
-**Previewing the site.** `web/` is static, but the pages fetch worker routes, so a bare file server leaves them empty. Run the worker and put the static files in front of it with `/data/**`, `/share/**`, `/og/**`, `/badge/**`, `/img/**`, `/sitemap.xml`, `/feed.xml` and `/healthz` proxied through — `scripts/kascov.Caddyfile` is the reference for exactly which paths those are, and its `try_files {path} {path}.html {path}/ /index.html` is what makes clean URLs like `/guide` reach the hash router. Pointing the same proxy at `https://kascov.io` instead of a local worker is enough to work on the frontend alone.
+**Previewing the site.** `web/` is static, but the pages fetch worker routes, so a bare file server leaves them empty. Run the worker and put the static files in front of it with `/data/**`, `/share/**`, `/og/**`, `/badge/**`, `/img/**`, `/openapi.json`, `/sitemap.xml`, `/feed.xml` and `/healthz` proxied through — `scripts/kascov.Caddyfile` is the reference for exactly which paths those are, and its `try_files {path} {path}.html {path}/ /index.html` is what makes clean URLs like `/guide` reach the hash router. Pointing the same proxy at `https://kascov.io` instead of a local worker is enough to work on the frontend alone; that mode deliberately refuses write methods.
 
 ## Running your own instance
 
@@ -192,7 +192,7 @@ None of this needs a Kaspa node. `ChainSource` is a boundary trait, so the sync 
 cargo run --release -p kascov -- serve --listen 0.0.0.0:8080 --networks mainnet,testnet-10
 ```
 
-The worker owns one SQLite file per network (`~/.kascov/<network>.db` by default) — disposable and rebuildable from the chain, though rebuilding cannot recover history that has since been pruned. Put a reverse proxy in front to serve `web/` as static files and forward `/data/**`, `/share/**`, `/og/**`, `/badge/**`, `/img/**`, `/sitemap.xml`, `/feed.xml` and `/healthz` to the worker; `scripts/kascov.Caddyfile` is the reference. Point it at your own `kaspad --utxoindex` for anything you intend to keep.
+The worker owns one SQLite file per network (`~/.kascov/<network>.db` by default) — disposable and rebuildable from the chain, though rebuilding cannot recover history that has since been pruned. Put a reverse proxy in front to serve `web/` as static files and forward `/data/**`, `/share/**`, `/og/**`, `/badge/**`, `/img/**`, `/openapi.json`, `/sitemap.xml`, `/feed.xml` and `/healthz` to the worker; `scripts/kascov.Caddyfile` is the reference. Point it at your own `kaspad --utxoindex` for anything you intend to keep.
 
 Production runs beside kascov's own archival mainnet and testnet-10 nodes: Caddy serves the static site and proxies the worker over the host bridge. The Firebase and Cloud Run configs in this repo remain only as migration history.
 
