@@ -13,16 +13,12 @@ node_modules/
 __pycache__/
 *.py[cod]
 
-# Local Claude settings and audit notes stay private. The GitNexus-generated
-# code-navigation skills are deliberately portable so Codex and Claude get the
-# same repository map after a fresh clone.
-.claude/*
-!.claude/skills/
-.claude/skills/*
-!.claude/skills/generated/
-!.claude/skills/generated/**
-!.claude/skills/gitnexus/
-!.claude/skills/gitnexus/**
+# Local agent settings and GitNexus-generated navigation stay private. Running
+# `npx gitnexus analyze` regenerates these files for whichever agent needs them.
+.claude/
+.gitnexus/
+AGENTS.md
+CLAUDE.md
 HANDOFF-AUDIT.md
 
 # Remotion promo-video project — rendered locally, not tracked
@@ -56,4 +52,3 @@ test-results/
 web/vote-tally.json
 web/passport-claims.json
 web/passport-anchor.json
-.gitnexus
