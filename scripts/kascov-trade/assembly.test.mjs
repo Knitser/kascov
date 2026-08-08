@@ -425,9 +425,15 @@ test("PARTIAL SELL: the remainder comes back as a presence-owned change cell", (
   assert.equal(changeState.owner, seller, "the remainder returns to the seller");
   /* and the transaction actually carries that cell as an output, bound to the
      token covenant like the inventory beside it */
-  const changeOut = outs[2];
+  /* The covenant pins a sell's fee outputs to absolute indexes 2, 3 and 4, so
+     the seller's remainder cannot sit before them: it is found by its covenant
+     binding as covid-A output 1, and this builder places it at index 5. */
+  const changeOut = outs[5];
   assert.equal(String(changeOut.value), "50000000", "the change cell carries the dust floor");
-  assert.equal(changeOut.covenant.covenantId, scene.state.tokenCovid ?? changeOut.covenant.covenantId);
+  assert.ok(changeOut.covenant, "the change cell is covenant-bound");
+  assert.equal(changeOut.covenant.authorizingInput, 1, "authorized by the inventory input");
+  /* and the three fee legs stay exactly where the covenant expects them */
+  assert.equal(outs.length, 7, "curve, inventory, three fees, the remainder, KAS change");
   const v = built.verify();
   assert.equal(v.ok, true, `partial sell must verify: ${v.reason ?? ""}`);
 

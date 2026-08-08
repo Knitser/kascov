@@ -1110,9 +1110,14 @@ function assembleTrade(kind, rawState, params) {
           authorizingInput: INVENTORY_IDX,
           covenantId: st.tokenCovid,
         }),
-        /* covid-A output 1: the seller's unsold remainder, presence-owned, and
-           only present when there IS a remainder — the covenant allows one or
-           two token outputs on a sell and nothing more. */
+        /* The covenant pins a sell's fee outputs at ABSOLUTE indexes 2, 3, 4
+           (SELL_CREATOR_FEE_OUT and friends), so nothing may be inserted
+           before them. The seller's remainder is found by its covenant
+           binding instead — it is covid-A output 1 wherever it sits — so it
+           goes after the fees. */
+        txOutput(quote.fees.creator, p2pkScriptPubKey(feeKeys.creator)),
+        txOutput(quote.fees.platform, p2pkScriptPubKey(feeKeys.platform)),
+        txOutput(quote.fees.dev, p2pkScriptPubKey(feeKeys.dev)),
         ...(tokenChange > 0n
           ? [
               txOutput(
@@ -1122,9 +1127,6 @@ function assembleTrade(kind, rawState, params) {
               ),
             ]
           : []),
-        txOutput(quote.fees.creator, p2pkScriptPubKey(feeKeys.creator)),
-        txOutput(quote.fees.platform, p2pkScriptPubKey(feeKeys.platform)),
-        txOutput(quote.fees.dev, p2pkScriptPubKey(feeKeys.dev)),
       ];
 
   const feeTotal = quote.fees.creator + quote.fees.platform + quote.fees.dev;
@@ -1277,17 +1279,16 @@ function buildReviewRows({ isBuy, quote, transaction, change, feeInfo, tokenIn, 
            panel honest: a mislabeled fee is a lie told at the moment of
            signing. */
         const keepsChange = tokenChange != null && tokenChange > 0n;
-        const f = keepsChange ? 3 : 2;
         return [
           row(0, "curve continuation", "covenant", `reserve → ${quote.newReserve}, holds ${kasStr(o[0].value)}`),
           row(1, "market inventory cell", "covenant", `${quote.newReserve} $KASCOV`),
+          row(2, "creator fee (0.25%)", "fee", kasStr(o[2].value)),
+          row(3, "platform fee (0.90%)", "fee", kasStr(o[3].value)),
+          row(4, "dev fee (0.10%, min 0.2 KAS)", "fee", kasStr(o[4].value)),
           ...(keepsChange
-            ? [row(2, "your $KASCOV back", "you", `${tokenChange} $KASCOV kept, ${tokenIn} sold`)]
+            ? [row(5, "your $KASCOV back", "you", `${tokenChange} kept, ${tokenIn} sold`)]
             : []),
-          row(f, "creator fee (0.25%)", "fee", kasStr(o[f].value)),
-          row(f + 1, "platform fee (0.90%)", "fee", kasStr(o[f + 1].value)),
-          row(f + 2, "dev fee (0.10%, min 0.2 KAS)", "fee", kasStr(o[f + 2].value)),
-          row(f + 3, "proceeds + change back to you", "you", `${kasStr(change)} for ${tokenIn} $KASCOV`),
+          row(keepsChange ? 6 : 5, "proceeds + change back to you", "you", `${kasStr(change)} for ${tokenIn} $KASCOV`),
         ];
       })();
   rows.push({
@@ -1385,7 +1386,7 @@ function verifyTrade(built, rawState, params) {
     const legs = feeLegs(moved);
     const feeKeys = feeKeysFromCurveProgram(st.programHex);
     /* The fee legs sit after the token outputs, and a partial sell adds one. */
-    const feeOffset = isBuy ? 3 : sellKeepsChange ? 3 : 2;
+    const feeOffset = isBuy ? 3 : 2;
     const legOk =
       tx.outputs[feeOffset].value === legs.creator &&
       tx.outputs[feeOffset + 1].value === legs.platform &&
@@ -1413,17 +1414,17 @@ function verifyTrade(built, rawState, params) {
       : [
           [q.curveValueAfter, p2shScriptPubKey(nextCurveProgram(st.programHex, b1))],
           [CELL_DUST_SOMPI, kcc20CellScriptPubKey(r.inventory.programHex, st.marketCovenantId, 0x02, b1, 0)],
-          /* the seller's own remainder, re-derived here as cellsTotal minus
-             what they asked to sell — never read back from the builder */
+          [legs.creator, p2pkScriptPubKey(feeKeys.creator)],
+          [legs.platform, p2pkScriptPubKey(feeKeys.platform)],
+          [legs.dev, p2pkScriptPubKey(feeKeys.dev)],
+          /* the seller's own remainder, re-derived as cellsTotal minus what
+             they asked to sell, never read back from the builder */
           ...(sellKeepsChange
             ? [[
                 CELL_DUST_SOMPI,
                 kcc20CellScriptPubKey(r.inventory.programHex, r.userXOnly, 0x03, cellsTotal - askedTokenIn, 0),
               ]]
             : []),
-          [legs.creator, p2pkScriptPubKey(feeKeys.creator)],
-          [legs.platform, p2pkScriptPubKey(feeKeys.platform)],
-          [legs.dev, p2pkScriptPubKey(feeKeys.dev)],
           [built.changeSompi, p2pkScriptPubKey(r.userXOnly)],
         ];
     for (let i = 0; i < expected.length; i++) {
@@ -1579,12 +1580,19 @@ function verifyTrade(built, rawState, params) {
       tx.outputs[1].covenant &&
       tx.outputs[1].covenant.authorizingInput === 1 &&
       tx.outputs[1].covenant.covenantId === st.tokenCovid &&
-      /* output 2 is a token cell on a buy (the buyer's) and on a partial sell
-         (the seller's remainder); both are authorized by the inventory input */
-      (!(isBuy || sellKeepsChange) ||
+      /* a buy's third output is the buyer's cell; a partial sell's token
+         change sits after the fee legs (index 5) because those are pinned to
+         absolute positions. Both are authorized by the inventory input. */
+      (!isBuy ||
         (tx.outputs[2].covenant && tx.outputs[2].covenant.authorizingInput === 1 &&
           tx.outputs[2].covenant.covenantId === st.tokenCovid)) &&
-      tx.outputs.slice(isBuy || sellKeepsChange ? 3 : 2).every((o) => !o.covenant);
+      (!sellKeepsChange ||
+        (tx.outputs[5].covenant && tx.outputs[5].covenant.authorizingInput === 1 &&
+          tx.outputs[5].covenant.covenantId === st.tokenCovid)) &&
+      tx.outputs.every((o, i) => {
+        const bound = i === 0 || i === 1 || (isBuy && i === 2) || (sellKeepsChange && i === 5);
+        return bound ? Boolean(o.covenant) : !o.covenant;
+      });
     if (!add("output covenant bindings", Boolean(bindOk), `token ${st.tokenCovid}`)) {
       return { ok: false, reason: "an output's covenant binding is wrong or missing", checks };
     }
