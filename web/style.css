@@ -4643,3 +4643,16 @@ details.sim-panel[open] > summary::before { transform: rotate(90deg); }
   }
   .tokens-table td:first-child .token-coin { max-width: 100%; }
 }
+
+/* ---- price candles (token + pool market sections) ---- */
+.price-view { margin: .85rem 0; }
+.chart-pills { display: flex; gap: .35rem; margin: 0 0 .55rem; flex-wrap: wrap; }
+.chart-pill {
+  font: 500 .72rem var(--mono); color: var(--faint);
+  background: transparent; border: 1px solid var(--border);
+  border-radius: 999px; padding: .22rem .6rem; cursor: pointer;
+}
+.chart-pill:hover { color: var(--accent); border-color: var(--accent); }
+.chart-pill[aria-pressed="true"] { color: #05100e; background: var(--accent); border-color: var(--accent); }
+.candles-host { height: 280px; }
+@media (max-width: 700px) { .candles-host { height: 220px; } }

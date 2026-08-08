@@ -2854,6 +2854,187 @@ mod tests {
         assert_eq!(owner_display("zz"), "zz");
     }
 
+    /// A real build of the resting-order source (the fixture market.rs pins):
+    /// 10_000 tokens of covenant 0x66.. asked at 250_000_000 sompi total by
+    /// maker 0x11.., expiring at DAA 536_000_000.
+    const ORDER: &[u8] = include_bytes!("../../kascov-decode/fixtures/kcm_order_v1.bin");
+    const ORD_COV: [u8; 32] = [0xE1; 32];
+    const TX_POST: [u8; 32] = [0xB0; 32];
+    const TX_BUMP: [u8; 32] = [0xB1; 32];
+    const TX_FILL: [u8; 32] = [0xB2; 32];
+
+    struct OrderRow {
+        token_id: [u8; 32],
+        side: String,
+        price_num: i64,
+        price_den: i64,
+        amount: i64,
+        maker: [u8; 32],
+        state: String,
+        created_daa: i64,
+        resolved_daa: Option<i64>,
+    }
+
+    fn order_row(store: &Store, cov: [u8; 32]) -> Option<OrderRow> {
+        store
+            .raw_conn()
+            .query_row(
+                "SELECT token_id, side, price_num, price_den, amount, maker, state,
+                        created_daa, resolved_daa
+                 FROM resting_orders WHERE covenant_id = ?1",
+                [cov.as_slice()],
+                |r| {
+                    Ok(OrderRow {
+                        token_id: r.get(0)?,
+                        side: r.get(1)?,
+                        price_num: r.get(2)?,
+                        price_den: r.get(3)?,
+                        amount: r.get(4)?,
+                        maker: r.get(5)?,
+                        state: r.get(6)?,
+                        created_daa: r.get(7)?,
+                        resolved_daa: r.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .unwrap()
+    }
+
+    /// E3 ingestion: a spend that reveals a recognised order program creates
+    /// a resting_orders row of decoded facts. While the covenant still has a
+    /// live cell the order rests — 'open', unresolved — and its created_daa
+    /// is when its cell was created, not when the reveal proved it.
+    #[test]
+    fn an_order_reveal_creates_an_open_row() {
+        let mut store = test_store("order-open");
+        BlockBuilder::new(1, 100)
+            .event(ORD_COV, EventKind::Genesis, TX_POST)
+            .out_spk(ORD_COV, TX_POST, 0, spk(ORDER))
+            .apply(&mut store);
+        assert!(
+            order_row(&store, ORD_COV).is_none(),
+            "an unrevealed commitment proves nothing"
+        );
+        BlockBuilder::new(2, 200)
+            .event(ORD_COV, EventKind::Transition, TX_BUMP)
+            .spend(TX_POST, 0, TX_BUMP, push(ORDER))
+            .out_spk(ORD_COV, TX_BUMP, 0, spk(ORDER))
+            .apply(&mut store);
+        let row = order_row(&store, ORD_COV).expect("the reveal proves the order");
+        assert_eq!(row.token_id, [0x66; 32]);
+        assert_eq!(row.side, "sell");
+        assert_eq!(row.price_num, 250_000_000);
+        assert_eq!(row.price_den, 10_000);
+        assert_eq!(row.amount, 10_000);
+        assert_eq!(row.maker, [0x11; 32]);
+        assert_eq!(row.state, "open");
+        assert_eq!(row.created_daa, 100);
+        assert_eq!(row.resolved_daa, None);
+    }
+
+    /// Fail closed: bytes the matcher refuses are NOT an order. One byte
+    /// appended after the pinned build's final push is enough — the matcher
+    /// compares every byte, never a summary — so nothing is written at all.
+    #[test]
+    fn a_malformed_order_program_creates_no_row() {
+        let mut store = test_store("order-malformed");
+        let mut evil = ORDER.to_vec();
+        evil.push(0x00);
+        BlockBuilder::new(1, 100)
+            .event(ORD_COV, EventKind::Genesis, TX_POST)
+            .out_spk(ORD_COV, TX_POST, 0, spk(&evil))
+            .apply(&mut store);
+        BlockBuilder::new(2, 200)
+            .event(ORD_COV, EventKind::Transition, TX_FILL)
+            .spend(TX_POST, 0, TX_FILL, push(&evil))
+            .apply(&mut store);
+        assert!(order_row(&store, ORD_COV).is_none());
+        let rows: i64 = store
+            .raw_conn()
+            .query_row("SELECT COUNT(*) FROM resting_orders", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "a refused program must leave no trace");
+    }
+
+    /// The consuming spend flips state: the covenant's last live cell is
+    /// gone, resolution is that spend's accepting DAA, and at or before the
+    /// committed expiry the label is 'filled'.
+    #[test]
+    fn a_consuming_spend_flips_the_order_to_filled() {
+        let mut store = test_store("order-fill");
+        BlockBuilder::new(1, 100)
+            .event(ORD_COV, EventKind::Genesis, TX_POST)
+            .out_spk(ORD_COV, TX_POST, 0, spk(ORDER))
+            .apply(&mut store);
+        BlockBuilder::new(2, 200)
+            .event(ORD_COV, EventKind::Transition, TX_BUMP)
+            .spend(TX_POST, 0, TX_BUMP, push(ORDER))
+            .out_spk(ORD_COV, TX_BUMP, 0, spk(ORDER))
+            .apply(&mut store);
+        assert_eq!(order_row(&store, ORD_COV).unwrap().state, "open");
+        BlockBuilder::new(3, 300)
+            .event(ORD_COV, EventKind::Transition, TX_FILL)
+            .spend(TX_BUMP, 0, TX_FILL, push(ORDER))
+            .apply(&mut store);
+        let row = order_row(&store, ORD_COV).unwrap();
+        assert_eq!(row.state, "filled", "DAA 300 is before the committed expiry");
+        assert_eq!(row.resolved_daa, Some(300));
+        assert_eq!(row.created_daa, 100, "posting time survives resolution");
+    }
+
+    /// Past the committed expiry the reclaim branch is live, so a resolution
+    /// after it is labeled 'cancelled'. Recognition and resolution arrive in
+    /// the same spend here — the row is born resolved.
+    #[test]
+    fn a_post_expiry_resolution_is_cancelled() {
+        let mut store = test_store("order-expire");
+        BlockBuilder::new(1, 100)
+            .event(ORD_COV, EventKind::Genesis, TX_POST)
+            .out_spk(ORD_COV, TX_POST, 0, spk(ORDER))
+            .apply(&mut store);
+        BlockBuilder::new(2, 536_000_001)
+            .event(ORD_COV, EventKind::Transition, TX_FILL)
+            .spend(TX_POST, 0, TX_FILL, push(ORDER))
+            .apply(&mut store);
+        let row = order_row(&store, ORD_COV).unwrap();
+        assert_eq!(row.state, "cancelled");
+        assert_eq!(row.resolved_daa, Some(536_000_001));
+    }
+
+    /// Decoded facts regress with their proofs: rolling back the resolving
+    /// spend reopens the order; rolling back the recognizing reveal deletes
+    /// the row entirely — a fact never outlives the bytes that proved it.
+    #[test]
+    fn order_rows_regress_on_rollback() {
+        let mut store = test_store("order-rollback");
+        BlockBuilder::new(1, 100)
+            .event(ORD_COV, EventKind::Genesis, TX_POST)
+            .out_spk(ORD_COV, TX_POST, 0, spk(ORDER))
+            .apply(&mut store);
+        BlockBuilder::new(2, 200)
+            .event(ORD_COV, EventKind::Transition, TX_BUMP)
+            .spend(TX_POST, 0, TX_BUMP, push(ORDER))
+            .out_spk(ORD_COV, TX_BUMP, 0, spk(ORDER))
+            .apply(&mut store);
+        BlockBuilder::new(3, 300)
+            .event(ORD_COV, EventKind::Transition, TX_FILL)
+            .spend(TX_BUMP, 0, TX_FILL, push(ORDER))
+            .apply(&mut store);
+        assert_eq!(order_row(&store, ORD_COV).unwrap().state, "filled");
+
+        store.rollback(&[BlockHash([3; 32])]).unwrap();
+        let row = order_row(&store, ORD_COV).unwrap();
+        assert_eq!(row.state, "open", "the resolving spend was reorged out");
+        assert_eq!(row.resolved_daa, None);
+
+        store.rollback(&[BlockHash([2; 32])]).unwrap();
+        assert!(
+            order_row(&store, ORD_COV).is_none(),
+            "the proving reveal is gone, the fact goes with it"
+        );
+    }
+
     trait IntoKey {
         fn into_key(&self) -> String;
     }

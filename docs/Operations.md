@@ -144,6 +144,38 @@ Before a production push:
 - verify mainnet and testnet-10 health and pending feeds;
 - confirm no credentials, local vault state, screenshots, or database files entered the commit.
 
+## Alerting, restore-proof, and the canonical deploy (August 2026)
+
+Three additions under `scripts/ops/`. Like the other ops scripts they are copied onto the box, never executed from the checkout.
+
+### Alerting
+
+`scripts/ops/kascov-alert.sh` posts its single argument as `{"content": …}` to a Discord webhook. It resolves the webhook from `$KASCOV_ALERT_WEBHOOK`, falling back to sourcing `/home/kascov/.kascov-alert.env` (chmod 600, holds `KASCOV_ALERT_WEBHOOK=…`, never in the repo — same pattern as `.deploy-key`). With neither present it logs a loud warning and exits 0: delivery is best-effort by design and must never break a caller.
+
+To arm:
+
+1. copy the script to `/usr/local/bin/kascov-alert.sh` and mark it executable;
+2. write the webhook URL into `/home/kascov/.kascov-alert.env`;
+3. install `scripts/ops/systemd/kascov-alert@.service` and `systemctl daemon-reload`.
+
+Every other unit now carries `OnFailure=kascov-alert@%n.service`, so any unit entering `failed` posts "unit <name> failed on <host>". The watchdog additionally escalates from its restart branch with the healthz status, the consecutive-failure count, and a since-boot restart counter — a self-heal nobody hears about is how the 49-hour wedge happened.
+
+### Restore-proof
+
+`scripts/ops/kascov-restore-verify.sh` (weekly, `kascov-restore-verify.timer`, `Persistent=true`) downloads the newest `vps-backups/mainnet-*.db` object from GCS, restores it to a scratch path, runs `PRAGMA quick_check`, counts `covenant_events`, and compares against the live DB read-only. Shrink tolerance is 0: the archive only grows, so a restored count above the live count means live history was lost. Any failure — including `$KASCOV_RESTORE_KEY_JSON` being unset — alerts and exits 1, because a restore-proof that silently skips is worse than none.
+
+The box's own GCS key is write-only (`objectCreator`) by design, so this job needs a second, read-scoped service-account key. To arm:
+
+1. create a read-scoped (`objectViewer`) key and place it at `/home/kascov/.gcs-restore-key.json`, chmod 600 (the service points `KASCOV_RESTORE_KEY_JSON` there);
+2. copy the script to `/home/kascov/kascov-restore-verify.sh`;
+3. install the service and timer, then `systemctl enable --now kascov-restore-verify.timer`.
+
+### Canonical deploy
+
+`scripts/ops/deploy.sh` is the one way to deploy the VPS, written after a hand rebuild silently shipped a stale commit. It hard-resets `/home/kascov/kascov` to `origin/main`, exports `KASCOV_GIT_HASH` before `cargo build --release -p kascov` so the binary embeds the hash, publishes `web/` into `/mnt/c/kascov/web` per file and copy-only (it never deletes there: `ops/traffic/traffic.json` is written into the served root by the traffic timer), restarts `kascov-worker`, then polls `/healthz` for up to 60 s and fails the deploy — with an alert — unless the reported `build` field equals the deployed hash.
+
+Requirements: run as the `kascov` user from outside the checkout (it resets the checkout mid-run), cargo env at `~/.cargo/env`, sudo rights for `systemctl restart kascov-worker.service`. No other environment is needed; the alert webhook is optional but recommended.
+
 ## Related notes
 
 - [[Architecture]]

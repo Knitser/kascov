@@ -4181,6 +4181,12 @@ function preflightResultHtml(d) {
    entries shipped the same day, so the title disambiguates */
 const changelogStamp = (e) => `${e.date || ''}|${e.title || ''}`;
 
+/* the same date|title identity as a URL anchor, slugified the way the feed
+   slugs titles (ascii alphanumerics kept, any other run folds to one dash) so
+   a feed link and a page anchor can never disagree about an entry's name */
+const changelogSlug = (e) => changelogStamp(e).toLowerCase()
+  .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
 /* the landing "what's new" card — the newest entry, with an unseen dot that
    clears once the visitor opens #/changelog */
 function renderWhatsNew() {
@@ -4242,14 +4248,31 @@ function renderChangelog() {
   if (!host) return;
   host.innerHTML = '<li class="dim">loading…</li>';
   loadChangelog().then((list) => {
-    if (parseRoute().view !== 'changelog') return;
+    const route = parseRoute();
+    if (route.view !== 'changelog') return;
     if (!list) { host.innerHTML = '<li class="dim">nothing here yet.</li>'; return; }
-    host.innerHTML = list.map((e) =>
-      `<li class="changelog-item">` +
-      `<span class="changelog-date mono dim">${esc(String(e.date || ''))}</span>` +
-      `<div class="changelog-body"><h2>${esc(String(e.title || ''))}</h2>` +
-      `<p>${esc(String(e.body || ''))}</p></div></li>`
-    ).join('');
+    /* every entry gets a stable id so /changelog#<slug> and #/changelog?at=
+       <slug> deep-link it; a repeated date|title (same-day reship of the same
+       headline) gets the feed's counter suffix so ids stay unique */
+    const used = new Map();
+    host.innerHTML = list.map((e) => {
+      let slug = changelogSlug(e);
+      const n = (used.get(slug) || 0) + 1;
+      used.set(slug, n);
+      if (n > 1) slug = `${slug}-${n}`;
+      return `<li class="changelog-item" id="${esc(slug)}" style="scroll-margin-top:1.5rem">` +
+        `<span class="changelog-date mono dim">${esc(String(e.date || ''))} ` +
+        `<a href="#/changelog?at=${esc(slug)}" title="a stable link straight to this entry" aria-label="link to this entry" style="text-decoration:none">§</a></span>` +
+        `<div class="changelog-body"><h2>${esc(String(e.title || ''))}</h2>` +
+        `<p>${esc(String(e.body || ''))}</p></div></li>`;
+    }).join('');
+    /* deep link: exact date|title slug first; a feed link may carry the title
+       slug alone, which is still unambiguous as a suffix */
+    if (route.at) {
+      const el = document.getElementById(route.at) ||
+        [...host.querySelectorAll('li[id]')].find((li) => li.id.endsWith(`-${route.at}`));
+      if (el) el.scrollIntoView({ block: 'start' });
+    }
     /* reading the page clears the landing card's unseen dot */
     try { localStorage.setItem('kascov-changelog-seen', changelogStamp(list[0])); } catch (err) { /* private mode */ }
   });
@@ -4740,6 +4763,280 @@ function tokenFieldChips(fields) {
 const TRADES_COLLAPSED = 12;
 let tradesExpanded = false;
 
+/* Price over time, drawn from the verified trades themselves — no series
+   endpoint, no launchpad API, no smoothing. A step line, because a covenant
+   price IS a step function: the executed price holds exactly until the next
+   trade moves it. Every point is an anchor to its transaction's page, so a
+   reader can walk from any point on the chart to the replayable spend that
+   produced it — the click-through is the claim. Under three priced trades
+   nothing renders: two points draw a slope the data cannot support. */
+function priceChartSvg(trades, network, toMs) {
+  const pts = (Array.isArray(trades) ? trades : [])
+    .filter((t) => t && t.co_covenants === 0 && t.txid &&
+      Number(t.quote_sompi) > 0 && Number(t.base_amount) > 0)
+    .map((t) => ({
+      txid: String(t.txid),
+      seq: Number(t.seq) || 0,
+      ms: t.accepting_time_ms != null ? t.accepting_time_ms : toMs(t.accepting_daa),
+      price: Number(t.quote_sompi) / Number(t.base_amount),
+      label: fmtPriceKas(t.quote_sompi, t.base_amount),
+      buy: t.side === 'buy',
+    }))
+    /* seq is the chain's own order; timestamps are only display */
+    .sort((a, b) => a.seq - b.seq);
+  if (pts.length < 3) return '';
+  const W = 700, H = 180, L = 10, R = 12, T = 16, B = 34;
+  /* time-proportional x only when every point has a clock; otherwise even
+     spacing, which is honest about order without inventing durations */
+  const haveMs = pts.every((p) => p.ms != null);
+  const x0 = haveMs ? pts[0].ms : 0;
+  const span = (haveMs ? pts[pts.length - 1].ms - x0 : pts.length - 1) || 1;
+  const px = (p, i) => L + ((haveMs ? p.ms - x0 : i) / span) * (W - L - R);
+  let lo = Math.min(...pts.map((p) => p.price));
+  let hi = Math.max(...pts.map((p) => p.price));
+  if (lo === hi) { lo = lo * 0.9; hi = hi * 1.1 || 1; } /* a flat series still gets a band */
+  const py = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  let d = `M${px(pts[0], 0).toFixed(1)} ${py(pts[0].price).toFixed(1)}`;
+  for (let i = 1; i < pts.length; i++) {
+    d += ` H${px(pts[i], i).toFixed(1)} V${py(pts[i].price).toFixed(1)}`;
+  }
+  const dots = pts.map((p, i) => {
+    const when = p.ms != null ? relTimeShort(p.ms) : `seq ${fmtInt(p.seq)}`;
+    const tip = `${p.buy ? 'buy' : 'sell'} at ${p.label} KAS · ${when} — open the transaction`;
+    return `<a href="#/${esc(network)}/tx/${esc(p.txid)}" aria-label="${esc(tip)}">` +
+      `<circle cx="${px(p, i).toFixed(1)}" cy="${py(p.price).toFixed(1)}" r="4" ` +
+      `style="fill:var(${p.buy ? '--born' : '--burn'});stroke:var(--bg);stroke-width:1.2"><title>${esc(tip)}</title></circle></a>`;
+  }).join('');
+  const axis = `style="font:10px var(--mono);fill:var(--faint)"`;
+  const labels =
+    `<text x="${L}" y="${T - 5}" ${axis}>${esc(fmtPriceKas(hi, 1))} KAS</text>` +
+    `<text x="${L}" y="${H - B + 12}" ${axis}>${esc(fmtPriceKas(lo, 1))} KAS</text>` +
+    (haveMs
+      ? `<text x="${L}" y="${H - 6}" ${axis}>${esc(absShort(pts[0].ms))}</text>` +
+        `<text x="${W - R}" y="${H - 6}" text-anchor="end" ${axis}>${esc(absShort(pts[pts.length - 1].ms))}</text>`
+      : `<text x="${L}" y="${H - 6}" ${axis}>oldest</text>` +
+        `<text x="${W - R}" y="${H - 6}" text-anchor="end" ${axis}>newest</text>`);
+  return `<div class="price-chart" style="margin:.85rem 0">` +
+    `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img" ` +
+    `aria-label="price of every verified trade over time; each point links to its transaction">` +
+    `<line x1="${L}" y1="${py(lo)}" x2="${W - R}" y2="${py(lo)}" style="stroke:var(--border)"></line>` +
+    `<line x1="${L}" y1="${py(hi)}" x2="${W - R}" y2="${py(hi)}" style="stroke:var(--border)"></line>` +
+    `<path d="${d}" style="fill:none;stroke:var(--accent);stroke-width:1.6"></path>` +
+    dots + labels + `</svg>` +
+    `<p class="dim" style="margin:.2rem 0 0">every point is a verified trade at its executed price — click one to open the transaction it replays from.</p>` +
+    `</div>`;
+}
+
+/* Group verified trades into OHLC candles. A candle asserts a DURATION, so
+   only trades carrying a real clock may be bucketed — charting buckets from
+   DAA guesses would invent time. The function refuses (null) unless every
+   admitted trade resolves a timestamp; callers fall back to the per-trade
+   line, which is honest about order without claiming durations. */
+function bucketTrades(trades, bucketMs, toMs) {
+  const pts = (Array.isArray(trades) ? trades : [])
+    .filter((t) => t && t.co_covenants === 0 && t.txid &&
+      Number(t.quote_sompi) > 0 && Number(t.base_amount) > 0)
+    .map((t) => ({
+      txid: String(t.txid),
+      seq: Number(t.seq) || 0,
+      ms: t.accepting_time_ms != null ? t.accepting_time_ms : toMs(t.accepting_daa),
+      price: Number(t.quote_sompi) / Number(t.base_amount),
+      quote: Number(t.quote_sompi),
+    }))
+    .sort((a, b) => a.seq - b.seq);
+  if (pts.length < 3 || pts.some((p) => p.ms == null)) return null;
+  const out = [];
+  let cur = null;
+  for (const p of pts) {
+    const t0 = Math.floor(p.ms / bucketMs) * bucketMs;
+    if (!cur || cur.t0 !== t0) {
+      if (cur) out.push(cur);
+      cur = { t0, open: p.price, high: p.price, low: p.price, close: p.price, volume_kas: 0, lastTxid: p.txid };
+    }
+    if (p.price > cur.high) cur.high = p.price;
+    if (p.price < cur.low) cur.low = p.price;
+    cur.close = p.price;
+    cur.volume_kas += p.quote / 1e8;
+    cur.lastTxid = p.txid;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+const CANDLE_BUCKETS = [
+  ['15m', 900000], ['1h', 3600000], ['4h', 14400000], ['1d', 86400000],
+];
+
+/* Pick the finest bucket that keeps the whole history under ~120 candles —
+   fine enough to see shape, coarse enough that the chart stays a summary. */
+function autoBucketMs(trades, toMs) {
+  const clocked = (Array.isArray(trades) ? trades : [])
+    .map((t) => (t && t.accepting_time_ms != null ? t.accepting_time_ms : toMs && toMs(t.accepting_daa)))
+    .filter((ms) => ms != null);
+  if (clocked.length < 2) return CANDLE_BUCKETS[1][1];
+  const span = Math.max(...clocked) - Math.min(...clocked);
+  for (const [, ms] of CANDLE_BUCKETS) if (span / ms <= 120) return ms;
+  return CANDLE_BUCKETS[CANDLE_BUCKETS.length - 1][1];
+}
+
+/* The candle view wraps the per-trade SVG rather than replacing it: candles
+   summarise, the trade line testifies. Both read the SAME list the trade
+   table reads, so no two surfaces can disagree about which trades exist. */
+function priceViewHtml(source, network, toMs) {
+  const svg = priceChartSvg(source, network, toMs);
+  if (!svg) return '';
+  const candles = bucketTrades(source, 3600000, toMs);
+  if (!candles || candles.length < 2) return svg;
+  const pills = CANDLE_BUCKETS
+    .map(([label, ms]) => `<button type="button" class="chart-pill" data-bucket="${ms}">${label}</button>`)
+    .join('');
+  return `<div class="price-view" data-price-candles>` +
+    `<div class="chart-pills" role="tablist" aria-label="chart timeframe">${pills}` +
+    `<button type="button" class="chart-pill" data-bucket="trades">every trade</button></div>` +
+    `<div class="candles-host"></div>` +
+    `<div class="trades-view" hidden>${svg}</div>` +
+    `<p class="dim candles-note" style="margin:.2rem 0 0">every candle is built only from replay-verified trades — click one to open the transaction that closed it.</p>` +
+    `</div>`;
+}
+
+/* TradingView Lightweight Charts (vendored, Apache-2.0) draws the candles.
+   Loaded only when a market page actually shows them, so its 163 KB never
+   taxes first paint. */
+let lwcLoadPromise = null;
+function loadLightweightCharts() {
+  if (window.LightweightCharts) return Promise.resolve();
+  if (!lwcLoadPromise) {
+    lwcLoadPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = '/vendor/lightweight-charts.js';
+      s.onload = () => resolve();
+      s.onerror = () => { lwcLoadPromise = null; reject(new Error('chart library failed to load')); };
+      document.head.appendChild(s);
+    });
+  }
+  return lwcLoadPromise;
+}
+
+let candleCtrl = null;
+/* marketSectionHtml computes which trade list the page shows (collapsed or
+   expanded); the post-render wiring must feed the SAME list to the candles. */
+let marketChartSource = null;
+function stopPriceCandles() {
+  if (candleCtrl) {
+    if (candleCtrl.ro) candleCtrl.ro.disconnect();
+    try { candleCtrl.chart.remove(); } catch { /* already gone */ }
+  }
+  candleCtrl = null;
+}
+
+function wirePriceCandles(view, source, network, toMs, tokenId = null) {
+  stopPriceCandles();
+  const host = view.querySelector('[data-price-candles]');
+  if (!host) return;
+  const candlesEl = host.querySelector('.candles-host');
+  const tradesEl = host.querySelector('.trades-view');
+  const noteEl = host.querySelector('.candles-note');
+  const pills = [...host.querySelectorAll('.chart-pill')];
+  const setActive = (val) => pills.forEach((p) =>
+    p.setAttribute('aria-pressed', String(p.dataset.bucket === String(val))));
+
+  /* Candles summarise the token's WHOLE life, not the table's visible page:
+     prefer the complete verified list, and fetch it if it isn't cached yet.
+     The per-trade SVG stays bound to the table's list — that is its job. */
+  let candleSource = source;
+  if (tokenId) {
+    const full = tradeLists.get(`${network}/${tokenId}`);
+    if (full && full.data) candleSource = full.data.trades;
+  }
+
+  let candleMap = new Map();
+  let currentBucket = null;
+  const render = async (bucketMs) => {
+    const candles = bucketTrades(candleSource, bucketMs, toMs);
+    if (!candles) return;
+    currentBucket = bucketMs;
+    await loadLightweightCharts();
+    if (!candleCtrl) {
+      const chart = LightweightCharts.createChart(candlesEl, {
+        layout: { background: { color: 'transparent' }, textColor: '#7f9a94', fontSize: 11 },
+        grid: { vertLines: { color: 'rgba(120,220,200,0.06)' }, horzLines: { color: 'rgba(120,220,200,0.06)' } },
+        rightPriceScale: { borderColor: 'rgba(120,220,200,0.12)' },
+        timeScale: { borderColor: 'rgba(120,220,200,0.12)', timeVisible: true, secondsVisible: false },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        autoSize: true,
+      });
+      const series = chart.addCandlestickSeries({
+        upColor: '#5be49b', downColor: '#ffb067',
+        borderUpColor: '#5be49b', borderDownColor: '#ffb067',
+        wickUpColor: '#5be49b', wickDownColor: '#ffb067',
+        priceFormat: { type: 'price', precision: 8, minMove: 0.00000001 },
+      });
+      const vol = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol' });
+      chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+      chart.subscribeClick((param) => {
+        const c = param.time != null ? candleMap.get(param.time) : null;
+        if (c) location.hash = `#/${network}/tx/${c.lastTxid}`;
+      });
+      /* autoSize means the chart may be laid out AFTER the first setData, and
+         fitContent against a zero-width chart leaves the view parked on the
+         newest bars. Refit on resize, a frame late, the way kascovmoon does. */
+      const ro = new ResizeObserver(() => {
+        requestAnimationFrame(() => {
+          if (candleCtrl) candleCtrl.chart.timeScale().fitContent();
+        });
+      });
+      ro.observe(candlesEl);
+      candleCtrl = { chart, series, vol, ro };
+    }
+    candleMap = new Map(candles.map((c) => [c.t0 / 1000, c]));
+    candleCtrl.series.setData(candles.map((c) => ({
+      time: c.t0 / 1000, open: c.open / 1e8, high: c.high / 1e8, low: c.low / 1e8, close: c.close / 1e8,
+    })));
+    candleCtrl.vol.setData(candles.map((c) => ({
+      time: c.t0 / 1000, value: c.volume_kas,
+      color: c.close >= c.open ? 'rgba(91,228,155,0.35)' : 'rgba(255,176,103,0.35)',
+    })));
+    requestAnimationFrame(() => {
+      if (candleCtrl) candleCtrl.chart.timeScale().fitContent();
+    });
+  };
+
+  pills.forEach((p) => p.addEventListener('click', () => {
+    const b = p.dataset.bucket;
+    setActive(b);
+    if (b === 'trades') {
+      candlesEl.hidden = true; tradesEl.hidden = false;
+      if (noteEl) noteEl.hidden = true;
+      return;
+    }
+    candlesEl.hidden = false; tradesEl.hidden = true;
+    if (noteEl) noteEl.hidden = false;
+    render(Number(b)).catch(() => { /* the SVG below still stands */ });
+  }));
+
+  const auto = autoBucketMs(candleSource, toMs);
+  setActive(auto);
+  render(auto).catch(() => {
+    /* library refused to load: show the per-trade line instead of a hole */
+    candlesEl.hidden = true; tradesEl.hidden = false;
+    if (noteEl) noteEl.hidden = true;
+  });
+
+  /* the full history arrives after first paint: rebucket in place, and let
+     the auto pill follow the now-known span unless the reader chose one */
+  if (tokenId && candleSource === source) {
+    loadAllTrades(network, tokenId).then(() => {
+      const full = tradeLists.get(`${network}/${tokenId}`);
+      if (!full || !full.data || !candleCtrl) return;
+      candleSource = full.data.trades;
+      const wasAuto = currentBucket === auto;
+      const next = wasAuto ? autoBucketMs(candleSource, toMs) : currentBucket;
+      if (wasAuto) setActive(next);
+      render(next).catch(() => { /* keep whatever is on screen */ });
+    }).catch(() => { /* the collapsed-list candles still stand */ });
+  }
+}
+
 function marketSectionHtml(m, trades, network, toMs, tokenId = '', tradesTotal = null) {
   if (!m) return '';
   if (m.phase === 'lp shares') return lpSharesSectionHtml(m, network);
@@ -4769,7 +5066,7 @@ function marketSectionHtml(m, trades, network, toMs, tokenId = '', tradesTotal =
     tiles.push(['pool shares', fmtInt(m.program.shares),
       'the share count the pool states in its own committed state block, as of its newest proven reveal']);
   }
-  if (m.program && m.program.token_reserve != null && (m.program.skeleton === 'KRON pool v1' || m.program.skeleton === 'KRON pool v2' || m.program.skeleton === 'KRON pool tn-a')) {
+  if (m.program && m.program.token_reserve != null && (m.program.skeleton === 'KRON pool v1' || m.program.skeleton === 'KRON pool v2' || m.program.skeleton === 'KRON pool v3' || m.program.skeleton === 'KRON pool tn-a')) {
     tiles.push(['token reserve', fmtInt(m.program.token_reserve),
       'tokens the pool held when it last committed its state — one spend behind the live cell, which is why the price above uses the covenant’s current balance instead']);
   }
@@ -4816,6 +5113,10 @@ function marketSectionHtml(m, trades, network, toMs, tokenId = '', tradesTotal =
           `show all ${esc(fmtInt(grandTotal))} trades</button></p>`;
     }
   }
+  /* the chart reads whichever list the table reads, so the two can never
+     disagree about which trades exist */
+  const chartHtml = priceViewHtml(source, network, toMs);
+  marketChartSource = source;
   if (!tiles.length && !whyLine && !tradesHtml) return '';
   const tilesHtml = tiles.length
     ? `<div class="lane-stats token-stats">` + tiles.map(([label, v, tip]) =>
@@ -4824,7 +5125,7 @@ function marketSectionHtml(m, trades, network, toMs, tokenId = '', tradesTotal =
     : '';
   return `<section aria-label="Market"><h2>market ${marketPhaseChip(m)}</h2>` +
     `<p class="dim">every figure below is derived from chain and checked against the curve program's own formula — nothing comes from any launchpad's API.</p>` +
-    tilesHtml + spotLine + whyLine + progLine + tradesHtml + `</section>`;
+    tilesHtml + spotLine + whyLine + progLine + chartHtml + tradesHtml + `</section>`;
 }
 
 /* How the three covenants wire together, drawn rather than described. A
@@ -4947,6 +5248,21 @@ function tokenChipHtml(network, tokenId, chainName, claimedImageHash = null, siz
   return `${art} ${label}`;
 }
 
+/* The one display-name precedence, field by field: the deployer's on-chain
+   claim outranks a launchpad's published listing, the listing only fills the
+   gap, and the chain-derived canonical name always rides along so no caller
+   can drop it. Same rule the directory rows and the token page apply — the
+   pools surfaces used to show the raw codename even for tokens both sources
+   had named, so the same coin read as two different assets one click apart. */
+function tokenDisplayParts(network, t) {
+  const cid = String((t && t.covenant_id) || '');
+  const canonical = (t && t.name) || friendlyName(cid);
+  const listed = state.registry[network] ? registryEntry(network, cid) : null;
+  const name = (t && t.claimed_name) || (listed && listed.name) || null;
+  const ticker = (t && t.claimed_ticker) || (listed && listed.ticker) || null;
+  return { display: name || ticker || canonical, name, ticker, canonical };
+}
+
 /* Which networks have already had their registry warm-up scheduled. The
    listed-name repaint must be able to happen at most ONCE per network no
    matter what the loader does: guarding only on the cache slot means a
@@ -5006,9 +5322,10 @@ function renderPools() {
   }
   const body = rows.map((t) => {
     const pid = t.market.program.covenant_id;
-    const name = friendlyName(t.covenant_id);
-    const listed = state.registry[network] && registryEntry(network, t.covenant_id);
-    const label = (listed && listed.ticker) ? `${name} <span class="dim">$${esc(listed.ticker)}</span>` : esc(name);
+    const p = tokenDisplayParts(network, t);
+    const label = esc(p.display) +
+      (p.name && p.ticker ? ` <span class="dim">$${esc(p.ticker)}</span>` : '') +
+      (p.display !== p.canonical ? ` <span class="dim token-alias">${esc(p.canonical)}</span>` : '');
     /* the directory payload is the shallow scan, which carries the last
        executed price but not the marginal one; prefer spot where it exists
        and say which is being shown rather than silently mixing them */
@@ -5051,6 +5368,11 @@ function renderPoolPage(route) {
   if (!view) return; /* stale cached index.html */
   const pid = route.id;
   const head = `<a class="back" href="#/${esc(network)}/pools">← all pools</a>`;
+  /* listed names are the slower second source here too — warm once, repaint
+     once, same slot-guarded discipline as the pools list. The warm is per
+     network, so the repaint re-reads the route: the reader may be on a
+     different pool by the time the registry answers. */
+  warmRegistryOnce(network, 'pool', () => renderPoolPage(parseRoute()));
   const cached = tokenPages.get(network);
   if (!cached) {
     view.innerHTML = head + routeLoading('reading this pool…');
@@ -5074,7 +5396,10 @@ function renderPoolPage(route) {
     return;
   }
   const m = tok.market, p = m.program;
-  const name = friendlyName(tok.covenant_id);
+  const disp = tokenDisplayParts(network, tok);
+  const name = disp.name
+    ? `${disp.name}${disp.ticker ? ` ($${disp.ticker})` : ''}`
+    : disp.ticker ? `$${disp.ticker}` : disp.canonical;
   document.title = `pool ${name} — kascov`;
   const lp = p.lp_token_covenant_id
     ? all.find((t) => t.covenant_id === p.lp_token_covenant_id) : null;
@@ -5113,17 +5438,42 @@ function renderPoolPage(route) {
       `and compare with <span class="mono">${esc(p.program_hash)}</span> — the digest kascov verified and the chain committed. ` +
       `the first 94 bytes of that program are the table above.</p>`
     : '';
+  /* the pool's price history is the token's own verified trade feed — fetched
+     once, cached in tradeLists, the page re-renders when it lands. A failed
+     fetch renders no chart rather than a guessed one. */
+  const toMs = (daa) => {
+    if (daa == null) return null;
+    const dd = cached.data || {};
+    if (dd.tip_daa != null) {
+      return (dd.tip_at_ms != null ? dd.tip_at_ms : dd.generated_at_ms) - (dd.tip_daa - daa) * MS_PER_DAA;
+    }
+    const entry = state.cache[network];
+    return entry ? daaToMs(daa, entry.data) : null;
+  };
+  const tlist = tradeLists.get(`${network}/${tok.covenant_id}`);
+  if (!tlist) {
+    loadAllTrades(network, tok.covenant_id).then(() => {
+      const r = parseRoute();
+      if (state.network === network && r.view === 'pool' && r.id === pid) renderPoolPage(r);
+    }).catch(() => { /* the page stands without the chart */ });
+  }
+  const chartSvg = tlist && tlist.data ? priceViewHtml(tlist.data.trades, network, toMs) : '';
+  const chartHtml = chartSvg
+    ? `<section aria-label="Price history"><h2>price, trade by trade</h2>${chartSvg}</section>`
+    : '';
   view.innerHTML = head +
-    `<header class="page-head"><h1>${esc(name)} <span class="flag flag-phase flag-grad">pool</span></h1>` +
+    `<header class="page-head"><h1>${esc(name)} <span class="flag flag-phase flag-grad">pool</span>` +
+    (name !== disp.canonical ? ` <span class="dim token-alias">${esc(disp.canonical)}</span>` : '') +
+    `</h1>` +
     `<p class="page-sub"><span class="mono">${esc(shortHex(pid, 10, 8))}</span> — a constant-product pool covenant. ` +
-    `it trades <a href="#/${esc(network)}/token/${esc(tok.covenant_id)}">${esc(friendlyName(tok.covenant_id))}</a>` +
-    (lp ? ` and issues <a href="#/${esc(network)}/token/${esc(lp.covenant_id)}">${esc(friendlyName(lp.covenant_id))}</a> as its share token` : '') +
+    `it trades <a href="#/${esc(network)}/token/${esc(tok.covenant_id)}">${esc(disp.display)}</a>` +
+    (lp ? ` and issues <a href="#/${esc(network)}/token/${esc(lp.covenant_id)}">${esc(tokenDisplayParts(network, lp).display)}</a> as its share token` : '') +
     `.</p></header>` +
     poolWiringSvg(network, {
       tokenId: tok.covenant_id, poolId: pid,
       lpId: p.lp_token_covenant_id || null, here: 'pool',
     }) +
-    tilesHtml +
+    tilesHtml + chartHtml +
     `<section aria-label="State block"><h2>its own committed state</h2>` +
     `<p class="dim">these five fields are parsed at fixed offsets from the program the chain hash-checked, ` +
     `as of its newest proven reveal — one spend behind the live cell, which is why the price above uses the ` +
@@ -5131,6 +5481,8 @@ function renderPoolPage(route) {
     `this program’s own formula${p.invariant_ok ? '' : ' — INVARIANT VIOLATION'}.</p>` +
     stateHtml + repro + `</section>` +
     `<p><a href="#/${esc(network)}/c/${esc(pid)}">open the raw covenant history →</a></p>`;
+
+  if (tlist && tlist.data) wirePriceCandles(view, tlist.data.trades, network, toMs, tok.covenant_id);
 }
 
 /* The verification log: what the deriver actually ran, and the queue of
@@ -5726,7 +6078,7 @@ function auditSectionHtml(t, d, network) {
   const prog = m && m.program;
   /* mirror of the Rust MATCHED_SKELETONS allowlist — an allowlist, never a
      prefix test, so a future give-up tag can never read as matched */
-  const MATCHED_SKELETONS = ['KRON curve v1', 'KRON pool v1', 'KRON curve v2', 'KRON pool v2', 'KRON pool tn-a'];
+  const MATCHED_SKELETONS = ['KRON curve v1', 'KRON pool v1', 'KRON curve v2', 'KRON pool v2', 'KRON curve v3', 'KRON pool v3', 'KRON pool tn-a'];
   const matched = Boolean(prog && MATCHED_SKELETONS.includes(prog.skeleton));
   const isShares = Boolean(m && m.phase === 'lp shares');
   const why = (m && m.unpriced_reason) || 'no verified market for this token';
@@ -5959,6 +6311,7 @@ function renderTokenPage(route) {
     `<span class="dim">covenant token on ${esc(net.label)}</span></p>` +
     `<p class="id-chip"><span class="mono">${esc(shortHex(id, 10, 8))}</span>` +
     `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(id)}" aria-label="copy this token’s covenant id">copy id</button>` +
+    `<button type="button" class="copy-btn" data-action="copy" data-copy="${esc(shareUrl(network, id))}" aria-label="copy a shareable link to this token">share</button>` +
     `<a class="token-coin-link" href="#/${esc(network)}/c/${esc(id)}">underlying smart coin →</a></p>` +
     `<p class="trade-line" id="token-trade-line" hidden></p>` +
     `<p class="listed-line" id="token-listed-line" hidden></p>` +
@@ -6102,6 +6455,8 @@ function renderTokenPage(route) {
     holdersSection +
     timelineSection;
 
+  wirePriceCandles(view, marketChartSource, network, toMs, route.id);
+
   const holderCanvas = view.querySelector('.holders-bubbles-canvas');
   if (holderCanvas && holderMapRows.length >= 3) {
     const listed = holderMapRows.reduce((sum, row) => sum + row.balance, 0);
@@ -6201,7 +6556,14 @@ function renderTokenPage(route) {
       }).join('') + auditRow(row.logo ? 'pass' : 'unknown', '+ listing: artwork',
         row.logo
           ? `nothing on chain commits to a logo, so kascov witnesses it: fetched, kept, re-checked daily${row.logo.change_count ? `, changed ${fmtInt(row.logo.change_count)}\u00d7 since first seen` : ''}`
-          : 'no fetchable logo at the listed url — kascov shows the identicon rather than a broken image');
+          /* "no fetchable logo" was a claim any reader could disprove by
+             opening the url: the witness fetcher announces itself as kascov,
+             never as a browser, and some hosts only answer browsers. Say only
+             what the payload actually establishes — a listed url without a
+             witnessed copy, or no listed url at all. */
+          : row.image
+            ? 'the listing names a logo url, but kascov’s fetcher — which identifies itself as kascov, not as a browser — holds no witnessed copy of it. the url may still open in your browser; only art kascov fetched itself is ever served here, so the identicon stays'
+            : 'the listing names no artwork, so there is nothing to witness — the identicon derived from the coin id stays');
       /* the listing rows joined the list after the headline was counted —
          recount so the summary always matches the receipts below it */
       const rowsNow = [...document.querySelectorAll('.audit-row')];
@@ -6580,7 +6942,14 @@ function parseRoute() {
   /* '#/explore' and '#/<network>/explore' — '?galaxy=1' opens the galaxy */
   m = path.match(/^#\/(?:(testnet-10|mainnet)\/)?explore\/?$/);
   if (m) return { view: 'explore', network: m[1] || null, galaxy: params.get('galaxy') === '1' };
-  if (/^#\/changelog\/?$/.test(path)) return { view: 'changelog', network: null };
+  if (/^#\/changelog\/?$/.test(path)) {
+    return {
+      view: 'changelog',
+      network: null,
+      /* an id is all ?at= may ever be: it is fed straight to getElementById */
+      at: (params.get('at') || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 120),
+    };
+  }
   /* '#/guide' — the builder guide, once a standalone /guide.html page. Not
      network-scoped: it is a testnet-10 walkthrough. '?at=<section>' deep-links
      one section, and is where old '/guide.html#trap' links now land. */
@@ -8457,6 +8826,14 @@ if (/^\/guide(?:\.html)?\/?$/.test(location.pathname) && !location.hash.startsWi
   const at = location.hash.replace(/^#/, '') ||
     new URLSearchParams(location.search).get('at') || '';
   history.replaceState(null, '', `/#/guide${at ? `?at=${encodeURIComponent(at)}` : ''}`);
+}
+
+/* feed readers deep-link one entry as '/changelog#<slug>'; the SPA is
+   hash-routed, so fold that fragment onto the route the same way old
+   guide.html section links are folded */
+if (/^\/changelog\/?$/.test(location.pathname) && !location.hash.startsWith('#/')) {
+  const at = location.hash.replace(/^#/, '');
+  history.replaceState(null, '', `/#/changelog${at ? `?at=${encodeURIComponent(at)}` : ''}`);
 }
 
 /* pasted clean URLs (hosting rewrites everything to this page):

@@ -12,7 +12,7 @@ import {
   VOTE_DUST_FLOOR, VOTE_MAX_AGE_MS, voteEligibility, roundIsOpen, castBallot,
   tallyCounts, buildTally, isOperator, parseSlate,
   balanceBucket, alertsEnabled, cursorDiff, deliverableAlerts,
-  badgesFromRoles, buildPassportFile, canonicalClaim, claimLeaf,
+  anchorFromFile, badgesFromRoles, buildPassportFile, canonicalClaim, claimLeaf,
   merkleProof, merkleRoot, verifyProof,
   PARTICIPATION_EPOCH_MS, mintParticipation, participationClaims,
 } from '../scripts/discord-holder-bot.mjs';
@@ -427,6 +427,89 @@ test('the public file carries addresses and badges, never a Discord identity', (
     assert.deepEqual(Object.keys(claim).sort(), ['address', 'badge', 'granted_ms', 'source', 'v']);
     assert.equal(claim.source, 'kascov-discord');
   }
+});
+
+/* --------------------------------------------------------- the mainnet anchor */
+
+/* The claims file is the JS-off source of truth, so its anchor block must
+   tell the same story as /passport-anchor.json: a live anchor is repeated
+   root-and-txid, no record at all is stated as pending, and nothing between
+   those two is ever half-claimed. */
+
+const ROOT = 'a1'.repeat(32);
+const TXID = 'b2'.repeat(32);
+const ANCHOR_RECORD = {
+  v: 1,
+  merkle_root: ROOT,
+  txid: TXID,
+  address: 'kaspa:qanchorxxxxxxxxxxxxxxxxx',
+  network: 'mainnet',
+  anchored_ms: 1754600000000,
+  history: [
+    { merkle_root: 'c3'.repeat(32), txid: 'd4'.repeat(32), anchored_ms: 1754500000000 },
+    { merkle_root: ROOT, txid: TXID, anchored_ms: 1754600000000 },
+  ],
+  note: 'the payload of this transaction carries kascov:passport:v1:<root>; verify it from raw chain bytes',
+};
+
+test('a live anchor record flows into the claims file', () => {
+  const anchor = anchorFromFile(ANCHOR_RECORD);
+  // exactly the facts the page can check against chain bytes, nothing else
+  assert.deepEqual(anchor, {
+    status: 'anchored',
+    root: ROOT,
+    txid: TXID,
+    anchored_at: new Date(1754600000000).toISOString(),
+  });
+  const file = buildPassportFile(CLAIMS, 1000, anchor);
+  assert.equal(file.anchor.status, 'anchored');
+  assert.equal(file.anchor.root, ROOT);
+  assert.equal(file.anchor.txid, TXID);
+  // the pending note must never ship alongside a real anchor: the file would
+  // be denying the very transaction it should be pointing at
+  assert.equal(file.anchor.note, undefined);
+  assert.ok(!JSON.stringify(file.anchor).includes('pending'));
+  assert.ok(!JSON.stringify(file.anchor).includes('anchor key'));
+});
+
+test('no anchor record keeps the pending shape', () => {
+  // absent third argument and explicit null both mean "no record readable"
+  for (const file of [buildPassportFile(CLAIMS, 1000), buildPassportFile(CLAIMS, 1000, null)]) {
+    assert.equal(file.anchor.status, 'pending');
+    assert.match(file.anchor.note, /anchor key/);
+    assert.equal(file.anchor.txid, undefined); // pending never carries a txid
+  }
+});
+
+test('only a provable anchor is repeated: anything less reads as none', () => {
+  assert.equal(anchorFromFile(null), null);
+  assert.equal(anchorFromFile(undefined), null);
+  assert.equal(anchorFromFile({}), null);
+  assert.equal(anchorFromFile('not an object'), null);
+  assert.equal(anchorFromFile({ merkle_root: ROOT }), null);                     // no txid
+  assert.equal(anchorFromFile({ txid: TXID }), null);                            // no root
+  assert.equal(anchorFromFile({ merkle_root: 'not-hex', txid: TXID }), null);
+  assert.equal(anchorFromFile({ merkle_root: ROOT.slice(0, 32), txid: TXID }), null);
+  assert.equal(anchorFromFile({ merkle_root: ROOT.toUpperCase(), txid: TXID }), null);
+});
+
+test('the newest entry wins, and history backs up a bare record', () => {
+  // the top level IS the newest write, so it beats every history entry
+  assert.equal(anchorFromFile(ANCHOR_RECORD).root, ROOT);
+  // a record whose top level lost its fields still proves its newest
+  // history entry: the lineage is oldest-first, so the walk is backwards
+  const fallback = anchorFromFile({
+    history: [
+      { merkle_root: 'c3'.repeat(32), txid: 'd4'.repeat(32), anchored_ms: 100 },
+      { merkle_root: ROOT, txid: TXID, anchored_ms: 200 },
+    ],
+  });
+  assert.equal(fallback.root, ROOT);
+  assert.equal(fallback.txid, TXID);
+  // a date the record does not carry is omitted, never invented
+  const bare = anchorFromFile({ merkle_root: ROOT, txid: TXID });
+  assert.deepEqual(bare, { status: 'anchored', root: ROOT, txid: TXID });
+  assert.ok(!('anchored_at' in bare));
 });
 
 /* ---------------------------------------------------- participation claims */

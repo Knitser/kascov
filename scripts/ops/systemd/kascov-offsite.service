@@ -1,5 +1,6 @@
 [Unit]
 Description=kascov off-site backup push to GCS
+OnFailure=kascov-alert@%n.service
 [Service]
 Type=oneshot
 User=kascov

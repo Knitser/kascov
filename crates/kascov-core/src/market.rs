@@ -182,18 +182,101 @@ const CURVE_FEE_GROWTH_BPS: i128 = 125;
 /// invariant's growth cap allows it. They differ on the v2 curve: its optional
 /// partner-fee branch withholds tokens (the reserve product grows) without
 /// moving the executed price beyond ordinary slack.
+///
+/// Exact pins answer first: a pin carries its own tuple, so a pinned build
+/// never borrows another family's fees by name. Curve generations answer
+/// from their [`SkeletonPin`] entry; only the pool builds — matched by
+/// [`match_pool_build`], not by a skeleton entry — stay name-resolved.
 fn fee_model(skeleton: &str) -> (i128, i128) {
+    fee_model_in(EXACT_PINS, skeleton)
+}
+
+fn fee_model_in(pins: &[ExactPin], skeleton: &str) -> (i128, i128) {
+    if let Some(pin) = pins.iter().find(|p| p.skeleton == skeleton) {
+        return pin.fees;
+    }
+    if let Some(sk) = SKELETON_PINS.iter().find(|s| s.name == skeleton) {
+        return sk.fees;
+    }
     match skeleton {
         "KRON pool v1" | "KRON pool v2" | "KRON pool tn-a" => (20, 20),
-        "KRON curve v1" | "KRON curve v2" => (0, CURVE_FEE_GROWTH_BPS),
-        // This family accrues its fees INSIDE the covenant rather than paying them out
-        // per trade, so the quote the trader pays carries no bracket fee, and the
-        // reserve grows by the accrual until a sweep releases it. 125 bps is its
-        // aggregate cap (creator + platform + dev), read from the same source the
-        // fixture came from.
-        "KCM curve v1" => (0, 125),
         _ => (0, 0),
     }
+}
+
+/// The market phase a skeleton implies: 'bonding' while a curve sells,
+/// 'graduated' once a pool holds the liquidity, 'unknown' otherwise. Exact
+/// pins answer first, from their own entry — a pin states its phase, it is
+/// never inferred from the name — then the skeleton table, then the pools.
+fn phase_for_skeleton(skeleton: &str) -> &'static str {
+    phase_for_skeleton_in(EXACT_PINS, skeleton)
+}
+
+fn phase_for_skeleton_in(pins: &[ExactPin], skeleton: &str) -> &'static str {
+    if let Some(pin) = pins.iter().find(|p| p.skeleton == skeleton) {
+        return pin.phase;
+    }
+    if let Some(sk) = SKELETON_PINS.iter().find(|s| s.name == skeleton) {
+        return sk.phase;
+    }
+    match skeleton {
+        "KRON pool v1" | "KRON pool v2" | "KRON pool tn-a" => "graduated",
+        _ => "unknown",
+    }
+}
+
+/// The exact-hash pin tier: recognition for a SINGLE-deployment build.
+///
+/// The slot-diffed skeletons need two instances by construction — a slot is a
+/// position where independent deployments disagree, and one deployment
+/// disagrees with nothing. A build deployed exactly once can still be
+/// recognised, but only at the strictest tier there is: the blake2b-256 of
+/// the revealed program must equal the pinned hash byte for byte, and every
+/// constant the entry publishes was read out of that one program by a human
+/// audit. Nothing is parameterised, so nothing can be widened.
+pub struct ExactPin {
+    /// blake2b-256 of the full revealed program — the same digest the chain's
+    /// P2SH commitment carries, so one hash equality is the whole match.
+    pub program_hash: [u8; 32],
+    /// The skeleton tag the verification row publishes. Must not reuse a
+    /// family name: `fee_model` and `phase_for_skeleton` consult pins first,
+    /// so a pin that shadows a family would silently replace that family's
+    /// audited tuple (pinned by test).
+    pub skeleton: &'static str,
+    /// The audited constants, in whichever shape the build has.
+    pub params: PinParams,
+    /// Phase the summary publishes for this build ("bonding"/"graduated").
+    pub phase: &'static str,
+    /// (bracket_fee_bps, growth_fee_bps), with `fee_model`'s meanings.
+    pub fees: (i128, i128),
+}
+
+/// A pin's audited constants: curve-shaped (virtual reserve, graduation
+/// target) or pool-shaped (real reserves, LP share token). The hash pins the
+/// whole program INCLUDING its state block, so state fields such as
+/// `token_reserve` are constants of the pinned bytes — they describe the
+/// audited reveal, exactly as a family match's do.
+pub enum PinParams {
+    Curve(CurveParams),
+    Pool(PoolParams),
+}
+
+/// Audited exact pins. SHIPS EMPTY, and the emptiness is deliberate: an entry
+/// here asserts that a human read the actual program and audited every
+/// constant the entry publishes. Two mainnet programs currently sit unmatched
+/// because they are single-deployment builds no slot diff can reach — this
+/// tier exists for them, but publishing prices from an unaudited guess at
+/// their constants would break the site's entire premise, so the table stays
+/// empty until an audit fills it. The first landing entry must also bump
+/// [`MATCHER_VERSION`], or the stored `unmatched` verdict for its hash is
+/// never retried.
+pub const EXACT_PINS: &[ExactPin] = &[];
+
+/// The pin whose hash equals `program_hash`, if any. Parameterised over the
+/// table so tests exercise the tier with synthetic entries; production
+/// callers pass [`EXACT_PINS`].
+fn exact_pin<'a>(pins: &'a [ExactPin], program_hash: &[u8; 32]) -> Option<&'a ExactPin> {
+    pins.iter().find(|p| p.program_hash == *program_hash)
 }
 
 /// What a matched curve program states about itself. Every field is read from
@@ -287,121 +370,232 @@ fn le_i64(bytes: &[u8]) -> Option<i64> {
     (v >= 0).then_some(v)
 }
 
-/// Match a revealed program against the pinned curve build and read its
-/// constants. `None` on ANY divergence outside the slots — a program that is
-/// almost the audited build is not the audited build.
-pub fn match_kron_curve(program: &[u8]) -> Option<CurveParams> {
-    let cand = push_units(program);
-    if cand.len() != CURVE_PUSHES {
-        return None;
-    }
-    let fixture = push_units(CURVE_FIXTURE);
-    debug_assert_eq!(fixture.len(), CURVE_PUSHES);
-    let slots: BTreeSet<usize> = SLOT_INDICES.into_iter().collect();
+/// One pinned curve generation, declaratively: the fixture a candidate must
+/// equal byte-for-byte outside the slots, and a name for every slot that may
+/// vary. The generations' matchers used to be hand-transcribed copies of one
+/// walk; a new build generation now costs a table entry, not a transcription.
+///
+/// Role arrays are empty where a generation lacks the role — v1 pushes no
+/// self-length and embeds no pool template. An empty array checks nothing,
+/// which is exactly what the hand-written walker of that generation checked.
+struct SkeletonPin {
+    /// The skeleton tag a match publishes. Must stay in
+    /// [`MATCHED_SKELETONS`], or the matcher recognises a build the publish
+    /// gate then refuses (pinned by test).
+    name: &'static str,
+    fixture: &'static [u8],
+    pushes: usize,
+    slots: &'static [usize],
+    token_covenant: usize,
+    token_reserve: usize,
+    /// The creator owner, at every site the build inlines it: all must agree.
+    creator: &'static [usize],
+    /// The virtual-KAS constant, at every inlined site: all must agree.
+    vkas: &'static [usize],
+    graduation: usize,
+    /// Sites where the build pushes its OWN byte length; every one must equal
+    /// the candidate's actual length (the v2 lie detector).
+    self_len: &'static [usize],
+    /// Embedded continuation-template copies; all must be byte-identical, or
+    /// the program graduates into something other than what it displays.
+    pool_tpl: &'static [usize],
+    /// An inlined i64 constant group checked only for self-agreement; its
+    /// value is not published (the KCM launch seed).
+    seed: &'static [usize],
+    /// Only the KCM walker ever refused non-positive constants; the KRON
+    /// walkers read them back as stated. Preserved per entry rather than
+    /// normalised — a refactor must not widen or narrow any match.
+    positive_constants: bool,
+    /// What `phase_for_skeleton` publishes for this tag.
+    phase: &'static str,
+    /// (bracket_fee_bps, growth_fee_bps), with `fee_model`'s meanings.
+    fees: (i128, i128),
+}
 
-    // Lockstep walk: the gap BEFORE each push and (for non-slot pushes) the
-    // whole push unit must be byte-identical to the fixture.
+const KRON_CURVE_V1_PIN: SkeletonPin = SkeletonPin {
+    name: "KRON curve v1",
+    fixture: CURVE_FIXTURE,
+    pushes: CURVE_PUSHES,
+    slots: &SLOT_INDICES,
+    token_covenant: IDX_TOKEN_COVENANT,
+    token_reserve: IDX_TOKEN_RESERVE,
+    creator: &IDX_CREATOR,
+    vkas: &IDX_VKAS,
+    graduation: IDX_GRADUATION,
+    self_len: &[],
+    pool_tpl: &[],
+    seed: &[],
+    positive_constants: false,
+    phase: "bonding",
+    fees: (0, CURVE_FEE_GROWTH_BPS),
+};
+
+const KRON_CURVE_V2_PIN: SkeletonPin = SkeletonPin {
+    name: "KRON curve v2",
+    fixture: CURVE2_FIXTURE,
+    pushes: CURVE2_PUSHES,
+    slots: &CURVE2_SLOTS,
+    token_covenant: IDX2_TOKEN_COVENANT,
+    token_reserve: IDX2_TOKEN_RESERVE,
+    creator: &IDX2_CREATOR,
+    vkas: &IDX2_VKAS,
+    graduation: IDX2_GRADUATION,
+    self_len: &IDX2_SELF_LEN,
+    pool_tpl: &IDX2_POOL_TPL,
+    seed: &[],
+    positive_constants: false,
+    phase: "bonding",
+    fees: (0, CURVE_FEE_GROWTH_BPS),
+};
+
+const KCM_CURVE_V1_PIN: SkeletonPin = SkeletonPin {
+    name: "KCM curve v1",
+    fixture: KCM_CURVE_FIXTURE,
+    pushes: KCM_CURVE_PUSHES,
+    slots: &KCM_CURVE_SLOTS,
+    token_covenant: KCM_IDX_TOKEN_COVENANT,
+    token_reserve: KCM_IDX_TOKEN_RESERVE,
+    creator: &KCM_IDX_CREATOR,
+    vkas: &KCM_IDX_VKAS,
+    graduation: KCM_IDX_GRADUATION,
+    self_len: &[],
+    pool_tpl: &[],
+    seed: &KCM_IDX_SEED,
+    positive_constants: true,
+    // The phase resolution never named this family, so its summaries said
+    // "unknown"; the entry records that as-is. Calling it "bonding" is a
+    // product decision with its own review, not a refactor side effect.
+    phase: "unknown",
+    // This family accrues its fees INSIDE the covenant rather than paying
+    // them out per trade, so the quote the trader pays carries no bracket
+    // fee, and the reserve grows by the accrual until a sweep releases it.
+    // 125 bps is its aggregate cap (creator + platform + dev), read from the
+    // same source the fixture came from.
+    fees: (0, 125),
+};
+
+/// Every slot-diffed curve generation, in the order the matcher tries them.
+/// The pool builds are not entries: their state block is length-prefixed at
+/// fixed offsets, not push-indexed, so they keep [`match_pool_build`].
+const SKELETON_PINS: [SkeletonPin; 3] =
+    [KRON_CURVE_V1_PIN, KRON_CURVE_V2_PIN, KCM_CURVE_V1_PIN];
+
+/// The lockstep gap walk every matcher performs: the gap BEFORE each push
+/// and (for non-slot pushes) the whole push unit must be byte-identical to
+/// the fixture, tail included. Raw-range equality implies data equality, so
+/// this is the entire structural claim. Callers have already checked the
+/// unit counts are equal.
+fn lockstep_matches(
+    fixture: &[u8],
+    fixture_units: &[(std::ops::Range<usize>, Vec<u8>)],
+    program: &[u8],
+    cand_units: &[(std::ops::Range<usize>, Vec<u8>)],
+    slots: &BTreeSet<usize>,
+) -> bool {
     let mut fpos = 0usize;
     let mut cpos = 0usize;
-    for i in 0..CURVE_PUSHES {
-        let (fr, fdata) = &fixture[i];
-        let (cr, cdata) = &cand[i];
-        if CURVE_FIXTURE[fpos..fr.start] != program[cpos..cr.start] {
-            return None;
+    for i in 0..fixture_units.len() {
+        let (fr, _) = &fixture_units[i];
+        let (cr, _) = &cand_units[i];
+        if fixture[fpos..fr.start] != program[cpos..cr.start] {
+            return false;
         }
-        if !slots.contains(&i)
-            && (fdata != cdata || CURVE_FIXTURE[fr.clone()] != program[cr.clone()])
-        {
-            return None;
+        if !slots.contains(&i) && fixture[fr.clone()] != program[cr.clone()] {
+            return false;
         }
         fpos = fr.end;
         cpos = cr.end;
     }
-    if CURVE_FIXTURE[fpos..] != program[cpos..] {
+    fixture[fpos..] == program[cpos..]
+}
+
+/// The one value a repeated slot group agrees on: every site must decode to
+/// the SAME non-negative i64, or the group disagreed with itself.
+fn agreed_i64(cand: &[(std::ops::Range<usize>, Vec<u8>)], idx: &[usize]) -> Option<i64> {
+    let vals: BTreeSet<Option<i64>> = idx.iter().map(|&i| le_i64(&cand[i].1)).collect();
+    match *vals.into_iter().collect::<Vec<_>>().as_slice() {
+        [Some(v)] => Some(v),
+        _ => None,
+    }
+}
+
+/// The one byte value a repeated slot group agrees on.
+fn agreed_bytes<'a>(
+    cand: &'a [(std::ops::Range<usize>, Vec<u8>)],
+    idx: &[usize],
+) -> Option<&'a [u8]> {
+    let vals: BTreeSet<&Vec<u8>> = idx.iter().map(|&i| &cand[i].1).collect();
+    match *vals.into_iter().collect::<Vec<_>>().as_slice() {
+        [v] => Some(v.as_slice()),
+        _ => None,
+    }
+}
+
+/// Match a program against one pinned generation and read its constants.
+/// `None` on ANY divergence outside the slots — a program that is almost the
+/// audited build is not the audited build — and on any internal lie the
+/// entry declares checkable: disagreeing repeated slots, a false self-length,
+/// mismatched embedded template copies.
+fn match_skeleton(pin: &SkeletonPin, program: &[u8]) -> Option<CurveParams> {
+    let cand = push_units(program);
+    if cand.len() != pin.pushes {
+        return None;
+    }
+    let fixture_units = push_units(pin.fixture);
+    debug_assert_eq!(fixture_units.len(), pin.pushes);
+    let slots: BTreeSet<usize> = pin.slots.iter().copied().collect();
+    if !lockstep_matches(pin.fixture, &fixture_units, program, &cand, &slots) {
         return None;
     }
 
-    // Internal consistency: repeated slots must agree with themselves.
-    let vkas_vals: BTreeSet<Option<i64>> = IDX_VKAS.iter().map(|&i| le_i64(&cand[i].1)).collect();
-    let [Some(v_kas_units)] = *vkas_vals.into_iter().collect::<Vec<_>>().as_slice() else {
+    // Internal consistency: a value inlined at several sites must be one
+    // value, the self-length pushes must tell the truth, and every embedded
+    // template copy must be the same bytes.
+    let v_kas_units = agreed_i64(&cand, pin.vkas)?;
+    let creator_fee_owner: [u8; 32] = agreed_bytes(&cand, pin.creator)?.try_into().ok()?;
+    if !pin.seed.is_empty() {
+        agreed_i64(&cand, pin.seed)?;
+    }
+    if !pin.self_len.is_empty() && agreed_i64(&cand, pin.self_len) != Some(program.len() as i64)
+    {
         return None;
-    };
-    let creators: BTreeSet<&Vec<u8>> = IDX_CREATOR.iter().map(|&i| &cand[i].1).collect();
-    let [creator] = *creators.into_iter().collect::<Vec<_>>().as_slice() else {
+    }
+    if let [first, rest @ ..] = pin.pool_tpl {
+        if rest.iter().any(|&i| cand[i].1 != cand[*first].1) {
+            return None;
+        }
+    }
+    let token_covenant_id: [u8; 32] = cand[pin.token_covenant].1.as_slice().try_into().ok()?;
+    let token_reserve = le_i64(&cand[pin.token_reserve].1)?;
+    let graduation_kas_sompi = le_i64(&cand[pin.graduation].1)?;
+    if pin.positive_constants
+        && (v_kas_units <= 0 || token_reserve < 0 || graduation_kas_sompi <= 0)
+    {
         return None;
-    };
-    let creator_fee_owner: [u8; 32] = creator.as_slice().try_into().ok()?;
-    let token_covenant_id: [u8; 32] = cand[IDX_TOKEN_COVENANT].1.as_slice().try_into().ok()?;
+    }
     Some(CurveParams {
         token_covenant_id,
         v_kas_units,
-        graduation_kas_sompi: le_i64(&cand[IDX_GRADUATION].1)?,
+        graduation_kas_sompi,
         creator_fee_owner,
-        token_reserve: le_i64(&cand[IDX_TOKEN_RESERVE].1)?,
+        token_reserve,
     })
+}
+
+/// Match a revealed program against the pinned curve build and read its
+/// constants. `None` on ANY divergence outside the slots — a program that is
+/// almost the audited build is not the audited build.
+pub fn match_kron_curve(program: &[u8]) -> Option<CurveParams> {
+    match_skeleton(&KRON_CURVE_V1_PIN, program)
 }
 
 /// Match a revealed program against the pinned v2 curve build. Same lockstep
 /// walk as v1, plus the internal consistency v2's own structure demands: the
 /// ten self-length pushes must state the program's real byte length, and the
-/// two embedded pool templates must be identical copies.
+/// two embedded pool templates must be identical copies — both declared on
+/// the entry.
 pub fn match_kron_curve_v2(program: &[u8]) -> Option<CurveParams> {
-    let cand = push_units(program);
-    if cand.len() != CURVE2_PUSHES {
-        return None;
-    }
-    let fixture = push_units(CURVE2_FIXTURE);
-    debug_assert_eq!(fixture.len(), CURVE2_PUSHES);
-    let slots: BTreeSet<usize> = CURVE2_SLOTS.into_iter().collect();
-
-    let mut fpos = 0usize;
-    let mut cpos = 0usize;
-    for i in 0..CURVE2_PUSHES {
-        let (fr, fdata) = &fixture[i];
-        let (cr, cdata) = &cand[i];
-        if CURVE2_FIXTURE[fpos..fr.start] != program[cpos..cr.start] {
-            return None;
-        }
-        if !slots.contains(&i)
-            && (fdata != cdata || CURVE2_FIXTURE[fr.clone()] != program[cr.clone()])
-        {
-            return None;
-        }
-        fpos = fr.end;
-        cpos = cr.end;
-    }
-    if CURVE2_FIXTURE[fpos..] != program[cpos..] {
-        return None;
-    }
-
-    // Internal consistency. Repeated slots must agree with themselves, the
-    // self-length pushes must tell the truth, and the two embedded pool
-    // templates must be the same bytes.
-    let vkas_vals: BTreeSet<Option<i64>> = IDX2_VKAS.iter().map(|&i| le_i64(&cand[i].1)).collect();
-    let [Some(v_kas_units)] = *vkas_vals.into_iter().collect::<Vec<_>>().as_slice() else {
-        return None;
-    };
-    let creators: BTreeSet<&Vec<u8>> = IDX2_CREATOR.iter().map(|&i| &cand[i].1).collect();
-    let [creator] = *creators.into_iter().collect::<Vec<_>>().as_slice() else {
-        return None;
-    };
-    let self_lens: BTreeSet<Option<i64>> =
-        IDX2_SELF_LEN.iter().map(|&i| le_i64(&cand[i].1)).collect();
-    if self_lens != BTreeSet::from([Some(program.len() as i64)]) {
-        return None;
-    }
-    if cand[IDX2_POOL_TPL[0]].1 != cand[IDX2_POOL_TPL[1]].1 {
-        return None;
-    }
-    let creator_fee_owner: [u8; 32] = creator.as_slice().try_into().ok()?;
-    let token_covenant_id: [u8; 32] = cand[IDX2_TOKEN_COVENANT].1.as_slice().try_into().ok()?;
-    Some(CurveParams {
-        token_covenant_id,
-        v_kas_units,
-        graduation_kas_sompi: le_i64(&cand[IDX2_GRADUATION].1)?,
-        creator_fee_owner,
-        token_reserve: le_i64(&cand[IDX2_TOKEN_RESERVE].1)?,
-    })
+    match_skeleton(&KRON_CURVE_V2_PIN, program)
 }
 
 /// The pool build the curve graduates into: a 94-byte state block (guard,
@@ -454,6 +648,13 @@ pub(crate) const MATCHED_SKELETONS: [&str; 6] = [
     "KCM curve v1",
 ];
 
+/// Skeleton tags that license publishing: the family allowlist plus any
+/// exact-pinned build. Still an allowlist twice over — families are
+/// enumerated, and a pin names its own tag explicitly.
+pub(crate) fn is_matched_skeleton(skeleton: &str) -> bool {
+    MATCHED_SKELETONS.contains(&skeleton) || EXACT_PINS.iter().any(|p| p.skeleton == skeleton)
+}
+
 pub(crate) fn unmatched_tag() -> String {
     format!("unmatched:{MATCHER_VERSION}")
 }
@@ -479,10 +680,6 @@ pub struct PoolParams {
     pub creator: [u8; 32],
 }
 
-/// Match a revealed program against the pinned pool build. The state block is
-/// parsed at fixed offsets (its five pushes have fixed widths), the template
-/// part must byte-equal the fixture outside the two creator slots, and the
-/// two creator slots must agree with each other.
 /// Match the third-party curve family and read its committed parameters.
 ///
 /// Same discipline as the KRON matchers: every byte outside a declared slot must equal
@@ -490,66 +687,13 @@ pub struct PoolParams {
 /// published list. A program that passes is provably that build with only its declared
 /// parameters changed.
 pub fn match_kcm_curve(program: &[u8]) -> Option<CurveParams> {
-    let cand = push_units(program);
-    if cand.len() != KCM_CURVE_PUSHES {
-        return None;
-    }
-    let fixture = push_units(KCM_CURVE_FIXTURE);
-    debug_assert_eq!(fixture.len(), KCM_CURVE_PUSHES);
-    let slots: BTreeSet<usize> = KCM_CURVE_SLOTS.into_iter().collect();
-
-    let mut fpos = 0usize;
-    let mut cpos = 0usize;
-    for i in 0..KCM_CURVE_PUSHES {
-        let (fr, fdata) = &fixture[i];
-        let (cr, cdata) = &cand[i];
-        if KCM_CURVE_FIXTURE[fpos..fr.start] != program[cpos..cr.start] {
-            return None;
-        }
-        if !slots.contains(&i)
-            && (fdata != cdata || KCM_CURVE_FIXTURE[fr.clone()] != program[cr.clone()])
-        {
-            return None;
-        }
-        fpos = fr.end;
-        cpos = cr.end;
-    }
-    if KCM_CURVE_FIXTURE[fpos..] != program[cpos..] {
-        return None;
-    }
-
-    // Internal consistency: a value inlined at several sites must be one value.
-    let vkas: BTreeSet<Option<i64>> = KCM_IDX_VKAS.iter().map(|&i| le_i64(&cand[i].1)).collect();
-    let [Some(v_kas_units)] = *vkas.into_iter().collect::<Vec<_>>().as_slice() else {
-        return None;
-    };
-    let creators: BTreeSet<&Vec<u8>> = KCM_IDX_CREATOR.iter().map(|&i| &cand[i].1).collect();
-    let [creator] = *creators.into_iter().collect::<Vec<_>>().as_slice() else {
-        return None;
-    };
-    let seeds: BTreeSet<Option<i64>> = KCM_IDX_SEED.iter().map(|&i| le_i64(&cand[i].1)).collect();
-    let [Some(_seed_kas)] = *seeds.into_iter().collect::<Vec<_>>().as_slice() else {
-        return None;
-    };
-
-    let token_covenant_id: [u8; 32] = cand[KCM_IDX_TOKEN_COVENANT].1.as_slice().try_into().ok()?;
-    let creator_fee_owner: [u8; 32] = creator.as_slice().try_into().ok()?;
-    let token_reserve = le_i64(&cand[KCM_IDX_TOKEN_RESERVE].1)?;
-    let graduation_kas_sompi = le_i64(&cand[KCM_IDX_GRADUATION].1)?;
-    if v_kas_units <= 0 || token_reserve < 0 || graduation_kas_sompi <= 0 {
-        return None;
-    }
-
-    Some(CurveParams {
-        token_covenant_id,
-        v_kas_units,
-        graduation_kas_sompi,
-        creator_fee_owner,
-        token_reserve,
-    })
+    match_skeleton(&KCM_CURVE_V1_PIN, program)
 }
 
-/// Match a resting limit order and read the offer it commits to.
+/// Match a resting limit order and read the offer it commits to. Not a
+/// [`SkeletonPin`]: an order's roles (price, size, maker, expiry) are a
+/// different shape from a curve's, so it shares the walk and the agreement
+/// helpers but reads its own fields.
 pub fn match_kcm_order(program: &[u8]) -> Option<OrderParams> {
     let cand = push_units(program);
     if cand.len() != KCM_ORDER_PUSHES {
@@ -558,47 +702,15 @@ pub fn match_kcm_order(program: &[u8]) -> Option<OrderParams> {
     let fixture = push_units(KCM_ORDER_FIXTURE);
     debug_assert_eq!(fixture.len(), KCM_ORDER_PUSHES);
     let slots: BTreeSet<usize> = KCM_ORDER_SLOTS.into_iter().collect();
-
-    let mut fpos = 0usize;
-    let mut cpos = 0usize;
-    for i in 0..KCM_ORDER_PUSHES {
-        let (fr, fdata) = &fixture[i];
-        let (cr, cdata) = &cand[i];
-        if KCM_ORDER_FIXTURE[fpos..fr.start] != program[cpos..cr.start] {
-            return None;
-        }
-        if !slots.contains(&i)
-            && (fdata != cdata || KCM_ORDER_FIXTURE[fr.clone()] != program[cr.clone()])
-        {
-            return None;
-        }
-        fpos = fr.end;
-        cpos = cr.end;
-    }
-    if KCM_ORDER_FIXTURE[fpos..] != program[cpos..] {
+    if !lockstep_matches(KCM_ORDER_FIXTURE, &fixture, program, &cand, &slots) {
         return None;
     }
 
     // Every repeated slot must agree with itself.
-    let one_i64 = |idx: &[usize]| -> Option<i64> {
-        let vals: BTreeSet<Option<i64>> = idx.iter().map(|&i| le_i64(&cand[i].1)).collect();
-        match *vals.into_iter().collect::<Vec<_>>().as_slice() {
-            [Some(v)] => Some(v),
-            _ => None,
-        }
-    };
-    let one_32 = |idx: &[usize]| -> Option<[u8; 32]> {
-        let vals: BTreeSet<&Vec<u8>> = idx.iter().map(|&i| &cand[i].1).collect();
-        match *vals.into_iter().collect::<Vec<_>>().as_slice() {
-            [v] => v.as_slice().try_into().ok(),
-            _ => None,
-        }
-    };
-
-    let price_sompi = one_i64(&KCM_ORD_PRICE)?;
-    let expiry_daa = one_i64(&KCM_ORD_EXPIRY)?;
-    let maker = one_32(&KCM_ORD_MAKER)?;
-    let token_covenant_id = one_32(&KCM_ORD_TOKEN)?;
+    let price_sompi = agreed_i64(&cand, &KCM_ORD_PRICE)?;
+    let expiry_daa = agreed_i64(&cand, &KCM_ORD_EXPIRY)?;
+    let maker: [u8; 32] = agreed_bytes(&cand, &KCM_ORD_MAKER)?.try_into().ok()?;
+    let token_covenant_id: [u8; 32] = agreed_bytes(&cand, &KCM_ORD_TOKEN)?.try_into().ok()?;
     let size = le_i64(&cand[KCM_ORD_SIZE].1)?;
     if price_sompi <= 0 || size <= 0 || expiry_daa <= 0 {
         return None;
@@ -607,6 +719,10 @@ pub fn match_kcm_order(program: &[u8]) -> Option<OrderParams> {
     Some(OrderParams { token_covenant_id, maker, price_sompi, size, expiry_daa })
 }
 
+/// Match a revealed program against the pinned pool build. The state block is
+/// parsed at fixed offsets (its five pushes have fixed widths), the template
+/// part must byte-equal the fixture outside the two creator slots, and the
+/// two creator slots must agree with each other.
 pub fn match_kron_pool(program: &[u8]) -> Option<PoolParams> {
     match_pool_build(program, POOL_FIXTURE, &POOL_TEMPLATE_CREATOR_SLOTS)
 }
@@ -651,37 +767,16 @@ fn match_pool_build(
         return None;
     }
     let slots: BTreeSet<usize> = creator_slots.iter().copied().collect();
-    let mut fpos = 0usize;
-    let mut cpos = 0usize;
-    for i in 0..fixture_units.len() {
-        let (fr, _) = &fixture_units[i];
-        let (cr, _) = &cand_units[i];
-        if pool_fixture[fpos..fr.start] != tpl[cpos..cr.start] {
-            return None;
-        }
-        if !slots.contains(&i) && pool_fixture[fr.clone()] != tpl[cr.clone()] {
-            return None;
-        }
-        fpos = fr.end;
-        cpos = cr.end;
-    }
-    if pool_fixture[fpos..] != tpl[cpos..] {
+    if !lockstep_matches(pool_fixture, &fixture_units, tpl, &cand_units, &slots) {
         return None;
     }
-    let creators: BTreeSet<&Vec<u8>> = creator_slots
-        .iter()
-        .map(|&i| &cand_units[i].1)
-        .collect();
-    let [creator] = *creators.into_iter().collect::<Vec<_>>().as_slice() else {
-        return None;
-    };
     Some(PoolParams {
         token_covenant_id,
         kas_reserve_units,
         token_reserve,
         shares,
         lp_token_covenant_id,
-        creator: creator.as_slice().try_into().ok()?,
+        creator: agreed_bytes(&cand_units, creator_slots)?.try_into().ok()?,
     })
 }
 
@@ -857,21 +952,13 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
         shares: Option<i64>,
     }
     let _ = params_known; // the re-match below is cheap either way
-    let matched: Option<Matched> = match_kron_curve(&program)
-        .map(|c| Matched {
-            skeleton: "KRON curve v1",
-            token_covenant_id: c.token_covenant_id,
-            v_kas_units: c.v_kas_units,
-            token_reserve: c.token_reserve,
-            graduation_kas_sompi: Some(c.graduation_kas_sompi),
-            creator: c.creator_fee_owner,
-            kas_reserve_sompi: None,
-            lp_token_covenant_id: None,
-            shares: None,
-        })
-        .or_else(|| {
-            match_kron_curve_v2(&program).map(|c| Matched {
-                skeleton: "KRON curve v2",
+    // The exact-hash tier answers before any skeleton: one hash equality
+    // against a human-audited entry, mapped into the same shape a family
+    // match produces so everything downstream treats the two identically.
+    let matched: Option<Matched> = exact_pin(EXACT_PINS, &program_hash)
+        .map(|pin| match &pin.params {
+            PinParams::Curve(c) => Matched {
+                skeleton: pin.skeleton,
                 token_covenant_id: c.token_covenant_id,
                 v_kas_units: c.v_kas_units,
                 token_reserve: c.token_reserve,
@@ -880,19 +967,34 @@ pub(crate) fn derive_market_program(conn: &Connection, covenant_id: &[u8; 32]) -
                 kas_reserve_sompi: None,
                 lp_token_covenant_id: None,
                 shares: None,
-            })
+            },
+            PinParams::Pool(p) => Matched {
+                skeleton: pin.skeleton,
+                token_covenant_id: p.token_covenant_id,
+                v_kas_units: 0,
+                token_reserve: p.token_reserve,
+                graduation_kas_sompi: None,
+                creator: p.creator,
+                kas_reserve_sompi: p.kas_reserve_units.checked_mul(1_000_000),
+                lp_token_covenant_id: Some(p.lp_token_covenant_id),
+                shares: Some(p.shares),
+            },
         })
         .or_else(|| {
-            match_kcm_curve(&program).map(|c| Matched {
-                skeleton: "KCM curve v1",
-                token_covenant_id: c.token_covenant_id,
-                v_kas_units: c.v_kas_units,
-                token_reserve: c.token_reserve,
-                graduation_kas_sompi: Some(c.graduation_kas_sompi),
-                creator: c.creator_fee_owner,
-                kas_reserve_sompi: None,
-                lp_token_covenant_id: None,
-                shares: None,
+            // Every curve generation is one table entry, tried in table
+            // order; the entry's own name becomes the published skeleton.
+            SKELETON_PINS.iter().find_map(|sk| {
+                match_skeleton(sk, &program).map(|c| Matched {
+                    skeleton: sk.name,
+                    token_covenant_id: c.token_covenant_id,
+                    v_kas_units: c.v_kas_units,
+                    token_reserve: c.token_reserve,
+                    graduation_kas_sompi: Some(c.graduation_kas_sompi),
+                    creator: c.creator_fee_owner,
+                    kas_reserve_sompi: None,
+                    lp_token_covenant_id: None,
+                    shares: None,
+                })
             })
         })
         .or_else(|| {
@@ -1205,14 +1307,11 @@ pub(crate) fn market_summary(
         out.unpriced_reason = Some("the market covenant's program is not yet verified".into());
         return Ok(out);
     };
-    out.phase = Some(match prog.skeleton.as_str() {
-        "KRON curve v1" | "KRON curve v2" => "bonding".into(),
-        "KRON pool v1" | "KRON pool v2" | "KRON pool tn-a" => "graduated".into(),
-        _ => "unknown".into(),
-    });
+    out.phase = Some(phase_for_skeleton(prog.skeleton.as_str()).to_string());
     // Allowlist, never a denylist: testing `!= unmatched` would promote a
     // future give-up tag into "priceable", which is match-widening by accident.
-    if !MATCHED_SKELETONS.contains(&prog.skeleton.as_str()) {
+    // Exact-pinned tags count — a pin names itself, so this stays enumerated.
+    if !is_matched_skeleton(prog.skeleton.as_str()) {
         out.unpriced_reason = Some(
             "the covenant holding the inventory runs a program kascov does not recognise,              so no exchange rate it produces can be verified"
                 .into(),
@@ -1330,10 +1429,12 @@ pub(crate) fn market_summary(
         .is_some_and(|t| t == *token_id);
     if cells == 1 && names_this_token {
         out.reserve_sompi = Some(value);
-        if let (Some(grad), true) = (
-        prog.graduation_kas_sompi,
-        prog.skeleton == "KRON curve v1" || prog.skeleton == "KRON curve v2",
-    ) {
+        // Phase-based, not name-based, so an exact-pinned bonding build gets
+        // its progress figure from the same wiring as the families.
+        if let (Some(grad), "bonding") = (
+            prog.graduation_kas_sompi,
+            phase_for_skeleton(prog.skeleton.as_str()),
+        ) {
             if grad > 0 {
                 out.grad_progress_bps = (value as i128)
                     .checked_mul(10_000)
@@ -1960,5 +2061,210 @@ mod kcm_order_tests {
         assert_eq!(o.price_sompi, 450_000_000, "for four and a half TKAS");
         assert_ne!(o.maker, [0u8; 32], "a real key, not a sentinel");
         assert!(o.unit_price() > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod exact_pin_tests {
+    use super::*;
+    use kascov_decode::kcc20::blake2b_256;
+
+    /// Build a synthetic pin over raw program bytes. Test-only: a production
+    /// entry is a hand-written const whose hash came from an audited program,
+    /// so no non-test path can mint a pin from bytes it happens to hold.
+    fn pin_of(
+        program: &[u8],
+        skeleton: &'static str,
+        params: PinParams,
+        phase: &'static str,
+        fees: (i128, i128),
+    ) -> ExactPin {
+        ExactPin {
+            program_hash: blake2b_256(program),
+            skeleton,
+            params,
+            phase,
+            fees,
+        }
+    }
+
+    fn curve_pin(program: &[u8]) -> ExactPin {
+        pin_of(
+            program,
+            "TEST curve pinned",
+            PinParams::Curve(CurveParams {
+                token_covenant_id: [0x21; 32],
+                v_kas_units: 4_321,
+                graduation_kas_sompi: 900_000_000,
+                creator_fee_owner: [0x37; 32],
+                token_reserve: 5_000_000,
+            }),
+            "bonding",
+            (7, 9),
+        )
+    }
+
+    #[test]
+    fn a_pin_matches_its_exact_bytes_and_nothing_else() {
+        let program = b"single-deployment build the slot diff can never reach";
+        let pins = [curve_pin(program)];
+        let hit = exact_pin(&pins, &blake2b_256(program)).expect("exact bytes must match");
+        let PinParams::Curve(c) = &hit.params else {
+            panic!("this pin is curve-shaped");
+        };
+        assert_eq!(hit.skeleton, "TEST curve pinned");
+        assert_eq!(c.v_kas_units, 4_321);
+        assert_eq!(c.graduation_kas_sompi, 900_000_000);
+        // one flipped byte is a different program, and a pin has no slots to
+        // absorb it — the hash is the whole match
+        let mut evil = program.to_vec();
+        evil[7] ^= 0x01;
+        assert!(exact_pin(&pins, &blake2b_256(&evil)).is_none());
+    }
+
+    #[test]
+    fn a_pin_reports_its_own_phase_and_fees_generically() {
+        let pins = [curve_pin(b"the pinned bytes")];
+        // resolved from the entry itself, never from a name list
+        assert_eq!(phase_for_skeleton_in(&pins, "TEST curve pinned"), "bonding");
+        assert_eq!(fee_model_in(&pins, "TEST curve pinned"), (7, 9));
+        // family names keep their audited tuples with pins present
+        assert_eq!(fee_model_in(&pins, "KRON pool v1"), (20, 20));
+        assert_eq!(phase_for_skeleton_in(&pins, "KRON pool v1"), "graduated");
+        // an unpinned unknown stays unknown and fee-less
+        assert_eq!(phase_for_skeleton_in(&pins, "nobody"), "unknown");
+        assert_eq!(fee_model_in(&pins, "nobody"), (0, 0));
+    }
+
+    #[test]
+    fn a_pool_shaped_pin_fits_the_same_entry() {
+        let program = b"a graduated single-deployment pool";
+        let pins = [pin_of(
+            program,
+            "TEST pool pinned",
+            PinParams::Pool(PoolParams {
+                token_covenant_id: [0x42; 32],
+                kas_reserve_units: 1_000,
+                token_reserve: 2_000,
+                shares: 3_000,
+                lp_token_covenant_id: [0x43; 32],
+                creator: [0x44; 32],
+            }),
+            "graduated",
+            (20, 20),
+        )];
+        let hit = exact_pin(&pins, &blake2b_256(program)).expect("pool pin must match");
+        let PinParams::Pool(p) = &hit.params else {
+            panic!("this pin is pool-shaped");
+        };
+        assert_eq!(p.shares, 3_000);
+        assert_eq!(p.lp_token_covenant_id, [0x43; 32]);
+        assert_eq!(phase_for_skeleton_in(&pins, "TEST pool pinned"), "graduated");
+        assert_eq!(fee_model_in(&pins, "TEST pool pinned"), (20, 20));
+    }
+
+    /// The shipped table is EMPTY on purpose: an entry asserts a human audit
+    /// happened, and none has. With no entries every resolution — match,
+    /// phase, fee, allowlist — degrades to exactly what the skeleton families
+    /// alone give. The first real entry updates this test deliberately,
+    /// alongside the MATCHER_VERSION bump its retry needs.
+    #[test]
+    fn the_shipped_table_is_empty_and_changes_nothing() {
+        assert!(EXACT_PINS.is_empty());
+        assert!(exact_pin(EXACT_PINS, &[0u8; 32]).is_none());
+        assert_eq!(fee_model("KRON curve v2"), fee_model_in(&[], "KRON curve v2"));
+        assert_eq!(phase_for_skeleton("KRON curve v1"), "bonding");
+        assert_eq!(phase_for_skeleton(&unmatched_tag()), "unknown");
+        // the allowlist helper degrades to exactly the family allowlist
+        assert!(is_matched_skeleton("KRON pool v2"));
+        assert!(!is_matched_skeleton(&unmatched_tag()));
+    }
+
+    /// fee_model and phase resolution consult pins FIRST, so a pin named
+    /// after a family would silently replace that family's audited tuple,
+    /// and two pins sharing a hash or a tag would make resolution order
+    /// load-bearing. All three are table bugs; refuse them here.
+    #[test]
+    fn no_pin_may_shadow_a_family_or_another_pin() {
+        for (i, a) in EXACT_PINS.iter().enumerate() {
+            assert!(
+                !MATCHED_SKELETONS.contains(&a.skeleton),
+                "{} shadows a family name",
+                a.skeleton
+            );
+            for b in &EXACT_PINS[i + 1..] {
+                assert_ne!(a.program_hash, b.program_hash, "duplicate pinned hash");
+                assert_ne!(a.skeleton, b.skeleton, "duplicate pinned tag");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod skeleton_pin_tests {
+    use super::*;
+
+    /// The wrappers ARE the table: every entry matches its own fixture, its
+    /// name is allowlisted, and fee/phase resolution answers from the same
+    /// entry the matcher walked — one row per generation, nothing resolved
+    /// twice from two places.
+    #[test]
+    fn the_table_and_the_wrappers_agree() {
+        let names: Vec<&str> = SKELETON_PINS.iter().map(|s| s.name).collect();
+        assert_eq!(names, ["KRON curve v1", "KRON curve v2", "KCM curve v1"]);
+        for sk in &SKELETON_PINS {
+            assert!(
+                MATCHED_SKELETONS.contains(&sk.name),
+                "{} matched but not allowlisted: recognised and then refused",
+                sk.name
+            );
+            assert_eq!(fee_model(sk.name), sk.fees, "{}", sk.name);
+            assert_eq!(phase_for_skeleton(sk.name), sk.phase, "{}", sk.name);
+            assert!(
+                match_skeleton(sk, sk.fixture).is_some(),
+                "{} rejects its own fixture",
+                sk.name
+            );
+        }
+    }
+
+    /// The KCM seed is inlined at three sites and was checked for agreement
+    /// since the family landed, but never exercised by a test until the
+    /// check became a table field. Copies that disagree are not a build of
+    /// the source.
+    #[test]
+    fn disagreeing_seed_copies_are_rejected() {
+        let units = push_units(KCM_CURVE_FIXTURE);
+        let (range, data) = &units[KCM_IDX_SEED[1]];
+        assert!(!data.is_empty(), "the seed is a data push");
+        let mut evil = KCM_CURVE_FIXTURE.to_vec();
+        // first data byte: the value moves, the push structure stays
+        evil[range.end - data.len()] ^= 0x01;
+        assert!(
+            match_kcm_curve(&evil).is_none(),
+            "the seed disagreed with itself and matched"
+        );
+    }
+
+    /// Positivity is the KCM walker's own rule and the collapse must not
+    /// spread it: zero the graduation constant and KCM refuses, while v1 —
+    /// which never had the rule — still matches and reports the zero it
+    /// read. Normalising either direction would silently widen or narrow a
+    /// match.
+    #[test]
+    fn positivity_stays_a_per_entry_rule() {
+        let units = push_units(KCM_CURVE_FIXTURE);
+        let (range, data) = &units[KCM_IDX_GRADUATION];
+        let mut evil = KCM_CURVE_FIXTURE.to_vec();
+        evil[range.end - data.len()..range.end].fill(0);
+        assert!(match_kcm_curve(&evil).is_none(), "KCM requires grad > 0");
+
+        let units = push_units(CURVE_FIXTURE);
+        let (range, data) = &units[IDX_GRADUATION];
+        let mut zeroed = CURVE_FIXTURE.to_vec();
+        zeroed[range.end - data.len()..range.end].fill(0);
+        let p = match_kron_curve(&zeroed).expect("v1 never required positivity");
+        assert_eq!(p.graduation_kas_sompi, 0);
+        assert_eq!(p.v_kas_units, 6_187_625, "the rest reads back unchanged");
     }
 }

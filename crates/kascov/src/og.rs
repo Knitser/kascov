@@ -264,15 +264,46 @@ pub fn iso_date(ms: u64) -> String {
 
 /* --------------------------------------------------------------- OG card */
 
+/// Standard base64 with padding. Only the card's data: URIs need it, and the
+/// workspace carries no direct base64 dependency to borrow.
+fn b64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = u32::from_be_bytes([
+            0,
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ]);
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 /// Everything the card needs, precomputed by the handler.
 pub struct CardData {
     pub id: String,
     pub name: String,
     pub alive: bool,
+    /// The token's derivation status is "verified" — the same gate behind
+    /// which the API publishes a market at all.
+    pub verified: bool,
     /// e.g. "12,345 TKAS live" or "retired — nothing left unspent"
     pub balance_line: String,
     /// e.g. "born Mar 3, 2026 · 42 events"
     pub born_line: String,
+    /// One market fact ("bonding · 42.5% to graduation" / "graduated · last
+    /// 0.0012 KAS/token"), preformatted by the handler from the gated
+    /// summary. Absent means no verified market — the card then claims none.
+    pub market_line: Option<String>,
+    /// Chain-proven claimed art as (content type, bytes), already reduced by
+    /// the handler to a format the SVG rasterizer decodes. Replaces the
+    /// identicon's shapes when present; the identity ring stays.
+    pub art: Option<(String, Vec<u8>)>,
     /// network label, e.g. "testnet-10"
     pub network: String,
 }
@@ -290,6 +321,50 @@ pub fn card_svg(card: &CardData) -> String {
     } else {
         ("#f2a566", "RETIRED")
     };
+    let pill_w = 60 + pill_label.len() * 14;
+    // The token's verified badge rides as a second pill, in the accent teal —
+    // never the alive green, because "verified" and "alive" are different
+    // claims with different provenance.
+    let verified_pill = if card.verified {
+        let x0 = 452 + pill_w + 14;
+        format!(
+            r##"<g><rect x="{x0}" y="212" width="{w}" height="44" rx="22" fill="none" stroke="#70c7ba" stroke-opacity="0.55" stroke-width="1.5"/><circle cx="{cx}" cy="234" r="5.5" fill="#70c7ba"/><text x="{tx}" y="241" font-family="JetBrains Mono" font-size="19" letter-spacing="2" fill="#70c7ba">VERIFIED</text></g>"##,
+            w = 60 + "VERIFIED".len() * 14,
+            cx = x0 + 26,
+            tx = x0 + 42,
+        )
+    } else {
+        String::new()
+    };
+    let market = card
+        .market_line
+        .as_deref()
+        .map(|m| {
+            format!(
+                r##"<text x="452" y="492" font-family="JetBrains Mono" font-size="22" fill="#70c7ba">{}</text>"##,
+                esc(m)
+            )
+        })
+        .unwrap_or_default();
+    // Proven art replaces the identicon's SHAPES only; the ring and disc stay,
+    // so both renderings share one silhouette. The content-type allowlist is
+    // exactly what resvg's raster decoders cover — anything else would parse
+    // into an empty circle, and a blank face is worse than the identicon.
+    let face = card
+        .art
+        .as_ref()
+        .filter(|(ct, _)| matches!(ct.as_str(), "image/png" | "image/jpeg" | "image/gif"))
+        .map(|(ct, bytes)| {
+            format!(
+                r##"<clipPath id="artclip"><circle cx="32" cy="32" r="30"/></clipPath><circle cx="32" cy="32" r="30" fill="{bg}"/><image x="2" y="2" width="60" height="60" preserveAspectRatio="xMidYMid slice" clip-path="url(#artclip)" href="data:{ct};base64,{}"/><circle cx="32" cy="32" r="30" fill="none" stroke="{ring}" stroke-width="2.5"/>"##,
+                b64(bytes)
+            )
+        })
+        .unwrap_or_else(|| {
+            format!(
+                r##"<circle cx="32" cy="32" r="30" fill="{bg}" stroke="{ring}" stroke-width="2.5"/>{shapes}"##
+            )
+        });
     // Fit the name into the ~640px column right of the avatar. Space Grotesk
     // Bold averages ~0.58em advance; names run 12..26 chars.
     let name_size = (640.0 / (0.58 * card.name.len() as f64)).min(84.0);
@@ -310,15 +385,14 @@ pub fn card_svg(card: &CardData) -> String {
 <g transform="translate(72,52)"><circle cx="20" cy="20" r="15" fill="none" stroke="#70c7ba" stroke-width="4.5"/><circle cx="20" cy="20" r="5.5" fill="#70c7ba"/></g>
 <text x="126" y="83" font-family="Space Grotesk" font-weight="700" font-size="34" fill="#e9f1ef">kascov</text>
 <text x="1128" y="80" text-anchor="end" font-family="JetBrains Mono" font-size="17" letter-spacing="2.4" fill="#8fa19d">KASPA {network}</text>
-<g transform="translate(87,180) scale(4.3)"><circle cx="32" cy="32" r="30" fill="{bg}" stroke="{ring}" stroke-width="2.5"/>{shapes}</g>
-<g><rect x="452" y="212" width="{pill_w}" height="44" rx="22" fill="none" stroke="{pill_col}" stroke-opacity="0.55" stroke-width="1.5"/><circle cx="478" cy="234" r="5.5" fill="{pill_col}"/><text x="494" y="241" font-family="JetBrains Mono" font-size="19" letter-spacing="2" fill="{pill_col}">{pill_label}</text></g>
+<g transform="translate(87,180) scale(4.3)">{face}</g>
+<g><rect x="452" y="212" width="{pill_w}" height="44" rx="22" fill="none" stroke="{pill_col}" stroke-opacity="0.55" stroke-width="1.5"/><circle cx="478" cy="234" r="5.5" fill="{pill_col}"/><text x="494" y="241" font-family="JetBrains Mono" font-size="19" letter-spacing="2" fill="{pill_col}">{pill_label}</text></g>{verified_pill}
 <text x="452" y="341" font-family="Space Grotesk" font-weight="700" font-size="{name_size}" letter-spacing="-1" fill="#e9f1ef">{name}</text>
 <text x="452" y="404" font-family="JetBrains Mono" font-size="26" fill="#a7b8b4">{balance}</text>
-<text x="452" y="448" font-family="JetBrains Mono" font-size="22" fill="#8fa19d">{born}</text>
+<text x="452" y="448" font-family="JetBrains Mono" font-size="22" fill="#8fa19d">{born}</text>{market}
 <text x="72" y="566" font-family="JetBrains Mono" font-size="19" fill="#70c7ba">smart coins on Kaspa L1, watched live</text>
 <text x="1128" y="566" text-anchor="end" font-family="JetBrains Mono" font-size="23" fill="#70c7ba">kascov.io</text>
 </svg>"##,
-        pill_w = 60 + pill_label.len() * 14,
     )
 }
 
@@ -403,21 +477,72 @@ mod tests {
         assert!(shapes.contains(r#"<circle cx="28.8" cy="34.4" r="9.4""#));
     }
 
-    #[test]
-    fn card_renders_png() {
-        let card = CardData {
+    fn base_card() -> CardData {
+        CardData {
             id: ID_A.to_string(),
             name: friendly_name(ID_A),
             alive: true,
+            verified: false,
             balance_line: "12,345 TKAS live".to_string(),
             born_line: "born Mar 3, 2026 · 42 events".to_string(),
+            market_line: None,
+            art: None,
             network: "testnet-10".to_string(),
-        };
-        let png = render_png(&card_svg(&card)).expect("render");
+        }
+    }
+
+    #[test]
+    fn card_renders_png() {
+        let png = render_png(&card_svg(&base_card())).expect("render");
         // PNG magic + IHDR dimensions 1200x630
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(&png[16..20], &1200u32.to_be_bytes());
         assert_eq!(&png[20..24], &630u32.to_be_bytes());
+    }
+
+    #[test]
+    fn b64_matches_the_rfc_vectors() {
+        assert_eq!(b64(b""), "");
+        assert_eq!(b64(b"f"), "Zg==");
+        assert_eq!(b64(b"fo"), "Zm8=");
+        assert_eq!(b64(b"foo"), "Zm9v");
+        assert_eq!(b64(b"foob"), "Zm9vYg==");
+        assert_eq!(b64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(b64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn verified_market_card_carries_pill_and_market_line() {
+        let mut card = base_card();
+        card.verified = true;
+        card.market_line = Some("bonding · 42.5% to graduation".to_string());
+        let svg = card_svg(&card);
+        assert!(svg.contains(">VERIFIED</text>"));
+        assert!(svg.contains("bonding · 42.5% to graduation"));
+        render_png(&svg).expect("render");
+        // The base card claims neither.
+        let plain = card_svg(&base_card());
+        assert!(!plain.contains("VERIFIED"));
+        assert!(!plain.contains("graduation"));
+    }
+
+    #[test]
+    fn proven_art_replaces_the_identicon_and_unknown_types_do_not() {
+        // Real PNG bytes for the embed: render a card, feed it back as art.
+        let art = render_png(&card_svg(&base_card())).expect("render art");
+        let mut card = base_card();
+        card.art = Some(("image/png".to_string(), art.clone()));
+        let svg = card_svg(&card);
+        assert!(svg.contains("data:image/png;base64,"));
+        assert!(!svg.contains("opacity=\"0.92\"")); // identicon shapes are gone
+        assert!(svg.contains("stroke-width=\"2.5\"")); // the identity ring stays
+        let png = render_png(&svg).expect("render with art");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        // A type resvg cannot decode must fall back to the identicon whole.
+        card.art = Some(("image/webp".to_string(), art));
+        let svg = card_svg(&card);
+        assert!(!svg.contains("data:"));
+        assert!(svg.contains("opacity=\"0.92\""));
     }
 
     #[test]

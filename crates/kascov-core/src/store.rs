@@ -229,6 +229,41 @@ CREATE TABLE IF NOT EXISTS market_programs (
     program_pushes INTEGER
 );
 CREATE INDEX IF NOT EXISTS mp_by_token ON market_programs(token_covenant_id);
+-- A resting limit order read off a proof-grade reveal of its own program
+-- bytes: one offer at one price, filled once and gone. Rows are DECODED
+-- FACTS about committed bytes — nothing may publish a price from this table
+-- without its own verification gate (market_programs' bar applies here too).
+-- A whole new table reaches deployed databases through SCHEMA itself:
+-- execute_batch runs on every open and IF NOT EXISTS creates it when absent
+-- (only new COLUMNS need the ALTER list below).
+CREATE TABLE IF NOT EXISTS resting_orders (
+    covenant_id BLOB PRIMARY KEY,
+    token_id BLOB NOT NULL,
+    -- This build family only encodes an ask — the maker parcels tokens and
+    -- names the sompi wanted. A bid would be a different program shape, so
+    -- 'sell' is the only value written today; the column exists because the
+    -- shape of a book is not the shape of one family.
+    side TEXT NOT NULL,
+    -- The offer as the exact pair the bytes commit to: total sompi asked
+    -- over tokens offered. A ratio, never a quotient — integer division
+    -- would collapse distinct price levels and a float would round them.
+    price_num INTEGER NOT NULL,
+    price_den INTEGER NOT NULL,
+    amount INTEGER NOT NULL,
+    maker BLOB NOT NULL,
+    expiry_daa INTEGER NOT NULL,
+    -- 'open' | 'filled' | 'cancelled'. Resolution is the spend that leaves
+    -- the covenant with no live cell; the filled/cancelled label applies the
+    -- program's own committed expiry to that spend's accepting DAA (kascov
+    -- does not decode which branch the spend ran — see derive_resting_order).
+    state TEXT NOT NULL,
+    created_daa INTEGER NOT NULL,
+    resolved_daa INTEGER
+);
+-- The live book of one token. GLOB-free equality predicate: 'open' rows are
+-- the only ones a book enumeration ever wants, and they are the minority
+-- once orders start resolving.
+CREATE INDEX IF NOT EXISTS ro_open_by_token ON resting_orders(token_id) WHERE state = 'open';
 CREATE TABLE IF NOT EXISTS token_balances (
     token_id BLOB NOT NULL,
     owner TEXT NOT NULL,                  -- hex(identifier_type || owner_identifier)
@@ -912,6 +947,124 @@ pub(crate) fn registry() -> &'static kascov_decode::Registry {
     REGISTRY.get_or_init(kascov_decode::Registry::default)
 }
 
+/// Derive (or retract) the resting-order row of one covenant from what the
+/// chain proves right now. The oldest proof-grade reveal that
+/// `market::match_kcm_order` accepts is the posted offer, and its cell's
+/// created_daa is the posting time; the order is resolved once the covenant
+/// has no live cell left, and the resolving DAA is read from the spend
+/// events of its cells (classify() guarantees every spent covenant UTXO
+/// produced one). Idempotent — INSERT OR REPLACE recomputes the whole row —
+/// so apply() and rollback() both call it after their writes land.
+///
+/// Fail-closed at every fork: bytes the matcher refuses leave no row, a row
+/// whose proving reveal was rolled back is deleted (a decoded fact never
+/// outlives the bytes that proved it), and a consumed order whose resolving
+/// spend left no accepting DAA on record is deleted rather than labeled by
+/// guesswork.
+fn derive_resting_order(conn: &Connection, covenant_id: &[u8; 32]) -> Result<()> {
+    // Oldest-first: the first cell whose reveal decodes as an order carries
+    // the posting DAA. LIMIT bounds the scan; this family's lifecycle is one
+    // or two cells (posted, consumed), so 8 is generous.
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT spk_script, spent_sig, created_daa FROM covenant_utxos
+             WHERE covenant_id = ?1 AND spent_sig IS NOT NULL
+             ORDER BY created_daa ASC LIMIT 8",
+        )
+        .map_err(db_err)?;
+    let rows: Vec<(Vec<u8>, Vec<u8>, i64)> = stmt
+        .query_map([covenant_id.as_slice()], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .map_err(db_err)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    let mut posted: Option<(crate::market::OrderParams, i64)> = None;
+    for (spk, sig, created_daa) in &rows {
+        if let Some(program) = kascov_decode::p2sh_reveal(spk, sig) {
+            if let Some(order) = crate::market::match_kcm_order(&program) {
+                posted = Some((order, *created_daa));
+                break;
+            }
+        }
+    }
+    let Some((order, created_daa)) = posted else {
+        conn.execute(
+            "DELETE FROM resting_orders WHERE covenant_id = ?1",
+            [covenant_id.as_slice()],
+        )
+        .map_err(db_err)?;
+        return Ok(());
+    };
+
+    let live: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM covenant_utxos
+             WHERE covenant_id = ?1 AND spent_block IS NULL)",
+            [covenant_id.as_slice()],
+            |r| r.get(0),
+        )
+        .map_err(db_err)?;
+    let resolved_daa: Option<i64> = if live {
+        None
+    } else {
+        // MAX because the spend that consumed the LAST live cell is the one
+        // that resolved the order.
+        conn.query_row(
+            "SELECT MAX(e.accepting_daa) FROM covenant_events e
+             WHERE e.covenant_id = ?1
+               AND e.txid IN (SELECT spent_txid FROM covenant_utxos
+                              WHERE covenant_id = ?1 AND spent_txid IS NOT NULL)",
+            [covenant_id.as_slice()],
+            |r| r.get(0),
+        )
+        .map_err(db_err)?
+    };
+    let state = match resolved_daa {
+        None if live => "open",
+        // The program's own committed expiry read against the resolving
+        // spend's accepting DAA: at or before expiry only the fill branch is
+        // live, after it the reclaim is (OrderParams::expiry_daa is "after
+        // which anyone may return the parcel"). The spend's branch itself is
+        // not decoded — this is the committed schedule against a chain fact.
+        Some(daa) if daa <= order.expiry_daa => "filled",
+        Some(_) => "cancelled",
+        // Consumed, but no spend event carries a DAA to place the
+        // resolution: no state can be proven, so no row is served at all.
+        None => {
+            conn.execute(
+                "DELETE FROM resting_orders WHERE covenant_id = ?1",
+                [covenant_id.as_slice()],
+            )
+            .map_err(db_err)?;
+            return Ok(());
+        }
+    };
+    conn.execute(
+        // price_den duplicates amount today because this family commits a
+        // total-for-parcel price; a family with a per-token price would
+        // diverge, so both columns stay.
+        "INSERT OR REPLACE INTO resting_orders
+           (covenant_id, token_id, side, price_num, price_den, amount, maker,
+            expiry_daa, state, created_daa, resolved_daa)
+         VALUES (?1, ?2, 'sell', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            covenant_id.as_slice(),
+            order.token_covenant_id.as_slice(),
+            order.price_sompi,
+            order.size,
+            order.size,
+            order.maker.as_slice(),
+            order.expiry_daa,
+            state,
+            created_daa,
+            resolved_daa,
+        ],
+    )
+    .map_err(db_err)?;
+    Ok(())
+}
+
 /// Version of the write-time classification (decode registry + inscription
 /// window). Bump whenever either learns something new, so stamps an older
 /// binary left as *generic* get cleared back to NULL on open and the
@@ -929,8 +1082,41 @@ pub(crate) const KCC20_RESTAMP_VERSION: &str = "1-locate-state-block";
 /// rehash_kcc1_if_stale.
 const KCC1_ABI_VERSION: &str = "55b28d8";
 
+/// Whether opening may create a brand-new database when none exists at the
+/// path. SQLite happily makes one, which for the sole archive of a chain's
+/// history is amnesia served as health: every count the empty file then
+/// publishes is honestly derived from nothing. Boot paths that own real
+/// data pass `Refuse`; first-time setups and the test suite pass `Allow`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FreshDb {
+    Allow,
+    Refuse,
+}
+
 impl Store {
     pub fn open(path: &Path, network: Network) -> Result<Self> {
+        Self::open_with_policy(path, network, FreshDb::Allow)
+    }
+
+    /// `FreshDb::Refuse` fails loudly when the file is missing or zero bytes
+    /// (SQLite treats both as "make me a fresh one") instead of booting an
+    /// empty archive. The refusal names KASCOV_FRESH_OK because the operator
+    /// escape hatch lives at the boot path that maps it to `Allow`; this
+    /// constructor never reads the environment itself. A stat failure counts
+    /// as missing: when the file's existence is in doubt, so is the archive.
+    pub fn open_with_policy(path: &Path, network: Network, fresh: FreshDb) -> Result<Self> {
+        if fresh == FreshDb::Refuse && std::fs::metadata(path).map_or(true, |m| m.len() == 0) {
+            return Err(Error::Invalid {
+                what: "db open",
+                value: format!(
+                    "{} does not exist (or is zero bytes) and this boot refuses to start a \
+                     fresh database in its place — an empty archive would serve zeros as \
+                     verified history. If a brand-new database is really intended, set \
+                     KASCOV_FRESH_OK=1.",
+                    path.display()
+                ),
+            });
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::Invalid {
                 what: "db path",
@@ -1558,6 +1744,12 @@ impl Store {
             )
             .map_err(db_err)?;
         }
+        // Resting-order triggers, collected while the reveals are in hand:
+        // covenants whose spend revealed order bytes, and every spent
+        // covenant (one with an existing order row may be consumed by a
+        // spend that reveals a successor program which is NOT the order).
+        let mut order_covenants: std::collections::BTreeSet<[u8; 32]> = Default::default();
+        let mut spent_covenants: std::collections::BTreeSet<[u8; 32]> = Default::default();
         for (outpoint, spending_txid, sig, budget, input_index) in &block.spent_utxos {
             // Spend-time recognition: a verified P2SH reveal names the program
             // that actually ran ('' = spend seen, nothing recognized). Reading
@@ -1585,6 +1777,16 @@ impl Store {
                     kcc1_hash = redeem
                         .as_deref()
                         .and_then(kascov_decode::kcc20::kcc1_template_hash);
+                    // The reveal is the only moment an order program's bytes
+                    // are proof-grade in hand. Anything the matcher refuses
+                    // is NOT an order — no row is ever written on a guess.
+                    if redeem
+                        .as_deref()
+                        .is_some_and(|p| crate::market::match_kcm_order(p).is_some())
+                    {
+                        order_covenants.insert(covenant_id);
+                    }
+                    spent_covenants.insert(covenant_id);
                     let template = redeem
                         .and_then(|redeem| {
                             kascov_decode::kcc20::revealed_template(registry(), version, &redeem)
@@ -1675,6 +1877,29 @@ impl Store {
                 [block.accepting_daa.to_string()],
             )
             .map_err(db_err)?;
+        }
+        // Resting-order upkeep — after the events land, because the
+        // resolved-DAA lookup in derive_resting_order reads THIS block's
+        // spend events. Spent covenants without a fresh order reveal only
+        // matter when a row already tracks them: one EXISTS probe each, so
+        // non-order blocks pay almost nothing.
+        for cov in &spent_covenants {
+            if order_covenants.contains(cov) {
+                continue;
+            }
+            let tracked: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM resting_orders WHERE covenant_id = ?1)",
+                    [cov.as_slice()],
+                    |r| r.get(0),
+                )
+                .map_err(db_err)?;
+            if tracked {
+                order_covenants.insert(*cov);
+            }
+        }
+        for cov in &order_covenants {
+            derive_resting_order(&tx, cov)?;
         }
         // Token accounting hook — same transaction, so readers can never see
         // token tables inconsistent with covenant data (and after the
@@ -1780,6 +2005,23 @@ impl Store {
         // Covenants whose genesis was rolled back disappear entirely.
         tx.execute("DELETE FROM covenants WHERE event_count <= 0", [])
             .map_err(db_err)?;
+        // Resting orders regress with their proofs: a rolled-back resolving
+        // spend reopens the order (its cell is live again), and a rolled-back
+        // recognizing reveal leaves nothing decodable, so the row is deleted.
+        // Gated on an existing row — a covenant that never proved an order
+        // has nothing to rewind.
+        for id in &affected {
+            let tracked: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM resting_orders WHERE covenant_id = ?1)",
+                    [id.as_slice()],
+                    |r| r.get(0),
+                )
+                .map_err(db_err)?;
+            if tracked {
+                derive_resting_order(&tx, id)?;
+            }
+        }
         // Token rewind, phase 2: re-derive every affected token from the
         // POST-rollback source tables — exactly what a from-scratch index at
         // the rolled-back height would contain. Cells whose proving reveal
@@ -5052,6 +5294,56 @@ mod tests {
 
     fn test_store(name: &str) -> Store {
         Store::open(&test_store_path(name), Network::Testnet(10)).unwrap()
+    }
+
+    /// The archive-boot policy. Under `Refuse` a missing file is an error
+    /// that tells the operator both what refused and how to overrule it —
+    /// never a silently created empty database.
+    #[test]
+    fn refuse_fresh_errs_on_a_missing_db_and_names_the_escape_hatch() {
+        let path = test_store_path("fresh-refuse-missing");
+        let Err(err) = Store::open_with_policy(&path, Network::Testnet(10), FreshDb::Refuse) else {
+            panic!("a missing archive must not be replaced by an empty one");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("KASCOV_FRESH_OK"), "no escape hatch in: {msg}");
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "no path in: {msg}"
+        );
+        assert!(
+            !path.exists(),
+            "the refusal must not create the file either"
+        );
+    }
+
+    /// SQLite treats a zero-byte file exactly like a missing one, so Refuse
+    /// must too.
+    #[test]
+    fn refuse_fresh_errs_on_a_zero_byte_db() {
+        let path = test_store_path("fresh-refuse-empty");
+        std::fs::write(&path, b"").unwrap();
+        let Err(err) = Store::open_with_policy(&path, Network::Testnet(10), FreshDb::Refuse) else {
+            panic!("a zero-byte file is a fresh database in sqlite's eyes");
+        };
+        assert!(err.to_string().contains("KASCOV_FRESH_OK"));
+    }
+
+    #[test]
+    fn refuse_fresh_opens_an_existing_db() {
+        let path = test_store_path("fresh-refuse-existing");
+        drop(Store::open(&path, Network::Testnet(10)).unwrap());
+        Store::open_with_policy(&path, Network::Testnet(10), FreshDb::Refuse)
+            .expect("an existing archive opens under Refuse");
+    }
+
+    /// `Store::open` stays the Allow wrapper: the whole test suite (and any
+    /// first-time setup) creates its databases through it.
+    #[test]
+    fn allow_fresh_still_creates_a_missing_db() {
+        let path = test_store_path("fresh-allow-missing");
+        Store::open(&path, Network::Testnet(10)).expect("Allow creates");
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
     }
 
     fn block_with_events(hash: u8, daa: u64, events: Vec<(u8, EventKind, u8)>) -> BlockEvents {

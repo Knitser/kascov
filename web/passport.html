@@ -47,6 +47,13 @@
     /* the anchored state: same box, the calm color of a settled fact */
     .arm.ok { border-color: var(--born); background: var(--born-soft); }
     .arm.ok .chip { background: var(--born-soft); color: var(--born); border-color: var(--born); }
+    /* the anchor lineage: every root ever written, payloads spelled out */
+    .arm-history { flex-basis: 100%; margin-top: .35rem; }
+    .arm-history summary { cursor: pointer; font-family: var(--mono); font-size: .78rem; color: var(--accent); }
+    .arm-history ul { list-style: none; margin: .5rem 0 0; padding: 0; }
+    .arm-history li { font-size: .82rem; color: var(--muted); margin: .35rem 0; }
+    .arm-history .payload { word-break: break-all; font-size: .76rem; }
+    .arm-history .dim { font-size: .8rem; margin: .5rem 0 0; }
 
     .lookup { display: flex; gap: .6rem; flex-wrap: wrap; margin: 1.25rem 0 .9rem; }
     .lookup input {
@@ -544,6 +551,32 @@
       }, function () { return { error: true }; });
     }
 
+    /* the anchor lineage, oldest first: every root ever anchored, its payload
+       string spelled out, and the explorer link that shows the raw bytes.
+       entries that do not validate are skipped, never guessed at */
+    function anchorHistoryHtml(j) {
+      var h = j && Array.isArray(j.history) ? j.history : [];
+      var rows = '';
+      for (var i = 0; i < h.length; i++) {
+        var e = h[i] || {};
+        var root = isHex(e.merkle_root, 64) ? e.merkle_root : null;
+        var txid = isHex(e.txid, 64) ? e.txid : null;
+        if (!root || !txid) continue;
+        var when = Number.isFinite(e.anchored_ms) && e.anchored_ms > 0
+          ? day(new Date(Number(e.anchored_ms)).toISOString()) : '';
+        rows += '<li>' + (when ? esc(when) + ' · ' : '')
+          + '<code class="payload">kascov:passport:v1:' + esc(root) + '</code>'
+          + ' · <a href="https://explorer.kaspa.org/txs/' + esc(txid) + '" rel="noopener" title="'
+          + esc(txid) + '"><code>' + esc(shortMid(txid)) + '</code></a></li>';
+      }
+      if (!rows) return '';
+      return '<details class="arm-history"><summary>every anchor ever made</summary>'
+        + '<ul>' + rows + '</ul>'
+        + '<p class="dim">each line is the exact payload of that transaction; the link shows the '
+        + 'raw bytes on the public explorer, because kascov&rsquo;s own index only walks '
+        + 'covenant transactions.</p></details>';
+    }
+
     function renderAnchor(a, c) {
       /* absent is the static copy already on the page: not yet anchored */
       if (a.absent) return;
@@ -559,8 +592,11 @@
           + 'from it. the raw file is at <a href="' + ANCHOR_FILE + '"><code>' + ANCHOR_FILE
           + '</code></a>.');
       }
-      var tx = '<a href="/#/' + esc(st.network) + '/tx/' + esc(st.txid) + '" title="' + esc(st.txid)
-        + '"><code>' + esc(shortMid(st.txid)) + '</code></a>';
+      /* anchors are plain payload sends, which kascov's own index does not
+         walk (it follows covenants) — so the link goes to the public
+         explorer, where the transaction and its payload bytes actually show */
+      var tx = '<a href="https://explorer.kaspa.org/txs/' + esc(st.txid) + '" rel="noopener" title="'
+        + esc(st.txid) + '"><code>' + esc(shortMid(st.txid)) + '</code></a>';
       var sent = (st.address
         ? ', sent from <code title="' + esc(st.address) + '">' + esc(shortMid(st.address)) + '</code>'
         : '') + (st.date ? ' on ' + esc(st.date) : '');
@@ -590,6 +626,12 @@
 
     Promise.all([fetchState(ANCHOR_FILE), fetchState(FILE)]).then(function (rs) {
       renderAnchor(rs[0], rs[1]);
+      /* the lineage renders under whatever state the box settled on, as long
+         as a readable anchor file provided it */
+      if (rs[0] && rs[0].json) {
+        var hist = anchorHistoryHtml(rs[0].json);
+        if (hist) armBox.insertAdjacentHTML('beforeend', hist);
+      }
     });
   })();
   </script>

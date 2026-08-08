@@ -224,6 +224,101 @@ pub fn signature_script(arg_pushes: &[u8], dispatch: Option<&[u8; 4]>, program: 
     out
 }
 
+/// Decode exactly one `PushMinimal` at the start of `script` (§5.2), giving
+/// the payload and the bytes consumed. Byte-exact like `read_push_explicit`:
+/// the consumed bytes must equal `encode_push(payload)`, so a data-form push
+/// of a value the numeric opcodes own (`01 05` for what is `OP_5`), an
+/// oversized length form, and a truncated push are all `None`. The crate
+/// root's disassembler deliberately tolerates those shapes; an ABI reader
+/// must not.
+pub fn read_push_minimal(script: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let (&op, rest) = script.split_first()?;
+    let (payload, consumed) = match op {
+        0x00 => (Vec::new(), 1),
+        0x4f => (vec![0x81], 1),
+        0x51..=0x60 => (vec![op - 0x50], 1),
+        1..=75 => (rest.get(..op as usize)?.to_vec(), 1 + op as usize),
+        0x4c => {
+            let n = *rest.first()? as usize;
+            (rest.get(1..1 + n)?.to_vec(), 2 + n)
+        }
+        0x4d => {
+            let n = u16::from_le_bytes(rest.get(..2)?.try_into().ok()?) as usize;
+            (rest.get(2..2 + n)?.to_vec(), 3 + n)
+        }
+        0x4e => {
+            let n = u32::from_le_bytes(rest.get(..4)?.try_into().ok()?) as usize;
+            (rest.get(4..4 + n)?.to_vec(), 5 + n)
+        }
+        _ => return None,
+    };
+    let canonical = encode_push(&payload).as_slice() == &script[..consumed];
+    canonical.then_some((payload, consumed))
+}
+
+/// A KCC1 invocation read back from the signature script that spends a
+/// version-0 P2SH envelope (§7): argument pushes, then the dispatch tag iff
+/// the program declares two or more invocable branches, then the revealed
+/// program as the mandatory final push. The inverse of [`signature_script`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Invocation {
+    /// Argument push payloads, in push order.
+    pub args: Vec<Vec<u8>>,
+    /// The four dispatch-tag bytes (§6.1), present iff the read was
+    /// multi-branch.
+    pub dispatch: Option<[u8; 4]>,
+    /// The revealed program `R`. Claimed, not yet proven: check it against
+    /// the spent envelope ([`read_invocation_checked`]) before trusting it.
+    pub program: Vec<u8>,
+}
+
+/// Read a §7 signature script. `multi_branch` is ABI knowledge — whether the
+/// program declares two or more invocable branches — and cannot be inferred
+/// from the bytes: a trailing `byte[4]` argument encodes exactly like a
+/// dispatch tag, so a reader that guessed would misfile one as the other.
+/// Passed the wrong arity, the read fails closed or files the tag among the
+/// arguments; it never guesses.
+///
+/// `None` on anything unexpected: a non-push opcode anywhere, a non-minimal
+/// push, an empty program, or (multi-branch) a tag push that is not exactly
+/// four bytes.
+pub fn read_invocation(sig_script: &[u8], multi_branch: bool) -> Option<Invocation> {
+    let mut pushes = Vec::new();
+    let mut at = 0usize;
+    while at < sig_script.len() {
+        let (payload, consumed) = read_push_minimal(&sig_script[at..])?;
+        pushes.push(payload);
+        at += consumed;
+    }
+    let program = pushes.pop()?;
+    if program.is_empty() {
+        return None;
+    }
+    let dispatch = if multi_branch {
+        let tag: [u8; 4] = pushes.pop()?.as_slice().try_into().ok()?;
+        Some(tag)
+    } else {
+        None
+    };
+    Some(Invocation {
+        args: pushes,
+        dispatch,
+        program,
+    })
+}
+
+/// [`read_invocation`], additionally requiring the revealed program to hash
+/// to the envelope it spends (§7): `envelope_spk(program) == spk`. The only
+/// form whose `program` is proven rather than claimed.
+pub fn read_invocation_checked(
+    spk: &[u8],
+    sig_script: &[u8],
+    multi_branch: bool,
+) -> Option<Invocation> {
+    let inv = read_invocation(sig_script, multi_branch)?;
+    (envelope_spk(&inv.program) == spk).then_some(inv)
+}
+
 /// Scalar field types with a defined state lowering (§5.1/§5.4). Arrays and
 /// records lower to sequences of these before encoding (§5.5/§5.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -344,6 +439,84 @@ pub fn commitment(payload: &[u8]) -> [u8; 32] {
 /// state, and MUST be verified before the value is used.
 pub fn verify_commitment(commitment: &[u8], payload: &[u8]) -> bool {
     commitment == hash32(payload).as_slice()
+}
+
+/// The KCC-0020 token-state tuple, per the token-spec draft in kccs PR #2:
+/// `owner_identifier byte[32]`, `identifier_type byte`, `amount int`,
+/// `is_minter bool` — the four fields every KCC20 build observed on chain
+/// carries, restated as a §5/§8.1 canonical state encoding (their fixed-width
+/// pushes ARE the canonical `PushExplicit` forms, so the two readings agree
+/// byte for byte).
+pub const KCC0020_STATE_TYPES: [FieldType; 4] = [
+    FieldType::FixedBytes(32),
+    FieldType::Byte,
+    FieldType::Int,
+    FieldType::Bool,
+];
+
+/// What a recognised KCC-0020 candidate states about itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Kcc0020State {
+    pub owner_identifier: [u8; 32],
+    pub identifier_type: u8,
+    /// Non-negative by construction: an amount with the §5.3 sign bit set is
+    /// rejected, never absolute-valued.
+    pub amount: i64,
+    pub is_minter: bool,
+    /// §8.3 `TemplateHash` over the bytes around the state block — the
+    /// identity of the BUILD, state-independent, comparable across instances.
+    pub template_hash: [u8; 32],
+}
+
+/// KCC-0020 recognizer STUB — decode-only scaffolding for the token-spec
+/// draft in kccs PR #2, which is not merged. Nothing here is wired into
+/// publishing, and nothing may be until the spec lands: recognising a shape
+/// is not proving a state (that is the splice-and-hash gate in
+/// `kcc20::prove_output_state`, whose sole acceptance criterion is hash
+/// equality against the chain's own commitment).
+///
+/// Accepts the head-of-program state layout both observed builds share: the
+/// tuple in [`KCC0020_STATE_TYPES`] as canonical §8.1 pushes, either bare at
+/// offset 0 or wrapped in the alt-stack guards `OpToAltStack`/
+/// `OpFromAltStack` (0x6b/0x6c). Anything else — a non-canonical push, a
+/// negative amount, a bool byte other than 0x00/0x01, an unclosed guard, a
+/// program with no logic after the state — is `None`.
+pub fn recognize_kcc0020(program: &[u8]) -> Option<Kcc0020State> {
+    // 33 + 2 + 9 + 2: the canonical PushExplicit widths of the four fields.
+    const BLOCK: usize = 46;
+    let start = match program.first()? {
+        0x6b => {
+            // an opened guard must close directly after the block
+            if *program.get(1 + BLOCK)? != 0x6c {
+                return None;
+            }
+            1
+        }
+        _ => 0,
+    };
+    let state = program.get(start..start + BLOCK)?;
+    // state alone is not a token program: logic must follow the block (and,
+    // when guarded, follow the closing guard byte too)
+    let guard_tail = start; // one closing 0x6c iff one opening 0x6b
+    if program.len() <= start + BLOCK + guard_tail {
+        return None;
+    }
+    let values = decode_state(&KCC0020_STATE_TYPES, state)?;
+    let [StateValue::Bytes(owner), StateValue::Bytes(id_type), StateValue::Int(amount), StateValue::Bool(is_minter)] =
+        values.as_slice()
+    else {
+        return None;
+    };
+    if *amount < 0 {
+        return None;
+    }
+    Some(Kcc0020State {
+        owner_identifier: owner.as_slice().try_into().ok()?,
+        identifier_type: *id_type.first()?,
+        amount: *amount,
+        is_minter: *is_minter,
+        template_hash: template_hash(&program[..start], &program[start + BLOCK..]),
+    })
 }
 
 #[cfg(test)]
@@ -652,5 +825,196 @@ mod tests {
         assert_eq!(decode_arg_int(&[0x00]), None); // padded zero
         assert_eq!(decode_arg_int(&[0x80]), None); // negative zero
         assert_eq!(decode_arg_int(&[0, 0, 0, 0, 0, 0, 0, 0x80, 0x00]), None); // 2^63 is out of range
+    }
+
+    #[test]
+    fn read_push_minimal_round_trips_and_rejects_non_minimal() {
+        for payload in [
+            vec![],
+            vec![0x01],
+            vec![0x10],
+            vec![0x11],
+            vec![0x81],
+            vec![0x07; 75],
+            vec![0x07; 76],
+            vec![0x07; 0x100],
+        ] {
+            let encoded = encode_push(&payload);
+            assert_eq!(
+                read_push_minimal(&encoded),
+                Some((payload.clone(), encoded.len()))
+            );
+        }
+        // data forms of values the numeric opcodes own are non-minimal
+        assert_eq!(read_push_minimal(&[0x01, 0x05]), None); // OP_5's value
+        assert_eq!(read_push_minimal(&[0x01, 0x81]), None); // OP_1NEGATE's value
+        assert_eq!(read_push_minimal(&[0x4c, 0x02, 0xaa, 0xbb]), None); // PUSHDATA1 under 76
+        assert_eq!(read_push_minimal(&[0xac]), None); // OpCheckSig is not a push
+        assert_eq!(read_push_minimal(&[0x02, 0xaa]), None); // truncated
+        assert_eq!(read_push_minimal(&[]), None);
+    }
+
+    // §11.2 read back: the reader inverts signature_script exactly.
+    #[test]
+    fn read_invocation_inverts_the_11_2_vector() {
+        let sig = h("011104010203045151043a088d130151");
+        let inv = read_invocation(&sig, true).expect("the spec's own vector must read");
+        assert_eq!(inv.program, vec![0x51]);
+        assert_eq!(inv.dispatch, Some(dispatch_tag(STEP_SIGNATURE)));
+        assert_eq!(
+            inv.args,
+            vec![vec![0x11], h("01020304"), vec![0x01], vec![0x01]]
+        );
+        // rebuilding from the parts reproduces the input byte for byte
+        let mut args = Vec::new();
+        for a in &inv.args {
+            args.extend(encode_push(a));
+        }
+        assert_eq!(
+            signature_script(&args, inv.dispatch.as_ref(), &inv.program),
+            sig
+        );
+
+        // Read single-branch, the same trailing four bytes are an ARGUMENT.
+        // The arity is ABI knowledge the bytes cannot carry — which is why
+        // the reader takes it as an input instead of guessing.
+        let inv1 = read_invocation(&sig, false).unwrap();
+        assert_eq!(inv1.dispatch, None);
+        assert_eq!(inv1.args.len(), 5);
+        assert_eq!(inv1.args[4], h("3a088d13"));
+    }
+
+    #[test]
+    fn read_invocation_fails_closed() {
+        // bare program, single branch
+        let inv = read_invocation(&h("0151"), false).unwrap();
+        assert_eq!(inv.program, vec![0x51]);
+        assert!(inv.args.is_empty());
+        // multi-branch demands a four-byte tag directly before the program
+        assert_eq!(read_invocation(&h("0151"), true), None);
+        assert_eq!(read_invocation(&h("03aabbcc0151"), true), None);
+        // a non-push opcode anywhere refuses the whole script
+        assert_eq!(read_invocation(&h("ac0151"), false), None);
+        // an empty revealed program is no reveal
+        assert_eq!(read_invocation(&h("00"), false), None);
+        assert_eq!(read_invocation(&[], false), None);
+        // a non-minimal argument push refuses (§5.2 is byte-exact)
+        assert_eq!(read_invocation(&h("01050151"), false), None);
+    }
+
+    #[test]
+    fn read_invocation_checked_requires_the_envelope() {
+        let program = h("5102aabb010102ccdd75");
+        let sig = signature_script(&[], None, &program);
+        let spk = envelope_spk(&program);
+        let inv = read_invocation_checked(&spk, &sig, false).expect("matching envelope");
+        assert_eq!(inv.program, program);
+        // any other envelope refuses the claimed program
+        assert_eq!(read_invocation_checked(&envelope_spk(&[0x51]), &sig, false), None);
+    }
+
+    #[test]
+    fn kcc0020_synthetic_accept_paths() {
+        let fields = [
+            (FieldType::FixedBytes(32), StateValue::Bytes(vec![0x5e; 32])),
+            (FieldType::Byte, StateValue::Bytes(vec![0x02])),
+            (FieldType::Int, StateValue::Int(7_500_000)),
+            (FieldType::Bool, StateValue::Bool(true)),
+        ];
+        let state = encode_state(&fields).unwrap();
+        assert_eq!(state.len(), 46);
+        // guarded shape: 0x6b state 0x6c, then some program logic
+        let mut guarded = vec![0x6b];
+        guarded.extend_from_slice(&state);
+        guarded.extend_from_slice(&[0x6c, 0x75, 0x51]);
+        let got = recognize_kcc0020(&guarded).expect("canonical guarded block");
+        assert_eq!(got.owner_identifier, [0x5e; 32]);
+        assert_eq!(got.identifier_type, 0x02);
+        assert_eq!(got.amount, 7_500_000);
+        assert!(got.is_minter);
+        // bare shape: same fields, no guards — recognised, but a DIFFERENT
+        // template hash, because the guards are template bytes
+        let mut bare = state.clone();
+        bare.extend_from_slice(&[0x75, 0x51]);
+        let bare_got = recognize_kcc0020(&bare).expect("canonical bare block");
+        assert_eq!(bare_got.amount, 7_500_000);
+        assert_ne!(bare_got.template_hash, got.template_hash);
+        // the hash is state-independent: a different amount, same template
+        let mut refields = fields.clone();
+        refields[2].1 = StateValue::Int(1);
+        let mut restate = vec![0x6b];
+        restate.extend_from_slice(&encode_state(&refields).unwrap());
+        restate.extend_from_slice(&[0x6c, 0x75, 0x51]);
+        let regot = recognize_kcc0020(&restate).expect("recognisable at any amount");
+        assert_eq!(regot.amount, 1);
+        assert_eq!(regot.template_hash, got.template_hash);
+    }
+
+    #[test]
+    fn kcc0020_synthetic_reject_paths() {
+        let fields = [
+            (FieldType::FixedBytes(32), StateValue::Bytes(vec![0x5e; 32])),
+            (FieldType::Byte, StateValue::Bytes(vec![0x02])),
+            (FieldType::Int, StateValue::Int(7_500_000)),
+            (FieldType::Bool, StateValue::Bool(true)),
+        ];
+        let state = encode_state(&fields).unwrap();
+        let mut guarded = vec![0x6b];
+        guarded.extend_from_slice(&state);
+        guarded.extend_from_slice(&[0x6c, 0x75, 0x51]);
+        assert!(recognize_kcc0020(&guarded).is_some(), "baseline accepts");
+
+        // a widened owner push desyncs every later field
+        let mut widened = guarded.clone();
+        widened[1] = 0x21;
+        assert_eq!(recognize_kcc0020(&widened), None);
+        // a bool byte that is neither 0x00 nor 0x01
+        let mut nonbool = guarded.clone();
+        nonbool[46] = 0x02;
+        assert_eq!(recognize_kcc0020(&nonbool), None);
+        // an opened guard that never closes
+        let mut unclosed = guarded.clone();
+        unclosed[47] = 0x75;
+        assert_eq!(recognize_kcc0020(&unclosed), None);
+        // a negative amount is not a token amount
+        let mut negative = fields.clone();
+        negative[2].1 = StateValue::Int(-1);
+        let mut neg = vec![0x6b];
+        neg.extend_from_slice(&encode_state(&negative).unwrap());
+        neg.extend_from_slice(&[0x6c, 0x75, 0x51]);
+        assert_eq!(recognize_kcc0020(&neg), None);
+        // state alone, with no program logic after it, is not a token program
+        assert_eq!(recognize_kcc0020(&state), None);
+        let mut only_guarded = vec![0x6b];
+        only_guarded.extend_from_slice(&state);
+        only_guarded.push(0x6c);
+        assert_eq!(recognize_kcc0020(&only_guarded), None);
+        // truncation anywhere
+        assert_eq!(recognize_kcc0020(&guarded[..20]), None);
+        assert_eq!(recognize_kcc0020(&[]), None);
+    }
+
+    /// The stub and the shipped KCC20 reader must agree on every real
+    /// on-chain build kascov carries fixtures for — the draft restates the
+    /// same tuple, so a disagreement is a bug in one of the two readers.
+    #[test]
+    fn kcc0020_agrees_with_the_kcc20_reader_on_real_builds() {
+        for fixture in [
+            include_bytes!("../fixtures/kcc20_a_a.bin").as_slice(),
+            include_bytes!("../fixtures/kcc20_b_a.bin").as_slice(),
+            include_bytes!("../fixtures/kcc20_c_a.bin").as_slice(),
+            include_bytes!("../fixtures/kcc20_unguarded_kron.bin").as_slice(),
+        ] {
+            let got = recognize_kcc0020(fixture).expect("observed build must recognise");
+            let want = crate::kcc20::decode_state_block(fixture).expect("kcc20 reader agrees");
+            assert_eq!(got.owner_identifier, want.owner);
+            assert_eq!(got.identifier_type, want.identifier_type);
+            assert_eq!(Some(got.amount), want.amount_i64());
+            assert_eq!(Some(got.is_minter), want.is_minter());
+            assert_eq!(
+                Some(got.template_hash),
+                crate::kcc20::kcc1_template_hash(fixture)
+            );
+        }
     }
 }

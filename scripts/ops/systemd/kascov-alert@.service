@@ -1,0 +1,9 @@
+# Instanced by OnFailure=kascov-alert@%n.service on every other unit; no
+# OnFailure of its own or a broken webhook would recurse.
+[Unit]
+Description=Post a failure alert for %i to the ops webhook
+[Service]
+Type=oneshot
+User=kascov
+Environment=HOME=/home/kascov
+ExecStart=/usr/local/bin/kascov-alert.sh "unit %i failed on %H"

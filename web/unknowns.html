@@ -58,6 +58,9 @@
     .fam-link { font-family: var(--mono); font-size: .78rem; margin-left: auto; }
     .fam-stats { font-family: var(--mono); font-size: .78rem; color: var(--faint); margin: .45rem 0 0; word-break: break-all; }
     .fam-pin { font-family: var(--mono); font-size: .78rem; color: var(--faint); border-top: 1px dashed var(--border); margin: .6rem 0 0; padding-top: .55rem; }
+    .fam-pin strong { color: var(--accent); font-weight: 600; }
+    .fam-tag-pinned { background: var(--accent-soft); color: var(--accent); }
+    .pinned-head { font-family: var(--display); font-size: 1.05rem; color: var(--text); margin: 1.4rem 0 .6rem; }
 
     .steps { counter-reset: step; list-style: none; padding: 0; margin: 1.25rem 0; }
     .steps li { counter-increment: step; position: relative; padding-left: 2.4rem; margin: .8rem 0; }
@@ -136,9 +139,9 @@
           confirms the pin. No name ever lands here automatically.</li>
     </ol>
     <p>
-      The pinned-by slots below every family are empty until someone earns
-      them. That is deliberate: an empty slot is an open problem, and an open
-      problem is an invitation.
+      A pinned-by slot on this board stays empty until someone earns it, and
+      an earned one stays forever. That is deliberate: an empty slot is an
+      open problem, and an open problem is an invitation.
     </p>
   </main>
 
@@ -177,21 +180,51 @@
       };
     }
 
+    /* the pinned ledger: families someone already named, each stamp written by
+       a reviewed commit. Only recent payloads carry the array — an old payload
+       yields null, and null renders NOTHING: a dash pretending to be a ledger
+       is exactly the kind of claim this site refuses to fake. Entries missing
+       the family or the name are dropped, because a stamp without either is
+       not a stamp. */
+    function pinnedOf(p) {
+      var src = p && Array.isArray(p.pinned) ? p.pinned
+        : p && p.audit_bench && Array.isArray(p.audit_bench.pinned) ? p.audit_bench.pinned
+        : null;
+      if (!src) return null;
+      return src.map(function (e) {
+        e = e || {};
+        return {
+          skeleton: typeof e.skeleton === 'string' && e.skeleton ? e.skeleton : null,
+          by: typeof e.first_pinned_by === 'string' && e.first_pinned_by ? e.first_pinned_by : null,
+          date: typeof e.date === 'string' ? e.date : '',
+          commit: typeof e.commit === 'string' ? e.commit : '',
+          instances: e.instances == null || !isFinite(Number(e.instances)) ? null : Number(e.instances)
+        };
+      }).filter(function (e) { return e.skeleton && e.by; });
+    }
+
     /* the payload -> one of three honest modes; the bench is a periodic job,
-       so an absent block is normal, not an error */
+       so an absent block is normal, not an error. The pinned ledger rides
+       along in every mode: stamps outlive the open problems they solved. */
     function benchState(p) {
+      var pinned = pinnedOf(p);
       var b = p && p.audit_bench;
-      if (!b || typeof b !== 'object' || !Array.isArray(b.families)) return { mode: 'absent' };
+      if (!b || typeof b !== 'object' || !Array.isArray(b.families)) {
+        return { mode: 'absent', pinned: pinned };
+      }
       var meta = {
         unmatched: Number(b.unmatched_covenants) || 0,
         recovered: Number(b.recovered) || 0,
         unrecoverable: Number(b.unrecoverable) || 0
       };
-      if (!b.families.length) return { mode: 'empty', meta: meta };
-      return { mode: 'families', meta: meta, rows: b.families.map(rowOf) };
+      if (!b.families.length) return { mode: 'empty', meta: meta, pinned: pinned };
+      return { mode: 'families', meta: meta, rows: b.families.map(rowOf), pinned: pinned };
     }
 
-    function rowHtml(net, r) {
+    /* hasLedger: the open slot renders only when the payload actually carries
+       the pinned array — with an old payload the dash would be decoration
+       nothing backs, so nothing renders instead */
+    function rowHtml(net, r, hasLedger) {
       var stats = fmtInt(r.instances) + ' instance' + (r.instances === 1 ? '' : 's')
         + ' · ' + fmtInt(r.pushes) + ' pushes'
         + (r.trades == null ? '' : ' · ' + fmtInt(r.trades) + ' trade' + (r.trades === 1 ? '' : 's') + ' ride on it')
@@ -206,24 +239,51 @@
             : '')
         + '</div>'
         + '<p class="fam-stats">' + stats + '</p>'
-        + '<p class="fam-pin">first pinned by &mdash;</p>'
+        + (hasLedger ? '<p class="fam-pin">first pinned by &mdash; (open: this slot is yours to earn)</p>' : '')
         + '</li>';
+    }
+
+    /* one pinned family -> its permanent stamp: who, when, and the reviewed
+       commit that wrote the name */
+    function pinnedHtml(rows) {
+      if (!rows || !rows.length) return '';
+      return '<h3 class="pinned-head">pinned families</h3><ul class="fams">'
+        + rows.map(function (e) {
+          var meta = [];
+          if (e.date) meta.push(e.date);
+          if (e.commit) meta.push('commit ' + e.commit.slice(0, 12));
+          if (e.instances != null) meta.push(fmtInt(e.instances) + ' instance' + (e.instances === 1 ? '' : 's'));
+          return '<li class="fam">'
+            + '<div class="fam-head">'
+            + '<span class="fam-id">' + esc(e.skeleton) + '</span>'
+            + '<span class="fam-tag fam-tag-pinned" title="matched byte for byte to submitted source, name written by a reviewed commit">pinned</span>'
+            + '</div>'
+            + '<p class="fam-pin">first pinned by <strong>' + esc(e.by) + '</strong>'
+            + (meta.length ? ' <span>· ' + esc(meta.join(' · ')) + '</span>' : '')
+            + '</p>'
+            + '</li>';
+        }).join('') + '</ul>';
     }
 
     function boardHtml(net, s) {
       if (s.mode === 'absent') {
         return '<p class="honest">the bench has not published a report for this network. '
           + 'it runs as a periodic job, separate from derivation; no report means it has not '
-          + 'run here yet, not that every build is named.</p>';
+          + 'run here yet, not that every build is named.</p>'
+          + pinnedHtml(s.pinned);
       }
+      var hasLedger = s.pinned != null;
       var meta = '<p class="meta">' + fmtInt(s.meta.unmatched) + ' unmatched covenants · '
         + fmtInt(s.meta.recovered) + ' programs recovered · '
         + fmtInt(s.meta.unrecoverable) + ' unrecoverable</p>';
       if (s.mode === 'empty') {
         return meta + '<p class="honest">the bench report for this network lists no open '
-          + 'families. an empty board here is the goal, not a gap.</p>';
+          + 'families. an empty board here is the goal, not a gap.</p>'
+          + pinnedHtml(s.pinned);
       }
-      return meta + '<ul class="fams">' + s.rows.map(function (r) { return rowHtml(net, r); }).join('') + '</ul>';
+      return meta
+        + '<ul class="fams">' + s.rows.map(function (r) { return rowHtml(net, r, hasLedger); }).join('') + '</ul>'
+        + pinnedHtml(s.pinned);
     }
 
     /* ------------------------------- wiring ------------------------------- */

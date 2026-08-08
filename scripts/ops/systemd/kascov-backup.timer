@@ -1,5 +1,6 @@
 [Unit]
 Description=Run kascov DB backup every 6h
+OnFailure=kascov-alert@%n.service
 [Timer]
 OnBootSec=8min
 OnUnitActiveSec=6h

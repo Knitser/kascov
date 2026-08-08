@@ -1,0 +1,10 @@
+# No OnFailure= here: the script alerts with specifics on every failure path
+# (including a missing key), and a second generic alert would double-post.
+[Unit]
+Description=kascov restore-proof (newest off-site mainnet backup must actually restore)
+[Service]
+Type=oneshot
+User=kascov
+Environment=HOME=/home/kascov
+Environment=KASCOV_RESTORE_KEY_JSON=/home/kascov/.gcs-restore-key.json
+ExecStart=/home/kascov/kascov-restore-verify.sh

@@ -1,9 +1,8 @@
 [Unit]
-Description=Daily off-site backup push
+Description=Weekly restore-proof of the off-site mainnet backup
 OnFailure=kascov-alert@%n.service
 [Timer]
-OnBootSec=15min
-OnUnitActiveSec=24h
+OnCalendar=Sun 04:30 UTC
 Persistent=true
 [Install]
 WantedBy=timers.target

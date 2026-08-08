@@ -1,5 +1,6 @@
 [Unit]
 Description=kascov worker (shadow)
+OnFailure=kascov-alert@%n.service
 After=network-online.target
 
 [Service]

@@ -1,5 +1,6 @@
 [Unit]
 Description=Off-site the mainnet archive every 5 minutes
+OnFailure=kascov-alert@%n.service
 [Timer]
 OnBootSec=5min
 OnUnitActiveSec=5min

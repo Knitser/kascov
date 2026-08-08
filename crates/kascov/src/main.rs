@@ -1558,6 +1558,148 @@ fn resolve_network(
     }
 }
 
+/// KASCOV_FRESH_OK → the store-open policy for the serving boot. Exactly
+/// "1" authorizes creating fresh databases (a first deploy on an empty
+/// volume); every other value — unset, "0", "true", a trailing space — keeps
+/// the fail-closed default, so a typo'd export can never authorize serving
+/// an empty archive as verified history.
+fn fresh_policy_from_env(value: Option<&str>) -> kascov_core::store::FreshDb {
+    match value {
+        Some("1") => kascov_core::store::FreshDb::Allow,
+        _ => kascov_core::store::FreshDb::Refuse,
+    }
+}
+
+/// Boot-time archive probe for the serving path: open every followed
+/// network's database under `policy` and drop the handle (the follower and
+/// the handlers keep their own connections). Under `Refuse` a missing or
+/// zero-byte file aborts the boot with the store's own explanation, which
+/// names the KASCOV_FRESH_OK escape hatch.
+fn probe_archives_at_boot(
+    base_dir: &std::path::Path,
+    networks: &[Network],
+    policy: kascov_core::store::FreshDb,
+) -> Result<()> {
+    for &network in networks {
+        let db = base_dir.join(format!("{network}.db"));
+        kascov_core::store::Store::open_with_policy(&db, network, policy)
+            .with_context(|| format!("{network}: refusing to serve"))?;
+    }
+    Ok(())
+}
+
+/// The SPA shell, embedded the same way as the changelog: the Docker build
+/// context carries crates/** only, so the worker cannot read web/ at run
+/// time. A test pins this copy byte-identical to web/index.html.
+const INDEX_HTML: &str = include_str!("../assets/index.html");
+
+/// The shell routes the worker serves with their own head metadata, each a
+/// factual title and description. An allowlist: a path absent here is not a
+/// shell route. "/" is deliberately NOT in this table — the root serves the
+/// shipped index.html byte-identical, its meta being the site-wide identity
+/// authored in web/, not here.
+const SHELL_ROUTES: &[(&str, &str, &str)] = &[
+    (
+        "/guide",
+        "/guide — deploy, spend and replay a covenant on Kaspa | kascov",
+        "The 15-minute guide: compile a SilverScript covenant in the browser, \
+         deploy it to Kaspa testnet-10, spend it, and replay the spend from raw \
+         chain bytes.",
+    ),
+    (
+        "/dev",
+        "/dev — the kascov JSON API, every endpoint documented | kascov",
+        "REST and SSE reference for the kascov worker: covenant feeds, token \
+         accounting, search, webhooks and the verification log, all served from \
+         chain-proven state.",
+    ),
+    (
+        "/tokens",
+        "/tokens — every KCC-20 token on Kaspa, derived from chain bytes | kascov",
+        "The KCC-20 token directory: supply, holders and history for every token \
+         kascov derived from raw covenant events, with claimed names labeled as \
+         claims.",
+    ),
+    (
+        "/pools",
+        "/pools — live covenant market pools on Kaspa | kascov",
+        "Every recognised covenant market on Kaspa: curve and pool builds, \
+         prices and trades decoded from on-chain programs pinned byte-for-byte.",
+    ),
+];
+
+/// The text between `open` and `close` (first occurrence) replaced. None
+/// when either marker is missing, so the caller keeps the original page
+/// instead of serving a half-spliced one.
+fn splice_between(html: &str, open: &str, close: &str, replacement: &str) -> Option<String> {
+    let start = html.find(open)? + open.len();
+    let end = html[start..].find(close)? + start;
+    let mut out = String::with_capacity(html.len() + replacement.len());
+    out.push_str(&html[..start]);
+    out.push_str(replacement);
+    out.push_str(&html[end..]);
+    Some(out)
+}
+
+/// The shell for one route. "/" is the shipped index.html unchanged; every
+/// SHELL_ROUTES path gets its own <title>, description, canonical and og:url
+/// spliced in at serve time — five URLs answering one poetic title left four
+/// pages with nothing for a crawler to index. None when the route is not
+/// allowlisted or a splice marker has drifted out of the shipped head (the
+/// tests pin the markers, so drift fails the build before it fails a page).
+fn shell_for_route(route: &str) -> Option<String> {
+    if route == "/" {
+        return Some(INDEX_HTML.to_string());
+    }
+    let (_, title, desc) = SHELL_ROUTES.iter().find(|(r, _, _)| *r == route)?;
+    let canonical = format!("https://kascov.io{route}");
+    let html = splice_between(INDEX_HTML, "<title>", "</title>", &og::esc(title))?;
+    let html = splice_between(
+        &html,
+        "<meta name=\"description\" content=\"",
+        "\">",
+        &og::esc(desc),
+    )?;
+    let html = splice_between(
+        &html,
+        "<meta property=\"og:url\" content=\"",
+        "\">",
+        &canonical,
+    )?;
+    // The shipped shell carries no canonical (the same bytes answer every
+    // path, so none would be honest); a per-route shell claims exactly one.
+    let at = html.find("</title>")? + "</title>".len();
+    let mut out = html;
+    out.insert_str(
+        at,
+        &format!("\n  <link rel=\"canonical\" href=\"{canonical}\">"),
+    );
+    Some(out)
+}
+
+/// GET / and the SHELL_ROUTES paths — the SPA shell, with per-route head
+/// metadata. Same no-cache contract the hosting config gives HTML.
+async fn shell_handler(uri: axum::http::Uri) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+
+    let path = uri.path();
+    let body = shell_for_route(path).unwrap_or_else(|| {
+        // A splice marker drifted out of the shipped shell: serve the plain
+        // shell (what every route served before this handler) over nothing.
+        tracing::warn!("{path}: shell meta splice failed; serving the base shell");
+        INDEX_HTML.to_string()
+    });
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 async fn serve(
     cli: &Cli,
     listen: String,
@@ -1577,6 +1719,12 @@ async fn serve(
         std::path::PathBuf::from(home).join(".kascov")
     });
     std::fs::create_dir_all(&base_dir)?;
+    // These databases are the sole archive of what this worker publishes.
+    // Probe them under the boot policy BEFORE any background task can create
+    // files at their paths: a missing mainnet.db must abort the process
+    // loudly, not let the follower start an empty archive and serve amnesia.
+    let fresh = fresh_policy_from_env(std::env::var("KASCOV_FRESH_OK").ok().as_deref());
+    probe_archives_at_boot(&base_dir, &networks, fresh)?;
 
     let mut live = Vec::with_capacity(networks.len());
     let mut sync_health = Vec::with_capacity(networks.len());
@@ -1745,6 +1893,14 @@ async fn serve(
         // the container — /health is the path that actually works in prod.
         .route("/healthz", get(healthz_handler))
         .route("/health", get(healthz_handler))
+        // The SPA shell with per-route head metadata. Behind Firebase these
+        // paths are answered by hosting; a front door that proxies the worker
+        // directly (the VPS path) gets indexable pages from here.
+        .route("/", get(shell_handler))
+        .route("/guide", get(shell_handler))
+        .route("/dev", get(shell_handler))
+        .route("/tokens", get(shell_handler))
+        .route("/pools", get(shell_handler))
         .route("/data/{network}/simulate", post(simulate_handler))
         .route(
             "/data/{network}/preflight",
@@ -1795,6 +1951,11 @@ async fn serve(
             "/data/{network}/token/{id}/trades.json",
             get(token_trades_handler),
         )
+        .route(
+            "/data/{network}/token/{id}/candles",
+            get(token_candles_handler),
+        )
+        .route("/data/{network}/token/{id}/book", get(token_book_handler))
         .route("/data/{network}/token/{id}", get(token_handler))
         .route("/data/{network}/consistency.json", get(consistency_handler))
         .route("/data/{network}/events", get(events_handler))
@@ -1940,6 +2101,10 @@ async fn healthz_handler(
         ],
         serde_json::json!({
             "status": if stalled { "stalled" } else { "ok" },
+            // The short git hash this binary was built from (build.rs; the
+            // deploy script's exported KASCOV_GIT_HASH wins over asking git).
+            // The deploy script asserts this equals HEAD after every rollout.
+            "build": env!("KASCOV_GIT_HASH"),
             "networks": networks,
         })
         .to_string(),
@@ -4402,6 +4567,36 @@ fn registry_cache() -> &'static tokio::sync::Mutex<Option<ListState>> {
     CACHE.get_or_init(|| tokio::sync::Mutex::new(None))
 }
 
+/// The TTL-cached registry list body — the one loader for the third-party
+/// token list, shared by /registry.json and /search so both read the same
+/// document under the same freshness contract. None while the publisher is
+/// unreachable and the cache holds nothing.
+async fn registry_list_cached() -> Option<String> {
+    let mut cache = registry_cache().lock().await;
+    let stale = match &*cache {
+        Some(s) => {
+            let ttl = if s.body.is_some() {
+                registry::LIST_TTL_OK
+            } else {
+                registry::LIST_TTL_ERR
+            };
+            s.fetched_at.elapsed() >= ttl
+        }
+        None => true,
+    };
+    if stale {
+        let fetched = match registry_client() {
+            Some(client) => registry::fetch_list(client).await.ok(),
+            None => None,
+        };
+        *cache = Some(ListState {
+            fetched_at: std::time::Instant::now(),
+            body: fetched,
+        });
+    }
+    cache.as_ref().and_then(|s| s.body.clone())
+}
+
 /// A launchpad's published token list, with every structural statement in it
 /// tested against kascov's own index. See `registry.rs` for why the checking is
 /// the feature and the names are the byproduct.
@@ -4433,32 +4628,7 @@ async fn registry_handler(
             .into_response()
     };
 
-    let body = {
-        let mut cache = registry_cache().lock().await;
-        let stale = match &*cache {
-            Some(s) => {
-                let ttl = if s.body.is_some() {
-                    registry::LIST_TTL_OK
-                } else {
-                    registry::LIST_TTL_ERR
-                };
-                s.fetched_at.elapsed() >= ttl
-            }
-            None => true,
-        };
-        if stale {
-            let fetched = match registry_client() {
-                Some(client) => registry::fetch_list(client).await.ok(),
-                None => None,
-            };
-            *cache = Some(ListState {
-                fetched_at: std::time::Instant::now(),
-                body: fetched,
-            });
-        }
-        cache.as_ref().and_then(|s| s.body.clone())
-    };
-    let Some(body) = body else {
+    let Some(body) = registry_list_cached().await else {
         return fail("token list unavailable");
     };
     let entries = match registry::parse_list(&body, &network.to_string()) {
@@ -5602,6 +5772,381 @@ async fn token_handler(
             out["next_after_seq"] = serde_json::json!(seq);
         }
         Ok(Some(serde_json::to_string(&out)?))
+    })
+    .await
+}
+
+/* -------------------------------------------------------------- candles */
+
+/// Trade scan bound for the candle endpoint — far above any real token's
+/// history, the same "all means all" spirit as the trades endpoint's bound.
+const CANDLE_TRADE_SCAN: u64 = 20_000;
+
+/// Bucket widths the endpoint serves, label → milliseconds. An allowlist,
+/// never parsed arithmetic: an arbitrary width would let a caller mint
+/// unbounded cache keys.
+fn parse_bucket(s: &str) -> Option<i64> {
+    match s {
+        "1h" => Some(3_600_000),
+        "4h" => Some(14_400_000),
+        "1d" => Some(86_400_000),
+        _ => None,
+    }
+}
+
+/// The bracket-fee slack per matched skeleton — a local mirror of the bracket
+/// half of kascov-core's `fee_model`, which is private to that crate. Allowlist
+/// on purpose: a build absent here serves NO candles rather than borrowing a
+/// fee, so a newly pinned family fails closed until its audited tuple is
+/// copied in. The long-term home for this whole filter is kascov-core next to
+/// fee_model, where one table would feed both.
+fn candle_bracket_fee_bps(skeleton: &str) -> Option<i128> {
+    match skeleton {
+        "KRON curve v1" | "KRON curve v2" | "KCM curve v1" => Some(0),
+        "KRON pool v1" | "KRON pool v2" | "KRON pool tn-a" => Some(20),
+        _ => None,
+    }
+}
+
+/// The exact price pair of one trade, as every candle field publishes it —
+/// the same two integers `market_summary` serves for its last price, never
+/// their quotient.
+fn candle_px(tr: &kascov_core::tokens::TokenTradeRow) -> serde_json::Value {
+    serde_json::json!({ "quote_sompi": tr.quote_sompi, "base_amount": tr.base_amount })
+}
+
+/// a < b on exact price pairs via i128 cross-multiplication — a float would
+/// collapse close price levels. Denominators are positive (bracket-passing
+/// trades have base_amount > 0), so no sign flip.
+fn candle_px_lt(a: (i64, i64), b: (i64, i64)) -> bool {
+    (a.0 as i128) * (b.1 as i128) < (b.0 as i128) * (a.1 as i128)
+}
+
+/// OHLC+volume buckets, oldest first. Callers pass admitted trades sorted
+/// oldest-first by seq; this only buckets and reduces. Open/close follow seq
+/// order within a bucket (block timestamps may jitter against seq, and seq is
+/// the chain's own order); high/low compare exact pairs. `first_txid` and
+/// `last_txid` tie every candle to replayable transactions.
+fn candle_buckets(
+    trades: &[&kascov_core::tokens::TokenTradeRow],
+    bucket_ms: i64,
+) -> Vec<serde_json::Value> {
+    struct Bucket<'a> {
+        open: &'a kascov_core::tokens::TokenTradeRow,
+        high: &'a kascov_core::tokens::TokenTradeRow,
+        low: &'a kascov_core::tokens::TokenTradeRow,
+        close: &'a kascov_core::tokens::TokenTradeRow,
+        volume: i128,
+        count: u64,
+    }
+    let mut buckets: std::collections::BTreeMap<i64, Bucket> = Default::default();
+    for tr in trades {
+        let Some(ms) = tr.accepting_time_ms else { continue };
+        let start = ms.div_euclid(bucket_ms) * bucket_ms;
+        let pair = (tr.quote_sompi, tr.base_amount);
+        buckets
+            .entry(start)
+            .and_modify(|b| {
+                if candle_px_lt((b.high.quote_sompi, b.high.base_amount), pair) {
+                    b.high = tr;
+                }
+                if candle_px_lt(pair, (b.low.quote_sompi, b.low.base_amount)) {
+                    b.low = tr;
+                }
+                b.close = tr;
+                b.volume += tr.quote_sompi as i128;
+                b.count += 1;
+            })
+            .or_insert(Bucket {
+                open: tr,
+                high: tr,
+                low: tr,
+                close: tr,
+                volume: tr.quote_sompi as i128,
+                count: 1,
+            });
+    }
+    buckets
+        .into_iter()
+        .map(|(start, b)| {
+            serde_json::json!({
+                "t": start,
+                "open": candle_px(b.open),
+                "high": candle_px(b.high),
+                "low": candle_px(b.low),
+                "close": candle_px(b.close),
+                // i128 sum reduced to i64: 2^63 sompi is ~92e9 KAS, beyond
+                // anything the chain can emit — and if a sum somehow got
+                // there, a null beats a misstated number.
+                "volume_sompi": i64::try_from(b.volume).ok(),
+                "trades": b.count,
+                "first_txid": b.open.txid,
+                "last_txid": b.close.txid,
+            })
+        })
+        .collect()
+}
+
+/// The candle series for one token, or the reason there is none. The gates
+/// restate `market_summary`'s from the published verification row — nothing
+/// here may admit a trade the summary would refuse, and any doubt yields the
+/// reason instead of a series.
+fn token_candles(
+    store: &kascov_core::store::Store,
+    row: &kascov_core::tokens::TokenDirRow,
+    bucket_ms: i64,
+) -> Result<(Vec<serde_json::Value>, Option<String>)> {
+    let refuse = |reason: String| Ok((Vec::new(), Some(reason)));
+    if row.validation != "verified" {
+        return refuse("the token's derivation is not verified; kascov prices nothing it trades".into());
+    }
+    let summary = store.token_market_summary(row, true)?;
+    if summary.lp_of_pool.is_some() {
+        return refuse("this token is a pool's LP share token; kascov does not price LP shares".into());
+    }
+    let Some(market) = row.market_covenant_id else {
+        return refuse("no single covenant holds this token's inventory".into());
+    };
+    let Some(prog) = summary.program else {
+        return refuse("the market covenant's program is not yet verified".into());
+    };
+    let Some(fee_bps) = candle_bracket_fee_bps(&prog.skeleton) else {
+        return refuse(
+            "kascov has no audited fee model for the program holding this token's inventory; \
+             no trade of it can be admitted to a candle"
+                .into(),
+        );
+    };
+    if !prog.invariant_ok {
+        return refuse(
+            "a recorded trade violates the program's own formula — nothing it produced is priced"
+                .into(),
+        );
+    }
+    if prog.exercised_trades < kascov_core::market::MIN_EXERCISED_TRADES {
+        return refuse(format!(
+            "only {} trade(s) have exercised this program's constants; kascov prices after {}",
+            prog.exercised_trades,
+            kascov_core::market::MIN_EXERCISED_TRADES
+        ));
+    }
+    // The same fail-whole rule the 24h window applies: a trade without a
+    // timestamp could belong to any bucket, so its existence falsifies all of
+    // them.
+    if row.trades_missing_time > 0 {
+        return refuse(format!(
+            "{} trade(s) predate timestamp capture; a partial bucket would misstate its span",
+            row.trades_missing_time
+        ));
+    }
+    let v = prog.v_kas_units as i128 * kascov_core::market::KAS_QUANTUM_SOMPI;
+    let mut trades = store.token_trades_page(&row.token_id, CANDLE_TRADE_SCAN)?;
+    trades.sort_by_key(|t| t.seq); // stored newest-first; candles read oldest-first
+    // publishable: same-tx-clean, on this market, bracket-passing — the exact
+    // admission market_summary applies (bracket_holds itself refuses
+    // non-positive amounts, so every pair below has a positive denominator).
+    let publishable: Vec<&kascov_core::tokens::TokenTradeRow> = trades
+        .iter()
+        .filter(|t| {
+            t.co_covenants == 0
+                && t.market_covenant_id == market
+                && kascov_core::market::bracket_holds(
+                    v,
+                    t.kas_before_sompi as i128,
+                    t.kas_after_sompi as i128,
+                    t.base_before as i128,
+                    t.base_after as i128,
+                    t.quote_sompi as i128,
+                    t.base_amount as i128,
+                    t.side == "buy",
+                    fee_bps,
+                )
+        })
+        .collect();
+    Ok((candle_buckets(&publishable, bucket_ms), None))
+}
+
+/// GET /data/{network}/token/{id}/candles?bucket={1h|4h|1d} — OHLC+volume
+/// buckets over exactly the trades market_summary's filter admits. Unknown
+/// buckets are the same plain 400 the activity endpoint's range check serves;
+/// a market that fails a pricing gate serves an empty list plus the reason.
+async fn token_candles_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    // Strict parses BEFORE the cache key: garbage must never populate the
+    // cache map.
+    let Ok(token_id) = id.parse::<kascov_core::CovenantId>() else {
+        return (StatusCode::BAD_REQUEST, "bad token id").into_response();
+    };
+    let bucket_label = q.get("bucket").cloned().unwrap_or_else(|| "1h".into());
+    let Some(bucket_ms) = parse_bucket(&bucket_label) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+            "unknown bucket — use 1h | 4h | 1d",
+        )
+            .into_response();
+    };
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/token/{token_id}/candles/{bucket_label}");
+    let cc = "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
+    serve_cached(&state, key, 30, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let Some(row) = store.token_row(&token_id)? else {
+            return Ok(None); // uncached 404: not a token the derivation knows
+        };
+        let (candles, reason) = token_candles(&store, &row, bucket_ms)?;
+        let mut out = serde_json::json!({
+            "network": network.to_string(),
+            "token_id": token_id,
+            "bucket": bucket_label,
+            "bucket_ms": bucket_ms,
+            "generated_at_ms": now_ms(),
+            "provenance": "each candle aggregates only trades market_summary's own filter admits \
+                           (same-tx-clean, on the token's one market covenant, bracket-passing \
+                           under the audited fee model); first_txid/last_txid tie every candle \
+                           to a replayable transaction",
+            "candles": candles,
+        });
+        if let Some(r) = reason {
+            out["reason"] = serde_json::json!(r);
+        }
+        Ok(Some(serde_json::to_string(&out)?))
+    })
+    .await
+}
+
+/* ----------------------------------------------------------------- book */
+
+/// (side, price_num, price_den, row) → (bids, asks), both best price first:
+/// bids highest, asks lowest. Exact-fraction ordering via i128
+/// cross-multiplication — a float would collapse close price levels. Sides
+/// are an allowlist and a non-positive price shape cannot order, so both are
+/// dropped whole rather than guessed at.
+fn sorted_book(
+    rows: Vec<(String, i64, i64, serde_json::Value)>,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    let mut bids: Vec<(i64, i64, serde_json::Value)> = Vec::new();
+    let mut asks: Vec<(i64, i64, serde_json::Value)> = Vec::new();
+    for (side, num, den, row) in rows {
+        if num < 0 || den <= 0 {
+            continue;
+        }
+        match side.as_str() {
+            "buy" => bids.push((num, den, row)),
+            "sell" => asks.push((num, den, row)),
+            _ => {}
+        }
+    }
+    fn by_price(
+        a: &(i64, i64, serde_json::Value),
+        b: &(i64, i64, serde_json::Value),
+    ) -> std::cmp::Ordering {
+        ((a.0 as i128) * (b.1 as i128)).cmp(&((b.0 as i128) * (a.1 as i128)))
+    }
+    asks.sort_by(by_price);
+    bids.sort_by(|a, b| by_price(b, a));
+    (
+        bids.into_iter().map(|(_, _, r)| r).collect(),
+        asks.into_iter().map(|(_, _, r)| r).collect(),
+    )
+}
+
+/// GET /data/{network}/token/{id}/book — the open resting orders naming this
+/// token, served as DECODED facts with their provenance stated: each row
+/// restates what a committed program's own bytes offer, and nothing here has
+/// passed (or could pass) the market verification gate. An empty book is
+/// empty arrays, never a 404 — "no orders" is a fact worth serving.
+async fn token_book_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let Ok(token_id) = id.parse::<kascov_core::CovenantId>() else {
+        return (StatusCode::BAD_REQUEST, "bad token id").into_response();
+    };
+
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/token/{token_id}/book");
+    let cc = "public, max-age=10, s-maxage=30, stale-while-revalidate=60";
+    serve_cached(&state, key, 10, cc, accepts_gzip(&headers), move || {
+        // Store::open first so a brand-new database carries the table before
+        // the read-only connection below looks for it. The Store API has no
+        // book reader yet; until it grows one, this endpoint reads the table
+        // directly, read-only, through params.
+        let _schema = kascov_core::store::Store::open(&db, network)?;
+        let conn = rusqlite::Connection::open_with_flags(
+            &db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT covenant_id, side, price_num, price_den, amount, maker, expiry_daa, created_daa
+             FROM resting_orders WHERE token_id = ?1 AND state = 'open'",
+        )?;
+        let rows: Vec<(String, i64, i64, serde_json::Value)> = stmt
+            .query_map([token_id.0.as_slice()], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, Vec<u8>>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(cid, side, num, den, amount, maker, expiry, created)| {
+                let maker_hex = hex::encode(&maker);
+                let mut row = serde_json::json!({
+                    "covenant_id": hex::encode(cid),
+                    // The exact pair the bytes commit to (total sompi asked
+                    // over tokens offered) — a quotient would collapse
+                    // distinct price levels.
+                    "price": { "quote_sompi": num, "base_amount": den },
+                    "amount": amount,
+                    "maker": maker_hex,
+                    "expiry_daa": expiry,
+                    "created_daa": created,
+                });
+                if let Some(a) = owner_address(&maker_hex, network) {
+                    row["maker_address"] = serde_json::json!(a);
+                }
+                (side, num, den, row)
+            })
+            .collect();
+        let (bids, asks) = sorted_book(rows);
+        Ok(Some(serde_json::to_string(&serde_json::json!({
+            "network": network.to_string(),
+            "token_id": token_id,
+            "generated_at_ms": now_ms(),
+            "provenance": "decoded, not verified: each row restates the one offer a committed \
+                           order program's own bytes state (price pair, size, expiry); kascov \
+                           has not verified any spend against these prices, and nothing here \
+                           is a quote",
+            "bids": bids,
+            "asks": asks,
+        }))?))
     })
     .await
 }
@@ -7397,15 +7942,91 @@ async fn detail_handler(
 struct ShareInfo {
     name: String,
     alive: bool,
+    /// The derivation's "verified" verdict — the gate behind which the API
+    /// publishes a market at all.
+    verified: bool,
+    /// The id resolves to a derived token, so the human forward should land
+    /// on the token page rather than the raw coin page.
+    is_token: bool,
     balance_line: String,
     born_line: String,
+    /// One gated market fact (phase + progress or last price), only when the
+    /// summary actually published the underlying figures.
+    market_line: Option<String>,
+    /// Verified claimed art ready for the card: (content type, bytes) in a
+    /// format the card's rasterizer decodes.
+    card_art: Option<(String, Vec<u8>)>,
     description: String,
+}
+
+/// "Name ($TICK)" the same way a claimed line renders, or None when the
+/// entry names nothing displayable.
+fn name_ticker_line(name: Option<&str>, ticker: Option<&str>) -> Option<String> {
+    fn clean(s: Option<&str>) -> Option<&str> {
+        s.map(str::trim).filter(|s| !s.is_empty())
+    }
+    match (clean(name), clean(ticker)) {
+        (Some(n), Some(t)) => Some(format!("{n} (${t})")),
+        (Some(n), None) => Some(n.to_string()),
+        (None, Some(t)) => Some(format!("${t}")),
+        (None, None) => None,
+    }
+}
+
+/// Name precedence claimed > listed > codename: an on-chain assertion
+/// outranks a third-party list, and both outrank the fallback codename. The
+/// leader LEADS but never replaces the nickname — the codename is the one
+/// identity every page of the site agrees on.
+fn resolved_share_name(claimed: Option<&str>, listed: Option<&str>, nickname: &str) -> String {
+    match claimed.or(listed) {
+        Some(lead) => format!("{lead} · {nickname}"),
+        None => nickname.to_string(),
+    }
+}
+
+/// The registry's display line for one covenant, when its signed list carries
+/// the id. Third-party data: every use must say so.
+fn listed_display_line(body: &str, network: Network, id: &CovenantId) -> Option<String> {
+    let entries = registry::parse_list(body, &network.to_string()).ok()?;
+    let id_hex = id.to_string();
+    let e = entries
+        .iter()
+        .find(|e| e.covenant_id.eq_ignore_ascii_case(&id_hex))?;
+    name_ticker_line(e.name.as_deref(), e.ticker.as_deref())
+}
+
+/// The one market fact a card may carry, from figures the gated summary
+/// actually published: graduation progress while bonding, else the last
+/// executed price. LP share tokens are never priced, and a summary that
+/// published neither figure yields no line at all.
+fn market_line(ms: &kascov_core::market::MarketSummary, unit: &str) -> Option<String> {
+    if ms.lp_of_pool.is_some() {
+        return None;
+    }
+    let phase = ms.phase.as_deref()?;
+    if let (Some(bps), "bonding") = (ms.grad_progress_bps, phase) {
+        return Some(format!(
+            "bonding · {}.{}% to graduation",
+            bps / 100,
+            (bps % 100).abs() / 10
+        ));
+    }
+    match (ms.last_quote_sompi, ms.last_base_amount) {
+        (Some(q), Some(b)) if q >= 0 && b > 0 => {
+            // Display form of the exact pair the summary published; the pair
+            // itself stays the provable fact, exactly as the API serves it.
+            let per_token = q as f64 / b as f64 / 1e8;
+            Some(format!("{phase} · last {per_token:.8} {unit}/token"))
+        }
+        _ => None,
+    }
 }
 
 fn share_info(
     store: &kascov_core::store::Store,
     summary: &kascov_core::store::CovenantSummary,
     network: Network,
+    listed_line: Option<String>,
 ) -> Result<ShareInfo> {
     let nickname = og::friendly_name(&summary.covenant_id.to_string());
     // A token that named itself in its genesis payload should share as that
@@ -7416,16 +8037,14 @@ fn share_info(
     // must not be presented as verified identity (the same line KCC-0020's
     // authors drew: claimed metadata never upgrades classification).
     let claimed = store.claimed_token_meta(&summary.covenant_id)?;
-    let claimed_line = claimed.as_ref().and_then(|c| match (&c.name, &c.ticker) {
-        (Some(n), Some(t)) => Some(format!("{n} (${t})")),
-        (Some(n), None) => Some(n.clone()),
-        (None, Some(t)) => Some(format!("${t}")),
-        (None, None) => None,
-    });
-    let name = match &claimed_line {
-        Some(claim) => format!("{claim} · {nickname}"),
-        None => nickname.clone(),
-    };
+    let claimed_line = claimed
+        .as_ref()
+        .and_then(|c| name_ticker_line(c.name.as_deref(), c.ticker.as_deref()));
+    let name = resolved_share_name(
+        claimed_line.as_deref(),
+        listed_line.as_deref(),
+        &nickname,
+    );
     let alive = summary.live_utxos > 0;
     let unit = match network {
         Network::Mainnet => "KAS",
@@ -7456,6 +8075,34 @@ fn share_info(
         Some(date) => format!("born {date} · {events}"),
         None => format!("adopted mid-life · {events}"),
     };
+    // Token facts behind the same gates the API serves them: the market
+    // summary only for a verified derivation (token_handler's exact rule),
+    // and each line only from figures the summary actually published.
+    let token = store.token_row(&summary.covenant_id)?;
+    let verified = token
+        .as_ref()
+        .is_some_and(|t| t.validation == "verified");
+    let market = match &token {
+        Some(t) if verified => market_line(&store.token_market_summary(t, true)?, unit),
+        _ => None,
+    };
+    // Card art only from the verified cache row — the bytes at the claimed
+    // URL hashed to the genesis commitment when /img fetched them. Never
+    // fetched from here: a card render must not become an outbound request.
+    // webp is hash-proven but the card's rasterizer cannot decode it, so it
+    // goes through the witness thumbnailer (pure) to become png/jpeg.
+    let card_art = match store.token_image(&summary.covenant_id)? {
+        Some((status, _, Some(bytes), _)) if status == "verified" => match sniff_image(&bytes) {
+            Some(ct @ ("image/png" | "image/jpeg" | "image/gif")) => {
+                Some((ct.to_string(), bytes))
+            }
+            Some("image/webp") => witness::process_image(&bytes)
+                .ok()
+                .map(|t| (t.content_type.to_string(), t.bytes)),
+            _ => None,
+        },
+        _ => None,
+    };
     let mut description = format!(
         "{} smart coin on Kaspa {network} — {balance_line} · {born_line}",
         if alive { "A living" } else { "A retired" },
@@ -7463,14 +8110,26 @@ fn share_info(
     if let Some(t) = summary.template.as_deref().filter(|t| !t.is_empty()) {
         description.push_str(&format!(" · {t}"));
     }
+    if verified {
+        description.push_str(" · KCC20 verified");
+    }
+    if let Some(m) = &market {
+        description.push_str(&format!(" · {m}"));
+    }
     if claimed_line.is_some() {
         description.push_str(" · name claimed in its genesis payload");
+    } else if listed_line.is_some() {
+        description.push_str(" · name from a third-party token list kascov checks against chain");
     }
     Ok(ShareInfo {
         name,
         alive,
+        verified,
+        is_token: token.is_some(),
         balance_line,
         born_line,
+        market_line: market,
+        card_art,
         description,
     })
 }
@@ -7561,6 +8220,8 @@ async fn data_index_handler(
             "tx": format!("/data/{n}/tx/{{txid}}.json"),
             "tokens": format!("/data/{n}/tokens.json"),
             "token": format!("/data/{n}/token/{{token_id}}.json"),
+            "token_candles": format!("/data/{n}/token/{{token_id}}/candles?bucket=1h|4h|1d"),
+            "token_book": format!("/data/{n}/token/{{token_id}}/book"),
             "templates": format!("/data/{n}/templates.json"),
             "template_by_kcc1_hash": format!("/data/{n}/template/{{hash}}.json"),
             "search": format!("/data/{n}/search?q="),
@@ -7568,6 +8229,7 @@ async fn data_index_handler(
             "badge_svg": format!("/badge/{n}/{{covenant_id}}.svg"),
             "og_card_png": format!("/og/{n}/{{covenant_id}}.png"),
             "share_page": format!("/share/{n}/{{covenant_id}}"),
+            "share_tx": format!("/share/{n}/{{txid}}"),
         },
         "clients": ["clients/js/kascov.mjs", "clients/py/kascov.py (github.com/Knitser/kascov)"],
         "note": "open JSON, no keys — every displayed fact is decodable from the chain's own revealed programs",
@@ -7872,19 +8534,27 @@ async fn og_card_handler(
         return (StatusCode::BAD_REQUEST, "bad covenant id").into_response();
     };
 
+    // Listed names ride the same TTL-cached loader search uses; fetched here
+    // because the loader is async and the render below is blocking.
+    let listed = registry_list_cached()
+        .await
+        .and_then(|body| listed_display_line(&body, network, &covenant_id));
     let db = state.base_dir.join(format!("{network}.db"));
     let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
         let store = kascov_core::store::Store::open(&db, network)?;
         let Some(summary) = store.summary(&covenant_id)? else {
             return Ok(None);
         };
-        let info = share_info(&store, &summary, network)?;
+        let info = share_info(&store, &summary, network, listed)?;
         let card = og::CardData {
             id: covenant_id.to_string(),
             name: info.name,
             alive: info.alive,
+            verified: info.verified,
             balance_line: info.balance_line,
             born_line: info.born_line,
+            market_line: info.market_line,
+            art: info.card_art,
             network: network.to_string(),
         };
         let started = std::time::Instant::now();
@@ -7921,42 +8591,19 @@ async fn og_card_handler(
     }
 }
 
-/// GET /share/{network}/{id} — a ~1KB crawler-visible shell: OG/Twitter meta
-/// tags pointing at the PNG card, a canonical url, a visible fallback link,
-/// and a JS redirect into the hash-routed SPA for humans.
-async fn share_handler(
-    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
-    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
-) -> axum::response::Response {
-    use axum::http::{header, StatusCode};
-    use axum::response::IntoResponse;
-
-    let network = match resolve_network(&state, &net_name) {
-        Ok(n) => n,
-        Err(resp) => return resp,
-    };
-    let Ok(covenant_id) = id.parse::<kascov_core::CovenantId>() else {
-        return (StatusCode::BAD_REQUEST, "bad covenant id").into_response();
-    };
-
-    let db = state.base_dir.join(format!("{network}.db"));
-    let result = tokio::task::spawn_blocking(move || -> Result<Option<String>> {
-        let store = kascov_core::store::Store::open(&db, network)?;
-        let Some(summary) = store.summary(&covenant_id)? else { return Ok(None) };
-        let info = share_info(&store, &summary, network)?;
-        let body_extra = share_body_extra(&store, &covenant_id)?;
-        // id is validated hex and the name comes from fixed word lists, but
-        // everything interpolated is escaped anyway — belt and braces.
-        let id = og::esc(&covenant_id.to_string());
-        let net = og::esc(&network.to_string());
-        let status = if info.alive { "alive" } else { "retired" };
-        let title = og::esc(&format!("{} ({status})", info.name));
-        let desc = og::esc(&info.description);
-        let page = og::esc(&format!("https://kascov.io/share/{network}/{covenant_id}"));
-        let image = og::esc(&format!("https://kascov.io/og/{network}/{covenant_id}.png"));
-        let app = format!("/#/{net}/c/{id}");
-        Ok(Some(format!(
-            r#"<!doctype html>
+/// The crawler-visible share shell both permalink shapes render into. Every
+/// argument arrives already escaped; `app` is the SPA hash route humans get
+/// forwarded to.
+fn share_shell_html(
+    title: &str,
+    desc: &str,
+    page: &str,
+    image: &str,
+    app: &str,
+    body_extra: &str,
+) -> String {
+    format!(
+        r#"<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -7988,6 +8635,166 @@ if (!/bot|crawl|spider|slurp|preview|fetch|scrape|google|bing|duckduck|yandex|ba
 </script>
 </body></html>
 "#
+    )
+}
+
+/// One line saying what an admitted trade moved, amounts exactly as stored:
+/// the token side as the raw integer the deltas prove, the KAS side through
+/// the same formatter every card uses.
+fn trade_headline(tr: &kascov_core::tokens::TokenTradeRow, token_name: &str, unit: &str) -> String {
+    let verb = if tr.side == "buy" { "bought" } else { "sold" };
+    format!(
+        "{verb} {} {token_name} for {}",
+        tr.base_amount,
+        og::fmt_amount(tr.quote_sompi.max(0) as u64, unit)
+    )
+}
+
+/// Title + description + first touched covenant for a transaction permalink:
+/// the most specific reading kascov admitted (trade > token action > covenant
+/// event), never more than the index proves. None when the tx never touched a
+/// covenant — kascov's index has nothing provable to say about it then.
+fn share_tx_info(
+    store: &kascov_core::store::Store,
+    txid: &TxId,
+    network: Network,
+) -> Result<Option<(String, String, CovenantId)>> {
+    let events = store.events_by_txid(txid)?;
+    let Some(first) = events.first() else { return Ok(None) };
+    let unit = match network {
+        Network::Mainnet => "KAS",
+        Network::Testnet(_) => "TKAS",
+    };
+    let mut ids: Vec<CovenantId> = Vec::new();
+    for e in &events {
+        if !ids.contains(&e.covenant_id) {
+            ids.push(e.covenant_id);
+        }
+    }
+    let title = if let Some((token_id, tr)) = store.trade_by_txid(&txid.0)? {
+        trade_headline(&tr, &og::friendly_name(&token_id.to_string()), unit)
+    } else {
+        let actions = store.token_actions_by_txid(txid)?;
+        match actions.first() {
+            Some(a) => {
+                let mut t = match a.amount {
+                    Some(v) => format!(
+                        "{} {v} {}",
+                        a.kind,
+                        og::friendly_name(&a.token_id.to_string())
+                    ),
+                    None => format!("{} {}", a.kind, og::friendly_name(&a.token_id.to_string())),
+                };
+                if actions.len() > 1 {
+                    t.push_str(&format!(" (+{} more)", actions.len() - 1));
+                }
+                t
+            }
+            None => {
+                let mut t = format!(
+                    "{}: {}",
+                    og::friendly_name(&first.covenant_id.to_string()),
+                    first.kind
+                );
+                if ids.len() > 1 {
+                    t.push_str(&format!(" (+{} covenants)", ids.len() - 1));
+                }
+                t
+            }
+        }
+    };
+    let txid_hex = txid.to_string();
+    let description = format!(
+        "Transaction {}… on Kaspa {network} — {} covenant event{} across {} covenant{} at DAA {}. \
+         Every figure is decoded from the accepted transaction's own bytes.",
+        &txid_hex[..12],
+        events.len(),
+        if events.len() == 1 { "" } else { "s" },
+        ids.len(),
+        if ids.len() == 1 { "" } else { "s" },
+        first.accepting_daa,
+    );
+    Ok(Some((title, description, first.covenant_id)))
+}
+
+/// The transaction share page: rendered when a /share id turns out to be a
+/// txid rather than a covenant id (both are 64 hex). The card image is the
+/// first touched covenant's — the tx itself has no card of its own.
+fn share_tx_page(
+    store: &kascov_core::store::Store,
+    txid: &TxId,
+    network: Network,
+) -> Result<Option<String>> {
+    let Some((title, desc, primary)) = share_tx_info(store, txid, network)? else {
+        return Ok(None);
+    };
+    let tx = og::esc(&txid.to_string());
+    let net = og::esc(&network.to_string());
+    let title = og::esc(&title);
+    let desc = og::esc(&desc);
+    let page = og::esc(&format!("https://kascov.io/share/{network}/{txid}"));
+    let image = og::esc(&format!("https://kascov.io/og/{network}/{primary}.png"));
+    let app = format!("/#/{net}/tx/{tx}");
+    Ok(Some(share_shell_html(&title, &desc, &page, &image, &app, "")))
+}
+
+/// GET /share/{network}/{id} — a ~1KB crawler-visible shell: OG/Twitter meta
+/// tags pointing at the PNG card, a canonical url, a visible fallback link,
+/// and a JS redirect into the hash-routed SPA for humans. `id` may be a
+/// covenant id or a txid (the same 64-hex shape); the index decides which.
+async fn share_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let Ok(covenant_id) = id.parse::<kascov_core::CovenantId>() else {
+        return (StatusCode::BAD_REQUEST, "bad covenant id").into_response();
+    };
+
+    // Listed names ride the same TTL-cached loader search uses; fetched here
+    // because the loader is async and the build below is blocking.
+    let listed = registry_list_cached()
+        .await
+        .and_then(|body| listed_display_line(&body, network, &covenant_id));
+    let db = state.base_dir.join(format!("{network}.db"));
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let Some(summary) = store.summary(&covenant_id)? else {
+            // Not a covenant kascov knows — the same 64 hex chars may name a
+            // transaction, which gets its own permalink shell.
+            return share_tx_page(&store, &TxId(covenant_id.0), network);
+        };
+        let info = share_info(&store, &summary, network, listed)?;
+        let body_extra = share_body_extra(&store, &covenant_id)?;
+        // id is validated hex and the name comes from fixed word lists, but
+        // everything interpolated is escaped anyway — belt and braces.
+        let id = og::esc(&covenant_id.to_string());
+        let net = og::esc(&network.to_string());
+        let status = if info.alive { "alive" } else { "retired" };
+        let title = og::esc(&format!("{} ({status})", info.name));
+        let desc = og::esc(&info.description);
+        let page = og::esc(&format!("https://kascov.io/share/{network}/{covenant_id}"));
+        let image = og::esc(&format!("https://kascov.io/og/{network}/{covenant_id}.png"));
+        // A derived token's human landing is its token page; the raw coin
+        // page stays the fallback for everything else.
+        let app = if info.is_token {
+            format!("/#/{net}/token/{id}")
+        } else {
+            format!("/#/{net}/c/{id}")
+        };
+        Ok(Some(share_shell_html(
+            &title,
+            &desc,
+            &page,
+            &image,
+            &app,
+            &body_extra,
         )))
     })
     .await;
@@ -8000,7 +8807,9 @@ if (!/bot|crawl|spider|slurp|preview|fetch|scrape|google|bing|duckduck|yandex|ba
             html,
         )
             .into_response(),
-        Ok(Ok(None)) => (StatusCode::NOT_FOUND, "unknown covenant").into_response(),
+        Ok(Ok(None)) => {
+            (StatusCode::NOT_FOUND, "unknown covenant or transaction").into_response()
+        }
         Ok(Err(err)) => {
             tracing::error!("{network}: share page failed: {err}");
             (StatusCode::SERVICE_UNAVAILABLE, "share page unavailable").into_response()
@@ -8119,6 +8928,15 @@ fn feed_slug(title: &str) -> String {
     slug.trim_end_matches('-').to_string()
 }
 
+/// The anchor slug the web changelog page stamps on each entry, derived from
+/// the same `date|title` pair the frontend's changelogStamp uses, through
+/// the same character rules as `feed_slug`. The feed's entry links point at
+/// these anchors; the fixture test below pins the derivation so the two
+/// sides cannot drift silently.
+fn changelog_anchor_slug(date: &str, title: &str) -> String {
+    feed_slug(&format!("{date}|{title}"))
+}
+
 /// Build the Atom feed from the embedded changelog. `now` only backstops the
 /// feed-level `<updated>` when the changelog is empty.
 fn build_feed_xml(changelog_json: &str, now: u64) -> Result<String> {
@@ -8162,16 +8980,21 @@ fn build_feed_xml(changelog_json: &str, now: u64) -> Result<String> {
             );
         }
         seen.push(id.clone());
+        // The link lands on the entry's own anchor on the changelog page.
+        // The <id> above stays untouched: readers key notifications on it,
+        // and a changed id would re-notify every subscriber of old news.
         xml.push_str(&format!(
             "<entry>\n\
              <id>{id}</id>\n\
              <title>{}</title>\n\
              <updated>{}T00:00:00Z</updated>\n\
-             <link rel=\"alternate\" type=\"text/html\" href=\"https://kascov.io/\"/>\n\
+             <link rel=\"alternate\" type=\"text/html\" \
+             href=\"https://kascov.io/changelog#{}\"/>\n\
              <content type=\"text\">{}</content>\n\
              </entry>\n",
             og::esc(&entry.title),
             og::esc(&entry.date),
+            changelog_anchor_slug(&entry.date, &entry.title),
             og::esc(&entry.body),
         ));
     }
@@ -9353,8 +10176,91 @@ fn name_prefix_matches(names: &[(String, [u8; 32])], q: &str, limit: usize) -> V
         .collect()
 }
 
+/// One search result row. `matched` is the provenance of the hit: "id" and
+/// "name" are kascov's own derivations, "claimed" is the deployer's unsigned
+/// on-chain assertion, "listed" is a third-party registry entry — checked
+/// against chain by /registry.json, but still somebody's word.
+fn search_row(s: &kascov_core::store::CovenantSummary, matched: &str) -> serde_json::Value {
+    let id_hex = s.covenant_id.to_string();
+    serde_json::json!({
+        "id": id_hex,
+        "name": og::friendly_name(&id_hex),
+        "template": s.template,
+        "status": if s.live_utxos > 0 { "active" } else { "burned" },
+        "matched": matched,
+    })
+}
+
+/// Registry-listed display names and tickers → covenant ids, lowercased and
+/// sorted for the same prefix walk the other search lanes use. Entries for
+/// another network never appear: parse_list refuses cross-network documents
+/// whole.
+fn listed_name_pairs(body: &str, network: Network) -> Vec<(String, [u8; 32])> {
+    let Ok(entries) = registry::parse_list(body, &network.to_string()) else {
+        return Vec::new();
+    };
+    let mut pairs: Vec<(String, [u8; 32])> = Vec::new();
+    for e in &entries {
+        let Some(id) = hex::decode(&e.covenant_id)
+            .ok()
+            .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+        else {
+            continue;
+        };
+        for s in [e.name.as_deref(), e.ticker.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            let s = s.trim().to_lowercase();
+            if !s.is_empty() {
+                pairs.push((s, id));
+            }
+        }
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+}
+
+/// Merge registry-listed name hits into `rows` with `matched:"listed"`
+/// provenance. Ranked below claimed hits by construction: the caller runs
+/// the claimed walk first and `seen` keeps a covenant's higher-trust row.
+/// The matched string rides along under `listed` for the same reason
+/// `claimed` does — every row's `name` is the canonical slug, so without it
+/// the hit has no visible reason to be in the results.
+fn merge_listed_matches(
+    store: &kascov_core::store::Store,
+    listed: &[(String, [u8; 32])],
+    q: &str,
+    limit: usize,
+    seen: &mut std::collections::HashSet<[u8; 32]>,
+    rows: &mut Vec<serde_json::Value>,
+) -> Result<()> {
+    let start = listed.partition_point(|(n, _)| n.as_str() < q);
+    for (name, id) in listed[start..].iter().take_while(|(n, _)| n.starts_with(q)) {
+        if rows.len() >= limit {
+            break;
+        }
+        if seen.contains(id) {
+            continue;
+        }
+        // Only tokens kascov indexed itself appear: a list entry naming a
+        // covenant the chain never showed us has nothing provable to serve.
+        let Some(s) = store.summary(&kascov_core::CovenantId(*id))? else {
+            continue;
+        };
+        seen.insert(*id);
+        rows.push(search_row(&s, "listed"));
+        if let Some(row) = rows.last_mut() {
+            row["listed"] = serde_json::Value::String(name.clone());
+        }
+    }
+    Ok(())
+}
+
 /// GET /data/{network}/search?q=&limit= — find covenants by id hex prefix,
-/// friendly-name prefix, or template substring. Deliberately NOT behind
+/// friendly-name prefix, claimed or registry-listed name, or template
+/// substring. Deliberately NOT behind
 /// serve_cached: `q` is an unbounded keyspace, so caching bodies per query
 /// would let strangers grow the cache without limit. Every path is either a
 /// bounded PK range scan or an in-memory probe, cheap enough to serve raw.
@@ -9383,6 +10289,10 @@ async fn search_handler(
         .unwrap_or(10)
         .clamp(1, SEARCH_MAX_LIMIT);
 
+    // Registry-listed names ride the same TTL-cached loader /registry.json
+    // uses. Fetched here, outside spawn_blocking, because the loader is
+    // async; most of the time this is a lock-and-clone of the cached body.
+    let listed_body = registry_list_cached().await;
     let db = state.base_dir.join(format!("{network}.db"));
     let state2 = state.clone();
     let built = tokio::task::spawn_blocking(move || -> Result<String> {
@@ -9391,14 +10301,7 @@ async fn search_handler(
         let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
         let mut rows: Vec<serde_json::Value> = Vec::new();
         let push = |s: &CovenantSummary, matched: &str, rows: &mut Vec<serde_json::Value>| {
-            let id_hex = s.covenant_id.to_string();
-            rows.push(serde_json::json!({
-                "id": id_hex,
-                "name": og::friendly_name(&id_hex),
-                "template": s.template,
-                "status": if s.live_utxos > 0 { "active" } else { "burned" },
-                "matched": matched,
-            }));
+            rows.push(search_row(s, matched));
         };
 
         // (a) id hex prefix — a bounded range scan on the PK.
@@ -9454,6 +10357,15 @@ async fn search_handler(
                         }
                     }
                 }
+            }
+            // Registry-listed display names — the name the site itself shows
+            // beside a listed token, which until this lane existed found
+            // nothing for 60 of 63 listed tokens. Runs AFTER the claimed
+            // walk so a deployer's own on-chain claim outranks a third
+            // party's list for the same covenant.
+            if let Some(body) = &listed_body {
+                let listed = listed_name_pairs(body, network);
+                merge_listed_matches(&store, &listed, &q, limit, &mut seen, &mut rows)?;
             }
             'templates: for (template, ids) in &idx.templates {
                 if !template.contains(&q) {
@@ -10761,6 +11673,54 @@ mod feed_and_sitemap_tests {
         assert_eq!(feed_slug("---"), "");
     }
 
+    /// Pins the `date|title` → anchor derivation shared with the web
+    /// changelog page (app.js changelogStamp + the slug rules). The two
+    /// sides live in different languages, so this fixture is the tripwire:
+    /// if either changes shape, one of the twin tests fails.
+    #[test]
+    fn changelog_anchor_slug_matches_the_web_fixture() {
+        assert_eq!(
+            changelog_anchor_slug("2026-08-05", "the passport touched mainnet"),
+            "2026-08-05-the-passport-touched-mainnet"
+        );
+        // the '|' separator collapses into the same '-' the web slug uses
+        assert_eq!(
+            changelog_anchor_slug("2026-01-02", "a <b> & \"c\""),
+            "2026-01-02-a-b-c"
+        );
+    }
+
+    /// Entry links land on the entry's own changelog anchor; entry IDS stay
+    /// exactly as before — readers key notifications on the id, and a
+    /// changed id re-notifies every subscriber of old news.
+    #[test]
+    fn entry_links_point_at_changelog_anchors_and_ids_are_unchanged() {
+        let one = r#"[{"date":"2026-08-05","title":"the passport touched mainnet","body":"x"}]"#;
+        let xml = build_feed_xml(one, 0).unwrap();
+        assert!(
+            xml.contains(
+                "href=\"https://kascov.io/changelog#2026-08-05-the-passport-touched-mainnet\""
+            ),
+            "entry link must carry the date|title anchor: {xml}"
+        );
+        // the id shape predates the anchor links and must not move
+        assert!(xml.contains("<id>tag:kascov.io,2026-08-05:the-passport-touched-mainnet</id>"));
+        // no entry link points at the bare root anymore
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        for entry in doc
+            .root_element()
+            .children()
+            .filter(|n| n.has_tag_name((ATOM, "entry")))
+        {
+            let href = entry
+                .children()
+                .find(|n| n.has_tag_name((ATOM, "link")))
+                .and_then(|n| n.attribute("href"))
+                .expect("entry link");
+            assert!(href.starts_with("https://kascov.io/changelog#"));
+        }
+    }
+
     #[test]
     fn sitemap_carries_lastmod_from_last_activity() {
         let path = std::env::temp_dir().join(format!("kascov-sitemap-{}.db", std::process::id()));
@@ -11198,5 +12158,539 @@ mod holder_lane_tests {
             assert!(limiter.try_take("203.0.113.7").is_ok(), "anon take {i}");
         }
         assert!(limiter.try_take("203.0.113.7").is_err());
+    }
+}
+
+#[cfg(test)]
+mod boot_policy_tests {
+    use super::*;
+    use kascov_core::store::FreshDb;
+
+    /// An allowlist of one value. Truthy-looking strings and near-misses
+    /// stay Refuse: a typo'd export must never authorize a fresh archive.
+    #[test]
+    fn fresh_policy_allows_exactly_the_string_1() {
+        assert_eq!(fresh_policy_from_env(Some("1")), FreshDb::Allow);
+        for wrong in [None, Some(""), Some("0"), Some("true"), Some("yes"), Some("1 ")] {
+            assert_eq!(
+                fresh_policy_from_env(wrong),
+                FreshDb::Refuse,
+                "{wrong:?} must not authorize a fresh database"
+            );
+        }
+    }
+
+    #[test]
+    fn boot_probe_refuses_a_missing_archive_and_creates_nothing() {
+        let dir = std::env::temp_dir().join(format!("kascov-bootprobe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let networks = [Network::Testnet(10)];
+        let err = probe_archives_at_boot(&dir, &networks, FreshDb::Refuse)
+            .expect_err("a missing archive must abort the boot");
+        // the chained store error names the escape hatch for the operator
+        assert!(format!("{err:#}").contains("KASCOV_FRESH_OK"));
+        assert!(
+            !dir.join("testnet-10.db").exists(),
+            "the refusal must not create the file it refused over"
+        );
+        // the declared first-time setup creates it and the probe passes
+        probe_archives_at_boot(&dir, &networks, FreshDb::Allow).expect("Allow creates");
+        probe_archives_at_boot(&dir, &networks, FreshDb::Refuse)
+            .expect("an existing archive passes under Refuse");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// build.rs guarantees a value ("unknown" at worst, the deploy export or
+    /// git otherwise) — /healthz serves this same constant as `build`.
+    #[test]
+    fn build_provenance_is_stamped() {
+        assert!(!env!("KASCOV_GIT_HASH").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod shell_meta_tests {
+    use super::*;
+
+    /// The worker embeds the crate-local shell copy; web/index.html is what
+    /// hosting serves. If they drift, whoever edited one forgot the other —
+    /// run: cp web/index.html crates/kascov/assets/index.html
+    #[test]
+    fn crate_shell_copy_matches_the_site_shell() {
+        let site = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/index.html"
+        ))
+        .expect("web/index.html must exist in the repo checkout");
+        assert_eq!(
+            INDEX_HTML, site,
+            "crates/kascov/assets/index.html is out of sync with web/index.html"
+        );
+    }
+
+    #[test]
+    fn five_routes_serve_five_distinct_titles_with_their_own_canonicals() {
+        let mut titles = std::collections::HashSet::new();
+        for route in ["/", "/guide", "/dev", "/tokens", "/pools"] {
+            let html = shell_for_route(route).expect("every shell route renders");
+            let start = html.find("<title>").unwrap() + "<title>".len();
+            let end = start + html[start..].find("</title>").unwrap();
+            let title = &html[start..end];
+            assert!(
+                titles.insert(title.to_string()),
+                "{route}: title {title:?} repeats another route's"
+            );
+            if route == "/" {
+                // the root is the shipped shell, byte-identical — its meta is
+                // authored in web/, and no canonical is spliced in
+                assert_eq!(html, INDEX_HTML);
+                assert!(!html.contains("rel=\"canonical\""));
+            } else {
+                assert!(
+                    html.contains(&format!(
+                        "<link rel=\"canonical\" href=\"https://kascov.io{route}\">"
+                    )),
+                    "{route}: canonical missing or wrong"
+                );
+                assert!(
+                    html.contains(&format!(
+                        "<meta property=\"og:url\" content=\"https://kascov.io{route}\">"
+                    )),
+                    "{route}: og:url must match the canonical"
+                );
+                assert!(
+                    html.contains(&format!("<title>{route} — ")),
+                    "{route}: the title names its route"
+                );
+                // exactly one description tag survives the splice
+                assert_eq!(html.matches("<meta name=\"description\"").count(), 1);
+            }
+        }
+        // a path outside the allowlist is not a shell route
+        assert!(shell_for_route("/nope").is_none());
+    }
+}
+
+#[cfg(test)]
+mod search_listed_tests {
+    use super::*;
+    use kascov_core::store::{BlockEvents, EventKind, NewEvent, Store};
+
+    const LISTED_ID: [u8; 32] = [0xB7; 32];
+
+    fn list_body(network: &str) -> String {
+        format!(
+            r#"{{"name":"KRON","network":"{network}","tokens":[{{"covenantId":"{}","name":"Krex Token","symbol":"KREX"}}]}}"#,
+            hex::encode(LISTED_ID)
+        )
+    }
+
+    #[test]
+    fn listed_pairs_are_lowercased_sorted_and_network_gated() {
+        let body = list_body("testnet-10");
+        let pairs = listed_name_pairs(&body, Network::Testnet(10));
+        assert_eq!(
+            pairs,
+            vec![
+                ("krex".to_string(), LISTED_ID),
+                ("krex token".to_string(), LISTED_ID),
+            ]
+        );
+        // a list published for another network contributes nothing
+        assert!(listed_name_pairs(&body, Network::Mainnet).is_empty());
+    }
+
+    #[test]
+    fn a_listed_only_name_returns_its_token_with_listed_provenance() {
+        let path =
+            std::env::temp_dir().join(format!("kascov-search-listed-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = Store::open(&path, Network::Testnet(10)).unwrap();
+        store
+            .apply(
+                &BlockEvents {
+                    accepting_block: BlockHash([1; 32]),
+                    accepting_daa: 1_000,
+                    accepting_time_ms: 1_700_000_000_000,
+                    accepting_blue_score: 1_000,
+                    events: vec![NewEvent {
+                        covenant_id: CovenantId(LISTED_ID),
+                        kind: EventKind::Genesis,
+                        txid: TxId([0x10; 32]),
+                        tx_index: 0,
+                        payload: None,
+                        lane_namespace: None,
+                    }],
+                    created_utxos: vec![],
+                    spent_utxos: vec![],
+                },
+                BlockHash([1; 32]),
+            )
+            .unwrap();
+
+        let listed = listed_name_pairs(&list_body("testnet-10"), Network::Testnet(10));
+        let mut seen = std::collections::HashSet::new();
+        let mut rows = Vec::new();
+        merge_listed_matches(&store, &listed, "kre", 10, &mut seen, &mut rows).unwrap();
+        assert_eq!(rows.len(), 1, "both pairs point at one covenant — one row");
+        assert_eq!(rows[0]["matched"], "listed");
+        assert_eq!(rows[0]["listed"], "krex");
+        assert_eq!(rows[0]["id"], CovenantId(LISTED_ID).to_string());
+
+        // a covenant already surfaced by a higher-trust lane keeps that row:
+        // the claimed walk runs first and `seen` carries its ids in here
+        let mut rows2 = Vec::new();
+        merge_listed_matches(&store, &listed, "kre", 10, &mut seen, &mut rows2).unwrap();
+        assert!(rows2.is_empty());
+
+        // a listed id the chain never showed us is not served
+        let ghost = vec![("krexghost".to_string(), [0xEE; 32])];
+        let mut seen3 = std::collections::HashSet::new();
+        let mut rows3 = Vec::new();
+        merge_listed_matches(&store, &ghost, "krexg", 10, &mut seen3, &mut rows3).unwrap();
+        assert!(rows3.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod share_identity_tests {
+    use super::*;
+    use kascov_core::store::{BlockEvents, EventKind, NewEvent, Store};
+
+    #[test]
+    fn share_name_precedence_is_claimed_then_listed_then_codename() {
+        assert_eq!(
+            resolved_share_name(Some("Chain ($CHN)"), Some("List ($LST)"), "quiet-slate-tapir"),
+            "Chain ($CHN) · quiet-slate-tapir"
+        );
+        assert_eq!(
+            resolved_share_name(None, Some("List ($LST)"), "quiet-slate-tapir"),
+            "List ($LST) · quiet-slate-tapir"
+        );
+        assert_eq!(
+            resolved_share_name(None, None, "quiet-slate-tapir"),
+            "quiet-slate-tapir"
+        );
+    }
+
+    #[test]
+    fn name_ticker_line_covers_every_shape_and_drops_blanks() {
+        assert_eq!(
+            name_ticker_line(Some("Krex"), Some("KREX")).as_deref(),
+            Some("Krex ($KREX)")
+        );
+        assert_eq!(name_ticker_line(Some("Krex"), None).as_deref(), Some("Krex"));
+        assert_eq!(name_ticker_line(None, Some("KREX")).as_deref(), Some("$KREX"));
+        assert_eq!(name_ticker_line(None, None), None);
+        assert_eq!(name_ticker_line(Some("  "), Some("")), None);
+    }
+
+    #[test]
+    fn listed_display_line_finds_its_id_and_respects_the_network_gate() {
+        let id = CovenantId([0xB7; 32]);
+        let body = format!(
+            r#"{{"name":"KRON","network":"testnet-10","tokens":[{{"covenantId":"{id}","name":"Krex Token","symbol":"KREX"}}]}}"#
+        );
+        assert_eq!(
+            listed_display_line(&body, Network::Testnet(10), &id).as_deref(),
+            Some("Krex Token ($KREX)")
+        );
+        // another id finds nothing; another network refuses the document whole
+        assert_eq!(
+            listed_display_line(&body, Network::Testnet(10), &CovenantId([0x01; 32])),
+            None
+        );
+        assert_eq!(listed_display_line(&body, Network::Mainnet, &id), None);
+    }
+
+    #[test]
+    fn market_line_publishes_only_what_the_summary_did() {
+        use kascov_core::market::MarketSummary;
+        let mut ms = MarketSummary::default();
+        assert_eq!(market_line(&ms, "KAS"), None, "no phase, no line");
+
+        ms.phase = Some("bonding".into());
+        ms.grad_progress_bps = Some(4_257);
+        assert_eq!(
+            market_line(&ms, "KAS").as_deref(),
+            Some("bonding · 42.5% to graduation")
+        );
+
+        let mut ms = MarketSummary::default();
+        ms.phase = Some("graduated".into());
+        ms.last_quote_sompi = Some(150_000_000);
+        ms.last_base_amount = Some(1_000);
+        assert_eq!(
+            market_line(&ms, "KAS").as_deref(),
+            Some("graduated · last 0.00150000 KAS/token")
+        );
+
+        // an LP share token is never priced, whatever else is set
+        ms.lp_of_pool = Some(CovenantId([2; 32]));
+        assert_eq!(market_line(&ms, "KAS"), None);
+    }
+
+    #[test]
+    fn trade_headline_states_side_and_both_legs() {
+        let tr = kascov_core::tokens::TokenTradeRow {
+            seq: 7,
+            txid: TxId([0xAB; 32]),
+            market_covenant_id: CovenantId([9; 32]),
+            side: "buy".into(),
+            base_amount: 1_234,
+            quote_sompi: 1_234_000_000,
+            kas_before_sompi: 0,
+            kas_after_sompi: 0,
+            base_before: 1,
+            base_after: 1,
+            co_covenants: 0,
+            accepting_daa: 1,
+            accepting_time_ms: Some(0),
+            counterparty: None,
+        };
+        assert_eq!(
+            trade_headline(&tr, "quiet-slate-tapir", "KAS"),
+            "bought 1234 quiet-slate-tapir for 12.34 KAS"
+        );
+        let mut sell = tr;
+        sell.side = "sell".into();
+        assert!(trade_headline(&sell, "quiet-slate-tapir", "KAS").starts_with("sold "));
+    }
+
+    /// One store, one genesis event: the share surfaces built on top of it.
+    fn seeded_store(tag: &str, id: [u8; 32], txid: [u8; 32]) -> (std::path::PathBuf, Store) {
+        let path = std::env::temp_dir().join(format!(
+            "kascov-share-{tag}-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut store = Store::open(&path, Network::Testnet(10)).unwrap();
+        store
+            .apply(
+                &BlockEvents {
+                    accepting_block: BlockHash([1; 32]),
+                    accepting_daa: 1_000,
+                    accepting_time_ms: 1_700_000_000_000,
+                    accepting_blue_score: 1_000,
+                    events: vec![NewEvent {
+                        covenant_id: CovenantId(id),
+                        kind: EventKind::Genesis,
+                        txid: TxId(txid),
+                        tx_index: 0,
+                        payload: None,
+                        lane_namespace: None,
+                    }],
+                    created_utxos: vec![],
+                    spent_utxos: vec![],
+                },
+                BlockHash([1; 32]),
+            )
+            .unwrap();
+        (path, store)
+    }
+
+    #[test]
+    fn share_info_leads_with_the_listed_name_and_says_where_it_came_from() {
+        let id = [0x5D; 32];
+        let (path, store) = seeded_store("listed", id, [0x10; 32]);
+        let summary = store.summary(&CovenantId(id)).unwrap().unwrap();
+        let info = share_info(
+            &store,
+            &summary,
+            Network::Testnet(10),
+            Some("Krex Token ($KREX)".into()),
+        )
+        .unwrap();
+        let nickname = og::friendly_name(&CovenantId(id).to_string());
+        assert_eq!(info.name, format!("Krex Token ($KREX) · {nickname}"));
+        assert!(info.description.contains("third-party token list"));
+        assert!(!info.verified);
+        assert!(!info.is_token);
+        assert_eq!(info.market_line, None);
+        assert!(info.card_art.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_tx_permalink_reads_the_event_and_an_unknown_tx_reads_nothing() {
+        let id = [0x6E; 32];
+        let txid = [0x77; 32];
+        let (path, store) = seeded_store("tx", id, txid);
+        let (title, desc, primary) = share_tx_info(&store, &TxId(txid), Network::Testnet(10))
+            .unwrap()
+            .expect("an indexed tx gets a reading");
+        let nickname = og::friendly_name(&CovenantId(id).to_string());
+        assert_eq!(title, format!("{nickname}: genesis"));
+        assert!(desc.contains("1 covenant event across 1 covenant at DAA 1000"));
+        assert_eq!(primary, CovenantId(id));
+        // the page shell forwards humans to the SPA's tx route
+        let html = share_tx_page(&store, &TxId(txid), Network::Testnet(10))
+            .unwrap()
+            .unwrap();
+        assert!(html.contains(&format!("/#/testnet-10/tx/{}", TxId(txid))));
+        assert!(html.contains(&format!("https://kascov.io/og/testnet-10/{}.png", CovenantId(id))));
+        // a tx the index never saw has nothing provable to say
+        assert!(share_tx_info(&store, &TxId([0xEE; 32]), Network::Testnet(10))
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod candle_tests {
+    use super::*;
+
+    #[test]
+    fn buckets_are_an_allowlist() {
+        assert_eq!(parse_bucket("1h"), Some(3_600_000));
+        assert_eq!(parse_bucket("4h"), Some(14_400_000));
+        assert_eq!(parse_bucket("1d"), Some(86_400_000));
+        for junk in ["2h", "1H", "60m", "", "1h; DROP", "all"] {
+            assert_eq!(parse_bucket(junk), None, "{junk} must be refused");
+        }
+    }
+
+    #[test]
+    fn the_fee_table_knows_the_priced_families_and_fails_closed() {
+        for curve in ["KRON curve v1", "KRON curve v2", "KCM curve v1"] {
+            assert_eq!(candle_bracket_fee_bps(curve), Some(0));
+        }
+        for pool in ["KRON pool v1", "KRON pool v2", "KRON pool tn-a"] {
+            assert_eq!(candle_bracket_fee_bps(pool), Some(20));
+        }
+        // an unrecognised build gets NO fee model, so no candle may use one
+        assert_eq!(candle_bracket_fee_bps("KRON curve v9"), None);
+        assert_eq!(candle_bracket_fee_bps("unmatched (matcher v7)"), None);
+    }
+
+    fn tr(seq: u64, ms: i64, quote: i64, base: i64) -> kascov_core::tokens::TokenTradeRow {
+        kascov_core::tokens::TokenTradeRow {
+            seq,
+            txid: TxId([seq as u8; 32]),
+            market_covenant_id: CovenantId([9; 32]),
+            side: "buy".into(),
+            base_amount: base,
+            quote_sompi: quote,
+            kas_before_sompi: 0,
+            kas_after_sompi: 0,
+            base_before: 1,
+            base_after: 1,
+            co_covenants: 0,
+            accepting_daa: seq,
+            accepting_time_ms: Some(ms),
+            counterparty: None,
+        }
+    }
+
+    #[test]
+    fn ohlc_follows_seq_order_and_exact_pair_comparison() {
+        // bucket 0: 1.5, then 1.2 (low), then 2.0 (high, close)
+        // bucket 3_600_000: a single 1.0 trade
+        let trades = [
+            tr(1, 100, 3, 2),
+            tr(2, 200, 6, 5),
+            tr(3, 300, 2, 1),
+            tr(4, 3_600_050, 1, 1),
+        ];
+        let refs: Vec<&kascov_core::tokens::TokenTradeRow> = trades.iter().collect();
+        let candles = candle_buckets(&refs, 3_600_000);
+        assert_eq!(candles.len(), 2);
+        let c = &candles[0];
+        assert_eq!(c["t"], 0);
+        assert_eq!(c["open"]["quote_sompi"], 3);
+        assert_eq!(c["open"]["base_amount"], 2);
+        assert_eq!(c["high"]["quote_sompi"], 2);
+        assert_eq!(c["high"]["base_amount"], 1);
+        assert_eq!(c["low"]["quote_sompi"], 6);
+        assert_eq!(c["low"]["base_amount"], 5);
+        assert_eq!(c["close"]["quote_sompi"], 2);
+        assert_eq!(c["volume_sompi"], 11);
+        assert_eq!(c["trades"], 3);
+        assert_eq!(c["first_txid"], serde_json::json!(TxId([1; 32])));
+        assert_eq!(c["last_txid"], serde_json::json!(TxId([3; 32])));
+        assert_eq!(candles[1]["t"], 3_600_000);
+        assert_eq!(candles[1]["trades"], 1);
+        // every bucket names replayable transactions
+        assert_eq!(candles[1]["first_txid"], candles[1]["last_txid"]);
+    }
+
+    #[test]
+    fn close_prices_that_collapse_as_floats_still_order_exactly() {
+        // 1_000_000_000_000_000_001/1e18 and 1/1 are both 1.0 as f64
+        assert!(candle_px_lt((1, 1), (1_000_000_000_000_000_001, 1_000_000_000_000_000_000)));
+        assert!(!candle_px_lt(
+            (1_000_000_000_000_000_001, 1_000_000_000_000_000_000),
+            (1, 1)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod book_tests {
+    use super::*;
+
+    fn row(side: &str, num: i64, den: i64) -> (String, i64, i64, serde_json::Value) {
+        (
+            side.to_string(),
+            num,
+            den,
+            serde_json::json!({ "price": { "quote_sompi": num, "base_amount": den } }),
+        )
+    }
+
+    #[test]
+    fn both_sides_sort_by_exact_price_and_junk_is_dropped() {
+        let (bids, asks) = sorted_book(vec![
+            row("sell", 3, 2),
+            row("sell", 6, 5),
+            row("sell", 2, 1),
+            row("buy", 3, 2),
+            row("buy", 6, 5),
+            row("hold", 1, 1),  // unknown side: dropped, not guessed
+            row("sell", 1, 0),  // unorderable price shape: dropped
+            row("sell", -1, 1), // negative ask: dropped
+        ]);
+        // asks cheapest first: 1.2, 1.5, 2.0
+        let ask_prices: Vec<(i64, i64)> = asks
+            .iter()
+            .map(|r| {
+                (
+                    r["price"]["quote_sompi"].as_i64().unwrap(),
+                    r["price"]["base_amount"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(ask_prices, vec![(6, 5), (3, 2), (2, 1)]);
+        // bids highest first: 1.5, 1.2
+        let bid_prices: Vec<(i64, i64)> = bids
+            .iter()
+            .map(|r| {
+                (
+                    r["price"]["quote_sompi"].as_i64().unwrap(),
+                    r["price"]["base_amount"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(bid_prices, vec![(3, 2), (6, 5)]);
+    }
+
+    #[test]
+    fn an_empty_book_is_two_empty_arrays() {
+        let (bids, asks) = sorted_book(Vec::new());
+        assert!(bids.is_empty());
+        assert!(asks.is_empty());
+    }
+
+    #[test]
+    fn price_levels_a_float_would_collapse_stay_distinct() {
+        let (_, asks) = sorted_book(vec![
+            row("sell", 1_000_000_000_000_000_001, 1_000_000_000_000_000_000),
+            row("sell", 1, 1),
+        ]);
+        let first = &asks[0]["price"];
+        assert_eq!(first["quote_sompi"], 1, "the exactly-1.0 ask sorts first");
     }
 }

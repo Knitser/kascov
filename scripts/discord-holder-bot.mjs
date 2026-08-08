@@ -84,6 +84,11 @@ const OPERATOR_ID = process.env.OPERATOR_USER_ID || '';
 /* Where the public passport claims file lands. Same rule as the tally: point
    it inside the web root so Caddy serves it as /passport-claims.json. */
 const PASSPORT_OUT = process.env.KASCOV_PASSPORT_OUT || './passport-claims.json';
+/* Where the anchor tool records the mainnet transaction carrying the root.
+   Read-only here — the anchor service owns the file — and the same web-root
+   convention as PASSPORT_OUT, so the claims file and /passport agree on which
+   anchor they are talking about. */
+const ANCHOR_PATH = process.env.KASCOV_PASSPORT_ANCHOR || './passport-anchor.json';
 
 const CHALLENGE_TTL_MS = 15 * 60 * 1000;
 const API = 'https://discord.com/api/v10';
@@ -364,8 +369,9 @@ export function alertMessage(alert, names = {}) {
    addresses and badges only, never a Discord identity: the account-to-address
    link stays this bot's secret, exactly as /verify promised. Revocation is
    ABSENCE: a badge that is gone simply does not appear in the newest tree,
-   and its old proof stops verifying against the newest root. The mainnet
-   anchor is not armed yet, and the file says so rather than implying it.
+   and its old proof stops verifying against the newest root. The anchor
+   block repeats the anchor tool's own record — root, txid, date of the
+   newest mainnet write — and says pending only while no record exists.
    Participation in a closed audit-vote round mints voted-<round-id> — the
    round and the close time, never the choice, which is deleted with the
    ballots and mints for no round closed before PARTICIPATION_EPOCH_MS. */
@@ -469,8 +475,10 @@ export function verifyProof(claim, proof, root) {
 
 /** The public passport file, assembled from claims alone. Claims are sorted
  *  by their canonical bytes first, so the same set always yields the same
- *  root whatever order the guild answered in. */
-export function buildPassportFile(claims, nowMs) {
+ *  root whatever order the guild answered in. `anchor` comes from the anchor
+ *  tool's record via anchorFromFile; absent one, the file states pending
+ *  rather than implying a chain write that never happened. */
+export function buildPassportFile(claims, nowMs, anchor = null) {
   const sorted = (claims || []).slice()
     .sort((a, b) => (canonicalClaim(a) < canonicalClaim(b) ? -1 : 1));
   const leaves = sorted.map(claimLeaf);
@@ -481,11 +489,36 @@ export function buildPassportFile(claims, nowMs) {
     generated_ms: nowMs,
     merkle_root: merkleRoot(leaves),
     claims: sorted.map((claim, i) => ({ claim, proof: merkleProof(leaves, i) })),
-    anchor: {
+    anchor: anchor || {
       status: 'pending',
       note: 'the mainnet anchor arms when the operator funds the anchor key; until then the root is published only in this served file, and /passport says exactly what that means',
     },
   };
+}
+
+const isHex64 = (s) => typeof s === 'string' && /^[0-9a-f]{64}$/.test(s);
+
+/** The claims file's anchor block, distilled from the anchor tool's record.
+ *  Only facts the page could re-check from chain bytes are repeated — the
+ *  root the transaction carries and its txid, both 64-hex or nothing — and a
+ *  record with neither reads as NO anchor rather than half of one. The
+ *  newest entry wins: the top level is rewritten after every successful
+ *  submit, with the oldest-first history walked backwards as the fallback.
+ *  The date rides along only when the record actually carries one. */
+export function anchorFromFile(record) {
+  if (!record || typeof record !== 'object') return null;
+  const history = Array.isArray(record.history) ? record.history.slice().reverse() : [];
+  for (const entry of [record, ...history]) {
+    if (!entry || typeof entry !== 'object') continue;
+    const root = isHex64(entry.merkle_root) ? entry.merkle_root
+      : (isHex64(entry.root) ? entry.root : null);
+    if (!root || !isHex64(entry.txid)) continue;
+    const anchor = { status: 'anchored', root, txid: entry.txid };
+    const ms = Number(entry.anchored_ms);
+    if (Number.isFinite(ms) && ms > 0) anchor.anchored_at = new Date(ms).toISOString();
+    return anchor;
+  }
+  return null;
 }
 
 /* ---------------------------------------------------------------- state */
@@ -758,11 +791,23 @@ async function gatherClaims() {
   return claims;
 }
 
+/** The anchor tool's record, parsed, or null when the file is absent, empty,
+ *  or unreadable. Null is a fact (no anchor provable from here), never an
+ *  error: anchorFromFile turns it into the pending shape downstream. */
+async function readAnchorRecord() {
+  try {
+    const text = await readFile(ANCHOR_PATH, 'utf8');
+    return text.trim() ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
 /* The claims file is public and served by Caddy, like the tally. Written
    write-then-rename for the same reason the state is. */
 async function writePassport() {
   const claims = await gatherClaims();
-  const file = buildPassportFile(claims, Date.now());
+  const file = buildPassportFile(claims, Date.now(), anchorFromFile(await readAnchorRecord()));
   const tmp = `${PASSPORT_OUT}.tmp`;
   await writeFile(tmp, JSON.stringify(file, null, 2));
   await rename(tmp, PASSPORT_OUT);

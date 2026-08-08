@@ -1,5 +1,6 @@
 [Unit]
 Description=Check kascov worker health every minute
+OnFailure=kascov-alert@%n.service
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=60s

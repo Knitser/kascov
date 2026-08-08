@@ -10,6 +10,8 @@
 set -uo pipefail
 STATE=/run/kascov-watchdog.fails
 LAST=/run/kascov-watchdog.lastrestart
+RESTARTS=/run/kascov-watchdog.restarts
+ALERT=/usr/local/bin/kascov-alert.sh
 NEED=3          # consecutive bad checks (timer is 60s) before acting
 COOLDOWN=900    # never restart more than once per 15 min
 
@@ -28,5 +30,9 @@ if [ $(( now - last )) -lt "$COOLDOWN" ]; then
   echo "in cooldown ($(( now - last ))s since last restart), not restarting"; exit 0
 fi
 echo "$now" > "$LAST"; echo 0 > "$STATE"
+restarts=$(( $(cat "$RESTARTS" 2>/dev/null || echo 0) + 1 )); echo "$restarts" > "$RESTARTS"
 echo "RESTARTING kascov-worker after $fails consecutive unhealthy checks (last code $code)"
+# self-healing must escalate: an unheard restart is how the 49-hour wedge
+# happened. /run resets at boot, so the counter reads "since boot".
+[ -x "$ALERT" ] && "$ALERT" "watchdog is restarting kascov-worker on $(hostname): healthz=$code, $fails consecutive failed checks, restart #$restarts since boot" || true
 systemctl restart kascov-worker.service
