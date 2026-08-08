@@ -6447,6 +6447,16 @@ async fn token_curve_cell_handler(
         let Some(base_program) = store.recover_program(&market_id.0)? else {
             return Ok(None);
         };
+        // The live cell's committed reserve is the newest TRADE's after-state,
+        // not the newest REVEAL's: the reveal is the cell that trade spent, one
+        // step behind. base_after is the reserve the live continuation commits,
+        // and splice(base_program, live_reserve) blake2b-matches script_hex —
+        // which the page checks before it builds.
+        let newest = store.token_trades_page_before(&token_id, None, 1)?;
+        let live_reserve = newest
+            .first()
+            .map(|t| t.base_after)
+            .unwrap_or(program.token_reserve.unwrap_or_default());
         let value = serde_json::json!({
             "network": network.to_string(),
             "generated_at_ms": now_ms(),
@@ -6457,14 +6467,15 @@ async fn token_curve_cell_handler(
             "value_sompi": live.value,
             "script_hex": hex::encode(&live.spk_script),
             "live_count": live.live_count,
-            // The current committed reserve the page splices into the base
-            // program to reproduce the live cell.
-            "token_reserve": program.token_reserve,
+            // Splice THIS into the base program to reproduce the live cell.
+            "live_reserve": live_reserve,
+            // The reveal's own reserve (one spend behind), for reference.
+            "revealed_reserve": program.token_reserve,
             "v_kas_units": program.v_kas_units,
             "graduation_kas_sompi": program.graduation_kas_sompi,
             "program_hash": program.program_hash,
             // The newest revealed program: identical to the live cell's program
-            // outside the reserve field, so splice(base, token_reserve) == live.
+            // outside the reserve field, so splice(base, live_reserve) == live.
             "base_program_hex": hex::encode(&base_program),
         });
         Ok(Some(serde_json::to_string(&value)?))
