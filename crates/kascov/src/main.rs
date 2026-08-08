@@ -6129,7 +6129,7 @@ fn parse_bucket(s: &str) -> Option<i64> {
 /// fee_model, where one table would feed both.
 fn candle_bracket_fee_bps(skeleton: &str) -> Option<i128> {
     match skeleton {
-        "KRON curve v1" | "KRON curve v2" | "KCM curve v1" => Some(0),
+        "KRON curve v1" | "KRON curve v2" | "curve tn-b" => Some(0),
         "KRON pool v1" | "KRON pool v2" | "KRON pool tn-a" => Some(20),
         _ => None,
     }
@@ -12928,7 +12928,7 @@ mod candle_tests {
 
     #[test]
     fn the_fee_table_knows_the_priced_families_and_fails_closed() {
-        for curve in ["KRON curve v1", "KRON curve v2", "KCM curve v1"] {
+        for curve in ["KRON curve v1", "KRON curve v2", "curve tn-b"] {
             assert_eq!(candle_bracket_fee_bps(curve), Some(0));
         }
         for pool in ["KRON pool v1", "KRON pool v2", "KRON pool tn-a"] {

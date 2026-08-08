@@ -483,7 +483,7 @@ const KRON_CURVE_V2_PIN: SkeletonPin = SkeletonPin {
 };
 
 const KCM_CURVE_V1_PIN: SkeletonPin = SkeletonPin {
-    name: "KCM curve v1",
+    name: "curve tn-b",
     fixture: KCM_CURVE_FIXTURE,
     pushes: KCM_CURVE_PUSHES,
     slots: &KCM_CURVE_SLOTS,
@@ -735,7 +735,7 @@ const POOL_TN_A_CREATOR_SLOTS: [usize; 4] = [136, 148, 295, 307];
 /// it re-tagged nothing, because the gate never noticed and returned early —
 /// the tag existed but the retry it promised could not fire. `market_stamp()`
 /// folds it into that gate so a bump mechanically forces re-verification.
-pub(crate) const MATCHER_VERSION: &str = "8";
+pub(crate) const MATCHER_VERSION: &str = "9";
 
 /// The only skeletons that mean "this program byte-matched an audited build".
 /// Every tally and every publish gate reads this ALLOWLIST rather than testing
@@ -749,7 +749,7 @@ pub(crate) const MATCHED_SKELETONS: [&str; 8] = [
     "KRON curve v3",
     "KRON pool v3",
     "KRON pool tn-a",
-    "KCM curve v1",
+    "curve tn-b",
 ];
 
 /// Skeleton tags that license publishing: the family allowlist plus any
@@ -2208,7 +2208,7 @@ mod kcm_tests {
     /// The allowlist and the version gate move together, or a bump re-verifies nothing.
     #[test]
     fn the_new_family_is_allowlisted_and_the_gate_moved() {
-        assert!(MATCHED_SKELETONS.contains(&"KCM curve v1"));
+        assert!(MATCHED_SKELETONS.contains(&"curve tn-b"));
         assert!(!MATCHED_SKELETONS.contains(&unmatched_tag().as_str()));
         assert!(market_stamp().ends_with(&format!("/{MATCHER_VERSION}")));
         // The guarantee is that the KCM family's arrival MOVED the gate, not that it
@@ -2250,7 +2250,7 @@ mod kcm_live_tests {
     fn the_live_deployment_earns_an_allowlisted_skeleton() {
         let live = include_bytes!("../../kascov-decode/fixtures/kcm_curve_live_tn10.bin");
         assert!(match_kcm_curve(live).is_some());
-        assert!(MATCHED_SKELETONS.contains(&"KCM curve v1"));
+        assert!(MATCHED_SKELETONS.contains(&"curve tn-b"));
         // and it is not any of the KRON families
         assert!(match_kron_curve(live).is_none());
         assert!(match_kron_curve_v2(live).is_none());
@@ -2476,7 +2476,7 @@ mod skeleton_pin_tests {
     #[test]
     fn the_table_and_the_wrappers_agree() {
         let names: Vec<&str> = SKELETON_PINS.iter().map(|s| s.name).collect();
-        assert_eq!(names, ["KRON curve v1", "KRON curve v2", "KCM curve v1"]);
+        assert_eq!(names, ["KRON curve v1", "KRON curve v2", "curve tn-b"]);
         for sk in &SKELETON_PINS {
             assert!(
                 MATCHED_SKELETONS.contains(&sk.name),
@@ -2522,7 +2522,7 @@ mod skeleton_pin_tests {
         let (range, data) = &units[KCM_IDX_GRADUATION];
         let mut evil = KCM_CURVE_FIXTURE.to_vec();
         evil[range.end - data.len()..range.end].fill(0);
-        assert!(match_kcm_curve(&evil).is_none(), "KCM requires grad > 0");
+        assert!(match_kcm_curve(&evil).is_none(), "tn-b requires grad > 0");
 
         let units = push_units(CURVE_FIXTURE);
         let (range, data) = &units[IDX_GRADUATION];

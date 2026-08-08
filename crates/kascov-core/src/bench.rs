@@ -99,7 +99,7 @@ pub const PIN_LEDGER: [PinEntry; 8] = [
         commit: "61a41eb",
     },
     PinEntry {
-        skeleton: "KCM curve v1",
+        skeleton: "curve tn-b",
         first_pinned_by: FOUNDER,
         date: "2026-08-06",
         commit: "29e9979",
