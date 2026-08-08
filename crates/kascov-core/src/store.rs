@@ -650,6 +650,18 @@ pub struct TemplateStat {
     pub covenants: u64,
 }
 
+/// The live cell of a market covenant, everything a trade page needs to spend
+/// it: the outpoint, its KAS value, and the P2SH script it commits to.
+#[derive(Clone, Debug)]
+pub struct LiveMarketUtxo {
+    pub txid: [u8; 32],
+    pub index: u32,
+    pub value: i64,
+    pub spk_script: Vec<u8>,
+    /// Total live cells of this covenant; a curve should show exactly 1.
+    pub live_count: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct UtxoRow {
     pub outpoint: Outpoint,
@@ -1749,6 +1761,43 @@ impl Store {
     }
 
     /// Is this outpoint a live covenant UTXO? Returns its covenant id.
+    /// The live (unspent) cell of a market covenant — the one a trade must
+    /// spend. A curve is a single cell, so `count > 1` means the market is
+    /// mid-trade and the caller must not build against a guessed outpoint.
+    /// Returns the highest-value live cell plus the total live count.
+    pub fn live_market_utxo(&self, covenant_id: &CovenantId) -> Result<Option<LiveMarketUtxo>> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM covenant_utxos
+                 WHERE covenant_id = ?1 AND spent_block IS NULL",
+                [covenant_id.0.as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+        if count == 0 {
+            return Ok(None);
+        }
+        self.conn
+            .query_row(
+                "SELECT txid, output_index, value, spk_script FROM covenant_utxos
+                 WHERE covenant_id = ?1 AND spent_block IS NULL
+                 ORDER BY value DESC LIMIT 1",
+                [covenant_id.0.as_slice()],
+                |row| {
+                    Ok(LiveMarketUtxo {
+                        txid: row.get::<_, [u8; 32]>(0)?,
+                        index: row.get(1)?,
+                        value: row.get(2)?,
+                        spk_script: row.get(3)?,
+                        live_count: count as u64,
+                    })
+                },
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
     pub fn live_covenant_utxo(&self, outpoint: &Outpoint) -> Result<Option<CovenantId>> {
         self.conn
             .query_row(

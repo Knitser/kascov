@@ -449,6 +449,23 @@ fn market_detail_value(
         .iter()
         .map(|trade| trade_json(trade, network))
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    // The live cell a trade must spend, from kascov's own index — so a trade
+    // page reads the outpoint, value and committed script same-origin instead
+    // of scraping a public node. The program BYTES are not embedded here (172
+    // KB); a page reconstructs them from the newest trade's reveal and checks
+    // the blake2b against this script. `null` when nothing live is indexed.
+    let live_curve = store
+        .live_market_utxo(market_id)?
+        .map(|u| {
+            serde_json::json!({
+                "outpoint": format!("{}:{}", hex::encode(u.txid), u.index),
+                "txid": hex::encode(u.txid),
+                "index": u.index,
+                "value_sompi": u.value,
+                "script_hex": hex::encode(&u.spk_script),
+                "live_count": u.live_count,
+            })
+        });
     Ok(Some(serde_json::json!({
         "network": network.to_string(),
         "generated_at_ms": now_ms(),
@@ -456,6 +473,7 @@ fn market_detail_value(
         "program": program,
         "tokens": token_values,
         "market": summary,
+        "live_curve": live_curve,
         "trades_total": store.token_trades_count(&base.token_id)?,
         "recent_trades": recent,
     })))
