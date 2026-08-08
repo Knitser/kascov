@@ -1,5 +1,25 @@
 [
   {
+    "date": "2026-08-08",
+    "title": "candles, built only from proof",
+    "body": "token and pool pages now draw real candlesticks — TradingView's open-source Lightweight Charts, vendored so the bytes served are the bytes in the repository — over a token's whole life from its first verified trade. timeframes from 15m to 1d, volume underneath, and clicking any candle opens the transaction that closed it, because every candle is bucketed only from trades replayed against the market program's own formula. trades without a chain clock refuse to chart: a candle asserts a duration, and kascov does not invent time. the per-trade step line, every point a link to its transaction, stays one pill away. the API grew /candles and /book to match, both in the OpenAPI document."
+  },
+  {
+    "date": "2026-08-08",
+    "title": "the archive can no longer lie to itself",
+    "body": "the worker now refuses to start against a missing database instead of silently creating an empty one — for the sole archive of mainnet covenant history, amnesia served as health was the worst failure mode there was. every systemd unit escalates failure to a webhook, the watchdog alerts before it self-heals, a weekly job restores an off-site backup and proves the restoration, and deploys must end with the running worker reporting the exact git hash just built — /healthz now carries it. this exists because a hand-run deploy silently rebuilt an old commit this very week; that class of incident is now structurally impossible."
+  },
+  {
+    "date": "2026-08-08",
+    "title": "eight audited builds, and a family of our own",
+    "body": "the matcher now recognises eight builds under one discipline, and the newest is the closest to home: the KCM launch curve — the founder's own launchpad — pinned on exactly the terms every KRON family got. its sources are published and its compiler pinned, so the fixture is reproducible by anyone; recognising a family is not endorsing it. its resting limit orders are indexed too, because an order book is many cells and recognition is the difference between a book existing and not. matcher version 8 re-verifies every stored program, the unknowns board finally shows who pinned each family first, and a new exact-hash tier can recognise single-deployment builds — it ships empty, because publishing constants nobody audited would break the premise."
+  },
+  {
+    "date": "2026-08-08",
+    "title": "findable, at last",
+    "body": "every route now carries its own title and canonical instead of one poetic page answering five addresses, search finds the listed names the site itself displays — with matched:listed provenance, never silently — changelog entries have permalinks the feed points at, pools pages resolve names like every other surface, and the passport's anchor lineage links to an explorer that can actually show the transactions. small screws, but every one of them sat between kascov and a new reader."
+  },
+  {
     "date": "2026-08-07",
     "title": "the whole token market has an API",
     "body": "the public API no longer stops at token summaries. every token can now be searched and paged with stable cursors, then opened for its holders, complete event history and verified trades. there is a global trade feed, a market directory covering bonding curves and graduated pools, and commitment-proven vesting schedules with their claim history. filters cover phase, pricing, side, token and market without turning exact integers into floats. every path is documented in the live API reference and OpenAPI document, and the JavaScript and Python clients speak it too. unverified programs still fail closed: they stay unpriced and out of the trade feed."
