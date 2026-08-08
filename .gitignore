@@ -13,8 +13,12 @@ node_modules/
 __pycache__/
 *.py[cod]
 
-# local editor/agent config and internal audit notes — not for the public repo
+# Local agent settings and GitNexus-generated navigation stay private. Running
+# `npx gitnexus analyze` regenerates these files for whichever agent needs them.
 .claude/
+.gitnexus/
+AGENTS.md
+CLAUDE.md
 HANDOFF-AUDIT.md
 
 # Remotion promo-video project — rendered locally, not tracked

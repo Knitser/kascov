@@ -45,6 +45,15 @@ export class Kascov {
     return res.json();
   }
 
+  #getWithQuery(path, entries) {
+    const q = new URLSearchParams();
+    for (const [key, value] of entries) {
+      if (value != null) q.set(key, value);
+    }
+    const suffix = q.toString();
+    return this.#get(`${path}${suffix ? `?${suffix}` : ''}`);
+  }
+
   /** Small fast feed: stats + chain tip + newest ~150 events. Poll this. */
   live() { return this.#get(`/data/${this.network}-live.json`); }
 
@@ -81,6 +90,77 @@ export class Kascov {
 
   /** Contract-type analytics (what's running on this network). */
   templates() { return this.#get(`/data/${this.network}/templates.json`); }
+
+  /** Derived token/minter directory. No options preserves the legacy full list;
+      any option opts into a bounded page. */
+  tokens(opts = {}) {
+    return this.#getWithQuery(`/data/${this.network}/tokens.json`, [
+      ['limit', opts.limit], ['after_daa', opts.afterDaa], ['after_id', opts.afterId],
+      ['status', opts.status], ['phase', opts.phase], ['kind', opts.kind], ['q', opts.q],
+    ]);
+  }
+
+  /** One derived token, with bounded embedded holders and events. */
+  token(covenantId, opts = {}) {
+    return this.#getWithQuery(`/data/${this.network}/token/${covenantId}`, [
+      ['limit', opts.limit], ['events_limit', opts.eventsLimit],
+      ['after_seq', opts.afterSeq], ['before_seq', opts.beforeSeq], ['order', opts.order],
+    ]);
+  }
+
+  tokenHolders(covenantId, opts = {}) {
+    return this.#getWithQuery(`/data/${this.network}/token/${covenantId}/holders`, [
+      ['limit', opts.limit], ['after_balance', opts.afterBalance], ['after_owner', opts.afterOwner],
+    ]);
+  }
+
+  tokenEvents(covenantId, opts = {}) {
+    return this.#getWithQuery(`/data/${this.network}/token/${covenantId}/events`, [
+      ['limit', opts.limit], ['after_seq', opts.afterSeq],
+      ['before_seq', opts.beforeSeq], ['order', opts.order],
+    ]);
+  }
+
+  tokenTrades(covenantId, opts = {}) {
+    return this.#getWithQuery(`/data/${this.network}/token/${covenantId}/trades`, [
+      ['limit', opts.limit], ['before_seq', opts.beforeSeq],
+    ]);
+  }
+
+  trades(opts = {}) {
+    return this.#getWithQuery(`/data/${this.network}/trades`, [
+      ['limit', opts.limit], ['token_id', opts.tokenId], ['market_id', opts.marketId],
+      ['side', opts.side], ['before_daa', opts.beforeDaa],
+      ['before_token', opts.beforeToken], ['before_seq', opts.beforeSeq],
+    ]);
+  }
+
+  markets(opts = {}) {
+    return this.#getWithQuery(`/data/${this.network}/markets`, [
+      ['limit', opts.limit], ['after_id', opts.afterId],
+      ['phase', opts.phase], ['priced', opts.priced],
+    ]);
+  }
+
+  market(covenantId) { return this.#get(`/data/${this.network}/market/${covenantId}`); }
+  tokenMarket(covenantId) { return this.#get(`/data/${this.network}/token/${covenantId}/market`); }
+
+  pools(opts = {}) {
+    return this.#getWithQuery(`/data/${this.network}/pools`, [
+      ['limit', opts.limit], ['after_id', opts.afterId], ['priced', opts.priced],
+    ]);
+  }
+
+  pool(covenantId) { return this.#get(`/data/${this.network}/pool/${covenantId}`); }
+  vesting(opts = {}) {
+    return this.#getWithQuery(`/data/${this.network}/vesting`, [
+      ['limit', opts.limit], ['after_id', opts.afterId],
+    ]);
+  }
+  vestingDetail(tokenOrLockId) { return this.#get(`/data/${this.network}/vesting/${tokenOrLockId}`); }
+  vestingClaims(tokenOrLockId) { return this.#get(`/data/${this.network}/vesting/${tokenOrLockId}/claims`); }
+  index() { return this.#get(`/data/${this.network}/index.json`); }
+  openapi() { return this.#get('/openapi.json'); }
 
   /** Births/moves/burns per DAA bucket. range: 1h|6h|24h|48h|all */
   activity(range = '24h') { return this.#get(`/data/${this.network}/activity.json?range=${range}`); }

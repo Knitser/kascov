@@ -42,6 +42,13 @@ token_minters(minter_covenant_id, token_id)
 token_events(token_id, covenant_id, seq, delta_idx, kind, amount,
              owner_from, owner_to, accepting_daa, tx_index)
 token_balances(token_id, owner, balance, cells)
+token_trades(token_id, seq, txid, market_covenant_id, side,
+             base_amount, quote_sompi, accepting_daa, accepting_time_ms)
+market_programs(covenant_id PK, program_hash, skeleton, invariant_ok,
+                exercised_trades, token_covenant_id, lp_token_covenant_id)
+vesting_schedules(token_id PK, lock_covenant_id UNIQUE, creator_pubkey,
+                  total, start_score, duration_score, genesis_txid,
+                  genesis_output_index, template_hash, source, proved_at_daa)
 ```
 
 ## Table families
@@ -59,7 +66,14 @@ The KCC20 tables are rebuildable projections:
 - `tokens` stores the validation verdict and aggregate provenance;
 - `token_events` records per-event deltas, including multi-output fan-out;
 - `token_balances` contains only live hash-proven cells;
-- `token_minters` links governing minter/vault covenants to tokens.
+- `token_minters` links governing minter/vault covenants to tokens;
+- `token_trades` stores exact chain-derived amount pairs, while publication
+  joins through a verified token and an allowlisted, invariant-checked
+  `market_programs` row;
+- `vesting_schedules` accepts an external schedule only as a candidate. The
+  row is written only when the full audited template plus candidate state
+  reproduces the genesis lock's P2SH commitment. Live continuation states are
+  re-proved against their own commitments when served.
 
 `verified` is fail-closed: an unknown transition, ambiguous amount, unresolved live cell, or broken commitment prevents that verdict and records a reason.
 

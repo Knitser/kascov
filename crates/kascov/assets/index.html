@@ -58,7 +58,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700;12..96,800&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/style.css?v=20260805-mobilefit">
+  <link rel="stylesheet" href="/style.css?v=20260808-buildout">
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -649,6 +649,10 @@
           <a href="#ep-inscriptions">Inscriptions</a>
           <a href="#ep-tokens">Tokens</a>
           <a href="#ep-token">One token</a>
+          <a href="#ep-token-pages">Token holders/events/trades</a>
+          <a href="#ep-markets">Markets &amp; pools</a>
+          <a href="#ep-vesting">Vesting</a>
+          <a href="#ep-openapi">OpenAPI</a>
           <a href="#ep-lifespans">Lifespans</a>
           <a href="#ep-reorgs">Reorgs</a>
           <a href="#ep-consistency">Consistency</a>
@@ -1075,7 +1079,7 @@ data: {"kind":"pending","tx_kind":"transition",
           </article>
 
           <article class="api-endpoint" id="ep-tokens">
-            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/tokens.json</code></div>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/tokens.json</code><span class="ep-q">?limit=&amp;after_daa=&amp;after_id=&amp;status=&amp;phase=&amp;kind=&amp;q=</span></div>
             <p class="ep-desc">The covenant-token directory behind the <a href="#/tokens" data-network-route="tokens">tokens</a> page — every KCC20-shaped coin the indexer decoded, its ticker and fields read straight from the chain's bytes, plus a <strong>conservative validation verdict</strong> per token: <code class="mono">status</code> is <code class="mono">verified</code> only when every event in the token's history matched a known KCC20 rule and supply is conserved; anything unknown or ambiguous stays <code class="mono">unvalidated</code> with a reason — never a false "valid". The response explains itself in <code class="mono">note</code> — surface it to your users too. Older workers answer the pre-validation shape (<code class="mono">status</code> is the coin's <code class="mono">active</code>/<code class="mono">burned</code> liveness, no supply fields) — treat those tokens as unvalidated.</p>
             <div class="ep-example"><div class="ep-ex-head">Response · <span class="ok">200</span></div><pre class="codeblock"><code>{
   "note": "validated from chain — verified means every event matched …",
@@ -1100,6 +1104,36 @@ data: {"kind":"pending","tx_kind":"transition",
               <tr><td class="mono">tokens[].minted / burned</td><td>int?</td><td>lifetime totals in raw token units</td></tr>
               <tr><td class="mono">tokens[].holders</td><td>int?</td><td>owners with a non-zero balance right now</td></tr>
             </tbody></table>
+          </article>
+
+          <article class="api-endpoint" id="ep-token-pages">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/token/{id}/holders</code><span class="ep-q">?limit=&amp;after_balance=&amp;after_owner=</span></div>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/token/{id}/events</code><span class="ep-q">?limit=&amp;after_seq=&amp;before_seq=&amp;order=</span></div>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/token/{id}/trades</code><span class="ep-q">?limit=&amp;before_seq=</span></div>
+            <p class="ep-desc">Dedicated stable pages for one token. Holder cursors are the opaque balance/owner pair returned by the previous page. Event limits count whole events, so a multi-delta transfer is never split or skipped. Trades are newest first and publish only after the token validates and the market byte-matches an allowlisted build, has enough exercised trades, and passes invariant replay.</p>
+          </article>
+
+          <article class="api-endpoint" id="ep-markets">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/trades</code><span class="ep-q">?limit=&amp;token_id=&amp;market_id=&amp;side=&amp;before_daa=&amp;before_token=&amp;before_seq=</span></div>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/markets</code><span class="ep-q">?limit=&amp;after_id=&amp;phase=&amp;priced=</span></div>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/market/{id}</code></div>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/pools</code><span class="ep-q">?limit=&amp;after_id=&amp;priced=</span></div>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/pool/{id}</code></div>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/token/{id}/market</code></div>
+            <p class="ep-desc">Verified bonding curves and graduated pools, plus a global compound-cursor trade feed. Prices never become floats: use the exact <code class="mono">quote_sompi</code> and <code class="mono">base_amount</code> pair. Unmatched programs, failed invariants, and unverified tokens remain unpriced and cannot enter the trade feed.</p>
+          </article>
+
+          <article class="api-endpoint" id="ep-vesting">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/vesting</code><span class="ep-q">?limit=&amp;after_id=</span></div>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/vesting/{token_or_lock_id}</code></div>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/vesting/{token_or_lock_id}/claims</code></div>
+            <p class="ep-desc">Commitment-proven vesting schedules, states, and claim deltas. Registry data supplies only a candidate schedule; kascov publishes it only when the complete audited program reproduces the genesis lock's P2SH commitment. Continuations are independently matched to their output commitments. <code class="mono">start_score</code> and <code class="mono">duration_score</code> are DAA scores, not timestamps.</p>
+          </article>
+
+          <article class="api-endpoint" id="ep-openapi">
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/openapi.json</code></div>
+            <div class="ep-head"><span class="method get">GET</span><code class="ep-path">/data/{network}/index.json</code></div>
+            <p class="ep-desc">The standard OpenAPI 3.1 contract and the smaller per-network discovery document. Both use kascov project identity only; there is no generator or agent branding in the contract.</p>
           </article>
 
           <article class="api-endpoint" id="ep-token">
@@ -1581,6 +1615,6 @@ the amount committed in the input: used=100000, limit=9999</span></code></pre></
   <script src="/graph.js?v=20260805-mobilefit" defer></script>
   <script src="/gen.js?v=20260805-mobilefit" defer></script>
   <script src="/decode-payload.js?v=20260805-mobilefit" defer></script>
-  <script type="module" src="/app.js?v=20260805-mobilefit"></script>
+  <script type="module" src="/app.js?v=20260808-buildout"></script>
 </body>
 </html>

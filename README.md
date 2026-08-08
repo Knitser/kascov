@@ -111,6 +111,9 @@ curl -s https://kascov.io/data/mainnet.json | jq '.covenants[0]'
 
 # what this worker offers, per network
 curl -s https://kascov.io/data/mainnet/index.json | jq .endpoints
+
+# standard OpenAPI 3.1 contract (all project identity, no generated branding)
+curl -s https://kascov.io/openapi.json | jq .openapi
 ```
 
 | endpoint | returns |
@@ -121,7 +124,11 @@ curl -s https://kascov.io/data/mainnet/index.json | jq .endpoints
 | `/data/{net}/coins?ids=` | Batch coin summaries. |
 | `/data/{net}/events?after_daa=&after_seq=&limit=` | The raw event log, forward-paginated. |
 | `/data/{net}/tx/{txid}`, `/data/{net}/addr/{address}` | Transaction and address views. |
-| `/data/{net}/tokens.json`, `/data/{net}/token/{id}` | Token directory and one token's whole story, with validation verdicts. |
+| `/data/{net}/tokens.json`, `/data/{net}/token/{id}` | Filterable, cursor-paginated token directory and one token's whole story, with validation verdicts. |
+| `/data/{net}/token/{id}/holders`, `/events`, `/trades` | Stable pages over hash-proven holders, whole classified events, and admitted trades. |
+| `/data/{net}/trades`, `/markets`, `/market/{id}` | Global admitted-trade feed and verified bonding/pool market directory and detail. |
+| `/data/{net}/pools`, `/pool/{id}`, `/token/{id}/market` | Graduated pools and token-to-market resolution. |
+| `/data/{net}/vesting`, `/vesting/{id}`, `/vesting/{id}/claims` | Schedules, states, and claims published only after reproducing their on-chain P2SH commitments. |
 | `/data/{net}/search?q=` | Ids, friendly names and templates. |
 | `/data/{net}/galaxy.json?tier=core&fmt=2` | Network graph geometry. `tier=core` returns only the larger clusters for a fast first paint; `fmt=2` switches to a columnar shape (parallel arrays instead of per-node objects), and `tier=visual` adds the outer geometry as a small delta over core. |
 | `/data/{net}/lanes.json`, `/data/{net}/lane/{ns}` | Payload lanes — inscriptions and namespace tags with their own volumes. |
@@ -132,6 +139,7 @@ curl -s https://kascov.io/data/mainnet/index.json | jq .endpoints
 | `/data/{net}/simulate`, `debug/{txid}`, `zk-verify`, `compile`, `publish` | Off-chain script-engine execution, replay, proof verification, contract compilation. |
 | `/data/{net}/subscribe`, `unsubscribe` | Webhooks (`{url, covenant_id?, kind?}`), delivered with SSRF guards. |
 | `/share/{net}/{id}`, `/og/{net}/{id}`, `/badge/{net}/{id}`, `/img/{net}/{id}` | Shareable coin page, rendered OG PNG, SVG badge, hash-verified token art. |
+| `/openapi.json`, `/data/{net}/index.json` | OpenAPI 3.1 contract and compact per-network endpoint discovery. |
 | `/healthz`, `/sitemap.xml`, `/feed.xml` | Sync state per network, crawlable coin index, changelog feed. |
 
 **Pagination.** A bare grid request returns a first page capped at 20,000 rows, newest activity first. When more remain, the response carries `next_after_daa` + `next_after_id`; pass them back as `?after_daa=&after_id=&limit=` to keep walking (default page 5,000). `/events` uses the same shape with `after_seq`.
@@ -176,7 +184,7 @@ python3 -m unittest scripts/test_traffic_report.py  # log-parsing privacy rules
 
 None of this needs a Kaspa node. `ChainSource` is a boundary trait, so the sync engine is driven by scripted virtual chains against temporary SQLite stores — including reorgs, rollback and re-acceptance convergence. The web tests are dependency-free and assert against the real `web/` sources rather than a copy.
 
-**Previewing the site.** `web/` is static, but the pages fetch worker routes, so a bare file server leaves them empty. Run the worker and put the static files in front of it with `/data/**`, `/share/**`, `/og/**`, `/badge/**`, `/img/**`, `/sitemap.xml`, `/feed.xml` and `/healthz` proxied through — `scripts/kascov.Caddyfile` is the reference for exactly which paths those are, and its `try_files {path} {path}.html {path}/ /index.html` is what makes clean URLs like `/guide` reach the hash router. Pointing the same proxy at `https://kascov.io` instead of a local worker is enough to work on the frontend alone.
+**Previewing the site.** `web/` is static, but the pages fetch worker routes, so a bare file server leaves them empty. Run the worker and put the static files in front of it with `/data/**`, `/share/**`, `/og/**`, `/badge/**`, `/img/**`, `/openapi.json`, `/sitemap.xml`, `/feed.xml` and `/healthz` proxied through — `scripts/kascov.Caddyfile` is the reference for exactly which paths those are, and its `try_files {path} {path}.html {path}/ /index.html` is what makes clean URLs like `/guide` reach the hash router. Pointing the same proxy at `https://kascov.io` instead of a local worker is enough to work on the frontend alone; that mode deliberately refuses write methods.
 
 ## Running your own instance
 
@@ -184,7 +192,7 @@ None of this needs a Kaspa node. `ChainSource` is a boundary trait, so the sync 
 cargo run --release -p kascov -- serve --listen 0.0.0.0:8080 --networks mainnet,testnet-10
 ```
 
-The worker owns one SQLite file per network (`~/.kascov/<network>.db` by default) — disposable and rebuildable from the chain, though rebuilding cannot recover history that has since been pruned. Put a reverse proxy in front to serve `web/` as static files and forward `/data/**`, `/share/**`, `/og/**`, `/badge/**`, `/img/**`, `/sitemap.xml`, `/feed.xml` and `/healthz` to the worker; `scripts/kascov.Caddyfile` is the reference. Point it at your own `kaspad --utxoindex` for anything you intend to keep.
+The worker owns one SQLite file per network (`~/.kascov/<network>.db` by default) — disposable and rebuildable from the chain, though rebuilding cannot recover history that has since been pruned. Put a reverse proxy in front to serve `web/` as static files and forward `/data/**`, `/share/**`, `/og/**`, `/badge/**`, `/img/**`, `/openapi.json`, `/sitemap.xml`, `/feed.xml` and `/healthz` to the worker; `scripts/kascov.Caddyfile` is the reference. Point it at your own `kaspad --utxoindex` for anything you intend to keep.
 
 Production runs beside kascov's own archival mainnet and testnet-10 nodes: Caddy serves the static site and proxies the worker over the host bridge. The Firebase and Cloud Run configs in this repo remain only as migration history.
 

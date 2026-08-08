@@ -273,6 +273,24 @@ CREATE TABLE IF NOT EXISTS token_balances (
 );
 CREATE INDEX IF NOT EXISTS bal_top ON token_balances(token_id, balance DESC);
 
+-- A schedule enters this table only after its complete candidate state
+-- reproduces a vesting lock's genesis P2SH commitment. The external list is
+-- therefore provenance for the candidate, never authority for the row.
+CREATE TABLE IF NOT EXISTS vesting_schedules (
+    token_id BLOB PRIMARY KEY,
+    lock_covenant_id BLOB NOT NULL UNIQUE,
+    creator_pubkey BLOB NOT NULL,
+    total INTEGER NOT NULL,
+    start_score INTEGER NOT NULL,
+    duration_score INTEGER NOT NULL,
+    genesis_txid BLOB NOT NULL,
+    genesis_output_index INTEGER NOT NULL,
+    template_hash BLOB NOT NULL,
+    source TEXT NOT NULL,
+    proved_at_daa INTEGER
+);
+CREATE INDEX IF NOT EXISTS vesting_by_lock ON vesting_schedules(lock_covenant_id);
+
 -- The verification log: one row per derivation PASS over this network's
 -- database. A pass is either a rebuild of the derived token tables ('full')
 -- or a re-verification of every linked market program ('markets'). The
@@ -648,6 +666,44 @@ pub struct UtxoRow {
     pub spent_budget: Option<u16>,
 }
 
+/// A vesting schedule whose full candidate state reproduced the lock's
+/// genesis commitment. The source supplied the candidate; the chain proved it.
+#[derive(Clone, Debug, Serialize)]
+pub struct VestingScheduleRow {
+    pub token_id: CovenantId,
+    pub lock_covenant_id: CovenantId,
+    pub creator_pubkey: String,
+    pub total: u64,
+    pub start_score: u64,
+    pub duration_score: u64,
+    pub genesis_txid: TxId,
+    pub genesis_output_index: u32,
+    pub template_hash: String,
+    pub source: String,
+    pub proved_at_daa: Option<u64>,
+}
+
+/// One proof-grade state in a vesting lock's continuation chain.
+#[derive(Clone, Debug, Serialize)]
+pub struct VestingStateRow {
+    pub txid: TxId,
+    pub output_index: u32,
+    pub created_daa: u64,
+    pub claimed: u64,
+    pub claimed_delta: u64,
+    pub live: bool,
+    /// `genesis`, `reveal`, or `continuation_witness` — the exact proof path.
+    pub proof: String,
+}
+
+/// A globally ordered trade paired with its token id.
+#[derive(Clone, Debug, Serialize)]
+pub struct GlobalTokenTradeRow {
+    pub token_id: CovenantId,
+    #[serde(flatten)]
+    pub trade: crate::tokens::TokenTradeRow,
+}
+
 /// A state UTXO some transaction spent, with the captured witness — what the
 /// real-spend debugger replays through the script engine.
 #[derive(Clone, Debug, Serialize)]
@@ -979,16 +1035,16 @@ fn derive_resting_order(conn: &Connection, covenant_id: &[u8; 32]) -> Result<()>
         .map_err(db_err)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(db_err)?;
-    let mut posted: Option<(crate::market::OrderParams, i64)> = None;
+    let mut posted: Option<(crate::market::OrderParams, i64, Vec<u8>)> = None;
     for (spk, sig, created_daa) in &rows {
         if let Some(program) = kascov_decode::p2sh_reveal(spk, sig) {
             if let Some(order) = crate::market::match_kcm_order(&program) {
-                posted = Some((order, *created_daa));
+                posted = Some((order, *created_daa, spk.clone()));
                 break;
             }
         }
     }
-    let Some((order, created_daa)) = posted else {
+    let Some((order, created_daa, order_spk)) = posted else {
         conn.execute(
             "DELETE FROM resting_orders WHERE covenant_id = ?1",
             [covenant_id.as_slice()],
@@ -997,11 +1053,15 @@ fn derive_resting_order(conn: &Connection, covenant_id: &[u8; 32]) -> Result<()>
         return Ok(());
     };
 
+    // "Open" requires a live cell whose spk still commits to the ORDER
+    // program — the same P2SH hash the reveal proved. A live cell with any
+    // other commitment is some other lifecycle (a re-post with different
+    // terms, a continuation) and must not keep a consumed order on the book.
     let live: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM covenant_utxos
-             WHERE covenant_id = ?1 AND spent_block IS NULL)",
-            [covenant_id.as_slice()],
+             WHERE covenant_id = ?1 AND spent_block IS NULL AND spk_script = ?2)",
+            rusqlite::params![covenant_id.as_slice(), order_spk.as_slice()],
             |r| r.get(0),
         )
         .map_err(db_err)?;
@@ -1197,6 +1257,22 @@ impl Store {
             "ALTER TABLE tokens ADD COLUMN trades INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE tokens ADD COLUMN co_moved_trades INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE tokens ADD COLUMN trades_missing_time INTEGER NOT NULL DEFAULT 0",
+            "CREATE INDEX IF NOT EXISTS tt_global_order ON token_trades(accepting_daa DESC, token_id DESC, seq DESC)",
+            "CREATE TABLE IF NOT EXISTS vesting_schedules (
+                token_id BLOB PRIMARY KEY,
+                lock_covenant_id BLOB NOT NULL UNIQUE,
+                creator_pubkey BLOB NOT NULL,
+                total INTEGER NOT NULL,
+                start_score INTEGER NOT NULL,
+                duration_score INTEGER NOT NULL,
+                genesis_txid BLOB NOT NULL,
+                genesis_output_index INTEGER NOT NULL DEFAULT 0,
+                template_hash BLOB NOT NULL,
+                source TEXT NOT NULL,
+                proved_at_daa INTEGER
+            )",
+            "CREATE INDEX IF NOT EXISTS vesting_by_lock ON vesting_schedules(lock_covenant_id)",
+            "ALTER TABLE vesting_schedules ADD COLUMN genesis_output_index INTEGER NOT NULL DEFAULT 0",
         ];
         for sql in &migrations {
             if let Err(e) = conn.execute(sql, []) {
@@ -4542,10 +4618,28 @@ impl Store {
     /// How many verified trades this token has, so a UI can offer "all of
     /// them" with a real number instead of the size of whatever page it got.
     pub fn token_trades_count(&self, id: &CovenantId) -> Result<i64> {
+        let skeletons = crate::market::MATCHED_SKELETONS;
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM token_trades WHERE token_id = ?1",
-                [id.0.as_slice()],
+                "SELECT COUNT(*)
+                 FROM token_trades tt
+                 JOIN tokens tok ON tok.token_id = tt.token_id AND tok.status = 'verified'
+                 JOIN market_programs mp ON mp.covenant_id = tt.market_covenant_id
+                    AND mp.invariant_ok = 1
+                    AND mp.skeleton IN (?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    AND mp.exercised_trades >= ?9
+                 WHERE tt.token_id = ?1",
+                params![
+                    id.0.as_slice(),
+                    skeletons[0],
+                    skeletons[1],
+                    skeletons[2],
+                    skeletons[3],
+                    skeletons[4],
+                    skeletons[5],
+                    skeletons[6],
+                    crate::market::MIN_EXERCISED_TRADES,
+                ],
                 |r| r.get(0),
             )
             .map_err(db_err)
@@ -4719,7 +4813,7 @@ impl Store {
         before: &std::collections::BTreeMap<[u8; 32], String>,
         error: Option<&str>,
     ) -> Result<()> {
-        let allow: [&str; 6] = crate::market::MATCHED_SKELETONS;
+        let allow = crate::market::MATCHED_SKELETONS;
         let (verified, unvalidated, invalid) = self
             .conn
             .query_row(
@@ -5184,6 +5278,45 @@ impl Store {
         crate::tokens::token_balances(&self.conn, &id.0, limit)
     }
 
+    /// Stable holder pagination: balance descending, owner ascending.
+    pub fn token_balances_page(
+        &self,
+        id: &CovenantId,
+        after_balance: Option<i64>,
+        after_owner: Option<&str>,
+        limit: u64,
+    ) -> Result<Vec<crate::tokens::TokenBalanceRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT owner, balance, cells FROM token_balances
+                 WHERE token_id = ?1
+                   AND (?2 IS NULL OR balance < ?2 OR (balance = ?2 AND owner > ?3))
+                 ORDER BY balance DESC, owner ASC LIMIT ?4",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    id.0.as_slice(),
+                    after_balance,
+                    after_owner,
+                    limit.min(i64::MAX as u64) as i64
+                ],
+                |r| {
+                    Ok(crate::tokens::TokenBalanceRow {
+                        owner: r.get(0)?,
+                        balance: r.get(1)?,
+                        cells: r.get(2)?,
+                    })
+                },
+            )
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
     /// One page of a token's classified event deltas (exclusive `after_seq`
     /// cursor, oldest first).
     pub fn token_events_page(
@@ -5223,6 +5356,463 @@ impl Store {
         limit: u64,
     ) -> Result<Vec<crate::tokens::TokenTradeRow>> {
         crate::tokens::token_trades_page(&self.conn, &id.0, limit)
+    }
+
+    /// One token's trades newest first, before an exclusive sequence cursor.
+    pub fn token_trades_page_before(
+        &self,
+        id: &CovenantId,
+        before_seq: Option<u64>,
+        limit: u64,
+    ) -> Result<Vec<crate::tokens::TokenTradeRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT tt.seq, tt.txid, tt.market_covenant_id, tt.side,
+                        tt.base_amount, tt.quote_sompi, tt.kas_before_sompi,
+                        tt.kas_after_sompi, tt.base_before, tt.base_after,
+                        tt.co_covenants, tt.accepting_daa, tt.accepting_time_ms,
+                        tt.counterparty
+                 FROM token_trades tt
+                 JOIN tokens tok ON tok.token_id = tt.token_id AND tok.status = 'verified'
+                 JOIN market_programs mp ON mp.covenant_id = tt.market_covenant_id
+                    AND mp.invariant_ok = 1
+                    AND mp.skeleton IN (?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                    AND mp.exercised_trades >= ?11
+                 WHERE tt.token_id = ?1 AND tt.seq < ?2
+                 ORDER BY tt.seq DESC LIMIT ?3",
+            )
+            .map_err(db_err)?;
+        let before = before_seq
+            .map(|v| v.min(i64::MAX as u64) as i64)
+            .unwrap_or(i64::MAX);
+        let skeletons = crate::market::MATCHED_SKELETONS;
+        let rows = stmt
+            .query_map(
+                params![
+                    id.0.as_slice(),
+                    before,
+                    limit.min(i64::MAX as u64) as i64,
+                    skeletons[0],
+                    skeletons[1],
+                    skeletons[2],
+                    skeletons[3],
+                    skeletons[4],
+                    skeletons[5],
+                    skeletons[6],
+                    crate::market::MIN_EXERCISED_TRADES,
+                ],
+                |r| {
+                    Ok(crate::tokens::TokenTradeRow {
+                        seq: r.get::<_, i64>(0)? as u64,
+                        txid: TxId(r.get(1)?),
+                        market_covenant_id: CovenantId(r.get(2)?),
+                        side: r.get(3)?,
+                        base_amount: r.get(4)?,
+                        quote_sompi: r.get(5)?,
+                        kas_before_sompi: r.get(6)?,
+                        kas_after_sompi: r.get(7)?,
+                        base_before: r.get(8)?,
+                        base_after: r.get(9)?,
+                        co_covenants: r.get(10)?,
+                        accepting_daa: r.get::<_, i64>(11)? as u64,
+                        accepting_time_ms: r.get(12)?,
+                        counterparty: r.get(13)?,
+                    })
+                },
+            )
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Global verified-trade feed with optional token/market/side filters and
+    /// a compound exclusive cursor matching its stable sort order.
+    pub fn global_token_trades_page(
+        &self,
+        token_id: Option<&CovenantId>,
+        market_id: Option<&CovenantId>,
+        side: Option<&str>,
+        before: Option<(u64, &CovenantId, u64)>,
+        limit: u64,
+    ) -> Result<Vec<GlobalTokenTradeRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT tt.token_id, tt.seq, tt.txid, tt.market_covenant_id,
+                        tt.side, tt.base_amount, tt.quote_sompi,
+                        tt.kas_before_sompi, tt.kas_after_sompi, tt.base_before,
+                        tt.base_after, tt.co_covenants, tt.accepting_daa,
+                        tt.accepting_time_ms, tt.counterparty
+                 FROM token_trades tt
+                 JOIN tokens tok ON tok.token_id = tt.token_id AND tok.status = 'verified'
+                 JOIN market_programs mp ON mp.covenant_id = tt.market_covenant_id
+                    AND mp.invariant_ok = 1
+                    AND mp.skeleton IN (?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                    AND mp.exercised_trades >= ?15
+                 WHERE (?1 IS NULL OR tt.token_id = ?1)
+                   AND (?2 IS NULL OR tt.market_covenant_id = ?2)
+                   AND (?3 IS NULL OR tt.side = ?3)
+                   AND (?4 IS NULL OR tt.accepting_daa < ?4
+                        OR (tt.accepting_daa = ?4 AND tt.token_id < ?5)
+                        OR (tt.accepting_daa = ?4 AND tt.token_id = ?5 AND tt.seq < ?6))
+                 ORDER BY tt.accepting_daa DESC, tt.token_id DESC, tt.seq DESC LIMIT ?7",
+            )
+            .map_err(db_err)?;
+        let token_blob = token_id.map(|id| id.0.as_slice());
+        let market_blob = market_id.map(|id| id.0.as_slice());
+        let (before_daa, before_token, before_seq) = match before {
+            Some((daa, token, seq)) => (
+                Some(daa.min(i64::MAX as u64) as i64),
+                Some(token.0.as_slice()),
+                Some(seq.min(i64::MAX as u64) as i64),
+            ),
+            None => (None, None, None),
+        };
+        let skeletons = crate::market::MATCHED_SKELETONS;
+        let rows = stmt
+            .query_map(
+                params![
+                    token_blob,
+                    market_blob,
+                    side,
+                    before_daa,
+                    before_token,
+                    before_seq,
+                    limit.min(i64::MAX as u64) as i64,
+                    skeletons[0],
+                    skeletons[1],
+                    skeletons[2],
+                    skeletons[3],
+                    skeletons[4],
+                    skeletons[5],
+                    skeletons[6],
+                    crate::market::MIN_EXERCISED_TRADES,
+                ],
+                |r| {
+                    Ok(GlobalTokenTradeRow {
+                        token_id: CovenantId(r.get(0)?),
+                        trade: crate::tokens::TokenTradeRow {
+                            seq: r.get::<_, i64>(1)? as u64,
+                            txid: TxId(r.get(2)?),
+                            market_covenant_id: CovenantId(r.get(3)?),
+                            side: r.get(4)?,
+                            base_amount: r.get(5)?,
+                            quote_sompi: r.get(6)?,
+                            kas_before_sompi: r.get(7)?,
+                            kas_after_sompi: r.get(8)?,
+                            base_before: r.get(9)?,
+                            base_after: r.get(10)?,
+                            co_covenants: r.get(11)?,
+                            accepting_daa: r.get::<_, i64>(12)? as u64,
+                            accepting_time_ms: r.get(13)?,
+                            counterparty: r.get(14)?,
+                        },
+                    })
+                },
+            )
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    pub fn market_program(
+        &self,
+        id: &CovenantId,
+    ) -> Result<Option<crate::market::MarketProgramRow>> {
+        crate::market::market_program_row(&self.conn, &id.0)
+    }
+
+    /// Tokens whose verified market link or program identity points at this
+    /// market. Includes the pool's LP token where one is proven.
+    pub fn tokens_for_market(&self, id: &CovenantId) -> Result<Vec<crate::tokens::TokenDirRow>> {
+        let program = self.market_program(id)?;
+        let rows = self.token_directory()?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| {
+                row.market_covenant_id.as_ref() == Some(id)
+                    || program.as_ref().is_some_and(|p| {
+                        p.token_covenant_id.as_ref() == Some(&row.token_id)
+                            || p.lp_token_covenant_id.as_ref() == Some(&row.token_id)
+                    })
+            })
+            .collect())
+    }
+
+    /// Verify and persist a complete vesting schedule candidate. The database
+    /// write is unreachable unless the candidate reproduces the genesis lock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prove_and_put_vesting_schedule(
+        &self,
+        token_id: &CovenantId,
+        lock_covenant_id: &CovenantId,
+        creator: &[u8; 32],
+        total: u64,
+        start_score: u64,
+        duration_score: u64,
+        genesis_txid: &TxId,
+        genesis_output_index: u32,
+        source: &str,
+    ) -> Result<bool> {
+        if source.len() > 128 {
+            return Err(Error::Invalid {
+                what: "vesting source",
+                value: "must be at most 128 bytes".into(),
+            });
+        }
+        let genesis_output_spk: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT spk_script FROM covenant_utxos
+                 WHERE covenant_id = ?1 AND txid = ?2 AND output_index = ?3",
+                params![
+                    lock_covenant_id.0.as_slice(),
+                    genesis_txid.0.as_slice(),
+                    genesis_output_index,
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+        let Some(genesis_output_spk) = genesis_output_spk else {
+            return Ok(false);
+        };
+        if !kascov_decode::vesting::prove_genesis_lock(
+            &genesis_output_spk,
+            creator,
+            total,
+            start_score,
+            duration_score,
+        ) {
+            return Ok(false);
+        }
+        let as_i64 = |what: &'static str, value: u64| {
+            i64::try_from(value).map_err(|_| Error::Invalid {
+                what,
+                value: value.to_string(),
+            })
+        };
+        let tip_daa = self.tip()?.map(|tip| tip.0.min(i64::MAX as u64) as i64);
+        self.conn
+            .execute(
+                "INSERT INTO vesting_schedules
+                    (token_id, lock_covenant_id, creator_pubkey, total, start_score,
+                     duration_score, genesis_txid, genesis_output_index, template_hash,
+                     source, proved_at_daa)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(token_id) DO UPDATE SET
+                    lock_covenant_id=excluded.lock_covenant_id,
+                    creator_pubkey=excluded.creator_pubkey,
+                    total=excluded.total,
+                    start_score=excluded.start_score,
+                    duration_score=excluded.duration_score,
+                    genesis_txid=excluded.genesis_txid,
+                    genesis_output_index=excluded.genesis_output_index,
+                    template_hash=excluded.template_hash,
+                    source=excluded.source,
+                    proved_at_daa=excluded.proved_at_daa",
+                params![
+                    token_id.0.as_slice(),
+                    lock_covenant_id.0.as_slice(),
+                    creator.as_slice(),
+                    as_i64("vesting total", total)?,
+                    as_i64("vesting start", start_score)?,
+                    as_i64("vesting duration", duration_score)?,
+                    genesis_txid.0.as_slice(),
+                    genesis_output_index,
+                    kascov_decode::vesting::KRON_VESTING_TEMPLATE_HASH.as_slice(),
+                    source,
+                    tip_daa,
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(true)
+    }
+
+    fn map_vesting_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<VestingScheduleRow> {
+        Ok(VestingScheduleRow {
+            token_id: CovenantId(row.get(0)?),
+            lock_covenant_id: CovenantId(row.get(1)?),
+            creator_pubkey: hex::encode(row.get::<_, Vec<u8>>(2)?),
+            total: row.get::<_, i64>(3)? as u64,
+            start_score: row.get::<_, i64>(4)? as u64,
+            duration_score: row.get::<_, i64>(5)? as u64,
+            genesis_txid: TxId(row.get(6)?),
+            genesis_output_index: row.get(7)?,
+            template_hash: hex::encode(row.get::<_, Vec<u8>>(8)?),
+            source: row.get(9)?,
+            proved_at_daa: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
+        })
+    }
+
+    pub fn vesting_schedules(&self) -> Result<Vec<VestingScheduleRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT v.token_id, v.lock_covenant_id, v.creator_pubkey, v.total,
+                        v.start_score, v.duration_score, v.genesis_txid,
+                        v.genesis_output_index, v.template_hash, v.source, v.proved_at_daa
+                 FROM vesting_schedules v
+                 WHERE EXISTS (
+                    SELECT 1 FROM covenant_utxos u
+                    WHERE u.covenant_id = v.lock_covenant_id
+                      AND u.txid = v.genesis_txid
+                      AND u.output_index = v.genesis_output_index
+                 )
+                 ORDER BY v.start_score DESC, v.token_id DESC",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], Self::map_vesting_schedule)
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    /// Resolve by token id or lock covenant id for ergonomic detail URLs.
+    pub fn vesting_schedule(&self, id: &CovenantId) -> Result<Option<VestingScheduleRow>> {
+        self.conn
+            .query_row(
+                "SELECT v.token_id, v.lock_covenant_id, v.creator_pubkey, v.total,
+                        v.start_score, v.duration_score, v.genesis_txid,
+                        v.genesis_output_index, v.template_hash, v.source, v.proved_at_daa
+                 FROM vesting_schedules v
+                 WHERE (v.token_id = ?1 OR v.lock_covenant_id = ?1)
+                   AND EXISTS (
+                      SELECT 1 FROM covenant_utxos u
+                      WHERE u.covenant_id = v.lock_covenant_id
+                        AND u.txid = v.genesis_txid
+                        AND u.output_index = v.genesis_output_index
+                   )
+                 LIMIT 1",
+                [id.0.as_slice()],
+                Self::map_vesting_schedule,
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
+    /// Walk the vesting cell's actual spend/create chain from its exact genesis
+    /// outpoint. Every continuation is re-proved from the witness that created
+    /// it (or its later exact reveal), so unrelated cells sharing the covenant
+    /// id can never be mistaken for part of this schedule.
+    pub fn vesting_states(&self, schedule: &VestingScheduleRow) -> Result<Vec<VestingStateRow>> {
+        let creator_vec = hex::decode(&schedule.creator_pubkey).map_err(|e| Error::Invalid {
+            what: "vesting creator",
+            value: e.to_string(),
+        })?;
+        let creator: [u8; 32] = creator_vec
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Invalid {
+                what: "vesting creator",
+                value: schedule.creator_pubkey.clone(),
+            })?;
+        let utxos = self.utxos(&schedule.lock_covenant_id, false)?;
+        let genesis_state = kascov_decode::vesting::VestingState {
+            creator,
+            total: schedule.total,
+            start_score: schedule.start_score,
+            duration_score: schedule.duration_score,
+            claimed: 0,
+        };
+        let Some(mut current_index) = utxos.iter().position(|utxo| {
+            utxo.outpoint.txid == schedule.genesis_txid
+                && utxo.outpoint.index == schedule.genesis_output_index
+                && kascov_decode::vesting::prove_state(&utxo.spk_script, &genesis_state)
+        }) else {
+            return Err(Error::Invalid {
+                what: "vesting genesis",
+                value: "stored genesis outpoint no longer reproduces its schedule".into(),
+            });
+        };
+        let mut state = genesis_state;
+        let mut proof = "genesis";
+        let mut previous_claimed = 0u64;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut rows = Vec::new();
+        loop {
+            let utxo = &utxos[current_index];
+            if !seen.insert((utxo.outpoint.txid.0, utxo.outpoint.index)) {
+                return Err(Error::Invalid {
+                    what: "vesting continuation",
+                    value: "cycle in continuation outpoints".into(),
+                });
+            }
+            let delta =
+                state
+                    .claimed
+                    .checked_sub(previous_claimed)
+                    .ok_or_else(|| Error::Invalid {
+                        what: "vesting continuation",
+                        value: "claimed counter decreased".into(),
+                    })?;
+            rows.push(VestingStateRow {
+                txid: utxo.outpoint.txid,
+                output_index: utxo.outpoint.index,
+                created_daa: utxo.created_daa,
+                claimed: state.claimed,
+                claimed_delta: delta,
+                live: utxo.live,
+                proof: proof.into(),
+            });
+            previous_claimed = state.claimed;
+            if utxo.live || state.claimed == schedule.total {
+                break;
+            }
+            let Some(next_txid) = utxo.spent_txid else {
+                break;
+            };
+            let witness = utxo.spent_sig.as_deref();
+            let mut matches = Vec::new();
+            for (index, candidate) in utxos
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| candidate.outpoint.txid == next_txid)
+            {
+                let recovered = witness.and_then(|witness| {
+                    kascov_decode::vesting::recover_continuation_state(
+                        &candidate.spk_script,
+                        &creator,
+                        schedule.total,
+                        schedule.start_score,
+                        schedule.duration_score,
+                        witness,
+                    )
+                });
+                let revealed = candidate
+                    .spent_sig
+                    .as_deref()
+                    .and_then(|sig| kascov_decode::p2sh_reveal(&candidate.spk_script, sig))
+                    .as_deref()
+                    .and_then(kascov_decode::vesting::decode_state);
+                let Some((candidate_state, candidate_proof)) = recovered
+                    .map(|state| (state, "continuation_witness"))
+                    .or_else(|| revealed.map(|state| (state, "reveal")))
+                else {
+                    continue;
+                };
+                if candidate_state.creator == creator
+                    && candidate_state.total == schedule.total
+                    && candidate_state.start_score == schedule.start_score
+                    && candidate_state.duration_score == schedule.duration_score
+                    && candidate_state.claimed >= state.claimed
+                {
+                    matches.push((index, candidate_state, candidate_proof));
+                }
+            }
+            let [(next_index, next_state, next_proof)] = matches.as_slice() else {
+                break;
+            };
+            current_index = *next_index;
+            state = *next_state;
+            proof = next_proof;
+        }
+        Ok(rows)
     }
 
     /// One page of a token's event deltas walking BACKWARDS from the tip.
@@ -7250,5 +7840,242 @@ mod tests {
             UnsubscribeOutcome::Deleted
         );
         assert_eq!(store.subscription_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn holder_pages_use_a_stable_balance_and_owner_cursor() {
+        let store = test_store("holder-page");
+        let token = CovenantId([0xA1; 32]);
+        for (owner, balance) in [("00aa", 10), ("00bb", 10), ("00cc", 5)] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO token_balances (token_id, owner, balance, cells) VALUES (?1, ?2, ?3, 1)",
+                    params![token.0.as_slice(), owner, balance],
+                )
+                .unwrap();
+        }
+        let first = store.token_balances_page(&token, None, None, 2).unwrap();
+        assert_eq!(
+            first.iter().map(|r| r.owner.as_str()).collect::<Vec<_>>(),
+            ["00aa", "00bb"]
+        );
+        let second = store
+            .token_balances_page(&token, Some(first[1].balance), Some(&first[1].owner), 2)
+            .unwrap();
+        assert_eq!(
+            second.iter().map(|r| r.owner.as_str()).collect::<Vec<_>>(),
+            ["00cc"]
+        );
+    }
+
+    #[test]
+    fn global_trade_pages_keep_equal_daa_rows_without_duplicates() {
+        let store = test_store("global-trades");
+        let market = [0xF0u8; 32];
+        store
+            .conn
+            .execute(
+                "INSERT INTO market_programs
+                    (covenant_id, program_hash, skeleton, invariant_ok, exercised_trades)
+                 VALUES (?1, ?2, 'KRON curve v1', 1, ?3)",
+                params![
+                    market.as_slice(),
+                    [0xAAu8; 32].as_slice(),
+                    crate::market::MIN_EXERCISED_TRADES,
+                ],
+            )
+            .unwrap();
+        let insert = |token: u8, seq: i64, daa: i64| {
+            store
+                .conn
+                .execute(
+                    "INSERT OR IGNORE INTO tokens (token_id, status) VALUES (?1, 'verified')",
+                    [[token; 32].as_slice()],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO token_trades
+                    (token_id, seq, txid, market_covenant_id, side, base_amount,
+                     quote_sompi, kas_before_sompi, kas_after_sompi, base_before,
+                     base_after, co_covenants, accepting_daa)
+                 VALUES (?1, ?2, ?3, ?4, 'buy', 1, 100000000, 1, 2, 2, 1, 0, ?5)",
+                    params![
+                        [token; 32].as_slice(),
+                        seq,
+                        [token.wrapping_add(seq as u8); 32].as_slice(),
+                        market.as_slice(),
+                        daa,
+                    ],
+                )
+                .unwrap();
+        };
+        insert(0xB2, 2, 100);
+        insert(0xB1, 1, 100);
+        insert(0xB3, 3, 99);
+        insert(0xB4, 4, 101);
+        store
+            .conn
+            .execute(
+                "UPDATE tokens SET status = 'invalid' WHERE token_id = ?1",
+                [[0xB4u8; 32].as_slice()],
+            )
+            .unwrap();
+        let first = store
+            .global_token_trades_page(None, None, None, None, 2)
+            .unwrap();
+        assert_eq!(first.len(), 2);
+        let last = first.last().unwrap();
+        let second = store
+            .global_token_trades_page(
+                None,
+                None,
+                None,
+                Some((last.trade.accepting_daa, &last.token_id, last.trade.seq)),
+                2,
+            )
+            .unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].trade.accepting_daa, 99);
+    }
+
+    #[test]
+    fn only_a_commitment_proven_vesting_schedule_is_persisted() {
+        let store = test_store("vesting-schedule");
+        let token = CovenantId([0xC1; 32]);
+        let lock = CovenantId([0xC2; 32]);
+        let genesis = TxId([0xC3; 32]);
+        let creator = [
+            0x98, 0x8a, 0x0b, 0x5e, 0x4d, 0xc7, 0xe8, 0xa2, 0x44, 0x9d, 0x24, 0x95, 0x4b, 0x67,
+            0xf8, 0x2a, 0x30, 0x90, 0x79, 0xea, 0x83, 0x0d, 0x28, 0x64, 0x28, 0x1f, 0x86, 0xff,
+            0xb4, 0x94, 0xe5, 0x6a,
+        ];
+        let spk: Vec<u8> = vec![
+            0xaa, 0x20, 0x0b, 0x1f, 0xb6, 0xee, 0xd9, 0x44, 0xc6, 0xa1, 0xd3, 0x58, 0x1f, 0xaf,
+            0x3c, 0x42, 0x23, 0x00, 0xf3, 0x41, 0xf8, 0x49, 0x96, 0x82, 0x34, 0x9f, 0x0b, 0x55,
+            0x30, 0x1d, 0xe3, 0xcb, 0x6d, 0x38, 0x87,
+        ];
+        store
+            .conn
+            .execute(
+                "INSERT INTO covenant_utxos
+                    (txid, output_index, covenant_id, value, spk_version, spk_script,
+                     created_block, created_daa)
+                 VALUES (?1, 3, ?2, 0, 0, ?3, ?4, 500000000)",
+                params![
+                    genesis.0.as_slice(),
+                    lock.0.as_slice(),
+                    spk,
+                    [0xEEu8; 32].as_slice(),
+                ],
+            )
+            .unwrap();
+        assert!(store
+            .prove_and_put_vesting_schedule(
+                &token,
+                &lock,
+                &creator,
+                100_000_000,
+                499_658_470,
+                298_796_626,
+                &genesis,
+                3,
+                "KRON registry (commitment-proven)",
+            )
+            .unwrap());
+        assert_eq!(store.vesting_schedules().unwrap().len(), 1);
+
+        let mut wrong = spk.clone();
+        wrong[2] ^= 1;
+        store
+            .conn
+            .execute(
+                "INSERT INTO covenant_utxos
+                    (txid, output_index, covenant_id, value, spk_version, spk_script,
+                     created_block, created_daa)
+                 VALUES (?1, 0, ?2, 0, 0, ?3, ?4, 500000001)",
+                params![
+                    [0xD3u8; 32].as_slice(),
+                    [0xD2u8; 32].as_slice(),
+                    wrong,
+                    [0xEFu8; 32].as_slice(),
+                ],
+            )
+            .unwrap();
+        assert!(!store
+            .prove_and_put_vesting_schedule(
+                &CovenantId([0xD1; 32]),
+                &CovenantId([0xD2; 32]),
+                &creator,
+                100_000_000,
+                499_658_470,
+                298_796_626,
+                &TxId([0xD3; 32]),
+                0,
+                "untrusted candidate",
+            )
+            .unwrap());
+        assert_eq!(store.vesting_schedules().unwrap().len(), 1);
+
+        let schedule = store.vesting_schedule(&token).unwrap().unwrap();
+        assert_eq!(schedule.genesis_output_index, 3);
+        let states = store.vesting_states(&schedule).unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].proof, "genesis");
+        assert_eq!(states[0].claimed, 0);
+
+        let continuation_txid = TxId([0xC4; 32]);
+        let claimed = 25_000_000u64;
+        let continuation_state = kascov_decode::vesting::VestingState {
+            creator,
+            total: 100_000_000,
+            start_score: 499_658_470,
+            duration_score: 298_796_626,
+            claimed,
+        };
+        let mut continuation_spk = vec![0xaa, 0x20];
+        continuation_spk.extend_from_slice(&kascov_decode::vesting::state_commitment(
+            &continuation_state,
+        ));
+        continuation_spk.push(0x87);
+        let mut witness = vec![0x08];
+        witness.extend_from_slice(&claimed.to_le_bytes());
+        store
+            .conn
+            .execute(
+                "UPDATE covenant_utxos
+                 SET spent_block = ?1, spent_txid = ?2, spent_sig = ?3
+                 WHERE txid = ?4 AND output_index = 3",
+                params![
+                    [0xABu8; 32].as_slice(),
+                    continuation_txid.0.as_slice(),
+                    witness,
+                    genesis.0.as_slice(),
+                ],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO covenant_utxos
+                    (txid, output_index, covenant_id, value, spk_version, spk_script,
+                     created_block, created_daa)
+                 VALUES (?1, 0, ?2, 0, 0, ?3, ?4, 500000100)",
+                params![
+                    continuation_txid.0.as_slice(),
+                    lock.0.as_slice(),
+                    continuation_spk,
+                    [0xACu8; 32].as_slice(),
+                ],
+            )
+            .unwrap();
+        let states = store.vesting_states(&schedule).unwrap();
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[1].claimed, claimed);
+        assert_eq!(states[1].claimed_delta, claimed);
+        assert_eq!(states[1].proof, "continuation_witness");
+        assert!(states[1].live);
     }
 }

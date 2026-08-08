@@ -68,7 +68,7 @@ kascov.io {
 			flush_interval -1
 		}
 	}
-	@worker path /data/* /share/* /og/* /badge/* /img/* /listed-img/* /sitemap.xml /feed.xml /health /healthz
+	@worker path /data/* /share/* /og/* /badge/* /img/* /listed-img/* /openapi.json /sitemap.xml /feed.xml /health /healthz
 	handle @worker {
 		reverse_proxy 127.0.0.1:8080
 	}

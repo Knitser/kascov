@@ -1689,9 +1689,9 @@ pub(crate) fn token_balances(
     Ok(rows)
 }
 
-/// One page of a token's classified event deltas, oldest first. `after_seq`
-/// is an exclusive cursor (`seq` is strictly increasing per covenant and
-/// agrees with the canonical feed order for a single covenant).
+/// One page of a token's classified events, oldest first. The limit counts
+/// distinct event sequences, and every delta belonging to each selected event
+/// is returned. `after_seq` is an exclusive cursor.
 pub(crate) fn token_events_page(
     conn: &Connection,
     id: &[u8; 32],
@@ -1700,15 +1700,23 @@ pub(crate) fn token_events_page(
 ) -> Result<Vec<TokenEventRow>> {
     let mut stmt = conn
         .prepare(
-            "SELECT e.seq, e.delta_idx, e.kind, e.amount, e.owner_from, e.owner_to,
+            "WITH page(seq) AS (
+                 SELECT seq FROM token_events
+                 WHERE token_id = ?1 AND seq > ?2
+                 GROUP BY seq ORDER BY seq LIMIT ?3
+             )
+             SELECT e.seq, e.delta_idx, e.kind, e.amount, e.owner_from, e.owner_to,
                     e.accepting_daa, e.tx_index, ce.txid, ce.kind
              FROM token_events e
+             JOIN page ON page.seq = e.seq
              JOIN covenant_events ce ON ce.covenant_id = e.covenant_id AND ce.seq = e.seq
-             WHERE e.token_id = ?1 AND e.seq > ?2
-             ORDER BY e.seq, e.delta_idx LIMIT ?3",
+             WHERE e.token_id = ?1
+             ORDER BY e.seq, e.delta_idx",
         )
         .map_err(db_err)?;
-    let after = after_seq.map(|s| s as i64).unwrap_or(-1);
+    let after = after_seq
+        .map(|s| s.min(i64::MAX as u64) as i64)
+        .unwrap_or(-1);
     let limit = limit.min(i64::MAX as u64) as i64;
     let rows = stmt
         .query_map(params![id.as_slice(), after, limit], |r| {
@@ -1731,8 +1739,9 @@ pub(crate) fn token_events_page(
     Ok(rows)
 }
 
-/// One page of a token's classified event deltas, NEWEST first. `before_seq`
-/// is an exclusive cursor walking backwards; `None` starts at the tip.
+/// One page of a token's classified events, NEWEST first. The limit counts
+/// distinct event sequences and never splits their deltas. `before_seq` is an
+/// exclusive cursor walking backwards; `None` starts at the tip.
 ///
 /// A history is read from the present backwards. Serving only the ascending
 /// page meant a reader of an active token saw its first minutes and nothing
@@ -1745,16 +1754,24 @@ pub(crate) fn token_events_page_before(
 ) -> Result<Vec<TokenEventRow>> {
     let mut stmt = conn
         .prepare(
-            "SELECT e.seq, e.delta_idx, e.kind, e.amount, e.owner_from, e.owner_to,
+            "WITH page(seq) AS (
+                 SELECT seq FROM token_events
+                 WHERE token_id = ?1 AND seq < ?2
+                 GROUP BY seq ORDER BY seq DESC LIMIT ?3
+             )
+             SELECT e.seq, e.delta_idx, e.kind, e.amount, e.owner_from, e.owner_to,
                     e.accepting_daa, e.tx_index, ce.txid, ce.kind
              FROM token_events e
+             JOIN page ON page.seq = e.seq
              JOIN covenant_events ce ON ce.covenant_id = e.covenant_id AND ce.seq = e.seq
-             WHERE e.token_id = ?1 AND e.seq < ?2
-             ORDER BY e.seq DESC, e.delta_idx DESC LIMIT ?3",
+             WHERE e.token_id = ?1
+             ORDER BY e.seq DESC, e.delta_idx DESC",
         )
         .map_err(db_err)?;
     // `None` means "from the tip": every real seq is below this bound.
-    let before = before_seq.map(|s| s as i64).unwrap_or(i64::MAX);
+    let before = before_seq
+        .map(|s| s.min(i64::MAX as u64) as i64)
+        .unwrap_or(i64::MAX);
     let limit = limit.min(i64::MAX as u64) as i64;
     let rows = stmt
         .query_map(params![id.as_slice(), before, limit], |r| {
@@ -2476,6 +2493,11 @@ mod tests {
             .unwrap();
         let mint_deltas: Vec<_> = evs.iter().filter(|e| e.seq == 1).collect();
         assert_eq!(mint_deltas.len(), 2);
+        let one_event = store
+            .token_events_page(&CovenantId(COV), Some(0), 1)
+            .unwrap();
+        assert_eq!(one_event.len(), 2, "an event page must include every delta");
+        assert!(one_event.iter().all(|event| event.seq == 1));
         assert!(mint_deltas.iter().any(|d| d.amount == Some(100)
             && d.owner_to.as_deref() == Some(holder(0x20, 100).into_key().as_str())));
     }

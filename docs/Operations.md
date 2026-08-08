@@ -9,7 +9,7 @@ Production runs from a dedicated Windows server:
 - Caddy serves the mirrored `web/` directory;
 - the Rust worker runs as `kascov-worker` inside WSL2;
 - mainnet and testnet-10 archival `kaspad` services run on the host;
-- Caddy proxies data, stream, image, share, feed, sitemap, and health routes to the worker.
+- Caddy proxies data, OpenAPI, stream, image, share, feed, sitemap, and health routes to the worker.
 
 Release procedure:
 

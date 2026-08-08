@@ -135,6 +135,30 @@ class PollingRoutes(unittest.TestCase):
             req = capture(call, response=page)
             self.assertEqual(req.full_url, url)
 
+    def test_token_market_and_vesting_endpoints_hit_registered_routes(self):
+        k = Kascov("testnet-10")
+        n = "https://kascov.io/data/testnet-10"
+        cases = [
+            (lambda: k.tokens(limit=5, status="verified", q="tree"), f"{n}/tokens.json?limit=5&status=verified&q=tree"),
+            (lambda: k.token(COVENANT, events_limit=7, order="desc"), f"{n}/token/{COVENANT}?events_limit=7&order=desc"),
+            (lambda: k.token_holders(COVENANT, limit=3, after_balance=9, after_owner="02aa"), f"{n}/token/{COVENANT}/holders?limit=3&after_balance=9&after_owner=02aa"),
+            (lambda: k.token_events(COVENANT, limit=4, before_seq=8), f"{n}/token/{COVENANT}/events?limit=4&before_seq=8"),
+            (lambda: k.token_trades(COVENANT, limit=6, before_seq=7), f"{n}/token/{COVENANT}/trades?limit=6&before_seq=7"),
+            (lambda: k.trades(limit=2, token_id=COVENANT, side="buy"), f"{n}/trades?limit=2&token_id={COVENANT}&side=buy"),
+            (lambda: k.markets(phase="bonding", priced=True), f"{n}/markets?phase=bonding&priced=true"),
+            (lambda: k.market(COVENANT), f"{n}/market/{COVENANT}"),
+            (lambda: k.token_market(COVENANT), f"{n}/token/{COVENANT}/market"),
+            (lambda: k.pools(priced=False), f"{n}/pools?priced=false"),
+            (lambda: k.pool(COVENANT), f"{n}/pool/{COVENANT}"),
+            (k.vesting, f"{n}/vesting"),
+            (lambda: k.vesting_detail(COVENANT), f"{n}/vesting/{COVENANT}"),
+            (lambda: k.vesting_claims(COVENANT), f"{n}/vesting/{COVENANT}/claims"),
+            (k.index, f"{n}/index.json"),
+            (k.openapi, "https://kascov.io/openapi.json"),
+        ]
+        for call, url in cases:
+            self.assertEqual(capture(call).full_url, url)
+
 
 class BadgeVerification(unittest.TestCase):
     """The scheme here is the spec the bot's merkle publisher

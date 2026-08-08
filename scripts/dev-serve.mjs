@@ -4,9 +4,10 @@
  * Serves web/ the way production does (the routing here mirrors
  * scripts/kascov.Caddyfile) so the SPA behaves like kascov.io on localhost:
  * real files first, then {path}.html, then the index shell for hash routes.
- * Worker routes (/data, /share, /og, /badge, /img, /sitemap.xml, /feed.xml,
- * /health) are reverse-proxied to the live origin, which is what makes the
- * page boot with real snapshots instead of a wall of 404s.
+ * Worker routes (/data, /share, /og, /badge, /img, /openapi.json,
+ * /sitemap.xml, /feed.xml, /health) are reverse-proxied to the selected
+ * upstream, which is what makes the page boot with real snapshots instead of
+ * a wall of 404s. Write methods are allowed only for a localhost upstream.
  *
  * It also carries a synthetic mempool, because the pending section
  * feature-hides itself when /pending 404s and testnet-10's real mempool is
@@ -21,7 +22,7 @@
  *   node scripts/dev-serve.mjs                          # testnet-10 synthetic, mainnet real
  *   DEMO_NETWORKS=testnet-10,mainnet node scripts/...    # fake both
  *   DEMO=0 node scripts/dev-serve.mjs                    # fake nothing
- *   PORT=9000 UPSTREAM=https://kascov.io node scripts/dev-serve.mjs
+ *   PORT=9000 UPSTREAM=http://127.0.0.1:8080 node scripts/dev-serve.mjs
  *
  * Controls, from a second terminal (or just visit them in a tab). They act on
  * the demo networks only, and accept ?net= to single one out:
@@ -34,7 +35,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { createReadStream, existsSync, statSync } from 'node:fs';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { extname, join, normalize, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,7 +43,15 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolvePath(fileURLToPath(new URL('../web', import.meta.url)));
 const PORT = Number(process.env.PORT || 8787);
 const UPSTREAM = process.env.UPSTREAM || 'https://kascov.io';
-const UPSTREAM_HOST = new URL(UPSTREAM).hostname;
+const UPSTREAM_URL = new URL(UPSTREAM);
+if (!['http:', 'https:'].includes(UPSTREAM_URL.protocol)) {
+  throw new Error('UPSTREAM must use http: or https:');
+}
+const UPSTREAM_HOST = UPSTREAM_URL.hostname;
+const UPSTREAM_PORT = UPSTREAM_URL.port
+  || (UPSTREAM_URL.protocol === 'https:' ? 443 : 80);
+const upstreamRequest = UPSTREAM_URL.protocol === 'https:' ? httpsRequest : httpRequest;
+const LOCAL_UPSTREAM = new Set(['127.0.0.1', 'localhost', '::1']).has(UPSTREAM_HOST);
 
 const NETWORKS = ['mainnet', 'testnet-10'];
 /* Only these segments get an invented mempool. Anything else proxies, so the
@@ -94,20 +103,28 @@ function serveStatic(req, res, pathname) {
 /* ------------------------------------------------------- upstream proxy */
 
 const WORKER_PREFIX = /^\/(data|share|og|badge|img|listed-img)\//;
-const WORKER_EXACT = new Set(['/sitemap.xml', '/feed.xml', '/health', '/healthz']);
+const WORKER_EXACT = new Set([
+  '/openapi.json', '/sitemap.xml', '/feed.xml', '/health', '/healthz',
+]);
 const isWorkerRoute = (p) => WORKER_PREFIX.test(p) || WORKER_EXACT.has(p);
 
 function proxy(req, res, pathname, search) {
   const headers = {
-    host: UPSTREAM_HOST,
+    host: UPSTREAM_URL.host,
     accept: req.headers.accept || '*/*',
     'user-agent': 'kascov-dev-serve',
     /* identity, so an SSE body is never handed to us gzip-buffered */
     'accept-encoding': 'identity',
   };
   if (req.headers['content-type']) headers['content-type'] = req.headers['content-type'];
-  const up = httpsRequest(
-    { hostname: UPSTREAM_HOST, port: 443, path: pathname + search, method: req.method, headers },
+  const up = upstreamRequest(
+    {
+      hostname: UPSTREAM_HOST,
+      port: UPSTREAM_PORT,
+      path: pathname + search,
+      method: req.method,
+      headers,
+    },
     (upRes) => {
       const out = { ...upRes.headers };
       delete out['content-encoding'];
@@ -317,7 +334,13 @@ const server = createServer((req, res) => {
     return res.end(JSON.stringify(pendingSnapshot(mempool[1])));
   }
 
-  if (isWorkerRoute(pathname)) return proxy(req, res, pathname, url.search);
+  if (isWorkerRoute(pathname)) {
+    if (!LOCAL_UPSTREAM && req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405).end();
+      return;
+    }
+    return proxy(req, res, pathname, url.search);
+  }
   if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405).end(); return; }
   return serveStatic(req, res, pathname);
 });

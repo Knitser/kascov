@@ -131,6 +131,48 @@ test('the polling endpoints still hit their registered routes', async () => {
   ]);
 });
 
+test('token, trade, market, pool, vesting, index, and OpenAPI methods pin the public routes', async () => {
+  const { impl, calls } = fakeFetch();
+  await withFetch(impl, async () => {
+    const k = new Kascov('testnet-10');
+    await k.tokens({ limit: 5, status: 'verified', q: 'tree' });
+    await k.token(COVENANT, { eventsLimit: 7, order: 'desc' });
+    await k.tokenHolders(COVENANT, { limit: 3, afterBalance: 9, afterOwner: '02aa' });
+    await k.tokenEvents(COVENANT, { limit: 4, beforeSeq: 8 });
+    await k.tokenTrades(COVENANT, { limit: 6, beforeSeq: 7 });
+    await k.trades({ limit: 2, tokenId: COVENANT, side: 'buy' });
+    await k.markets({ phase: 'bonding', priced: true });
+    await k.market(COVENANT);
+    await k.tokenMarket(COVENANT);
+    await k.pools({ priced: false });
+    await k.pool(COVENANT);
+    await k.vesting();
+    await k.vestingDetail(COVENANT);
+    await k.vestingClaims(COVENANT);
+    await k.index();
+    await k.openapi();
+  });
+  const n = 'https://kascov.io/data/testnet-10';
+  assert.deepEqual(calls.map((call) => call.url), [
+    `${n}/tokens.json?limit=5&status=verified&q=tree`,
+    `${n}/token/${COVENANT}?events_limit=7&order=desc`,
+    `${n}/token/${COVENANT}/holders?limit=3&after_balance=9&after_owner=02aa`,
+    `${n}/token/${COVENANT}/events?limit=4&before_seq=8`,
+    `${n}/token/${COVENANT}/trades?limit=6&before_seq=7`,
+    `${n}/trades?limit=2&token_id=${COVENANT}&side=buy`,
+    `${n}/markets?phase=bonding&priced=true`,
+    `${n}/market/${COVENANT}`,
+    `${n}/token/${COVENANT}/market`,
+    `${n}/pools?priced=false`,
+    `${n}/pool/${COVENANT}`,
+    `${n}/vesting`,
+    `${n}/vesting/${COVENANT}`,
+    `${n}/vesting/${COVENANT}/claims`,
+    `${n}/index.json`,
+    'https://kascov.io/openapi.json',
+  ]);
+});
+
 /* ---- passport badge verification -------------------------------------
    The scheme here is the spec the bot's merkle publisher
    (scripts/discord-holder-bot.mjs) must match: sha256 over canonical
