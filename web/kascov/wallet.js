@@ -376,22 +376,38 @@ function loadSdk() {
  * NOTE: this wRPC fallback and its reshape are not runtime-verified in this
  * environment (they need a wallet, a browser and a live node). The trusted,
  * exercised path is api.kaspa.org above. */
-function rpcModelToITransaction(tx) {
+export function rpcModelToITransaction(tx) {
+  /* The SDK's safe JSON writes a ScriptPublicKey as ONE hex string whose first
+     four characters are the u16 version: "0000" + "aa20…87". Taking that whole
+     string as the script is what handed the node a script beginning 0000aa20
+     and earned "non-standard script form". Split it back apart; an object form
+     is passed through unchanged. */
   const spk = (s) => {
     if (s == null) throw new Error('output missing scriptPublicKey');
-    const script = typeof s === 'string' ? s : s.script ?? s.scriptPublicKey;
+    if (typeof s === 'string') {
+      const hex = s.trim().toLowerCase();
+      if (hex.length < 6 || hex.length % 2 !== 0 || /[^0-9a-f]/.test(hex)) {
+        throw new Error(`scriptPublicKey is not a hex string: ${s}`);
+      }
+      return { version: parseInt(hex.slice(0, 4), 16), script: hex.slice(4) };
+    }
+    const script = s.script ?? s.scriptPublicKey;
     if (script == null) throw new Error('output scriptPublicKey missing its script hex');
     return { version: Number(s.version ?? 0), script: String(script) };
   };
   return {
     version: Number(tx.version ?? 0),
     inputs: tx.inputs.map((i) => {
+      /* Safe JSON flattens the outpoint onto the input (transactionId/index at
+         the top level); an ITransaction nests it. Resolve once and reuse, so
+         the utxo entry can never disagree with the input it belongs to. */
       const op = i.previousOutpoint || {};
+      const outpoint = {
+        transactionId: String(op.transactionId ?? i.transactionId),
+        index: Number(op.index ?? i.index ?? 0),
+      };
       return {
-        previousOutpoint: {
-          transactionId: String(op.transactionId ?? i.transactionId),
-          index: Number(op.index ?? i.index ?? 0),
-        },
+        previousOutpoint: outpoint,
         signatureScript: i.signatureScript || '',
         sequence: BigInt(i.sequence ?? 0),
         /* A v1 input commits a compute budget; the legacy sig-op count must
@@ -399,7 +415,22 @@ function rpcModelToITransaction(tx) {
            either of these silently rewrote what the trader approved. */
         sigOpCount: Number(i.sigOpCount ?? 0),
         computeBudget: Number(i.computeBudget ?? 0),
-        ...(i.utxo ? { utxo: i.utxo } : {}),
+        /* The SDK's Transaction constructor requires a utxo entry per input,
+           but it is rebuilt here from the fields we know rather than forwarded:
+           a wallet round-trip can hand back an `address` the SDK then refuses
+           ("The address is invalid"), and none of it is consensus data — the
+           node resolves the real outpoints itself. */
+        ...(i.utxo
+          ? {
+              utxo: {
+                outpoint,
+                amount: BigInt(i.utxo.amount ?? 0),
+                scriptPublicKey: spk(i.utxo.scriptPublicKey),
+                blockDaaScore: BigInt(i.utxo.blockDaaScore ?? 0),
+                isCoinbase: Boolean(i.utxo.isCoinbase ?? false),
+              },
+            }
+          : {}),
       };
     }),
     outputs: tx.outputs.map((o) => {
