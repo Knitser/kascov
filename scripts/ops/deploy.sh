@@ -44,7 +44,11 @@ while IFS= read -r f; do
     copied=$((copied+1))
     echo "published ${f#web/}"
   fi
-done < <(git ls-files web/)
+done < <(git ls-files web/ | grep -vE '^web/(kascov\.html|kascov/)')
+# ^ the /kascov trade page is UNLAUNCHED: it stays in the repo but is not
+#   published. Because this loop re-copies anything missing from the target,
+#   removing it server-side alone would resurrect it on the next deploy; this
+#   filter is the single switch. Delete the grep to launch.
 echo "published $copied changed file(s) to $WEBDST"
 
 sudo systemctl restart kascov-worker.service
