@@ -617,8 +617,15 @@ export const COMPUTE_BUDGET_P2PK = 10;
 // the fixtures cannot confirm it (api.kaspa.org reports sig_op_count as null for
 // these trades) — it is the only field of the built transaction with no chain
 // evidence behind it.
+/* A version-1 input commits a compute budget INSTEAD of the v0 sig-op count
+ * (kascov's own decoder says so in kascov-core/src/model.rs: "v1 per-input
+ * compute budget commitment (replaces v0 sig_op_count)"). Carrying a non-zero
+ * legacy count on a v1 transaction is what the node means by
+ * "sig_op_count is inconsistent with transaction version 1" — it rejected a
+ * real trade over exactly this. Every v1 input therefore states 0 here and
+ * lets computeBudget speak. */
 export const SIGOPS_COVENANT = 0;
-export const SIGOPS_P2PK = 1;
+export const SIGOPS_P2PK = 0;
 
 // NETWORK FEE. The two proven trades paid 42_124_320 sompi (buy, node-reported
 // mass 229_134) and 42_714_960 (sell, mass 241_159) and both confirmed on
