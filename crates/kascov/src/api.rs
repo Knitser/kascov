@@ -167,6 +167,92 @@ pub(super) async fn token_holders_handler(
     .await
 }
 
+/// GET /data/{network}/token/{id}/cells — the token's LIVE KCC-20 cells, in
+/// the shape a page needs to reference them as covenant inputs: outpoint,
+/// value, state, and the committed program bytes to reveal.
+///
+/// A live cell's program has never been published — a P2SH commitment only
+/// opens when it is spent — so the bytes here are RECONSTRUCTED from a proven
+/// same-build base plus the cell's own 46-byte state head, and admitted only
+/// when their blake2b equals the UTXO's committed hash. Cells that fail that
+/// check are omitted and counted in `omitted_unproven`; the endpoint never
+/// serves a guessed program, because a wrong one builds a transaction the
+/// script engine rejects.
+pub(super) async fn token_cells_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let network = match resolve_network(&state, &net_name) {
+        Ok(network) => network,
+        Err(response) => return response,
+    };
+    let token_id = match parse_id(&id, "bad token id") {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    let limit = match parse_limit(&q, 200, 1000) {
+        Ok(limit) => limit,
+        Err(response) => return response,
+    };
+    let owner = match q.get("owner") {
+        None => None,
+        Some(owner) => {
+            // The stored owner key: hex(identifier_type || owner_identifier).
+            // Anything else can only ever match nothing, so it is a 400 rather
+            // than a silently empty page.
+            if owner.len() != 66
+                || !owner
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return bad_request(
+                    "owner must be 66 lowercase hex chars: identifier_type || owner_identifier",
+                );
+            }
+            Some(owner.clone())
+        }
+    };
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!(
+        "{network}/token/{token_id}/cells?limit={limit}&owner={}",
+        owner.as_deref().unwrap_or("")
+    );
+    // Short TTL: every trade spends the inventory cell and mints a new one.
+    serve_cached(
+        &state,
+        key,
+        5,
+        "public, max-age=5, s-maxage=10, stale-while-revalidate=30",
+        accepts_gzip(&headers),
+        move || {
+            let store = Store::open(&db, network)?;
+            if store.token_row(&token_id)?.is_none() {
+                return Ok(None);
+            }
+            let cells = store.live_token_cells(&token_id, owner.as_deref(), limit)?;
+            let mut out = serde_json::json!({
+                "network": network.to_string(),
+                "token_id": token_id,
+                "generated_at_ms": now_ms(),
+                "provenance": "every program_hex is a reconstruction whose blake2b equals the \
+                               utxo's own committed script hash; cells that failed that check \
+                               are omitted, not guessed",
+                "cells": cells.cells,
+                "omitted_unproven": cells.omitted_unproven,
+                "omitted_unvalued": cells.omitted_unvalued,
+                "omitted_over_limit": cells.omitted_over_limit,
+            });
+            if let Some(owner) = owner.as_deref() {
+                out["owner"] = serde_json::json!(owner);
+            }
+            Ok(Some(serde_json::to_string(&out)?))
+        },
+    )
+    .await
+}
+
 pub(super) async fn token_events_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
@@ -1064,6 +1150,10 @@ pub(super) fn openapi_document() -> serde_json::Value {
             ]),
             "/data/{network}/token/{id}/book": get("List open resting orders, served as decoded facts with an explicit not-verified provenance note", "tokenBook", vec![network(), id()]),
             "/data/{network}/token/{id}/curve-cell": get("Everything a page needs to build a trade against the live curve cell: outpoint, value, committed script, economics, and the base program bytes to reveal (the page splices the reserve and verifies the hash)", "tokenCurveCell", vec![network(), id()]),
+            "/data/{network}/token/{id}/cells": get("List the token's live KCC-20 cells with the committed program bytes to reveal; each program is reconstructed and only served when its blake2b matches the utxo's committed hash", "tokenCells", vec![
+                network(), id(), query("limit", "Maximum cells", positive_limit.clone()),
+                query("owner", "Filter by owner key: identifier_type || owner_identifier", serde_json::json!({ "type": "string", "pattern": "^[0-9a-f]{66}$" }))
+            ]),
             "/data/{network}/index.json": get("Discover the machine-readable API surface", "index", vec![network()]),
             "/data/{network}/simulate": post("Simulate a covenant action", "simulate", vec![network()]),
             "/data/{network}/preflight": post("Preflight a transaction", "preflight", vec![network()]),
@@ -1141,6 +1231,8 @@ mod tests {
             "/data/{network}/vesting/{id}/claims",
             "/data/{network}/token/{id}/candles",
             "/data/{network}/token/{id}/book",
+            "/data/{network}/token/{id}/curve-cell",
+            "/data/{network}/token/{id}/cells",
         ] {
             assert!(paths.contains_key(path), "missing {path}");
         }

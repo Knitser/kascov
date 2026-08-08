@@ -1663,6 +1663,86 @@ pub(crate) fn token_trades_page(
     Ok(rows)
 }
 
+/// One LIVE KCC-20 cell of a token, carrying the program bytes a spender must
+/// reveal to spend it.
+///
+/// A live P2SH cell's program has never appeared on chain — a commitment is
+/// only opened when it is spent — so `program` is RECONSTRUCTED: a proven
+/// same-build base with this cell's own 46-byte state head spliced in. It is
+/// admitted only when `blake2b256(program)` equals the output's own committed
+/// hash, so these bytes ARE the committed program or the cell is not returned.
+#[derive(Clone, Debug)]
+pub struct LiveTokenCell {
+    pub txid: [u8; 32],
+    pub index: u32,
+    /// hex(identifier_type || owner_identifier) — 66 hex chars.
+    pub owner: String,
+    pub identifier_type: u8,
+    pub amount: i64,
+    pub is_minter: bool,
+    /// The committed program, hash-checked against `spk_script`.
+    pub program: Vec<u8>,
+    pub spk_script: Vec<u8>,
+}
+
+/// Does `program` open the commitment `spk` actually carries? P2SH cells are
+/// checked by blake2b against the committed hash; a bare consensus state
+/// script IS its own program and is checked by equality. Anything else fails
+/// closed — this is the gate that lets a reconstructed program be served.
+fn commits_to(spk: &[u8], program: &[u8]) -> bool {
+    match kascov_decode::p2sh_hash(spk) {
+        Some(hash) => kcc20::blake2b_256(program).as_slice() == hash,
+        None => spk == program,
+    }
+}
+
+/// Every LIVE cell of `token_id` whose state is hash-proven, in load order,
+/// plus the number of live cells that could NOT be proven.
+///
+/// Runs the same two proof passes the derivation runs — reveals first, then
+/// witness recovery — because only they can recover a live cell's state. The
+/// recovery loop skips any transaction whose cells are already proven, and a
+/// spend always reveals its own program, so the work here is confined to the
+/// transactions that created cells still standing. Unproven live cells are
+/// omitted and counted, never guessed at.
+pub(crate) fn live_token_cells(
+    conn: &Connection,
+    token_id: &[u8; 32],
+) -> Result<(Vec<LiveTokenCell>, u64)> {
+    let mut cells = load_cells(conn, token_id)?;
+    prove_direct(&mut cells);
+    prove_recovered(conn, token_id, &mut cells)?;
+    let mut live = Vec::new();
+    let mut omitted = 0u64;
+    for cell in &cells {
+        if !cell.live() {
+            continue;
+        }
+        let (Some((state, program)), Ok(judged)) = (&cell.proven, judge(cell)) else {
+            omitted += 1;
+            continue;
+        };
+        // Re-checked here rather than trusted from the proof pass: a caller
+        // that hands these bytes to a wallet must not depend on a discipline
+        // held somewhere else in the file.
+        if !commits_to(&cell.spk_script, program) {
+            omitted += 1;
+            continue;
+        }
+        live.push(LiveTokenCell {
+            txid: cell.txid,
+            index: cell.index,
+            owner: judged.owner_key,
+            identifier_type: state.identifier_type,
+            amount: judged.amount,
+            is_minter: judged.minter,
+            program: program.clone(),
+            spk_script: cell.spk_script.clone(),
+        });
+    }
+    Ok((live, omitted))
+}
+
 pub(crate) fn token_balances(
     conn: &Connection,
     id: &[u8; 32],
@@ -3055,6 +3135,125 @@ mod tests {
             order_row(&store, ORD_COV).is_none(),
             "the proving reveal is gone, the fact goes with it"
         );
+    }
+
+    /// The trade page has to reference live cells as covenant inputs, and a
+    /// live cell's program has never been on chain. Every program served must
+    /// therefore open the commitment the utxo actually carries — checked here
+    /// against the stored scriptPubKey, not against the value the store just
+    /// handed back — and the state fields must be the ones the cell holds.
+    #[test]
+    fn live_cells_serve_programs_that_open_the_committed_script() {
+        let mut store = test_store("live-cells");
+        // The shape a curve token really has: covenant-owned inventory, a
+        // presence-owned wallet cell, a signature-owned wallet cell.
+        let inventory = covenant_held(0x11, 700);
+        let presence = presence_holder(0x33, 200);
+        let signed = holder(0x22, 100);
+        let outs = [inventory, presence, signed];
+        let g0 = minter_state(1000);
+        BlockBuilder::new(1, 100)
+            .event(COV, EventKind::Genesis, TX_G)
+            .out(COV, TX_G, 0, &g0)
+            .apply(&mut store);
+        let mut b = BlockBuilder::new(2, 200)
+            .event(COV, EventKind::Transition, TX_M)
+            .spend(TX_G, 0, TX_M, sig(&outs, &g0));
+        for (i, o) in outs.iter().enumerate() {
+            // 0.5 KAS of dust, the value a KCC-20 cell actually carries.
+            b = b.out_v(COV, TX_M, i as u32, o, 50_000_000);
+        }
+        b.apply(&mut store);
+
+        let served = store.live_token_cells(&CovenantId(COV), None, 100).unwrap();
+        assert_eq!(served.omitted_unproven, 0);
+        assert_eq!(served.omitted_unvalued, 0);
+        assert_eq!(served.omitted_over_limit, 0);
+        // Largest amount first: 700 inventory, 200 presence, 100 signed.
+        assert_eq!(
+            served.cells.iter().map(|c| c.amount).collect::<Vec<_>>(),
+            vec![700, 200, 100]
+        );
+        assert_eq!(
+            served
+                .cells
+                .iter()
+                .map(|c| c.identifier_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["02", "03", "00"]
+        );
+        assert!(served.cells.iter().all(|c| !c.is_minter));
+        assert!(served.cells.iter().all(|c| c.value_sompi == 50_000_000));
+        assert_eq!(served.cells[0].owner, inventory.into_key());
+
+        // The load-bearing claim: each served program opens the commitment on
+        // the utxo row it names, and is the exact program the cell was built
+        // from. Read the commitment back out of the database so the check does
+        // not lean on anything the serving path computed.
+        let committed: std::collections::HashMap<String, Vec<u8>> = store
+            .utxos(&CovenantId(COV), true)
+            .unwrap()
+            .into_iter()
+            .map(|u| {
+                (
+                    format!("{}:{}", hex::encode(u.outpoint.txid.0), u.outpoint.index),
+                    u.spk_script,
+                )
+            })
+            .collect();
+        for (cell, state) in served.cells.iter().zip([inventory, presence, signed]) {
+            let bytes = hex::decode(&cell.program_hex).unwrap();
+            let spk = committed
+                .get(&cell.outpoint)
+                .expect("cell names a live utxo");
+            assert_eq!(
+                kcc20::blake2b_256(&bytes).as_slice(),
+                kascov_decode::p2sh_hash(spk).unwrap(),
+                "served program does not open {}",
+                cell.outpoint
+            );
+            assert_eq!(bytes, program(&state), "not this cell's build");
+            assert_eq!(
+                cell.script_hex,
+                hex::encode(spk),
+                "script_hex must be the utxo's own committed script"
+            );
+        }
+
+        // The owner filter narrows to one cell without changing its bytes.
+        let only = store
+            .live_token_cells(&CovenantId(COV), Some(&inventory.into_key()), 100)
+            .unwrap();
+        assert_eq!(only.cells.len(), 1);
+        assert_eq!(only.cells[0].program_hex, served.cells[0].program_hex);
+
+        // A bound is a bound: the drop is reported, never silent.
+        let capped = store.live_token_cells(&CovenantId(COV), None, 2).unwrap();
+        assert_eq!(capped.cells.len(), 2);
+        assert_eq!(capped.omitted_over_limit, 1);
+    }
+
+    /// A live cell whose spend left no recoverable args cannot be reconstructed.
+    /// Serving a guessed program would build a transaction the script engine
+    /// rejects, so the cell is omitted — and the omission is counted, so a
+    /// caller can tell "no cells" from "cells kascov could not prove".
+    #[test]
+    fn live_cells_omit_what_cannot_be_proven_and_count_it() {
+        let mut store = test_store("live-cells-opaque");
+        let g0 = minter_state(0);
+        BlockBuilder::new(1, 100)
+            .event(COV, EventKind::Genesis, TX_G)
+            .out(COV, TX_G, 0, &g0)
+            .apply(&mut store);
+        BlockBuilder::new(2, 200)
+            .event(COV, EventKind::Transition, TX_M)
+            .spend(TX_G, 0, TX_M, sig_no_args(&g0))
+            .out(COV, TX_M, 0, &holder(0x20, 100))
+            .apply(&mut store);
+
+        let served = store.live_token_cells(&CovenantId(COV), None, 100).unwrap();
+        assert!(served.cells.is_empty(), "an unproven cell must not ship");
+        assert_eq!(served.omitted_unproven, 1);
     }
 
     trait IntoKey {

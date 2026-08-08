@@ -1976,6 +1976,7 @@ async fn serve(
             "/data/{network}/token/{id}/curve-cell",
             get(token_curve_cell_handler),
         )
+        .route("/data/{network}/token/{id}/cells", get(token_cells_handler))
         .route(
             "/data/{network}/token/{id}/trades",
             get(token_trades_handler),
@@ -8641,6 +8642,8 @@ async fn data_index_handler(
             "token": format!("/data/{n}/token/{{token_id}}.json"),
             "token_candles": format!("/data/{n}/token/{{token_id}}/candles?bucket=1h|4h|1d"),
             "token_book": format!("/data/{n}/token/{{token_id}}/book"),
+            "token_curve_cell": format!("/data/{n}/token/{{token_id}}/curve-cell"),
+            "token_cells": format!("/data/{n}/token/{{token_id}}/cells?limit=&owner="),
             "token_holders": format!("/data/{n}/token/{{token_id}}/holders?limit=&after_balance=&after_owner="),
             "token_events": format!("/data/{n}/token/{{token_id}}/events?limit=&after_seq=&before_seq=&order="),
             "token_trades": format!("/data/{n}/token/{{token_id}}/trades?limit=&before_seq="),

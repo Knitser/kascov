@@ -678,6 +678,42 @@ pub struct UtxoRow {
     pub spent_budget: Option<u16>,
 }
 
+/// One live KCC-20 cell of a token, in the shape a spender needs: which UTXO
+/// to spend, what it is worth, the state it carries, and the committed program
+/// bytes to reveal. `program_hex` is reconstructed and hash-checked against the
+/// UTXO's own commitment before it is built — see [`Store::live_token_cells`].
+#[derive(Clone, Debug, Serialize)]
+pub struct TokenCellRow {
+    /// "txid:index".
+    pub outpoint: String,
+    pub value_sompi: i64,
+    /// hex(identifier_type || owner_identifier) — 66 hex chars.
+    pub owner: String,
+    /// The one-byte identifier type as two hex chars, e.g. "02".
+    pub identifier_type: String,
+    pub amount: i64,
+    pub is_minter: bool,
+    pub program_hex: String,
+    /// The UTXO's committed scriptPubKey — the commitment `program_hex` was
+    /// checked against, and what a signer needs to compute the sighash.
+    pub script_hex: String,
+}
+
+/// The live KCC-20 cells of one token, with what had to be left out.
+#[derive(Clone, Debug, Serialize)]
+pub struct TokenCells {
+    pub cells: Vec<TokenCellRow>,
+    /// Live cells whose state could not be hash-proven. Omitted, never
+    /// guessed: a wrong program would produce an unspendable transaction.
+    /// Counted across the whole token, before any owner filter — an unprovable
+    /// cell has no owner to filter it by.
+    pub omitted_unproven: u64,
+    /// Live cells whose UTXO row carried no value (index inconsistency).
+    pub omitted_unvalued: u64,
+    /// Matching cells dropped by `limit`.
+    pub omitted_over_limit: u64,
+}
+
 /// A vesting schedule whose full candidate state reproduced the lock's
 /// genesis commitment. The source supplied the candidate; the chain proved it.
 #[derive(Clone, Debug, Serialize)]
@@ -5364,6 +5400,88 @@ impl Store {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
         Ok(rows)
+    }
+
+    /// The token's LIVE KCC-20 cells — the covenant inputs a spender actually
+    /// has to reference — each with the committed program bytes to reveal.
+    ///
+    /// A live cell is a P2SH commitment whose program has never been on chain,
+    /// so the program here is RECONSTRUCTED: a proven same-build base with this
+    /// cell's own 46-byte state head ([owner 32B | identifierType 1B |
+    /// amount 8B LE | isMinter 1B]) spliced in, admitted only when its blake2b
+    /// equals the UTXO's committed hash. Cells that fail are omitted and
+    /// counted rather than served with a guessed program — a wrong program
+    /// builds a transaction the script engine rejects.
+    ///
+    /// `owner` filters on the 66-hex `hex(identifier_type || owner_identifier)`
+    /// key. Cells come back largest amount first, then by outpoint, so a caller
+    /// selecting inputs gets a stable order.
+    pub fn live_token_cells(
+        &self,
+        id: &CovenantId,
+        owner: Option<&str>,
+        limit: u64,
+    ) -> Result<TokenCells> {
+        let (live, omitted_unproven) = crate::tokens::live_token_cells(&self.conn, &id.0)?;
+        // Values live on the utxo row, not on the proven state; a cell whose
+        // row is missing here would be an index inconsistency, so it is
+        // dropped and counted rather than served with an invented value.
+        let mut values: std::collections::HashMap<(Vec<u8>, u32), i64> =
+            std::collections::HashMap::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT txid, output_index, value FROM covenant_utxos
+                     WHERE covenant_id = ?1 AND spent_block IS NULL",
+                )
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map([id.0.as_slice()], |r| {
+                    Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, u32>(1)?, r.get(2)?))
+                })
+                .map_err(db_err)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(db_err)?;
+            for (txid, index, value) in rows {
+                values.insert((txid, index), value);
+            }
+        }
+        let mut omitted_unvalued = 0u64;
+        let mut rows: Vec<TokenCellRow> = Vec::new();
+        for cell in live {
+            if owner.is_some_and(|want| want != cell.owner) {
+                continue;
+            }
+            let Some(&value_sompi) = values.get(&(cell.txid.to_vec(), cell.index)) else {
+                omitted_unvalued += 1;
+                continue;
+            };
+            rows.push(TokenCellRow {
+                outpoint: format!("{}:{}", hex::encode(cell.txid), cell.index),
+                value_sompi,
+                owner: cell.owner,
+                identifier_type: hex::encode([cell.identifier_type]),
+                amount: cell.amount,
+                is_minter: cell.is_minter,
+                program_hex: hex::encode(&cell.program),
+                script_hex: hex::encode(&cell.spk_script),
+            });
+        }
+        rows.sort_by(|a, b| {
+            b.amount
+                .cmp(&a.amount)
+                .then_with(|| a.outpoint.cmp(&b.outpoint))
+        });
+        let limit = limit.min(usize::MAX as u64) as usize;
+        let omitted_over_limit = rows.len().saturating_sub(limit) as u64;
+        rows.truncate(limit);
+        Ok(TokenCells {
+            cells: rows,
+            omitted_unproven,
+            omitted_unvalued,
+            omitted_over_limit,
+        })
     }
 
     /// One page of a token's classified event deltas (exclusive `after_seq`
