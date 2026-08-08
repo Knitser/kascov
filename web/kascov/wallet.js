@@ -394,13 +394,25 @@ function rpcModelToITransaction(tx) {
         },
         signatureScript: i.signatureScript || '',
         sequence: BigInt(i.sequence ?? 0),
-        sigOpCount: Number(i.sigOpCount ?? 1),
+        /* A v1 input commits a compute budget; the legacy sig-op count must
+           stay 0 or the node calls it inconsistent with the version. Defaulting
+           either of these silently rewrote what the trader approved. */
+        sigOpCount: Number(i.sigOpCount ?? 0),
+        computeBudget: Number(i.computeBudget ?? 0),
+        ...(i.utxo ? { utxo: i.utxo } : {}),
       };
     }),
-    outputs: tx.outputs.map((o) => ({
-      value: BigInt(o.amount ?? o.value),
-      scriptPublicKey: spk(o.scriptPublicKey),
-    })),
+    outputs: tx.outputs.map((o) => {
+      const out = {
+        value: BigInt(o.amount ?? o.value),
+        scriptPublicKey: spk(o.scriptPublicKey),
+      };
+      /* The covenant binding is what makes an output that creates a covenant
+         cell standard at all. Dropping it here handed the node a bare P2SH and
+         earned "non-standard script form" on output 0. */
+      if (o.covenant) out.covenant = o.covenant;
+      return out;
+    }),
     lockTime: BigInt(tx.lockTime ?? 0),
     subnetworkId: String(tx.subnetworkId ?? '0000000000000000000000000000000000000000'),
     gas: BigInt(tx.gas ?? 0),
