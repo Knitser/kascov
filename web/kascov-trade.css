@@ -1,0 +1,187 @@
+/* kascov — /kascov trade page. Only what this page adds on top of the shared
+   palette in /style.css; every colour is a shared token so the two surfaces
+   can never drift, and light/dark follow the site's `color-scheme: dark`. */
+
+.trade-doc { max-width: 1000px; margin: 0 auto; padding: 2.4rem 1.25rem 5rem; }
+.home {
+  display: inline-flex; align-items: center; gap: .55rem; margin-bottom: 1.6rem;
+  color: var(--faint); text-decoration: none; font-family: var(--mono); font-size: .85rem;
+}
+.home:hover { color: var(--accent); text-decoration: none; }
+
+/* ------------------------------------------------------------------ hero */
+
+.kc-hero { margin: 0 0 1.4rem; }
+.kc-hero-top { display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap; }
+.kc-hero h1 {
+  font-family: var(--display); font-size: clamp(1.9rem, 5vw, 2.7rem);
+  margin: 0; line-height: 1.05; letter-spacing: -0.01em;
+}
+.kc-ticker {
+  font-family: var(--mono); font-size: .8rem; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--accent); background: var(--accent-soft); border: 1px solid var(--border-strong);
+  border-radius: 999px; padding: .28rem .7rem; align-self: center;
+}
+.kc-priceline { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; margin: 1rem 0 .5rem; }
+.kc-price { font-family: var(--mono); font-size: clamp(1.6rem, 4vw, 2.2rem); font-weight: 600; color: var(--text); }
+.kc-price small { font-size: .5em; color: var(--faint); font-weight: 400; margin-left: .3rem; }
+.kc-phase {
+  font-family: var(--mono); font-size: .78rem; letter-spacing: .05em;
+  color: var(--born); background: var(--born-soft); border-radius: 999px; padding: .25rem .7rem;
+}
+.kc-bond { display: flex; align-items: center; gap: .6rem; margin: .2rem 0 .6rem; max-width: 560px; flex-wrap: wrap; }
+.kc-bond-bar {
+  flex: 1 1 120px; height: 8px; border-radius: 999px; background: var(--bg-soft);
+  border: 1px solid var(--border); overflow: hidden;
+}
+.kc-bond-fill { height: 100%; width: 0; background: var(--accent); transition: width .6s ease; }
+/* the progress detail is a long mono string; let it shrink and wrap so a
+   narrow phone never gets a horizontal scrollbar off this one label */
+.kc-bond-label { font-family: var(--mono); font-size: .74rem; color: var(--faint); flex: 1 1 14ch; min-width: 0; white-space: normal; line-height: 1.4; }
+.kc-creed {
+  color: var(--muted); line-height: 1.6; font-size: .96rem; max-width: 70ch;
+  border-left: 2px solid var(--border-strong); padding-left: .9rem; margin: 1rem 0 0;
+}
+
+/* ------------------------------------------------------------- verified stats */
+
+.kc-stats {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: .7rem; margin: 1.6rem 0 1.2rem;
+}
+@media (max-width: 720px) { .kc-stats { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 380px) { .kc-stats { grid-template-columns: 1fr; } }
+.kc-stat {
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: .8rem .95rem;
+}
+.kc-stat-label {
+  font-family: var(--mono); font-size: .68rem; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--faint); display: block;
+}
+.kc-stat-n { font-family: var(--mono); font-size: 1.12rem; font-weight: 600; color: var(--text); margin-top: .35rem; word-break: break-word; }
+.kc-stat-n.soft { color: var(--faint); font-size: .9rem; font-weight: 400; }
+.kc-stat-prove { display: block; margin-top: .35rem; font-family: var(--mono); font-size: .66rem; color: var(--faint); }
+a.kc-stat { text-decoration: none; color: inherit; display: block; }
+a.kc-stat:hover { border-color: var(--border-strong); background: var(--card-hover); }
+a.kc-stat:hover .kc-stat-prove { color: var(--accent); }
+
+/* ---------------------------------------------------------------- sections */
+
+.kc-section { margin: 2.2rem 0 0; }
+.kc-section > h2 {
+  font-family: var(--mono); font-size: .78rem; font-weight: 600; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--faint); margin: 0 0 1rem;
+  display: flex; align-items: center; gap: .7rem;
+}
+.kc-section > h2::before { content: "▮"; color: var(--accent); font-size: .6rem; }
+.kc-section > h2::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--border), transparent); }
+
+.kc-chart-empty {
+  border: 1px dashed var(--border); border-radius: var(--radius-sm);
+  padding: 1.4rem; color: var(--faint); font-size: .9rem; text-align: center;
+}
+
+/* --------------------------------------------------------------- trade panel */
+
+.kc-panel {
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 1.2rem 1.2rem 1.4rem; box-shadow: var(--hairline);
+}
+.kc-connect-wrap { text-align: center; padding: 1.4rem .5rem; }
+.kc-connect-wrap p { color: var(--muted); margin: .8rem auto 0; max-width: 46ch; font-size: .92rem; }
+.kc-connect-wrap .kc-install { font-family: var(--mono); font-size: .82rem; }
+
+.kc-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; margin: 0 0 1rem; }
+.kc-toggle button {
+  appearance: none; font: inherit; font-weight: 600; cursor: pointer;
+  padding: .6rem; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--bg-soft); color: var(--muted);
+  transition: border-color .15s ease, background .15s ease, color .15s ease;
+}
+.kc-toggle button:hover { border-color: var(--border-strong); }
+.kc-toggle button[aria-pressed="true"][data-side="buy"] { color: #06211d; background: var(--born); border-color: var(--born); }
+.kc-toggle button[aria-pressed="true"][data-side="sell"] { color: #241206; background: var(--burn); border-color: var(--burn); }
+
+.kc-field { margin: 0 0 .9rem; }
+.kc-field label { display: block; font-family: var(--mono); font-size: .72rem; letter-spacing: .05em; color: var(--faint); margin: 0 0 .35rem; }
+.kc-input-row { display: flex; align-items: stretch; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-soft); overflow: hidden; }
+.kc-input-row:focus-within { border-color: var(--accent); }
+.kc-input-row input {
+  flex: 1; min-width: 0; appearance: none; border: 0; background: transparent; color: var(--text);
+  font-family: var(--mono); font-size: 1.1rem; padding: .7rem .85rem;
+}
+.kc-input-row input:focus { outline: none; }
+.kc-input-unit { display: flex; align-items: center; padding: 0 .9rem; font-family: var(--mono); font-size: .84rem; color: var(--faint); border-left: 1px solid var(--border); }
+.kc-help { font-family: var(--mono); font-size: .72rem; color: var(--faint); margin: .4rem 0 0; }
+.kc-help.bad { color: var(--burn); }
+.kc-max { background: none; border: 0; color: var(--accent); font-family: var(--mono); font-size: .72rem; cursor: pointer; padding: 0; }
+.kc-max:hover { text-decoration: underline; }
+
+/* the live quote */
+.kc-quote { border-top: 1px solid var(--border); margin: .3rem 0 0; padding: .9rem 0 0; }
+.kc-quote-row { display: flex; justify-content: space-between; gap: 1rem; font-size: .9rem; padding: .28rem 0; }
+.kc-quote-row .k { color: var(--faint); font-family: var(--mono); font-size: .8rem; }
+.kc-quote-row .v { color: var(--text); font-family: var(--mono); text-align: right; }
+.kc-quote-row.total .k, .kc-quote-row.total .v { color: var(--text); font-weight: 600; }
+.kc-quote-row .v.out { color: var(--born); }
+.kc-quote-row .v.impact { color: var(--burn); }
+.kc-fee-detail { padding-left: 1rem; }
+.kc-fee-detail .k { font-size: .74rem; }
+
+.kc-cta { width: 100%; margin: 1.1rem 0 0; }
+
+/* ----------------------------------------------------------------- review */
+
+.kc-review { border-top: 1px solid var(--border); margin: 1rem 0 0; padding: 1rem 0 0; }
+.kc-review h3 { font-size: .95rem; margin: 0 0 .3rem; color: var(--text); }
+.kc-review .kc-selfverify {
+  border: 1px solid var(--border-strong); background: var(--accent-soft);
+  border-radius: var(--radius-sm); padding: .7rem .85rem; margin: .7rem 0; font-size: .86rem; color: var(--muted);
+}
+.kc-review .kc-selfverify.ok::before { content: "✓ "; color: var(--born); font-weight: 700; }
+.kc-review .kc-selfverify.bad { border-color: var(--burn); background: var(--burn-soft); }
+.kc-review .kc-selfverify.bad::before { content: "✕ "; color: var(--burn); font-weight: 700; }
+.kc-checks { list-style: none; margin: .5rem 0 0; padding: 0; font-family: var(--mono); font-size: .78rem; }
+.kc-checks li { display: flex; gap: .5rem; padding: .18rem 0; color: var(--muted); }
+.kc-checks li::before { content: "✓"; color: var(--born); flex: none; }
+.kc-checks li.bad { color: var(--burn); }
+.kc-checks li.bad::before { content: "✕"; color: var(--burn); }
+
+.kc-outs { width: 100%; border-collapse: collapse; margin: .6rem 0 0; font-family: var(--mono); font-size: .8rem; }
+.kc-outs th, .kc-outs td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--border); }
+.kc-outs th { color: var(--faint); font-weight: 500; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
+.kc-outs td.num { text-align: right; color: var(--text); }
+.kc-outs td .kc-out-note { color: var(--faint); font-size: .72rem; display: block; }
+.kc-review-actions { display: flex; gap: .6rem; margin: 1rem 0 0; flex-wrap: wrap; }
+.kc-review-actions .btn { flex: 1 1 auto; text-align: center; }
+
+/* status / result */
+.kc-status { font-family: var(--mono); font-size: .84rem; margin: 1rem 0 0; padding: .7rem .85rem; border-radius: var(--radius-sm); }
+.kc-status.info { color: var(--muted); background: var(--bg-soft); border: 1px solid var(--border); }
+.kc-status.err { color: var(--burn); background: var(--burn-soft); border: 1px solid var(--burn); }
+.kc-status.ok { color: var(--born); background: var(--born-soft); border: 1px solid var(--born); }
+.kc-status a { color: inherit; text-decoration: underline; }
+.kc-spin { display: inline-block; width: .8em; height: .8em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: kc-spin .7s linear infinite; vertical-align: -1px; margin-right: .5rem; }
+@keyframes kc-spin { to { transform: rotate(360deg); } }
+
+/* --------------------------------------------------------------- skeletons */
+
+.skel {
+  display: inline-block; min-width: 3.5ch; height: 1em; border-radius: 4px; vertical-align: middle;
+  background: linear-gradient(90deg, var(--bg-soft) 25%, var(--card-hover) 37%, var(--bg-soft) 63%);
+  background-size: 400% 100%; animation: kc-shimmer 1.4s ease infinite;
+}
+@keyframes kc-shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .skel, .kc-spin { animation: none; }
+}
+
+/* ------------------------------------------------------------------ footer */
+
+.kc-foot {
+  margin: 2.6rem 0 0; padding: 1rem 1.1rem; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--card); color: var(--muted); font-size: .9rem; line-height: 1.6;
+}
+.kc-foot code { font-family: var(--mono); font-size: .82em; color: var(--text); word-break: break-all; }
+.kc-foot a { color: var(--accent); }
+.kc-disclaim { color: var(--faint); font-size: .82rem; margin: 1rem 0 0; line-height: 1.55; }

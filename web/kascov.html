@@ -1,0 +1,1002 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>trade $KASCOV, buy and sell the covenant directly | kascov</title>
+  <meta name="description" content="Trade $KASCOV straight against its KRON curve v1 covenant on Kaspa mainnet. Your KasWare wallet signs only your funding inputs; the page builds the transaction and shows every output before you sign. No launchpad website in the loop.">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://kascov.io/kascov">
+  <meta property="og:title" content="trade $KASCOV, buy and sell the covenant directly">
+  <meta property="og:description" content="Buy and sell $KASCOV against its on-chain curve covenant from your own wallet. kascov builds the transaction and verifies it against the curve's own formula before you sign. the market is the covenant, not this page.">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="kascov">
+  <meta property="og:url" content="https://kascov.io/kascov">
+  <meta property="og:image" content="https://kascov.io/og.png?v=20260728-scoped">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:site" content="@0xKnitser">
+  <meta name="twitter:creator" content="@0xKnitser">
+  <meta name="twitter:title" content="trade $KASCOV, buy and sell the covenant directly">
+  <meta name="twitter:description" content="Buy and sell $KASCOV against its on-chain curve covenant from your own wallet. Every output shown before you sign.">
+  <meta name="twitter:image" content="https://kascov.io/og.png?v=20260728-scoped">
+  <script type="application/ld+json">
+    {"@context":"https://schema.org","@type":"WebPage","name":"trade $KASCOV","url":"https://kascov.io/kascov","isPartOf":{"@type":"WebSite","name":"kascov","url":"https://kascov.io/"}}
+  </script>
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Instrument+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css?v=20260805-mobilefit">
+  <link rel="stylesheet" href="/kascov-trade.css?v=20260808-trade">
+</head>
+<body>
+  <main class="trade-doc">
+    <a class="home" href="/">&larr; kascov.io</a>
+
+    <!-- 1 · hero: live price + phase + the honest creed. Numbers stay blank
+         (skeletons) until the chain answers; a zero is never shown as fact. -->
+    <header class="kc-hero">
+      <div class="kc-hero-top">
+        <h1>$KASCOV</h1>
+        <span class="kc-ticker">KCC20 · Kaspa mainnet</span>
+      </div>
+      <div class="kc-priceline">
+        <span class="kc-price" id="hero-price"><span class="skel" style="width:9ch"></span></span>
+        <span class="kc-phase" id="hero-phase"><span class="skel" style="width:7ch"></span></span>
+      </div>
+      <div class="kc-bond" id="hero-bond" hidden>
+        <div class="kc-bond-bar" aria-hidden="true"><div class="kc-bond-fill" id="hero-bond-fill"></div></div>
+        <span class="kc-bond-label" id="hero-bond-label"></span>
+      </div>
+      <p class="kc-creed">
+        kascov sells nothing and the token buys no influence over any verdict.
+        this page shows what the chain proves, and lets you trade the covenant
+        directly, with no launchpad website in the loop.
+      </p>
+    </header>
+
+    <!-- 3 · verified stats. Each figure comes from one public endpoint and
+         links to the explorer view that proves it. -->
+    <div class="kc-stats" id="stats">
+      <a class="kc-stat" id="stat-holders" href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2">
+        <span class="kc-stat-label">holders</span>
+        <span class="kc-stat-n" data-stat><span class="skel"></span></span>
+        <span class="kc-stat-prove">verified from chain &rarr;</span>
+      </a>
+      <a class="kc-stat" id="stat-supply" href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2">
+        <span class="kc-stat-label">supply</span>
+        <span class="kc-stat-n" data-stat><span class="skel"></span></span>
+        <span class="kc-stat-prove">verified from chain &rarr;</span>
+      </a>
+      <a class="kc-stat" id="stat-reserve" href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2">
+        <span class="kc-stat-label">KAS reserve</span>
+        <span class="kc-stat-n" data-stat><span class="skel"></span></span>
+        <span class="kc-stat-prove">verified from chain &rarr;</span>
+      </a>
+      <a class="kc-stat" id="stat-vol" href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2">
+        <span class="kc-stat-label">24h volume</span>
+        <span class="kc-stat-n" data-stat><span class="skel"></span></span>
+        <span class="kc-stat-prove">summed from verified trades &rarr;</span>
+      </a>
+    </div>
+    <p class="kc-help" id="stats-fresh">reading the chain&hellip;</p>
+
+    <!-- 2 · the candle chart, built only from replay-verified trades. Same
+         vendored library and the same bucketing app.js uses, so the two
+         surfaces can never disagree about which trades exist. -->
+    <section class="kc-section" aria-label="Price history">
+      <h2>price, trade by trade</h2>
+      <div id="chart-mount">
+        <div class="kc-chart-empty" id="chart-empty">
+          <span class="skel" style="width:12ch"></span>
+          <span class="skel" style="width:20ch;margin-left:.5rem"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4 · the trade panel -->
+    <section class="kc-section" aria-label="Trade">
+      <h2>trade the covenant</h2>
+      <div class="kc-panel" id="panel">
+        <div class="kc-connect-wrap" id="connect-wrap">
+          <button type="button" class="btn btn-accent btn-cta" id="connect-btn">connect KasWare</button>
+          <p id="connect-note">
+            KasWare signs only your own funding inputs. This page builds the
+            transaction and shows you every output before anything is signed.
+          </p>
+        </div>
+        <div id="trade-ui" hidden></div>
+      </div>
+    </section>
+
+    <!-- 5 · footer: the market is the covenant, not this page -->
+    <div class="kc-foot">
+      <p>
+        <strong>First trades should be small.</strong> The market is the
+        covenant, not this page: any transaction that satisfies the curve&rsquo;s
+        script is a valid trade, whoever built it. This page is only a
+        convenience that assembles one and checks it against the curve&rsquo;s own
+        formula before you sign. If a number here ever disagrees with the chain,
+        the chain is right and we have a bug.
+      </p>
+      <p style="margin:.8rem 0 0">
+        The proof: token <code>c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2</code>,
+        its <a href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2">full trade history on the explorer</a>,
+        the <a href="/token">token doctrine at /token</a>, and one public endpoint anyone can read:
+        <code>curl -s https://kascov.io/data/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2</code>.
+      </p>
+      <p class="kc-disclaim">
+        $KASCOV is not an investment product and nobody promises it will be worth
+        more tomorrow. It pays no dividends, shares no revenue, and buys no
+        influence over any verdict. You trade at your own risk against a
+        permissionless covenant; kascov never takes custody of your keys or funds.
+      </p>
+    </div>
+
+    <noscript>
+      <p class="kc-disclaim">
+        Trading needs JavaScript and a wallet. Nothing here is hidden: every
+        figure is one click away on the explorer, read straight from the chain
+        &mdash; <a href="/#/mainnet/token/c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2">open the token page</a>.
+      </p>
+    </noscript>
+  </main>
+
+  <script type="module">
+  /* ------------------------------------------------------------------------
+     /kascov — the $KASCOV trade page shell.
+
+     This file ORCHESTRATES and DISPLAYS. It never crafts script, never signs,
+     never touches a key. All of that lives in three sibling modules this page
+     drives; the shell only calls them and renders what they return.
+
+     Contract with the sibling modules (built elsewhere, loaded lazily so the
+     read-only half of this page — hero, chart, stats — still renders while the
+     trade bundle is deploying):
+
+       wallet.isInstalled()            -> bool
+       wallet.connect()                -> { address, xOnlyPubkey }   // 32B hex
+       wallet.getFundingUtxos()        -> [utxo, ...]
+       wallet.signFunding(txJson, signInputs) -> signedTxJson
+            // signs ONLY the listed indexes (SIGHASH_ALL) and re-verifies that
+            // every covenant sigscript came back byte-identical
+       wallet.submit(signedTxJson)     -> txid
+
+       state.getCurveState()           -> { outpoint, value_sompi, reserve_sompi,
+                                            token_reserve, graduated, phase,
+                                            grad_progress_bps, price_sompi_per_token,
+                                            program_hex, vkas, graduation_kas_sompi }
+       state.getUserTokenCells(xOnlyPubkey)
+                                       -> [{ outpoint, amount, value_sompi }, ...]
+
+       curve.quoteBuy(curveState, kasInSompi)
+                                       -> { tokens_out, avg_price_sompi,
+                                            price_impact_bps,
+                                            fees:{creator_sompi,platform_sompi,dev_sompi,total_sompi},
+                                            new_value_sompi, new_reserve_sompi }
+       curve.quoteSell(curveState, kasOutSompi)
+                                       -> { tokens_in, ... same shape ... }
+       curve.buildBuy(curveState,  { kasInSompi,  buyerXOnlyPubkey,  fundingUtxos, changeAddress })
+       curve.buildSell(curveState, { kasOutSompi, sellerXOnlyPubkey, tokenCells,   fundingUtxos, changeAddress })
+            both -> { txJson, signInputs:[{index,sighashType:1}],
+                      outputs:[{label, value_sompi, kind, detail}],
+                      verify() -> { ok, reason, checks:[{name, ok, detail}] } }
+
+     The covenant is permissionless: any transaction satisfying its script is a
+     valid trade. This page is a convenience, not the market.
+  ------------------------------------------------------------------------ */
+
+  const TOKEN_ID = 'c58c826d0aa9cee62f93208718c674883f5c89a8aca4933dc41fb0391539abe2';
+  const TOKEN_API  = '/data/mainnet/token/' + TOKEN_ID + '?limit=1&events_limit=1';
+  const TRADES_API = '/data/mainnet/token/' + TOKEN_ID + '/trades.json';
+  const EXPLORER_TX = (txid) => 'https://explorer.kaspa.org/txs/' + txid;
+  const KASCOV_TX   = (txid) => '/#/mainnet/tx/' + txid;
+
+  /* public, program-baked constants — echoed here only as labels; every live
+     figure still comes from a quote or an API read, never from these. */
+  const SCALE_SOMPI = 1_000_000n;         // 0.01 KAS trade granularity
+  const FEE_BPS = { creator: 25, platform: 90, dev: 10, total: 125 };
+
+  const $ = (id) => document.getElementById(id);
+
+  /* -------------------------- pure format helpers ----------------------- */
+
+  const fmtInt = (n) => Number(n).toLocaleString('en-US');
+
+  function trimDec(s) { return s.indexOf('.') < 0 ? s : s.replace(/0+$/, '').replace(/\.$/, ''); }
+
+  /* BigInt sompi -> "X KAS", exact, trailing zeros trimmed (max 8 dp) */
+  function fmtKasBig(sompi, maxDp = 8) {
+    let neg = sompi < 0n; let v = neg ? -sompi : sompi;
+    let whole = v / 100_000_000n, frac = (v % 100_000_000n).toString().padStart(8, '0');
+    if (maxDp < 8) frac = frac.slice(0, maxDp);
+    const s = trimDec(whole.toLocaleString('en-US') + '.' + frac);
+    return (neg ? '-' : '') + s + ' KAS';
+  }
+
+  /* integer token amount at claimed decimals -> display string. The chain
+     integer is the number that was verified; decimals are a presentation
+     claim carried in the payload. */
+  function fmtTokenBig(amount, decimals) {
+    const v = typeof amount === 'bigint' ? amount : BigInt(String(amount).split('.')[0] || '0');
+    const d = Number(decimals) || 0;
+    if (d <= 0) return v.toLocaleString('en-US');
+    const base = 10n ** BigInt(d);
+    const whole = (v / base).toLocaleString('en-US');
+    const frac = (v % base).toString().padStart(d, '0');
+    return trimDec(whole + '.' + frac);
+  }
+
+  /* the same price rendering the explorer uses, so the two can't disagree */
+  function fmtPrice(quoteSompi, baseAmount) {
+    const px = Number(quoteSompi) / Number(baseAmount) / 1e8;
+    if (!isFinite(px) || px <= 0) return null;
+    const digits = px >= 1 ? 4 : px >= 0.0001 ? 6 : 8;
+    return trimDec(px.toFixed(digits)) + ' KAS';
+  }
+
+  function supplyText(token) {
+    if (!token || token.supply == null) return null;
+    const d = token.claimed_decimals;
+    if (d != null && d > 0) {
+      return (Number(token.supply) / Math.pow(10, d)).toLocaleString('en-US', { maximumFractionDigits: d });
+    }
+    return fmtInt(token.supply);
+  }
+
+  function phaseText(m) {
+    if (!m || !m.phase || m.phase === 'unknown') return null;
+    if (m.phase === 'bonding') return 'bonding';
+    if (m.phase === 'graduated') return 'graduated';
+    if (m.phase === 'lp shares') return 'pool shares';
+    return m.phase;
+  }
+
+  /* exact decimal-KAS string -> BigInt sompi, or null if malformed. Kept off
+     Number so 0.07 never becomes 6999999 sompi and slips the SCALE check. */
+  function kasStrToSompi(str) {
+    const s = String(str).trim();
+    if (!/^\d*\.?\d*$/.test(s) || s === '' || s === '.') return null;
+    const [whole = '0', frac = ''] = s.split('.');
+    if (frac.length > 8) return null; // finer than a sompi
+    const padded = (frac + '00000000').slice(0, 8);
+    try { return BigInt(whole || '0') * 100_000_000n + BigInt(padded || '0'); }
+    catch { return null; }
+  }
+
+  const isScaleMultiple = (sompi) => sompi != null && sompi > 0n && sompi % SCALE_SOMPI === 0n;
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  /* sum verified trade quote-KAS inside the trailing 24h, as BigInt sompi.
+     Only clocked trades count — a DAA guess would invent a window. */
+  function vol24hSompi(trades, nowMs) {
+    if (!Array.isArray(trades)) return null;
+    const cutoff = nowMs - 86_400_000;
+    let seen = false, sum = 0n;
+    for (const t of trades) {
+      if (!t || t.accepting_time_ms == null) continue;
+      seen = true;
+      if (t.accepting_time_ms >= cutoff && Number(t.quote_sompi) > 0) {
+        sum += BigInt(String(t.quote_sompi).split('.')[0] || '0');
+      }
+    }
+    return seen ? sum : null;
+  }
+
+  /* --------------------------- hero + stats ----------------------------- */
+
+  function setStat(id, text, soft, title, href) {
+    const el = $(id); if (!el) return;
+    const n = el.querySelector('[data-stat]');
+    n.textContent = text;
+    n.className = 'kc-stat-n' + (soft ? ' soft' : '');
+    if (title) el.title = title;
+    if (href) el.href = href;
+  }
+
+  function paintHero(p) {
+    const m = p && p.market, t = p && p.token;
+    const priceEl = $('hero-price'), phaseEl = $('hero-phase');
+    const px = m && m.last_quote_sompi != null && m.last_base_amount
+      ? fmtPrice(m.last_quote_sompi, m.last_base_amount) : null;
+    if (px) { priceEl.textContent = px; priceEl.innerHTML = esc(px) + ' <small>last verified trade</small>'; }
+    else { priceEl.textContent = 'not priced'; priceEl.classList.add('kc-stat-n', 'soft'); }
+
+    const ph = phaseText(m);
+    phaseEl.textContent = ph || 'no verified market';
+    if (!ph) phaseEl.style.background = 'transparent';
+
+    /* bonding progress, only when the curve itself reports it */
+    if (m && m.phase === 'bonding' && m.grad_progress_bps != null) {
+      const pct = Math.max(0, Math.min(100, m.grad_progress_bps / 100));
+      $('hero-bond').hidden = false;
+      $('hero-bond-fill').style.width = pct + '%';
+      const detail = (m.reserve_sompi != null && m.program && m.program.graduation_kas_sompi != null)
+        ? fmtKasBig(BigInt(String(m.reserve_sompi).split('.')[0]), 2) + ' of ' +
+          fmtKasBig(BigInt(String(m.program.graduation_kas_sompi).split('.')[0]), 0) + ' to graduation'
+        : pct.toFixed(1) + '% to graduation';
+      $('hero-bond-label').textContent = pct.toFixed(1) + '% · ' + detail;
+    } else if (m && m.phase === 'graduated') {
+      $('hero-bond').hidden = false;
+      $('hero-bond-fill').style.width = '100%';
+      $('hero-bond-label').textContent = 'graduated — the curve reached its target and closed';
+    }
+
+    setStat('stat-holders', t && t.holders != null ? fmtInt(t.holders) : 'not proven', !(t && t.holders != null));
+    setStat('stat-supply', supplyText(t) || 'not proven', !supplyText(t));
+    setStat('stat-reserve',
+      m && m.reserve_sompi != null ? fmtKasBig(BigInt(String(m.reserve_sompi).split('.')[0]), 2) : 'not shown',
+      !(m && m.reserve_sompi != null),
+      m && m.reserve_note);
+  }
+
+  function heroFail() {
+    ['hero-price', 'hero-phase'].forEach((k) => { const e = $(k); e.textContent = 'could not read the chain'; e.classList.add('soft'); });
+    ['stat-holders', 'stat-supply', 'stat-reserve', 'stat-vol'].forEach((k) => setStat(k, 'could not read', true));
+    $('stats-fresh').textContent = 'could not read the chain just now — retrying in 60s';
+  }
+
+  let lastToken = null;
+  function loadToken() {
+    return fetch(TOKEN_API, { cache: 'no-cache' })
+      .then((r) => { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+      .then((p) => {
+        lastToken = p;
+        paintHero(p);
+        $('stats-fresh').textContent = 'read from the chain at ' +
+          new Date(p.generated_at_ms || Date.now()).toLocaleTimeString('en-US', { hour12: false }) +
+          ' — refreshes every 60s';
+        return p;
+      })
+      .catch((e) => { heroFail(); throw e; });
+  }
+
+  /* --------------------------- the candle chart ------------------------- */
+
+  /* Group verified trades into OHLC candles. A candle asserts a DURATION, so
+     only trades carrying a real clock may be bucketed — the same rule app.js
+     enforces. Returns null unless every admitted trade resolves a timestamp. */
+  function bucketTrades(trades, bucketMs) {
+    const pts = (Array.isArray(trades) ? trades : [])
+      .filter((t) => t && t.co_covenants === 0 && t.txid &&
+        Number(t.quote_sompi) > 0 && Number(t.base_amount) > 0 && t.accepting_time_ms != null)
+      .map((t) => ({ txid: String(t.txid), seq: Number(t.seq) || 0, ms: t.accepting_time_ms,
+                     price: Number(t.quote_sompi) / Number(t.base_amount), quote: Number(t.quote_sompi) }))
+      .sort((a, b) => a.seq - b.seq);
+    if (pts.length < 3) return null;
+    const out = []; let cur = null;
+    for (const p of pts) {
+      const t0 = Math.floor(p.ms / bucketMs) * bucketMs;
+      if (!cur || cur.t0 !== t0) { if (cur) out.push(cur); cur = { t0, open: p.price, high: p.price, low: p.price, close: p.price, volume_kas: 0, lastTxid: p.txid }; }
+      if (p.price > cur.high) cur.high = p.price;
+      if (p.price < cur.low) cur.low = p.price;
+      cur.close = p.price; cur.volume_kas += p.quote / 1e8; cur.lastTxid = p.txid;
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+
+  const CANDLE_BUCKETS = [['15m', 900000], ['1h', 3600000], ['4h', 14400000], ['1d', 86400000]];
+
+  function autoBucketMs(trades) {
+    const clocked = (Array.isArray(trades) ? trades : []).map((t) => t && t.accepting_time_ms).filter((ms) => ms != null);
+    if (clocked.length < 2) return CANDLE_BUCKETS[1][1];
+    const span = Math.max(...clocked) - Math.min(...clocked);
+    for (const [, ms] of CANDLE_BUCKETS) if (span / ms <= 120) return ms;
+    return CANDLE_BUCKETS[CANDLE_BUCKETS.length - 1][1];
+  }
+
+  let lwcLoad = null;
+  function loadLightweightCharts() {
+    if (window.LightweightCharts) return Promise.resolve();
+    if (!lwcLoad) lwcLoad = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = '/vendor/lightweight-charts.js';
+      s.onload = resolve; s.onerror = () => { lwcLoad = null; reject(new Error('chart library failed to load')); };
+      document.head.appendChild(s);
+    });
+    return lwcLoad;
+  }
+
+  function chartEmpty(msg) {
+    $('chart-mount').innerHTML = '<div class="kc-chart-empty">' + esc(msg) + '</div>';
+  }
+
+  function renderChart(trades) {
+    if (!Array.isArray(trades) || trades.length === 0) {
+      chartEmpty('no verified trades yet — this token has no price history to chart.');
+      return;
+    }
+    const probe = bucketTrades(trades, 3600000);
+    if (!probe || probe.length < 2) {
+      chartEmpty('not enough clocked trades to draw candles yet. every trade is on the explorer link below.');
+      return;
+    }
+    const pills = CANDLE_BUCKETS.map(([label, ms]) => '<button type="button" class="chart-pill" data-bucket="' + ms + '">' + label + '</button>').join('');
+    $('chart-mount').innerHTML =
+      '<div class="price-view" data-price-candles>' +
+        '<div class="chart-pills" role="tablist" aria-label="chart timeframe">' + pills +
+          '<button type="button" class="chart-pill" data-bucket="trades">every trade</button></div>' +
+        '<div class="candles-host"></div>' +
+        '<p class="dim candles-note" style="margin:.2rem 0 0">every candle is built only from replay-verified trades — click one to open the transaction that closed it.</p>' +
+      '</div>';
+
+    const host = $('chart-mount').querySelector('[data-price-candles]');
+    const candlesEl = host.querySelector('.candles-host');
+    const noteEl = host.querySelector('.candles-note');
+    const pillEls = [...host.querySelectorAll('.chart-pill')];
+    const setActive = (val) => pillEls.forEach((p) => p.setAttribute('aria-pressed', String(p.dataset.bucket === String(val))));
+
+    let ctrl = null, candleMap = new Map();
+    const ensureChart = async () => {
+      await loadLightweightCharts();
+      if (ctrl) return ctrl;
+      const chart = LightweightCharts.createChart(candlesEl, {
+        layout: { background: { color: 'transparent' }, textColor: '#7f9a94', fontSize: 11 },
+        grid: { vertLines: { color: 'rgba(120,220,200,0.06)' }, horzLines: { color: 'rgba(120,220,200,0.06)' } },
+        rightPriceScale: { borderColor: 'rgba(120,220,200,0.12)' },
+        timeScale: { borderColor: 'rgba(120,220,200,0.12)', timeVisible: true, secondsVisible: false },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        autoSize: true,
+      });
+      const series = chart.addCandlestickSeries({
+        upColor: '#5be49b', downColor: '#ffb067', borderUpColor: '#5be49b', borderDownColor: '#ffb067',
+        wickUpColor: '#5be49b', wickDownColor: '#ffb067',
+        priceFormat: { type: 'price', precision: 8, minMove: 0.00000001 },
+      });
+      const line = chart.addLineSeries({ color: '#70c7ba', lineWidth: 2, priceFormat: { type: 'price', precision: 8, minMove: 0.00000001 }, visible: false });
+      const vol = chart.addHistogramSeries({ priceFormat: { type: 'volume' }, priceScaleId: 'vol' });
+      chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+      chart.subscribeClick((param) => {
+        const c = param.time != null ? candleMap.get(param.time) : null;
+        if (c) location.href = KASCOV_TX(c.lastTxid);
+      });
+      const ro = new ResizeObserver(() => requestAnimationFrame(() => { if (ctrl) ctrl.chart.timeScale().fitContent(); }));
+      ro.observe(candlesEl);
+      ctrl = { chart, series, line, vol, ro };
+      return ctrl;
+    };
+
+    const renderCandles = async (bucketMs) => {
+      const candles = bucketTrades(trades, bucketMs);
+      if (!candles) return;
+      const c = await ensureChart();
+      c.line.applyOptions({ visible: false });
+      c.series.applyOptions({ visible: true });
+      candleMap = new Map(candles.map((k) => [k.t0 / 1000, k]));
+      c.series.setData(candles.map((k) => ({ time: k.t0 / 1000, open: k.open / 1e8, high: k.high / 1e8, low: k.low / 1e8, close: k.close / 1e8 })));
+      c.vol.setData(candles.map((k) => ({ time: k.t0 / 1000, value: k.volume_kas,
+        color: k.close >= k.open ? 'rgba(91,228,155,0.35)' : 'rgba(255,176,103,0.35)' })));
+      requestAnimationFrame(() => { if (ctrl) ctrl.chart.timeScale().fitContent(); });
+    };
+
+    /* "every trade": each clocked trade as its own point, still from the same
+       verified list; clicking a point opens the transaction it replays from. */
+    const renderEveryTrade = async () => {
+      const pts = (Array.isArray(trades) ? trades : [])
+        .filter((t) => t && t.co_covenants === 0 && t.txid && Number(t.quote_sompi) > 0 && Number(t.base_amount) > 0 && t.accepting_time_ms != null)
+        .map((t) => ({ txid: String(t.txid), seq: Number(t.seq) || 0, ms: t.accepting_time_ms, price: Number(t.quote_sompi) / Number(t.base_amount) / 1e8 }))
+        .sort((a, b) => a.seq - b.seq);
+      if (pts.length < 2) return;
+      const c = await ensureChart();
+      c.series.applyOptions({ visible: false });
+      c.line.applyOptions({ visible: true });
+      /* lightweight-charts needs strictly-increasing, de-duplicated times */
+      const seen = new Set(); const data = [];
+      candleMap = new Map();
+      for (const p of pts) {
+        let ts = Math.floor(p.ms / 1000);
+        while (seen.has(ts)) ts += 1;
+        seen.add(ts); data.push({ time: ts, value: p.price });
+        candleMap.set(ts, { lastTxid: p.txid });
+      }
+      c.line.setData(data);
+      c.vol.setData([]);
+      requestAnimationFrame(() => { if (ctrl) ctrl.chart.timeScale().fitContent(); });
+    };
+
+    pillEls.forEach((p) => p.addEventListener('click', () => {
+      const b = p.dataset.bucket; setActive(b);
+      if (noteEl) noteEl.textContent = b === 'trades'
+        ? 'every verified trade at its executed price — click a point to open its transaction.'
+        : 'every candle is built only from replay-verified trades — click one to open the transaction that closed it.';
+      (b === 'trades' ? renderEveryTrade() : renderCandles(Number(b)))
+        .catch(() => chartEmpty('the chart library did not load. every trade is on the explorer link below.'));
+    }));
+
+    const auto = autoBucketMs(trades); setActive(auto);
+    renderCandles(auto).catch(() => chartEmpty('the chart library did not load. every trade is on the explorer link below.'));
+  }
+
+  function loadTrades() {
+    return fetch(TRADES_API, { cache: 'no-cache' })
+      .then((r) => { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+      .then((d) => {
+        const trades = Array.isArray(d) ? d : (d && Array.isArray(d.trades) ? d.trades : []);
+        renderChart(trades);
+        const v = vol24hSompi(trades, Date.now());
+        setStat('stat-vol', v != null ? fmtKasBig(v, 2) : 'not counted', v == null,
+          v == null ? 'no clocked trades in the last 24h' : null);
+        return trades;
+      })
+      .catch(() => {
+        chartEmpty('could not read the verified trade history just now.');
+        setStat('stat-vol', 'could not read', true);
+      });
+  }
+
+  /* ============================ the trade panel ========================= */
+
+  /* the three sibling modules, loaded once, on first engagement. A failure
+     here is surfaced honestly — it never blanks the read-only page above. */
+  let modules = null, modulesErr = null;
+  async function loadTradeModules() {
+    if (modules) return modules;
+    if (modulesErr) throw modulesErr;
+    try {
+      const [wallet, chainState, curve] = await Promise.all([
+        import('/kascov/wallet.js'),
+        import('/kascov/state.js'),
+        import('/kascov/curve.js'),
+      ]);
+      modules = { wallet, state: chainState, curve };
+      return modules;
+    } catch (e) {
+      modulesErr = e;
+      throw new Error('the trade module is not available on this deploy yet');
+    }
+  }
+
+  const T = {
+    side: 'buy', account: null, xOnlyPk: null,
+    curveState: null, userCells: null, quote: null, built: null,
+    quoteReq: 0,
+  };
+
+  function status(kind, html) {
+    let el = $('trade-status');
+    if (!el) { el = document.createElement('div'); el.id = 'trade-status'; $('trade-ui').appendChild(el); }
+    el.className = 'kc-status ' + kind;
+    el.innerHTML = html;
+  }
+  function clearStatus() { const el = $('trade-status'); if (el) el.remove(); }
+
+  /* ---- connect ---- */
+
+  async function onConnect() {
+    const btn = $('connect-btn');
+    btn.disabled = true;
+    $('connect-note').innerHTML = '<span class="kc-spin"></span>connecting…';
+    let mod;
+    try { mod = await loadTradeModules(); }
+    catch (e) {
+      btn.disabled = false;
+      $('connect-note').textContent = e.message + '. The read-only price and stats above still work.';
+      return;
+    }
+    if (!mod.wallet.isInstalled || !mod.wallet.isInstalled()) {
+      btn.disabled = false;
+      $('connect-note').innerHTML = 'KasWare was not detected. Install it at ' +
+        '<a class="kc-install" href="https://www.kasware.xyz/" rel="noopener" target="_blank">kasware.xyz</a>, then reconnect. ' +
+        'This page never asks for a seed phrase or private key.';
+      return;
+    }
+    try {
+      const acct = await mod.wallet.connect();
+      if (!acct || !acct.xOnlyPubkey) throw new Error('the wallet returned no public key');
+      T.account = acct.address || null;
+      T.xOnlyPk = acct.xOnlyPubkey;
+    } catch (e) {
+      btn.disabled = false;
+      $('connect-note').textContent = 'wallet did not connect: ' + (e && e.message ? e.message : 'request declined') + '.';
+      return;
+    }
+    $('connect-wrap').hidden = true;
+    $('trade-ui').hidden = false;
+    renderTradeUi();
+    await refreshChainState();
+  }
+
+  /* pull the live curve UTXO and the user's sellable cells. A trade is only
+     ever built against the freshest tip, because the curve is a single UTXO
+     and a landed trade invalidates any pending one. */
+  async function refreshChainState() {
+    try {
+      const mod = await loadTradeModules();
+      const [cs, held] = await Promise.all([
+        mod.state.getCurveState(),
+        T.xOnlyPk ? mod.state.getUserTokenCells(T.xOnlyPk).catch(() => null) : null,
+      ]);
+      T.curveState = cs;
+      T.userCells = held && Array.isArray(held.cells) ? held.cells : [];
+      /* The inventory cell is a required input of every trade, so it is read
+         against the SAME tip as the curve state; a mismatch between the two is
+         what the builder's stale-inventory refusal is there to catch. */
+      T.inventoryCell = null;
+      if (cs && cs.marketCovenantId) {
+        T.inventoryCell = await mod.state.getInventoryCell(cs.marketCovenantId).catch(() => null);
+      }
+      renderBalances();
+      recomputeQuote();
+    } catch (e) {
+      status('err', 'could not read the live curve state: ' + esc(e && e.message ? e.message : String(e)) + '. Reconnect to retry.');
+    }
+  }
+
+  function userTokenTotal() {
+    if (!Array.isArray(T.userCells)) return 0n;
+    return T.userCells.reduce((a, c) => a + BigInt(String(c.amount).split('.')[0] || '0'), 0n);
+  }
+
+  function renderTradeUi() {
+    const acct = T.account ? esc(T.account) : 'connected';
+    $('trade-ui').innerHTML =
+      '<div class="kc-quote-row" style="border-bottom:1px solid var(--border);padding-bottom:.6rem;margin-bottom:.8rem">' +
+        '<span class="k">wallet</span><span class="v mono" id="acct" title="' + acct + '">' + shortAddr(T.account) + '</span></div>' +
+      '<div class="kc-toggle" role="tablist" aria-label="buy or sell">' +
+        '<button type="button" data-side="buy" aria-pressed="true">buy $KASCOV</button>' +
+        '<button type="button" data-side="sell" aria-pressed="false">sell $KASCOV</button>' +
+      '</div>' +
+      '<div class="kc-field">' +
+        '<label id="amt-label" for="amt">KAS to spend</label>' +
+        '<div class="kc-input-row">' +
+          '<input id="amt" inputmode="decimal" autocomplete="off" placeholder="0.00" aria-describedby="amt-help">' +
+          '<span class="kc-input-unit">KAS</span>' +
+        '</div>' +
+        '<p class="kc-help" id="amt-help">whole multiples of 0.01 KAS. <button type="button" class="kc-max" id="amt-max" hidden>max</button></p>' +
+      '</div>' +
+      '<div class="kc-quote" id="quote" hidden></div>' +
+      '<button type="button" class="btn btn-accent btn-cta kc-cta" id="review-btn" disabled>enter an amount</button>' +
+      '<div id="review" hidden></div>';
+
+    $('trade-ui').querySelectorAll('.kc-toggle button').forEach((b) => b.addEventListener('click', () => setSide(b.dataset.side)));
+    $('amt').addEventListener('input', onAmountInput);
+    $('amt-max').addEventListener('click', onMax);
+    $('review-btn').addEventListener('click', onReview);
+    renderBalances();
+  }
+
+  function shortAddr(a) {
+    if (!a) return 'connected';
+    return a.length > 20 ? a.slice(0, 12) + '…' + a.slice(-6) : a;
+  }
+
+  function renderBalances() {
+    const help = $('amt-help'); if (!help) return;
+    const maxBtn = $('amt-max');
+    if (T.side === 'sell') {
+      const total = userTokenTotal();
+      const dec = (lastToken && lastToken.token && lastToken.token.claimed_decimals) || 0;
+      help.innerHTML = 'KAS you receive, in whole multiples of 0.01 KAS. you hold ' +
+        (T.userCells == null ? '<span class="skel" style="width:6ch"></span>' : esc(fmtTokenBig(total, dec)) + ' $KASCOV') +
+        ' <button type="button" class="kc-max" id="amt-max">max</button>';
+      $('amt-max').addEventListener('click', onMax);
+    } else {
+      help.innerHTML = 'whole multiples of 0.01 KAS.';
+      if (maxBtn) maxBtn.hidden = true;
+    }
+  }
+
+  function setSide(side) {
+    if (side !== 'buy' && side !== 'sell') return;
+    T.side = side;
+    $('trade-ui').querySelectorAll('.kc-toggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.side === side)));
+    $('amt-label').textContent = side === 'buy' ? 'KAS to spend' : 'KAS to receive';
+    $('review').hidden = true; T.built = null;
+    renderBalances();
+    recomputeQuote();
+  }
+
+  function onMax() {
+    /* for a sell, the most KAS out is bounded by what the user's cells can
+       fund; the module owns the exact bound, so we only prefill and let the
+       quote/build be the authority. */
+    if (T.side !== 'sell' || !T.curveState) return;
+    const px = T.curveState.price_sompi_per_token;
+    const total = userTokenTotal();
+    if (!px || total <= 0n) return;
+    let est = (total * BigInt(String(px).split('.')[0] || '0')) / (10n ** BigInt((lastToken && lastToken.token && lastToken.token.claimed_decimals) || 0));
+    est = (est / SCALE_SOMPI) * SCALE_SOMPI; // floor to a SCALE multiple
+    if (est <= 0n) return;
+    $('amt').value = fmtKasBig(est).replace(' KAS', '');
+    onAmountInput();
+  }
+
+  let quoteTimer = null;
+  function onAmountInput() {
+    $('review').hidden = true; T.built = null;
+    if (quoteTimer) clearTimeout(quoteTimer);
+    quoteTimer = setTimeout(recomputeQuote, 220);
+  }
+
+  function currentAmountSompi() { return kasStrToSompi($('amt').value); }
+
+  function setReviewBtn(label, enabled) {
+    const b = $('review-btn'); if (!b) return;
+    b.textContent = label; b.disabled = !enabled;
+  }
+
+  async function recomputeQuote() {
+    const q = $('quote'); if (!q) return;
+    const sompi = currentAmountSompi();
+    const help = $('amt-help');
+    if ($('amt').value.trim() === '') { q.hidden = true; setReviewBtn('enter an amount', false); if (help) help.classList.remove('bad'); return; }
+    if (sompi == null || sompi <= 0n) { q.hidden = true; setReviewBtn('enter a valid amount', false); return; }
+    if (!isScaleMultiple(sompi)) {
+      q.hidden = true; setReviewBtn('amount must be a 0.01 KAS multiple', false);
+      if (help) { help.classList.add('bad'); }
+      return;
+    }
+    if (help) help.classList.remove('bad');
+    if (!T.curveState) { q.hidden = false; q.innerHTML = '<div class="kc-quote-row"><span class="k">quote</span><span class="v"><span class="kc-spin"></span>reading the curve…</span></div>'; setReviewBtn('reading the curve…', false); return; }
+
+    const reqId = ++T.quoteReq;
+    setReviewBtn('quoting…', false);
+    let quote;
+    try {
+      const mod = await loadTradeModules();
+      quote = normalizeQuote(T.side, sompi, mod.curve);
+    } catch (e) {
+      if (reqId !== T.quoteReq) return;
+      q.hidden = false; q.innerHTML = '<div class="kc-quote-row"><span class="k">quote</span><span class="v impact">' + esc(e && e.message ? e.message : 'the curve refused this amount') + '</span></div>';
+      setReviewBtn('cannot quote this amount', false);
+      return;
+    }
+    if (reqId !== T.quoteReq) return; // a newer keystroke already superseded this
+    T.quote = quote;
+    paintQuote(sompi, quote);
+  }
+
+  /* curve.js speaks the covenant's language (tokenOut, fees as bigints); this
+     panel speaks the reader's. One adapter between them, so the proven module
+     never bends to a display concern.
+
+     The sell side also inverts direction: curve.js answers "how much KAS for N
+     tokens", the field asks "how many tokens for X KAS". Closed form, same
+     constant product the covenant enforces:
+       b1 = ceil((V + k0) * b0 / (V + k0 - kasOut)), tokenIn = b1 - b0
+     then re-quote forward and keep raising tokenIn until the KAS out actually
+     covers what was asked — the covenant floors to whole SCALE steps, so the
+     first candidate can land one step short. */
+  function normalizeQuote(side, sompi, curve) {
+    const st = T.curveState;
+    if (st.vSompi == null) throw new Error('the curve has not published its virtual reserve yet');
+    const V = BigInt(st.vSompi);
+    const k0 = BigInt(st.value);
+    const b0 = BigInt(st.reserve);
+    let tokensIn = null, tokensOut = null, q;
+    if (side === 'buy') {
+      q = curve.quoteBuy(st, sompi);
+      tokensOut = q.tokenOut;
+    } else {
+      const denom = V + k0 - sompi;
+      if (denom <= 0n) throw new Error('that is more KAS than the curve holds');
+      let cand = ceilDivBig((V + k0) * b0, denom) - b0;
+      if (cand <= 0n) cand = 1n;
+      /* at most a few nudges: each step adds one token of depth */
+      for (let i = 0; i < 8; i++) {
+        q = curve.quoteSell(st, cand);
+        if (q.kasOut >= sompi) break;
+        cand += 1n;
+      }
+      if (!q || q.kasOut < sompi) throw new Error('the curve cannot release that much KAS right now');
+      tokensIn = cand;
+    }
+    const f = q.fees || {};
+    const total = (f.creator || 0n) + (f.platform || 0n) + (f.dev || 0n);
+    /* average execution price vs the curve's marginal price before the trade */
+    const tokens = side === 'buy' ? tokensOut : tokensIn;
+    let avg = null, impact = null;
+    if (tokens && tokens > 0n) {
+      avg = sompi / tokens;
+      const spot = (V + k0) / b0;
+      if (spot > 0n) impact = Number(((avg - spot) * 10000n) / spot);
+    }
+    return {
+      tokens_out: tokensOut != null ? String(tokensOut) : null,
+      tokens_in: tokensIn != null ? String(tokensIn) : null,
+      avg_price_sompi: avg != null ? String(avg) : null,
+      price_impact_bps: impact,
+      new_reserve: q.newReserve != null ? String(q.newReserve) : null,
+      fees: {
+        creator_sompi: String(f.creator ?? 0n),
+        platform_sompi: String(f.platform ?? 0n),
+        dev_sompi: String(f.dev ?? 0n),
+        total_sompi: String(total),
+      },
+      raw: q,
+    };
+  }
+  function ceilDivBig(a, b) { return (a + b - 1n) / b; }
+
+  function paintQuote(sompi, quote) {
+    const q = $('quote'); q.hidden = false;
+    const dec = (lastToken && lastToken.token && lastToken.token.claimed_decimals) || 0;
+    const fees = quote.fees || {};
+    const feeTotal = fees.total_sompi != null ? BigInt(String(fees.total_sompi).split('.')[0]) : null;
+    const rows = [];
+    if (T.side === 'buy') {
+      rows.push(row('you spend', fmtKasBig(sompi), ''));
+      rows.push(row('you receive', quote.tokens_out != null ? fmtTokenBig(quote.tokens_out, dec) + ' $KASCOV' : '—', 'out'));
+    } else {
+      rows.push(row('you sell', quote.tokens_in != null ? fmtTokenBig(quote.tokens_in, dec) + ' $KASCOV' : '—', ''));
+      rows.push(row('you receive', fmtKasBig(sompi), 'out'));
+    }
+    if (quote.avg_price_sompi != null)
+      rows.push(row('avg price', trimDec((Number(quote.avg_price_sompi) / 1e8).toFixed(8)) + ' KAS / token', ''));
+    if (quote.price_impact_bps != null)
+      rows.push(row('price impact', (Number(quote.price_impact_bps) / 100).toFixed(2) + '%', 'impact'));
+    /* The three fee legs the covenant enforces sum to 1.25% NOMINALLY, but the
+       dev leg has a 0.2 KAS floor, so on a small trade the real rate is higher.
+       Show the EFFECTIVE rate (never the flattering nominal one) and say when
+       the floor is the reason, so a first small trade isn't a nasty surprise. */
+    let feeLabel = 'fees';
+    if (feeTotal != null && sompi > 0n) feeLabel = 'fees (' + (Number(feeTotal * 10000n / sompi) / 100).toFixed(2) + '%)';
+    const nominalDev = sompi * BigInt(FEE_BPS.dev) / 10000n;
+    const floorActive = fees.dev_sompi != null && BigInt(String(fees.dev_sompi).split('.')[0]) > nominalDev;
+    rows.push('<div class="kc-quote-row total"><span class="k">' + feeLabel + '</span><span class="v">' +
+      (feeTotal != null ? fmtKasBig(feeTotal) : '—') + '</span></div>');
+    rows.push(feeRow('creator ' + (FEE_BPS.creator / 100) + '%', fees.creator_sompi));
+    rows.push(feeRow('platform ' + (FEE_BPS.platform / 100) + '%', fees.platform_sompi));
+    rows.push(feeRow('dev ' + (FEE_BPS.dev / 100) + '%' + (floorActive ? ' · floored at 0.2 KAS' : ''), fees.dev_sompi));
+    q.innerHTML = rows.join('');
+    setReviewBtn('review & trade', true);
+
+    function row(k, v, cls) { return '<div class="kc-quote-row"><span class="k">' + esc(k) + '</span><span class="v ' + cls + '">' + esc(v) + '</span></div>'; }
+    function feeRow(k, s) { return '<div class="kc-quote-row kc-fee-detail"><span class="k">' + esc(k) + '</span><span class="v">' + (s != null ? esc(fmtKasBig(BigInt(String(s).split('.')[0]))) : '—') + '</span></div>'; }
+  }
+
+  /* ---- review: build, self-verify, show every output ---- */
+
+  async function onReview() {
+    const sompi = currentAmountSompi();
+    if (!isScaleMultiple(sompi) || !T.curveState) return;
+    setReviewBtn('building…', false);
+    clearStatus();
+    let built, mod;
+    try {
+      mod = await loadTradeModules();
+      /* Read the tip again at build time: the curve is a single UTXO, so the
+         state that was fresh when the quote painted may already be spent. */
+      await refreshChainState();
+      if (!T.inventoryCell) throw new Error('could not read the market inventory cell — retry in a moment');
+      const funding = await mod.wallet.getFundingUtxos(T.account);
+      /* No change address is passed: the builder derives the change script
+         from the trader's own public key, so change can only ever pay the key
+         that funded the trade. An address would add a decode step that could
+         only ever weaken that. */
+      const common = {
+        fundingUtxos: funding,
+        inventoryCell: T.inventoryCell,
+      };
+      if (T.side === 'buy') {
+        built = await mod.curve.buildBuy(T.curveState, {
+          ...common, kasInSompi: sompi, buyerXOnlyPubkey: T.xOnlyPk,
+        });
+      } else {
+        built = await mod.curve.buildSell(T.curveState, {
+          ...common, kasOutSompi: sompi, sellerXOnlyPubkey: T.xOnlyPk, tokenCells: T.userCells,
+        });
+      }
+    } catch (e) {
+      setReviewBtn('review & trade', true);
+      status('err', 'could not build the transaction: ' + esc(e && e.message ? e.message : String(e)));
+      return;
+    }
+    T.built = built;
+    paintReview(built);
+    setReviewBtn('review & trade', true);
+  }
+
+  function paintReview(built) {
+    const dec = (lastToken && lastToken.token && lastToken.token.claimed_decimals) || 0;
+    let verify = null;
+    try { verify = built.verify ? built.verify() : null; } catch (e) { verify = { ok: false, reason: e && e.message, checks: [] }; }
+
+    const outs = Array.isArray(built.outputs) ? built.outputs : [];
+    const outRows = outs.map((o, i) =>
+      '<tr><td>' + i + '</td><td>' + esc(o.label || o.kind || 'output') +
+      (o.detail ? '<span class="kc-out-note">' + esc(o.detail) + '</span>' : '') +
+      '</td><td class="num">' + (o.value_sompi != null ? esc(fmtKasBig(BigInt(String(o.value_sompi).split('.')[0]))) : '—') + '</td></tr>').join('');
+
+    let vHtml = '';
+    if (verify) {
+      const cls = verify.ok ? 'ok' : 'bad';
+      const checks = Array.isArray(verify.checks) ? verify.checks : [];
+      vHtml = '<div class="kc-selfverify ' + cls + '">' +
+        (verify.ok
+          ? 'kascov re-derived this transaction from the curve&rsquo;s own formula and every output matched.'
+          : 'kascov could NOT verify this transaction against the curve&rsquo;s formula' + (verify.reason ? ': ' + esc(verify.reason) : '') + '. Do not sign it.') +
+        '</div>' +
+        (checks.length ? '<ul class="kc-checks">' + checks.map((c) =>
+          '<li class="' + (c.ok ? '' : 'bad') + '">' + esc(c.name) + (c.detail ? ' — ' + esc(c.detail) : '') + '</li>').join('') + '</ul>' : '');
+    }
+
+    const canSign = !verify || verify.ok !== false;
+    $('review').hidden = false;
+    $('review').innerHTML =
+      '<div class="kc-review">' +
+        '<h3>exactly what gets submitted</h3>' +
+        '<p class="dim" style="font-size:.85rem;margin:.2rem 0 .4rem">Your wallet will sign only your funding input' +
+          (Array.isArray(built.signInputs) && built.signInputs.length === 1 ? '' : 's') +
+          ' — index ' + esc((built.signInputs || []).map((s) => s.index).join(', ') || '?') +
+          '. The covenant input carries no signature; the curve&rsquo;s script is what authorises it.</p>' +
+        vHtml +
+        '<table class="kc-outs"><thead><tr><th>#</th><th>output</th><th>value</th></tr></thead><tbody>' +
+          (outRows || '<tr><td colspan="3" class="dim">the build returned no output list</td></tr>') +
+        '</tbody></table>' +
+        '<div class="kc-review-actions">' +
+          '<button type="button" class="btn" id="cancel-btn">cancel</button>' +
+          '<button type="button" class="btn btn-accent" id="confirm-btn"' + (canSign ? '' : ' disabled') + '>' +
+            (canSign ? 'sign my funding &amp; submit' : 'verification failed — signing blocked') + '</button>' +
+        '</div>' +
+      '</div>';
+    $('cancel-btn').addEventListener('click', () => { $('review').hidden = true; T.built = null; });
+    if (canSign) $('confirm-btn').addEventListener('click', onConfirm);
+  }
+
+  /* ---- confirm: sign only the funding inputs, submit, link the txid ---- */
+
+  async function onConfirm() {
+    const btn = $('confirm-btn'); btn.disabled = true;
+    status('info', '<span class="kc-spin"></span>waiting for KasWare to sign your funding input…');
+    let mod, signed;
+    try {
+      mod = await loadTradeModules();
+      signed = await mod.wallet.signFunding(T.built.txJson, T.built.signInputs);
+    } catch (e) {
+      btn.disabled = false;
+      status('err', 'signing was declined or failed: ' + esc(e && e.message ? e.message : String(e)));
+      return;
+    }
+    status('info', '<span class="kc-spin"></span>submitting to a Kaspa node…');
+    let txid;
+    try {
+      txid = await mod.wallet.submit(signed);
+    } catch (e) {
+      const msg = (e && e.message ? e.message : String(e)) || '';
+      if (/spent|already|orphan|utxo|outpoint|missing|not found|double/i.test(msg)) {
+        /* the curve is a single UTXO: a trade landed between our build and our
+           submit, so the outpoint we committed to is gone. Rebuild from the
+           new tip and ask the reader to review the fresh quote. */
+        status('err', 'another trade landed first, so this one no longer fits the curve&rsquo;s single UTXO. ' +
+          'Rebuilding from the new state — review the fresh quote and try again.');
+        T.built = null; $('review').hidden = true;
+        await refreshChainState();
+        return;
+      }
+      btn.disabled = false;
+      status('err', 'the node rejected the transaction: ' + esc(msg));
+      return;
+    }
+    status('ok', 'submitted. txid <span class="mono">' + esc(txid) + '</span> — ' +
+      '<a href="' + EXPLORER_TX(txid) + '" rel="noopener" target="_blank">open on explorer.kaspa.org</a>' +
+      ' · <a href="' + KASCOV_TX(txid) + '">see it on kascov</a>. ' +
+      'The curve state and your balance update as the block is accepted.');
+    /* the tip moved: refresh state, price and chart so the next trade builds
+       against the new UTXO */
+    T.built = null; $('review').hidden = true;
+    const amt = $('amt'); if (amt) amt.value = '';
+    $('quote').hidden = true;
+    setReviewBtn('enter an amount', false);
+    setTimeout(() => { refreshChainState(); loadToken(); loadTrades(); }, 1500);
+  }
+
+  /* ------------------------------- boot -------------------------------- */
+
+  $('connect-btn').addEventListener('click', onConnect);
+  loadToken().catch(() => { /* heroFail already painted */ });
+  loadTrades();
+  setInterval(() => { loadToken().catch(() => {}); }, 60000);
+
+  /* lift the pure helpers so a test harness can check them without a browser */
+  window.__kascovTrade = { kasStrToSompi, isScaleMultiple, fmtKasBig, fmtTokenBig, bucketTrades, autoBucketMs, vol24hSompi, fmtPrice, supplyText, phaseText, SCALE_SOMPI, FEE_BPS };
+  </script>
+</body>
+</html>
