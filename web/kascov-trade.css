@@ -185,3 +185,17 @@ a.kc-stat:hover .kc-stat-prove { color: var(--accent); }
 .kc-foot code { font-family: var(--mono); font-size: .82em; color: var(--text); word-break: break-all; }
 .kc-foot a { color: var(--accent); }
 .kc-disclaim { color: var(--faint); font-size: .82rem; margin: 1rem 0 0; line-height: 1.55; }
+
+/* ---- sell: pick one cell, spent whole ---- */
+#cell-list { display: flex; flex-direction: column; gap: .4rem; }
+.kc-cell {
+  display: flex; align-items: baseline; gap: .6rem; width: 100%;
+  padding: .55rem .7rem; border-radius: 10px; cursor: pointer; text-align: left;
+  border: 1px solid var(--border); background: transparent; color: var(--text);
+  font: inherit;
+}
+.kc-cell:hover { border-color: var(--accent); }
+.kc-cell.on { border-color: var(--accent); background: rgba(73, 234, 203, 0.08); }
+.kc-cell-amt { font-weight: 600; }
+.kc-cell-yield { color: var(--born, #5be49b); font-family: var(--mono); font-size: .85rem; }
+.kc-cell-op { margin-left: auto; color: var(--faint); font-size: .75rem; }

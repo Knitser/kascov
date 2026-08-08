@@ -97,6 +97,14 @@
       </div>
     </section>
 
+    <!-- 3 · the same verified trades the chart is built from, as a list -->
+    <section class="kc-section" aria-label="Latest trades">
+      <h2>latest trades <span class="kc-h2-note" id="trades-count"></span></h2>
+      <div class="kc-trades" id="trades-list">
+        <div class="kc-trades-empty"><span class="skel" style="width:24ch"></span></div>
+      </div>
+    </section>
+
     <!-- 4 · the trade panel -->
     <section class="kc-section" aria-label="Trade">
       <h2>trade the covenant</h2>
@@ -112,7 +120,21 @@
       </div>
     </section>
 
-    <!-- 5 · footer: the market is the covenant, not this page -->
+    <!-- 5 · what is actually serving this page, collapsed. A trader wants a
+         fill; the details are for anyone who wants to check the plumbing. Each
+         row states a fact this page verified, never a capability it wishes it
+         had. -->
+    <details class="kc-status" id="status-details">
+      <summary>
+        <span class="kc-status-line" id="status-line">
+          <span class="kc-dot kc-dot-wait"></span><span>reading the chain…</span>
+        </span>
+        <span class="kc-status-more">details</span>
+      </summary>
+      <div class="kc-status-body" id="status-body"></div>
+    </details>
+
+    <!-- 6 · footer: the market is the covenant, not this page -->
     <div class="kc-foot">
       <p>
         <strong>First trades should be small.</strong> The market is the
@@ -546,6 +568,7 @@
         import('/kascov/curve.js'),
       ]);
       modules = { wallet, state: chainState, curve };
+      T.mod = modules; /* the cell picker quotes synchronously once loaded */
       return modules;
     } catch (e) {
       modulesErr = e;
@@ -629,6 +652,14 @@
     }
   }
 
+  /* The one cell a sell will spend, whole. */
+  function selectedSellCell() {
+    const cells = Array.isArray(T.userCells) ? T.userCells : [];
+    if (!cells.length) return null;
+    const i = T.sellCellIdx != null && cells[T.sellCellIdx] ? T.sellCellIdx : 0;
+    return cells[i];
+  }
+
   function userTokenTotal() {
     if (!Array.isArray(T.userCells)) return 0n;
     return T.userCells.reduce((a, c) => a + BigInt(String(c.amount).split('.')[0] || '0'), 0n);
@@ -650,6 +681,14 @@
           '<span class="kc-input-unit">KAS</span>' +
         '</div>' +
         '<p class="kc-help" id="amt-help">whole multiples of 0.01 KAS. <button type="button" class="kc-max" id="amt-max" hidden>max</button></p>' +
+      '</div>' +
+      '<div class="kc-field" id="cell-field" hidden>' +
+        '<label>cell to sell</label>' +
+        '<div id="cell-list"></div>' +
+        '<p class="kc-help">A $KASCOV balance lives in cells. Every sell any covenant trade has ever' +
+          ' shown spends one cell whole, so that is all this page will build: pick a cell and it goes' +
+          ' in its entirety. Splitting a cell is something the covenant allows but no observed trade' +
+          ' proves, so it is not offered.</p>' +
       '</div>' +
       '<div class="kc-quote" id="quote" hidden></div>' +
       '<button type="button" class="btn btn-accent btn-cta kc-cta" id="review-btn" disabled>enter an amount</button>' +
@@ -673,21 +712,60 @@
     if (T.side === 'sell') {
       const total = userTokenTotal();
       const dec = (lastToken && lastToken.token && lastToken.token.claimed_decimals) || 0;
-      help.innerHTML = 'KAS you receive, in whole multiples of 0.01 KAS. you hold ' +
-        (T.userCells == null ? '<span class="skel" style="width:6ch"></span>' : esc(fmtTokenBig(total, dec)) + ' $KASCOV') +
-        ' <button type="button" class="kc-max" id="amt-max">max</button>';
-      $('amt-max').addEventListener('click', onMax);
+      help.innerHTML = 'you hold ' +
+        (T.userCells == null ? '<span class="skel" style="width:6ch"></span>'
+          : esc(fmtTokenBig(total, dec)) + ' $KASCOV in ' + (T.userCells.length) +
+            ' cell' + (T.userCells.length === 1 ? '' : 's'));
+      if (maxBtn) maxBtn.hidden = true;
+      renderCellPicker();
     } else {
       help.innerHTML = 'whole multiples of 0.01 KAS.';
       if (maxBtn) maxBtn.hidden = true;
     }
   }
 
+  /* The seller picks one cell and it is spent whole. Each row states what that
+     cell actually yields, computed from the curve's own formula, so the choice
+     is made on the real number rather than on a balance the wallet cannot even
+     display. */
+  function renderCellPicker() {
+    const host = $('cell-list'); if (!host) return;
+    const cells = Array.isArray(T.userCells) ? T.userCells : [];
+    if (!cells.length) {
+      host.innerHTML = '<p class="dim" style="margin:0;font-size:.85rem">' +
+        (T.userCells == null ? 'reading your cells…' : 'no $KASCOV cells on this key.') + '</p>';
+      return;
+    }
+    host.innerHTML = cells.map((c, i) => {
+      let yields = '';
+      try {
+        if (T.curveState && T.mod && T.mod.curve) {
+          const q = T.mod.curve.quoteSell(T.curveState, BigInt(c.amount));
+          yields = ' → ' + esc(fmtKasBig(q.kasOut, 2));
+        }
+      } catch { /* an unquotable cell still lists; the build is the authority */ }
+      const on = T.sellCellIdx === i;
+      return '<button type="button" class="kc-cell' + (on ? ' on' : '') + '" data-cell="' + i + '">' +
+        '<span class="kc-cell-amt">' + esc(String(c.amount)) + ' $KASCOV</span>' +
+        '<span class="kc-cell-yield">' + yields + '</span>' +
+        '<span class="kc-cell-op mono">' + esc(String(c.outpointText || '').slice(0, 12)) + '…</span>' +
+        '</button>';
+    }).join('');
+    host.querySelectorAll('[data-cell]').forEach((b) =>
+      b.addEventListener('click', () => { T.sellCellIdx = Number(b.dataset.cell); renderCellPicker(); recomputeQuote(); }));
+  }
+
   function setSide(side) {
     if (side !== 'buy' && side !== 'sell') return;
     T.side = side;
     $('trade-ui').querySelectorAll('.kc-toggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.side === side)));
-    $('amt-label').textContent = side === 'buy' ? 'KAS to spend' : 'KAS to receive';
+    /* A sell has no free amount: the cell it spends fixes it. Hide the KAS
+       field entirely rather than let a reader type a number the covenant
+       cannot honour. */
+    const amtField = $('amt') && $('amt').closest('.kc-field');
+    if (amtField) amtField.hidden = side === 'sell';
+    if ($('cell-field')) $('cell-field').hidden = side !== 'sell';
+    if (side === 'sell' && T.sellCellIdx == null) T.sellCellIdx = 0;
     $('review').hidden = true; T.built = null;
     renderBalances();
     recomputeQuote();
@@ -724,8 +802,29 @@
 
   async function recomputeQuote() {
     const q = $('quote'); if (!q) return;
-    const sompi = currentAmountSompi();
     const help = $('amt-help');
+    /* A sell is quoted from the chosen cell, whole; there is no typed amount. */
+    if (T.side === 'sell') {
+      const cell = selectedSellCell();
+      if (!cell) { q.hidden = true; setReviewBtn(T.userCells == null ? 'reading your cells…' : 'no cell to sell', false); return; }
+      if (!T.curveState) { q.hidden = true; setReviewBtn('reading the curve…', false); return; }
+      const reqId = ++T.quoteReq;
+      try {
+        const mod = await loadTradeModules();
+        const sq = mod.curve.quoteSell(T.curveState, BigInt(cell.amount));
+        if (reqId !== T.quoteReq) return;
+        T.quote = normalizeQuote('sell', sq.kasOut, mod.curve);
+        paintQuote(sq.kasOut, T.quote);
+      } catch (e) {
+        if (reqId !== T.quoteReq) return;
+        q.hidden = false;
+        q.innerHTML = '<div class="kc-quote-row"><span class="k">quote</span><span class="v impact">' +
+          esc(e && e.message ? e.message : 'the curve refused this cell') + '</span></div>';
+        setReviewBtn('cannot quote this cell', false);
+      }
+      return;
+    }
+    const sompi = currentAmountSompi();
     if ($('amt').value.trim() === '') { q.hidden = true; setReviewBtn('enter an amount', false); if (help) help.classList.remove('bad'); return; }
     if (sompi == null || sompi <= 0n) { q.hidden = true; setReviewBtn('enter a valid amount', false); return; }
     if (!isScaleMultiple(sompi)) {
@@ -856,7 +955,9 @@
 
   async function onReview() {
     const sompi = currentAmountSompi();
-    if (!isScaleMultiple(sompi) || !T.curveState) return;
+    /* a sell has no typed amount to validate: its cell fixes everything */
+    if (!T.curveState) return;
+    if (T.side === 'sell' ? !selectedSellCell() : !isScaleMultiple(sompi)) return;
     setReviewBtn('building…', false);
     clearStatus();
     let built, mod;
@@ -881,7 +982,10 @@
         });
       } else {
         built = await mod.curve.buildSell(T.curveState, {
-          ...common, kasOutSompi: sompi, sellerXOnlyPubkey: T.xOnlyPk, tokenCells: T.userCells,
+          /* one cell, spent whole — the only sell shape a real trade proves.
+             kasOut is not asserted: the cell fixes it, and the builder's own
+             quote is the authority. */
+          ...common, sellerXOnlyPubkey: T.xOnlyPk, tokenCells: [selectedSellCell()],
         });
       }
     } catch (e) {
