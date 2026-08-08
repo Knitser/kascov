@@ -1973,6 +1973,10 @@ async fn serve(
         )
         .route("/data/{network}/token/{id}/book", get(token_book_handler))
         .route(
+            "/data/{network}/token/{id}/curve-cell",
+            get(token_curve_cell_handler),
+        )
+        .route(
             "/data/{network}/token/{id}/trades",
             get(token_trades_handler),
         )
@@ -6398,6 +6402,76 @@ fn sorted_book(
 /// restates what a committed program's own bytes offer, and nothing here has
 /// passed (or could pass) the market verification gate. An empty book is
 /// empty arrays, never a 404 — "no orders" is a fact worth serving.
+/// Everything a page needs to BUILD a trade against a token's live curve cell,
+/// all from kascov's own index: the outpoint and value to spend, the script it
+/// commits to, the economics, and the base program bytes to reveal. The page
+/// splices the current reserve into the base program with its own proven code
+/// and checks the blake2b against `script_hex` before it dares build — kascov
+/// serves the ingredients, the page verifies the result. Curve markets only.
+async fn token_curve_cell_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
+    axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let network = match resolve_network(&state, &net_name) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+    let Ok(token_id) = id.parse::<kascov_core::CovenantId>() else {
+        return (StatusCode::BAD_REQUEST, "bad token id").into_response();
+    };
+    let db = state.base_dir.join(format!("{network}.db"));
+    let key = format!("{network}/token/{token_id}/curve-cell");
+    // Short TTL: the live cell moves with every trade.
+    let cc = "public, max-age=5, s-maxage=10, stale-while-revalidate=30";
+    serve_cached(&state, key, 5, cc, accepts_gzip(&headers), move || {
+        let store = kascov_core::store::Store::open(&db, network)?;
+        let Some(token) = store.token_row(&token_id)? else {
+            return Ok(None);
+        };
+        let summary = store.token_market_summary(&token, true)?;
+        let Some(program) = summary.program.as_ref() else {
+            return Ok(None);
+        };
+        // Only a bonding curve is buildable here; a pool is a different shape.
+        if !program.skeleton.starts_with("KRON curve") {
+            return Ok(None);
+        }
+        let market_id = program.covenant_id;
+        let Some(live) = store.live_market_utxo(&market_id)? else {
+            return Ok(None);
+        };
+        let Some(base_program) = store.recover_program(&market_id.0)? else {
+            return Ok(None);
+        };
+        let value = serde_json::json!({
+            "network": network.to_string(),
+            "generated_at_ms": now_ms(),
+            "token_id": token_id.to_string(),
+            "market_id": market_id.to_string(),
+            "skeleton": program.skeleton,
+            "outpoint": format!("{}:{}", hex::encode(live.txid), live.index),
+            "value_sompi": live.value,
+            "script_hex": hex::encode(&live.spk_script),
+            "live_count": live.live_count,
+            // The current committed reserve the page splices into the base
+            // program to reproduce the live cell.
+            "token_reserve": program.token_reserve,
+            "v_kas_units": program.v_kas_units,
+            "graduation_kas_sompi": program.graduation_kas_sompi,
+            "program_hash": program.program_hash,
+            // The newest revealed program: identical to the live cell's program
+            // outside the reserve field, so splice(base, token_reserve) == live.
+            "base_program_hex": hex::encode(&base_program),
+        });
+        Ok(Some(serde_json::to_string(&value)?))
+    })
+    .await
+}
+
 async fn token_book_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<ServeState>>,
     axum::extract::Path((net_name, id)): axum::extract::Path<(String, String)>,

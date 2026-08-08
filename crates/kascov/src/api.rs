@@ -1063,6 +1063,7 @@ pub(super) fn openapi_document() -> serde_json::Value {
                 query("bucket", "Candle duration", serde_json::json!({ "type": "string", "enum": ["1h", "4h", "1d"] }))
             ]),
             "/data/{network}/token/{id}/book": get("List open resting orders, served as decoded facts with an explicit not-verified provenance note", "tokenBook", vec![network(), id()]),
+            "/data/{network}/token/{id}/curve-cell": get("Everything a page needs to build a trade against the live curve cell: outpoint, value, committed script, economics, and the base program bytes to reveal (the page splices the reserve and verifies the hash)", "tokenCurveCell", vec![network(), id()]),
             "/data/{network}/index.json": get("Discover the machine-readable API surface", "index", vec![network()]),
             "/data/{network}/simulate": post("Simulate a covenant action", "simulate", vec![network()]),
             "/data/{network}/preflight": post("Preflight a transaction", "preflight", vec![network()]),
