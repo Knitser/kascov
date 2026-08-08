@@ -635,10 +635,31 @@ export const SIGOPS_P2PK = 0;
 // more. The default is therefore a flat floor above what both proven trades
 // paid, and the mass-derived figure only ever raises it. The cap exists so a
 // bad mass or a fat-fingered override cannot quietly eat the wallet.
-export const NETWORK_FEE_FLOOR_SOMPI = 50_000_000n; // 0.5 KAS
+//
+// UPDATE, with six confirmed trades to reason from. The node reports these
+// masses for this transaction shape: ~229_120 for a buy, ~241_700 for a sell,
+// stable across trade size because the 172 KB reveal dominates. At the network
+// rate those cost 0.229 and 0.242 KAS. The measured masses below are therefore
+// used INSTEAD of the SDK's calculation, which the fixtures showed to be wrong
+// in both directions. The floor still exists so a rate spike cannot silently
+// underpay, but it no longer sits at double the real cost.
+export const MEASURED_MASS_BUY = 232_000n; // observed 229_118-229_134, rounded up
+export const MEASURED_MASS_SELL = 244_000n; // observed 241_157-241_705, rounded up
+export const MEASURED_MASS_PER_EXTRA_INPUT = 1_200n;
+/* Headroom over the live rate: the rate can move between quoting and landing,
+   and an underpaid transaction is refused rather than lost, but a refusal
+   still wastes the trader's time. 1.4x covers the buckets observed so far. */
+export const FEE_HEADROOM_NUM = 14n;
+export const FEE_HEADROOM_DEN = 10n;
+export const NETWORK_FEE_FLOOR_SOMPI = 30_000_000n; // 0.3 KAS
 export const NETWORK_FEE_CAP_SOMPI = 200_000_000n; // 2 KAS, hard refusal above
-export const FEE_RATE_SOMPI_PER_GRAM = 1n; // network minimum relay rate
-export const FEE_MASS_HEADROOM = 4n; // multiplier on the mass-derived figure
+/* The observed rate in every bucket, priority included. A caller that reads a
+   live estimate should pass it; this is the fallback. */
+export const FEE_RATE_SOMPI_PER_GRAM = 100n;
+/* Retired: a blunt 4x multiplier over a mass the SDK computed wrongly. The
+   fee now comes from the MEASURED mass for the shape times the live rate times
+   FEE_HEADROOM, and an injected mass can still only raise it. */
+export const FEE_MASS_HEADROOM = 1n;
 
 // A change output smaller than this is not worth creating: Kaspa's storage mass
 // penalises tiny outputs, so the trade would cost more than the change is worth.
@@ -864,7 +885,10 @@ function resolveNetworkFee({ feeSompi, mass, feeRateSompiPerGram, minNetworkFeeS
   }
   const floor = minNetworkFeeSompi != null ? BigInt(minNetworkFeeSompi) : NETWORK_FEE_FLOOR_SOMPI;
   const rate = feeRateSompiPerGram != null ? BigInt(feeRateSompiPerGram) : FEE_RATE_SOMPI_PER_GRAM;
-  const fromMass = mass != null ? BigInt(mass) * rate * FEE_MASS_HEADROOM : 0n;
+  const fromMass =
+    mass != null
+      ? (BigInt(mass) * rate * FEE_HEADROOM_NUM * FEE_MASS_HEADROOM) / FEE_HEADROOM_DEN
+      : 0n;
   const fee = fromMass > floor ? fromMass : floor;
   if (fee > cap) throw new Error(`curve: computed fee ${fee} exceeds the ${cap} sompi safety cap`);
   return { fee, source: mass != null && fromMass > floor ? "mass" : "floor", cap, mass, rate };
@@ -1146,9 +1170,16 @@ function assembleTrade(kind, rawState, params) {
   // Fee and funding are mutually dependent (more inputs -> more mass -> more
   // fee -> maybe more inputs). Iterate to a fixed point; refuse rather than
   // ship a transaction whose fee was never re-checked against its final shape.
+  /* The mass of this shape is dominated by the 172 KB reveal, so it barely
+     moves with trade size: use what the node actually reported for six
+     confirmed trades rather than the SDK's calculation, which the fixtures
+     showed wrong in both directions. A caller may still inject a real mass. */
+  const measuredMass =
+    (isBuy ? MEASURED_MASS_BUY : MEASURED_MASS_SELL) +
+    MEASURED_MASS_PER_EXTRA_INPUT * BigInt(Math.max(0, tokenCells.length - (isBuy ? 0 : 1)));
   let feeInfo = resolveNetworkFee({
     feeSompi: params.feeSompi,
-    mass: null,
+    mass: measuredMass,
     feeRateSompiPerGram: params.feeRateSompiPerGram,
     minNetworkFeeSompi: params.minNetworkFeeSompi,
     maxNetworkFeeSompi: params.maxNetworkFeeSompi,

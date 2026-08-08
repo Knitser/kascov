@@ -600,9 +600,19 @@ test("fee policy: the floor holds, an injected mass can only raise it, the cap b
   const noFee = { ...params };
   delete noFee.feeSompi;
 
+  /* The fee comes from the mass the NODE reported for this shape across six
+     confirmed trades, times the live rate and headroom — not from the SDK's
+     calculation, which both fixtures showed to be wrong. The floor is the
+     backstop under that, not the everyday answer. */
   const floored = buildBuy(scene.state, noFee);
-  assert.equal(floored.networkFeeSompi, NETWORK_FEE_FLOOR_SOMPI, "with no mass function the floor is the fee");
-  assert.equal(floored.feeSource, "floor");
+  assert.ok(floored.networkFeeSompi >= NETWORK_FEE_FLOOR_SOMPI, "never below the floor");
+  assert.ok(
+    floored.networkFeeSompi < 50_000_000n,
+    `a measured-mass fee should undercut the old flat 0.5 KAS, got ${floored.networkFeeSompi}`,
+  );
+  /* and it must still clear what the two proven trades actually paid at the
+     rate they paid it — those confirmed on mainnet */
+  assert.ok(floored.networkFeeSompi > 20_000_000n, "comfortably above the bare relay minimum");
   assert.equal(floored.verify().ok, true);
 
   // a real mass from the vendored SDK, on the transaction as constructed
