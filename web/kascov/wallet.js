@@ -467,7 +467,12 @@ async function submitViaSdk(tx, opts) {
   }
   try {
     const res = await rpc.submitTransaction({ transaction, allowOrphan: false });
-    return { ok: true, txid: res && (res.transactionId || res.txId) ? res.transactionId || res.txId : null, via: 'wrpc' };
+    /* The SDK answers with a Hash object, not a string; interpolating it
+       straight into a link produced "[object Object]". Coerce, and only accept
+       something that actually looks like a transaction id. */
+    const raw = res && (res.transactionId ?? res.txId);
+    const txid = raw == null ? null : String(raw.toString ? raw.toString() : raw);
+    return { ok: true, txid: /^[0-9a-f]{64}$/i.test(txid || '') ? txid.toLowerCase() : null, via: 'wrpc' };
   } finally {
     if (owned) {
       try {

@@ -1116,10 +1116,16 @@
       status('err', 'the node rejected the transaction: ' + esc(msg));
       return;
     }
-    status('ok', 'submitted. txid <span class="mono">' + esc(txid) + '</span> — ' +
-      '<a href="' + EXPLORER_TX(txid) + '" rel="noopener" target="_blank">open on explorer.kaspa.org</a>' +
-      ' · <a href="' + KASCOV_TX(txid) + '">see it on kascov</a>. ' +
-      'The curve state and your balance update as the block is accepted.');
+    /* A node can accept a transaction without handing back an id (a duplicate
+       submit does exactly that). Say so plainly rather than link to nothing. */
+    const id = /^[0-9a-f]{64}$/i.test(String(txid || '')) ? String(txid).toLowerCase() : null;
+    status('ok', id
+      ? 'submitted. txid <span class="mono">' + esc(id) + '</span> — ' +
+        '<a href="' + EXPLORER_TX(id) + '" rel="noopener" target="_blank">open on explorer.kaspa.org</a>' +
+        ' · <a href="' + KASCOV_TX(id) + '">see it on kascov</a>. ' +
+        'The curve state and your balance update as the block is accepted.'
+      : 'submitted, and the node accepted it without returning an id. Watch it land in ' +
+        '<a href="#trades-list">latest trades</a> below, or on your wallet.');
     /* the tip moved: refresh state, price and chart so the next trade builds
        against the new UTXO */
     T.built = null; $('review').hidden = true;
