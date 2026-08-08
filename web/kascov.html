@@ -949,7 +949,9 @@
     let mod, signed;
     try {
       mod = await loadTradeModules();
-      signed = await mod.wallet.signFunding(T.built.txJson, T.built.signInputs);
+      const txJson = await mod.wallet.serializeTransaction(T.built.transaction);
+      /* plain indexes: signFunding attaches SIGHASH_ALL itself */
+      signed = await mod.wallet.signFunding(txJson, T.built.fundingIndexes);
     } catch (e) {
       btn.disabled = false;
       status('err', 'signing was declined or failed: ' + esc(e && e.message ? e.message : String(e)));

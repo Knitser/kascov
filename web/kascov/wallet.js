@@ -292,6 +292,25 @@ function looksAlreadyAccepted(text) {
  * signed (inputs[].previousOutpoint, outputs[].amount, scriptPublicKey with a
  * hex `scriptPublicKey`) — the model api.kaspa.org accepts natively. A caller
  * may inject opts.submitter(tx) or a connected opts.rpc to bypass both. */
+/* The wallet takes a transaction as the SDK's canonical "safe JSON" string and
+ * parses it with the same library, so the serialization has to be the SDK's
+ * own — a hand-rolled JSON that merely looks right could round-trip into a
+ * different transaction than the one the reviewer approved. The builder's
+ * object is already SDK-shaped: the assembly proof feeds this exact structure
+ * to `new Transaction(...)` and recovers both real trades' transaction ids. */
+export async function serializeTransaction(transaction) {
+  if (!transaction || typeof transaction !== 'object') {
+    throw new Error('serializeTransaction needs the built transaction object');
+  }
+  const kaspa = await loadSdk();
+  const tx = new kaspa.Transaction(transaction);
+  const json = tx.serializeToSafeJSON();
+  if (typeof json !== 'string' || !json.length) {
+    throw new Error('the SDK returned no serialized transaction');
+  }
+  return json;
+}
+
 export async function submit(signedTx, opts = {}) {
   const tx = typeof signedTx === 'string' ? JSON.parse(signedTx) : signedTx;
   if (!tx || !Array.isArray(tx.inputs) || !Array.isArray(tx.outputs)) {
