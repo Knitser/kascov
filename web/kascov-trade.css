@@ -199,3 +199,5 @@ a.kc-stat:hover .kc-stat-prove { color: var(--accent); }
 .kc-cell-amt { font-weight: 600; }
 .kc-cell-yield { color: var(--born, #5be49b); font-family: var(--mono); font-size: .85rem; }
 .kc-cell-op { margin-left: auto; color: var(--faint); font-size: .75rem; }
+.kc-cell-note { margin: .45rem 0 0; font-size: .82rem; color: var(--faint); }
+.kc-cell-note.bad { color: var(--burn, #ffb067); }

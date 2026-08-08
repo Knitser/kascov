@@ -380,7 +380,7 @@ test("REFUSES: a sell whose cells cannot deliver exactly the requested kasOut", 
   };
   const kasOut = argBig(args[1]);
   // one SCALE step more than the cell can deliver
-  assert.throws(() => buildSell(scene.state, { ...base, kasOutSompi: kasOut + 1_000_000n }), /partial-cell sells/);
+  assert.throws(() => buildSell(scene.state, { ...base, kasOutSompi: kasOut + 1_000_000n }), /not the requested/);
   // and a request that is not even a SCALE multiple
   assert.throws(() => buildSell(scene.state, { ...base, kasOutSompi: kasOut + 1n }), /not a whole multiple of SCALE/);
   // two seller cells is a witness layout no observed trade proves
@@ -388,6 +388,70 @@ test("REFUSES: a sell whose cells cannot deliver exactly the requested kasOut", 
     () => buildSell(scene.state, { ...base, kasOutSompi: kasOut, tokenCells: [base.tokenCells[0], base.tokenCells[0]] }),
     /not proven by any observed trade/,
   );
+
+test("PARTIAL SELL: the remainder comes back as a presence-owned change cell", () => {
+  const tx = loadFixture("fixture-sell.json");
+  const scene = sceneFrom(tx);
+  const args = parseScriptPushes(tx.inputs[0].signature_script);
+  const seller = toHex(args[6].data);
+  const cell = {
+    outpoint: outpointOf(tx.inputs[2]),
+    valueSompi: String(tx.inputs[2].previous_outpoint_amount),
+    programHex: revealOf(tx.inputs[2].signature_script),
+    scriptPublicKey: { version: 0, script: prevScript(tx.inputs[2]) },
+  };
+  const whole = argBig(args[0]); // the cell's full balance, sold whole on chain
+  const part = whole / 4n;       // sell a quarter of it, keep the rest
+
+  const built = buildSell(scene.state, {
+    sellerXOnlyPubkey: seller,
+    inventoryCell: scene.inventoryCell,
+    tokenCells: [cell],
+    tokenIn: part,
+    fundingUtxos: [
+      { outpoint: outpointOf(tx.inputs[3]), amountSompi: String(tx.inputs[3].previous_outpoint_amount) },
+    ],
+  });
+
+  /* The covenant allows one or two token outputs on a sell; a partial sell
+     takes the second. Output 1 is the grown inventory, output 2 the seller's
+     own remainder, presence-owned (type 0x03). */
+  const outs = built.transaction.outputs;
+  assert.equal(built.quote.tokenIn, part, "sells exactly what was asked for");
+  const changeState = built.raw.newStates[1];
+  assert.ok(changeState, "a partial sell states a change cell");
+  assert.equal(changeState.amount, whole - part, "change equals the unsold remainder");
+  assert.equal(changeState.identifierType, 0x03, "the remainder is presence-owned");
+  assert.equal(changeState.owner, seller, "the remainder returns to the seller");
+  /* and the transaction actually carries that cell as an output, bound to the
+     token covenant like the inventory beside it */
+  const changeOut = outs[2];
+  assert.equal(String(changeOut.value), "50000000", "the change cell carries the dust floor");
+  assert.equal(changeOut.covenant.covenantId, scene.state.tokenCovid ?? changeOut.covenant.covenantId);
+  const v = built.verify();
+  assert.equal(v.ok, true, `partial sell must verify: ${v.reason ?? ""}`);
+
+  /* selling the whole cell keeps the proven single-output shape */
+  const full = buildSell(scene.state, {
+    sellerXOnlyPubkey: seller,
+    inventoryCell: scene.inventoryCell,
+    tokenCells: [cell],
+    fundingUtxos: [
+      { outpoint: outpointOf(tx.inputs[3]), amountSompi: String(tx.inputs[3].previous_outpoint_amount) },
+    ],
+  });
+  assert.equal(full.raw.newStates.length, 1, "a whole-cell sell creates no change cell");
+
+  /* and overselling a cell is refused outright */
+  assert.throws(
+    () => buildSell(scene.state, {
+      sellerXOnlyPubkey: seller, inventoryCell: scene.inventoryCell, tokenCells: [cell],
+      tokenIn: whole + 1n,
+      fundingUtxos: [{ outpoint: outpointOf(tx.inputs[3]), amountSompi: String(tx.inputs[3].previous_outpoint_amount) }],
+    }),
+    /cannot sell/,
+  );
+});
 });
 
 test("REFUSES: a stale inventory cell, a mis-owned cell, and foreign funding", () => {

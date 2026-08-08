@@ -933,6 +933,8 @@ function assembleTrade(kind, rawState, params) {
   // both are refused rather than guessed.
   let tokenCells = [];
   let tokenIn = 0n;
+  let cellTotal = 0n;
+  let tokenChange = 0n;
   if (!isBuy) {
     const raw = params.tokenCells;
     if (!Array.isArray(raw) || raw.length === 0) throw new Error("curve: a sell needs a token cell");
@@ -945,7 +947,18 @@ function assembleTrade(kind, rawState, params) {
     tokenCells = raw.map((c, i) =>
       normalizeCell(c, `token cell ${i}`, { owner: userXOnly, identifierType: 0x03 }),
     );
-    tokenIn = tokenCells.reduce((s, c) => s + c.state.amount, 0n);
+    cellTotal = tokenCells.reduce((s, c) => s + c.state.amount, 0n);
+    /* Sell part of a cell and the covenant hands the remainder straight back
+       as a presence-owned change cell — its own sell branch provides for
+       exactly this (nTokOut == 2, IDENTIFIER_ADDRESS, amount >= 1), and kcc20
+       conservation forces the change to equal Σseller − tokenIn, so the seller
+       can only ever receive their OWN tokens back. Default: the whole cell. */
+    tokenIn = params.tokenIn != null ? BigInt(params.tokenIn) : cellTotal;
+    if (tokenIn <= 0n) throw new Error("curve: tokenIn must be positive");
+    if (tokenIn > cellTotal) {
+      throw new Error(`curve: the chosen cell holds ${cellTotal} tokens, cannot sell ${tokenIn}`);
+    }
+    tokenChange = cellTotal - tokenIn;
   }
 
   // The quote, and the exactness gate on what the caller asked for.
@@ -969,8 +982,7 @@ function assembleTrade(kind, rawState, params) {
       if (want !== quote.kasOut) {
         throw new Error(
           `curve: the supplied token cells deliver ${tokenIn} tokens, which the curve prices at ` +
-            `${quote.kasOut} sompi, not the requested ${want} — no cell combination delivers exactly ` +
-            "that, and partial-cell sells are not supported",
+            `${quote.kasOut} sompi, not the requested ${want}`,
         );
       }
     }
@@ -1031,10 +1043,12 @@ function assembleTrade(kind, rawState, params) {
         kasOutSompi: quote.kasOut,
         newReserve: b1,
         sellerXOnlyKey: userXOnly,
-        // Not a knob. The observed sell pushes OP_1 here and produces no seller
-        // token-change output, so 1 is the only value with chain evidence; the
-        // whole-cell gate above is what makes it correct.
-        changeAmount: 1n,
+        /* The remainder the seller keeps. On a whole-cell sell there is no
+           change output and the covenant ignores this argument — the observed
+           trade pushes OP_1 there, so 1 is what a whole-cell sell states. On a
+           partial sell it must equal the change cell this transaction creates,
+           which kcc20 conservation independently forces to Σseller − tokenIn. */
+        changeAmount: tokenChange > 0n ? tokenChange : 1n,
       });
 
   const newStates = isBuy
@@ -1042,7 +1056,12 @@ function assembleTrade(kind, rawState, params) {
         { owner: st.marketCovenantId, identifierType: 0x02, amount: b1, isMinter: 0 },
         { owner: userXOnly, identifierType: 0x03, amount: quote.tokenOut, isMinter: 0 },
       ]
-    : [{ owner: st.marketCovenantId, identifierType: 0x02, amount: b1, isMinter: 0 }];
+    : tokenChange > 0n
+      ? [
+          { owner: st.marketCovenantId, identifierType: 0x02, amount: b1, isMinter: 0 },
+          { owner: userXOnly, identifierType: 0x03, amount: tokenChange, isMinter: 0 },
+        ]
+      : [{ owner: st.marketCovenantId, identifierType: 0x02, amount: b1, isMinter: 0 }];
 
   // Input indexes are fixed by the proven layout.
   const CURVE_IDX = 0;
@@ -1091,6 +1110,18 @@ function assembleTrade(kind, rawState, params) {
           authorizingInput: INVENTORY_IDX,
           covenantId: st.tokenCovid,
         }),
+        /* covid-A output 1: the seller's unsold remainder, presence-owned, and
+           only present when there IS a remainder — the covenant allows one or
+           two token outputs on a sell and nothing more. */
+        ...(tokenChange > 0n
+          ? [
+              txOutput(
+                CELL_DUST_SOMPI,
+                kcc20CellScriptPubKey(inventory.programHex, userXOnly, 0x03, tokenChange, 0),
+                { authorizingInput: INVENTORY_IDX, covenantId: st.tokenCovid },
+              ),
+            ]
+          : []),
         txOutput(quote.fees.creator, p2pkScriptPubKey(feeKeys.creator)),
         txOutput(quote.fees.platform, p2pkScriptPubKey(feeKeys.platform)),
         txOutput(quote.fees.dev, p2pkScriptPubKey(feeKeys.dev)),
@@ -1181,7 +1212,7 @@ function assembleTrade(kind, rawState, params) {
   const fundingIndexes = picked.map((_, i) => firstFundingIdx + i);
   const signInputs = fundingIndexes.map((index) => ({ index, sighashType: 1 })); // SIGHASH_ALL
 
-  const review = buildReviewRows({ isBuy, quote, transaction, change, feeInfo, tokenIn });
+  const review = buildReviewRows({ isBuy, quote, transaction, change, feeInfo, tokenIn, tokenChange });
 
   const built0 = {
     kind,
@@ -1222,7 +1253,7 @@ function kasStr(sompi) {
   return frac ? `${whole}.${frac} KAS` : `${whole} KAS`;
 }
 
-function buildReviewRows({ isBuy, quote, transaction, change, feeInfo, tokenIn }) {
+function buildReviewRows({ isBuy, quote, transaction, change, feeInfo, tokenIn, tokenChange }) {
   const o = transaction.outputs;
   const row = (i, label, kindName, detail) => ({
     label,
@@ -1240,14 +1271,25 @@ function buildReviewRows({ isBuy, quote, transaction, change, feeInfo, tokenIn }
         row(5, "dev fee (0.10%, min 0.2 KAS)", "fee", kasStr(o[5].value)),
         row(6, "change back to you", "you", kasStr(change)),
       ]
-    : [
-        row(0, "curve continuation", "covenant", `reserve → ${quote.newReserve}, holds ${kasStr(o[0].value)}`),
-        row(1, "market inventory cell", "covenant", `${quote.newReserve} $KASCOV`),
-        row(2, "creator fee (0.25%)", "fee", kasStr(o[2].value)),
-        row(3, "platform fee (0.90%)", "fee", kasStr(o[3].value)),
-        row(4, "dev fee (0.10%, min 0.2 KAS)", "fee", kasStr(o[4].value)),
-        row(5, "proceeds + change back to you", "you", `${kasStr(change)} for ${tokenIn} $KASCOV`),
-      ];
+    : (() => {
+        /* A partial sell inserts the seller's remainder as a token output, so
+           every row after it shifts. Deriving the offset here keeps the review
+           panel honest: a mislabeled fee is a lie told at the moment of
+           signing. */
+        const keepsChange = tokenChange != null && tokenChange > 0n;
+        const f = keepsChange ? 3 : 2;
+        return [
+          row(0, "curve continuation", "covenant", `reserve → ${quote.newReserve}, holds ${kasStr(o[0].value)}`),
+          row(1, "market inventory cell", "covenant", `${quote.newReserve} $KASCOV`),
+          ...(keepsChange
+            ? [row(2, "your $KASCOV back", "you", `${tokenChange} $KASCOV kept, ${tokenIn} sold`)]
+            : []),
+          row(f, "creator fee (0.25%)", "fee", kasStr(o[f].value)),
+          row(f + 1, "platform fee (0.90%)", "fee", kasStr(o[f + 1].value)),
+          row(f + 2, "dev fee (0.10%, min 0.2 KAS)", "fee", kasStr(o[f + 2].value)),
+          row(f + 3, "proceeds + change back to you", "you", `${kasStr(change)} for ${tokenIn} $KASCOV`),
+        ];
+      })();
   rows.push({
     label: "network fee",
     kind: "network",
@@ -1286,9 +1328,18 @@ function verifyTrade(built, rawState, params) {
     //    cells they handed over actually commit to, not from anything the
     //    builder wrote down along the way.
     const askedKasIn = isBuy ? BigInt(params.kasInSompi) : 0n;
-    const askedTokenIn = isBuy
+    /* What the seller handed over, and what they asked to sell of it. Absent an
+       explicit tokenIn the ask IS the whole cell; with one, the remainder must
+       come back to them, which the change-cell check below re-derives
+       independently rather than trusting the builder's arithmetic. */
+    const cellsTotal = isBuy
       ? 0n
       : (params.tokenCells || []).reduce((s, c) => s + parseCellState(c.programHex || c.program_hex).amount, 0n);
+    const askedTokenIn = isBuy
+      ? 0n
+      : params.tokenIn != null
+        ? BigInt(params.tokenIn)
+        : cellsTotal;
     const q = isBuy
       ? quoteBuy({ reserve: st.reserve, value: st.value }, askedKasIn)
       : quoteSell({ reserve: st.reserve, value: st.value }, askedTokenIn);
@@ -1314,7 +1365,12 @@ function verifyTrade(built, rawState, params) {
     }
 
     // 4. the shape, before anything indexes into it
-    const expectedOutputCount = isBuy ? 7 : 6;
+    /* A buy always creates two token cells (grown inventory + the buyer's).
+       A sell creates the grown inventory, plus the seller's remainder ONLY
+       when they sold part of a cell — the covenant permits one or two token
+       outputs on a sell and never more. */
+    const sellKeepsChange = !isBuy && askedTokenIn < cellsTotal;
+    const expectedOutputCount = isBuy ? 7 : sellKeepsChange ? 7 : 6;
     if (!add("output count", tx.outputs.length === expectedOutputCount,
       `${tx.outputs.length} built, ${expectedOutputCount} expected`)) {
       return { ok: false, reason: "the transaction has the wrong number of outputs", checks };
@@ -1328,7 +1384,8 @@ function verifyTrade(built, rawState, params) {
     // 5. fee legs, recomputed from basis points
     const legs = feeLegs(moved);
     const feeKeys = feeKeysFromCurveProgram(st.programHex);
-    const feeOffset = isBuy ? 3 : 2;
+    /* The fee legs sit after the token outputs, and a partial sell adds one. */
+    const feeOffset = isBuy ? 3 : sellKeepsChange ? 3 : 2;
     const legOk =
       tx.outputs[feeOffset].value === legs.creator &&
       tx.outputs[feeOffset + 1].value === legs.platform &&
@@ -1356,6 +1413,14 @@ function verifyTrade(built, rawState, params) {
       : [
           [q.curveValueAfter, p2shScriptPubKey(nextCurveProgram(st.programHex, b1))],
           [CELL_DUST_SOMPI, kcc20CellScriptPubKey(r.inventory.programHex, st.marketCovenantId, 0x02, b1, 0)],
+          /* the seller's own remainder, re-derived here as cellsTotal minus
+             what they asked to sell — never read back from the builder */
+          ...(sellKeepsChange
+            ? [[
+                CELL_DUST_SOMPI,
+                kcc20CellScriptPubKey(r.inventory.programHex, r.userXOnly, 0x03, cellsTotal - askedTokenIn, 0),
+              ]]
+            : []),
           [legs.creator, p2pkScriptPubKey(feeKeys.creator)],
           [legs.platform, p2pkScriptPubKey(feeKeys.platform)],
           [legs.dev, p2pkScriptPubKey(feeKeys.dev)],
@@ -1514,9 +1579,12 @@ function verifyTrade(built, rawState, params) {
       tx.outputs[1].covenant &&
       tx.outputs[1].covenant.authorizingInput === 1 &&
       tx.outputs[1].covenant.covenantId === st.tokenCovid &&
-      (!isBuy || (tx.outputs[2].covenant && tx.outputs[2].covenant.authorizingInput === 1 &&
-        tx.outputs[2].covenant.covenantId === st.tokenCovid)) &&
-      tx.outputs.slice(isBuy ? 3 : 2).every((o) => !o.covenant);
+      /* output 2 is a token cell on a buy (the buyer's) and on a partial sell
+         (the seller's remainder); both are authorized by the inventory input */
+      (!(isBuy || sellKeepsChange) ||
+        (tx.outputs[2].covenant && tx.outputs[2].covenant.authorizingInput === 1 &&
+          tx.outputs[2].covenant.covenantId === st.tokenCovid)) &&
+      tx.outputs.slice(isBuy || sellKeepsChange ? 3 : 2).every((o) => !o.covenant);
     if (!add("output covenant bindings", Boolean(bindOk), `token ${st.tokenCovid}`)) {
       return { ok: false, reason: "an output's covenant binding is wrong or missing", checks };
     }
