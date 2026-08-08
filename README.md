@@ -217,4 +217,15 @@ Run `cargo test --workspace` and `npm run test:web` before opening a PR.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE) — with one carve-out.
+
+The **direct-trade module** (`web/kascov.html`, `web/kascov/` and
+`scripts/kascov-trade/`) is licensed under the **GNU AGPL-3.0** — see
+[LICENSE-AGPL](LICENSE-AGPL). It builds covenant trades byte for byte in the
+browser; anyone may run it, study it, modify it and serve it, and anyone who
+serves a modified version over a network must publish their changes under the
+same terms. Each covered file carries an SPDX header saying so.
+
+The vendored Kaspa WASM SDK under `web/kascov/sdk/` is upstream code and keeps
+its own license (`web/kascov/sdk/web/LICENSE`); it is covered by neither of the
+licenses above.

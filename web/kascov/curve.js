@@ -1,3 +1,13 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (c) 2026 Michiel Hamblok
+ *
+ * Part of kascov's direct-trade module. Unlike the rest of this repository
+ * (MIT), this module is licensed under the GNU Affero General Public License
+ * v3.0: run it, modify it, serve it — and publish your changes the same way.
+ * Full text in LICENSE-AGPL at the repository root. The vendored Kaspa WASM
+ * SDK under web/kascov/sdk/ keeps its own upstream license and is NOT covered
+ * by this notice.
+ */
 // KRON curve v1 trade builder — pure, offline, permissionless.
 //
 // The curve covenant (skeleton "KRON curve v1", covenant id 081249d5e7ed1847…)
