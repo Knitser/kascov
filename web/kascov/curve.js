@@ -643,14 +643,28 @@ export const SIGOPS_P2PK = 0;
 // used INSTEAD of the SDK's calculation, which the fixtures showed to be wrong
 // in both directions. The floor still exists so a rate spike cannot silently
 // underpay, but it no longer sits at double the real cost.
-export const MEASURED_MASS_BUY = 232_000n; // observed 229_118-229_134, rounded up
-export const MEASURED_MASS_SELL = 244_000n; // observed 241_157-241_705, rounded up
-export const MEASURED_MASS_PER_EXTRA_INPUT = 1_200n;
+// The binding constraint is NOT the compute mass api.kaspa.org reports (~229k
+// buy / ~242k sell). A node refused a sell with:
+//
+//   32480000 fees ... under the required 35137800 for normalized TRANSIENT
+//   mass 351378 (proportional to transaction byte size)
+//
+// Transient mass is ~2x the serialized size, and at 172 KB of reveal the
+// sigscripts are 99% of that size — so the fee is priced off the transaction
+// this builder actually produced, not off a constant that stops being true the
+// moment an input is added.
+export const TRANSIENT_MASS_PER_BYTE = 2n;
+/* A funding input carries no signature until the wallet signs it, and the
+   node prices the SIGNED bytes: a 0x41 push of 65 bytes, plus its length. */
+export const SIGNED_FUNDING_INPUT_BYTES = 67n;
 /* Headroom over the live rate: the rate can move between quoting and landing,
    and an underpaid transaction is refused rather than lost, but a refusal
    still wastes the trader's time. 1.4x covers the buckets observed so far. */
-export const FEE_HEADROOM_NUM = 14n;
-export const FEE_HEADROOM_DEN = 10n;
+/* The transient-mass estimate above already rounds up (it measured 356k
+   against the node's 351k on a real sell), so the headroom on top only has to
+   absorb a rate move between quoting and landing, not a bad mass. */
+export const FEE_HEADROOM_NUM = 115n;
+export const FEE_HEADROOM_DEN = 100n;
 export const NETWORK_FEE_FLOOR_SOMPI = 30_000_000n; // 0.3 KAS
 export const NETWORK_FEE_CAP_SOMPI = 200_000_000n; // 2 KAS, hard refusal above
 /* The observed rate in every bucket, priority included. A caller that reads a
@@ -875,6 +889,24 @@ function selectFunding(pool, needed, minCount) {
 // The fee the transaction will pay. An explicit feeSompi wins outright (that is
 // how the acceptance gate replays a real trade); otherwise the floor, raised —
 // never lowered — by the mass-derived figure when a mass function was injected.
+/* Serialized size of a transaction as the node will see it once signed, and
+   from it the transient mass the node actually charges for. Deliberately a
+   slight OVER-estimate: paying a little more confirms, paying a little less is
+   refused, and the trader's time is worth more than a few thousand sompi. */
+function transientMassOf(transaction, fundingIndexes) {
+  const funding = new Set((fundingIndexes || []).map(Number));
+  let size = 62; // version, counts, lockTime, subnetworkId, gas, payload len
+  transaction.inputs.forEach((inp, i) => {
+    const sig = String(inp.signatureScript || "").length / 2;
+    // outpoint 36, sigscript length prefix 8, sequence 8, sigops 1, budget 2
+    size += 55 + sig + (funding.has(i) && sig === 0 ? Number(SIGNED_FUNDING_INPUT_BYTES) : 0);
+  });
+  for (const out of transaction.outputs) {
+    size += 18 + scriptHexOf(out.scriptPublicKey).length / 2 + (out.covenant ? 40 : 0);
+  }
+  return TRANSIENT_MASS_PER_BYTE * BigInt(size);
+}
+
 function resolveNetworkFee({ feeSompi, mass, feeRateSompiPerGram, minNetworkFeeSompi, maxNetworkFeeSompi }) {
   const cap = maxNetworkFeeSompi != null ? BigInt(maxNetworkFeeSompi) : NETWORK_FEE_CAP_SOMPI;
   if (feeSompi != null) {
@@ -1170,16 +1202,16 @@ function assembleTrade(kind, rawState, params) {
   // Fee and funding are mutually dependent (more inputs -> more mass -> more
   // fee -> maybe more inputs). Iterate to a fixed point; refuse rather than
   // ship a transaction whose fee was never re-checked against its final shape.
-  /* The mass of this shape is dominated by the 172 KB reveal, so it barely
-     moves with trade size: use what the node actually reported for six
-     confirmed trades rather than the SDK's calculation, which the fixtures
-     showed wrong in both directions. A caller may still inject a real mass. */
-  const measuredMass =
-    (isBuy ? MEASURED_MASS_BUY : MEASURED_MASS_SELL) +
-    MEASURED_MASS_PER_EXTRA_INPUT * BigInt(Math.max(0, tokenCells.length - (isBuy ? 0 : 1)));
   let feeInfo = resolveNetworkFee({
     feeSompi: params.feeSompi,
-    mass: measuredMass,
+    /* seeded from the covenant sigscripts alone, which dominate the size; the
+       loop below re-prices against the assembled transaction */
+    mass: TRANSIENT_MASS_PER_BYTE * (
+      BigInt(curveArgs.signatureScript.length / 2) +
+      BigInt(inventoryArgs.signatureScript.length / 2) +
+      tokenCellArgs.reduce((n, a) => n + BigInt(a.signatureScript.length / 2), 0n) +
+      1_000n
+    ),
     feeRateSompiPerGram: params.feeRateSompiPerGram,
     minNetworkFeeSompi: params.minNetworkFeeSompi,
     maxNetworkFeeSompi: params.maxNetworkFeeSompi,
@@ -1218,7 +1250,7 @@ function assembleTrade(kind, rawState, params) {
       payload,
     };
     built = { transaction, picked, fundingSum: sum, change };
-    if (params.feeSompi != null || !calcMass) break;
+    if (params.feeSompi != null) break;
     // Mass is measured on the SIGNED shape, not the one the wallet is handed:
     // each funding input grows by a 66-byte Schnorr push once signed, and a fee
     // sized against the unsigned bytes would be short by exactly that much.
@@ -1228,7 +1260,12 @@ function assembleTrade(kind, rawState, params) {
         i >= firstFundingIdx ? { ...inp, signatureScript: `41${"00".repeat(65)}` } : inp,
       ),
     };
-    const mass = BigInt(calcMass(network, massShape));
+    /* The node charges the greater of its mass measures; for this shape the
+       transient one (byte size) always dominates, and the SDK does not report
+       it. Take ours, and let an injected calculator raise it if it disagrees. */
+    const ourMass = transientMassOf(massShape, built.picked.map((_, i) => firstFundingIdx + i));
+    const sdkMass = calcMass ? BigInt(calcMass(network, massShape)) : 0n;
+    const mass = ourMass > sdkMass ? ourMass : sdkMass;
     const next = resolveNetworkFee({
       feeSompi: null,
       mass,
