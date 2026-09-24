@@ -1,0 +1,15 @@
+{
+  "note": "the first KCC-0020-shaped covenant on any chain: kascov's reduced vector, broadcast on testnet-10 2026-08-24 by the lab key. Every transaction was engine-simulated before broadcast and accepted by consensus; the pin 4abcc188... recognises the family and kascov.io indexed it live.",
+  "network": "testnet-10",
+  "covenant_id": "94d927e08ecdcf8833c012aba39961ac3d07d42051870205b8db946b95633109",
+  "template_hash": "4abcc18873220d197d2dd5ddf46b24180bdb7fac48afd19f80bae6e1dd64e7eb",
+  "genesis": "af1fd65075027f7693db81c5d55c1132fff5551f27ddd373c90090a281bb971f",
+  "ladder": [
+    { "step": "T1 split 1->3 (threshold / schnorr+p2sh / hash-chain)", "txid": "c63da5ac092bac19164b974b8f99f65dc3cfae044685b560d08a0e393afdf53e" },
+    { "step": "T2 threshold borrowed receive (delta 101 > 100)", "txid": "4bd308b9ec480be597aea6fe82ca595248f6308bec198619fe24b1cffe4f18a5" },
+    { "step": "T3 schnorr borrowed receive (borrow key signs the tx)", "txid": "fa70b335acf4f5f9fbfcaf8647e0a87511cf7653c7e295770b984c81f257f81e" },
+    { "step": "T4 hash-chain borrowed receive, step 1", "txid": "4e6dc6559a01c9c7f502fa3028aca52981d538eefe4fff116d5d62e8ff371d8d" },
+    { "step": "T5 hash-chain borrowed receive, step 2", "txid": "193d9b7e90eab84eb53daee055c84c3a3a019a1ae5054cffc18347f7d8fe9ed8" },
+    { "step": "T6 merge 3->1", "txid": "88be6c0d81dd040f1d036692629b56eb3c4565f4f2687d3d3b00a11fe7b9e9b5" }
+  ]
+}

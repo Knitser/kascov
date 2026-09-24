@@ -1,0 +1,547 @@
+{
+  "schema_version": 1,
+  "id": "2d00b3d08e6f517786ff3bb534ada9fff2331b3eb8a880dbcac1dcfdd34e9ea1",
+  "generator": {
+    "name": "argentc",
+    "version": "0.1.0"
+  },
+  "app": "KCC20Asset",
+  "dependencies": [],
+  "root": "examples/icc/kcc20_asset.ag",
+  "modules": [
+    "examples/icc/kcc20_asset.ag"
+  ],
+  "argent": {
+    "templates": [
+      {
+        "id": "template/kcc20",
+        "actor": "KCC20",
+        "symbol": "gen__kcc20_template"
+      },
+      {
+        "id": "template/minter_proxy",
+        "actor": "MinterProxy",
+        "symbol": "gen__minter_proxy_template"
+      }
+    ],
+    "template_plan": {
+      "templates": [
+        {
+          "id": "template/kcc20",
+          "actor": "KCC20",
+          "contract": "KCC20",
+          "symbol": "gen__kcc20_template",
+          "sil_template_hash": "0e9a40dcf2fd307d0288957c166beae77750f79686c43c8d42d6c4178a3ea72a",
+          "actor_type_handle": {
+            "state": "KCC20State",
+            "context_fields": [],
+            "template": {
+              "prefix_hex": "",
+              "suffix_hex": "b9cb519c69780100876353795379ac696778010287635279d000a0696700696868012056797e010156797e0108537958cd7e7e7eb976c97601da937cbc7eaa02000001aa7e01207e7c7e01877eb900ccc3876975757575757551",
+              "hash_hex": "0e9a40dcf2fd307d0288957c166beae77750f79686c43c8d42d6c4178a3ea72a"
+            }
+          }
+        },
+        {
+          "id": "template/minter_proxy",
+          "actor": "MinterProxy",
+          "contract": "MinterProxy",
+          "symbol": "gen__minter_proxy_template",
+          "sil_template_hash": "9da6d72a5edff6ba4dc43b7db896871cffa553d3fc0f5d8180dc137c8afe3cad",
+          "actor_type_handle": {
+            "state": "MinterProxyState",
+            "context_fields": [
+              "gen__kcc20_template"
+            ],
+            "template": {
+              "prefix_hex": "200e9a40dcf2fd307d0288957c166beae77750f79686c43c8d42d6c4178a3ea72a",
+              "suffix_hex": "b9cb529c6976d000a0695779788769012052797e012059797e7eb976c976028f80937cbc7eaa02000001aa7e01207e7c7e01877eb900ccc38769785479827c75519658cd55797e5479827c75519658cd55797e7eaa8769012057797e010157797e0108577958cd7e7e7e54797c7e53797eaa02000001aa7e01207e7c7e01877eb951ccc38769757575757575757551",
+              "hash_hex": "69ddc77eece6021e9aa72af49be79cdd42b86d8170dfdfe2c934144a85a36024"
+            }
+          }
+        }
+      ],
+      "runtime_states": [
+        {
+          "contract": "MinterProxy",
+          "source": "MinterProxyState",
+          "field_roles": [
+            {
+              "name": "gen__kcc20_template",
+              "role": {
+                "kind": "template",
+                "contract": "KCC20"
+              }
+            }
+          ]
+        }
+      ],
+      "route_tables": [],
+      "route_proofs": [],
+      "route_families": [],
+      "witness_recipes": [
+        {
+          "id": "witness/kcc20/template_prefix_bytes",
+          "template_id": "template/kcc20",
+          "subject": {
+            "kind": "actor",
+            "actor": "KCC20"
+          },
+          "param": "gen__kcc20_prefix",
+          "purpose": {
+            "kind": "template_prefix_bytes"
+          }
+        },
+        {
+          "id": "witness/kcc20/template_suffix_bytes",
+          "template_id": "template/kcc20",
+          "subject": {
+            "kind": "actor",
+            "actor": "KCC20"
+          },
+          "param": "gen__kcc20_suffix",
+          "purpose": {
+            "kind": "template_suffix_bytes"
+          }
+        }
+      ]
+    },
+    "interfaces": {
+      "exports": [
+        {
+          "id": "interface/actor/KCC20",
+          "app": "KCC20Asset",
+          "actor": "KCC20",
+          "state": "KCC20State",
+          "fingerprint_hex": "68a09fba1e686fcdcf15c631eba96dce55f36c3f7e6bcab188f1eade3933fee2"
+        },
+        {
+          "id": "interface/actor/MinterProxy",
+          "app": "KCC20Asset",
+          "actor": "MinterProxy",
+          "state": "MinterProxyState",
+          "fingerprint_hex": "6e4a918db5a03bebaeebbb6f4b9fba6a8626d7098a34d61272e6216f02c1d7f1"
+        }
+      ],
+      "imports": []
+    },
+    "states": [
+      {
+        "name": "KCC20State",
+        "fields": [
+          {
+            "name": "owner_identifier",
+            "type": {
+              "kind": "fixed_bytes",
+              "len": 32
+            }
+          },
+          {
+            "name": "identifier_type",
+            "type": {
+              "kind": "byte"
+            }
+          },
+          {
+            "name": "amount",
+            "type": {
+              "kind": "int"
+            }
+          }
+        ]
+      },
+      {
+        "name": "MinterProxyState",
+        "fields": [
+          {
+            "name": "controller_id",
+            "type": {
+              "kind": "fixed_bytes",
+              "len": 32
+            },
+            "source_type": {
+              "name": "cov_id"
+            }
+          }
+        ]
+      }
+    ],
+    "actor_enums": [],
+    "actors": [
+      {
+        "name": "KCC20",
+        "state": "KCC20State",
+        "abi": {
+          "actor": "KCC20"
+        },
+        "entries": [
+          {
+            "name": "transfer",
+            "kind": "leader",
+            "abi": {
+              "actor": "KCC20",
+              "entry": "transfer"
+            },
+            "route_plan": {
+              "active_input": {
+                "name": "self",
+                "actor": "KCC20",
+                "cov_index": 0
+              },
+              "leader_input": {
+                "name": "self",
+                "actor": "KCC20",
+                "cov_index": 0
+              },
+              "consumes": [],
+              "outputs": [
+                {
+                  "name": "next",
+                  "auth_index": 0,
+                  "actors": [
+                    "KCC20"
+                  ]
+                }
+              ],
+              "witness_recipe_ids": []
+            },
+            "hidden_params": [],
+            "template_selectors": [],
+            "witnesses": [],
+            "consumes": [],
+            "emits": {
+              "kind": "outputs",
+              "outputs": [
+                {
+                  "name": "next",
+                  "auth_index": 0,
+                  "actors": [
+                    "KCC20"
+                  ]
+                }
+              ]
+            },
+            "routes": [
+              {
+                "output": "next",
+                "actor": "KCC20",
+                "template_id": "template/kcc20",
+                "state_expr": "next_state"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "MinterProxy",
+        "state": "MinterProxyState",
+        "abi": {
+          "actor": "MinterProxy"
+        },
+        "entries": [
+          {
+            "name": "mint",
+            "kind": "leader",
+            "abi": {
+              "actor": "MinterProxy",
+              "entry": "mint"
+            },
+            "route_plan": {
+              "active_input": {
+                "name": "self",
+                "actor": "MinterProxy",
+                "cov_index": 0
+              },
+              "leader_input": {
+                "name": "self",
+                "actor": "MinterProxy",
+                "cov_index": 0
+              },
+              "consumes": [],
+              "outputs": [
+                {
+                  "name": "proxy",
+                  "auth_index": 0,
+                  "actors": [
+                    "MinterProxy"
+                  ]
+                },
+                {
+                  "name": "recipient",
+                  "auth_index": 1,
+                  "actors": [
+                    "KCC20"
+                  ]
+                }
+              ],
+              "witness_recipe_ids": [
+                "witness/kcc20/template_prefix_bytes",
+                "witness/kcc20/template_suffix_bytes"
+              ]
+            },
+            "hidden_params": [
+              {
+                "recipe_id": "witness/kcc20/template_prefix_bytes",
+                "name": "gen__kcc20_prefix",
+                "type": {
+                  "kind": "bytes"
+                },
+                "subject": {
+                  "kind": "actor",
+                  "actor": "KCC20"
+                },
+                "purpose": {
+                  "kind": "template_prefix_bytes"
+                }
+              },
+              {
+                "recipe_id": "witness/kcc20/template_suffix_bytes",
+                "name": "gen__kcc20_suffix",
+                "type": {
+                  "kind": "bytes"
+                },
+                "subject": {
+                  "kind": "actor",
+                  "actor": "KCC20"
+                },
+                "purpose": {
+                  "kind": "template_suffix_bytes"
+                }
+              }
+            ],
+            "template_selectors": [],
+            "witnesses": [
+              {
+                "recipe_id": "witness/kcc20/template_prefix_bytes",
+                "param": "gen__kcc20_prefix",
+                "subject": {
+                  "kind": "actor",
+                  "actor": "KCC20"
+                },
+                "purpose": {
+                  "kind": "template_prefix_bytes"
+                }
+              },
+              {
+                "recipe_id": "witness/kcc20/template_suffix_bytes",
+                "param": "gen__kcc20_suffix",
+                "subject": {
+                  "kind": "actor",
+                  "actor": "KCC20"
+                },
+                "purpose": {
+                  "kind": "template_suffix_bytes"
+                }
+              }
+            ],
+            "consumes": [],
+            "emits": {
+              "kind": "outputs",
+              "outputs": [
+                {
+                  "name": "proxy",
+                  "auth_index": 0,
+                  "actors": [
+                    "MinterProxy"
+                  ]
+                },
+                {
+                  "name": "recipient",
+                  "auth_index": 1,
+                  "actors": [
+                    "KCC20"
+                  ]
+                }
+              ]
+            },
+            "routes": [
+              {
+                "output": "proxy",
+                "actor": "MinterProxy",
+                "template_id": "template/minter_proxy",
+                "state_expr": "next_proxy"
+              },
+              {
+                "output": "recipient",
+                "actor": "KCC20",
+                "template_id": "template/kcc20",
+                "state_expr": "recipient"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "sil_abi": {
+    "schema_version": 1,
+    "states": [
+      {
+        "name": "KCC20State",
+        "fields": [
+          {
+            "name": "owner_identifier",
+            "type": {
+              "kind": "fixed_bytes",
+              "len": 32
+            }
+          },
+          {
+            "name": "identifier_type",
+            "type": {
+              "kind": "byte"
+            }
+          },
+          {
+            "name": "amount",
+            "type": {
+              "kind": "int"
+            }
+          }
+        ]
+      },
+      {
+        "name": "MinterProxyState",
+        "fields": [
+          {
+            "name": "controller_id",
+            "type": {
+              "kind": "fixed_bytes",
+              "len": 32
+            }
+          }
+        ]
+      }
+    ],
+    "contracts": [
+      {
+        "name": "KCC20",
+        "source_path": "sil/KCC20.sil",
+        "runtime_state": {
+          "source": "KCC20State",
+          "fields": [
+            {
+              "name": "owner_identifier",
+              "type": {
+                "kind": "fixed_bytes",
+                "len": 32
+              }
+            },
+            {
+              "name": "identifier_type",
+              "type": {
+                "kind": "byte"
+              }
+            },
+            {
+              "name": "amount",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        },
+        "entries": [
+          {
+            "name": "transfer",
+            "selector": null,
+            "params": [
+              {
+                "name": "new_owner_identifier",
+                "type": {
+                  "kind": "fixed_bytes",
+                  "len": 32
+                }
+              },
+              {
+                "name": "new_identifier_type",
+                "type": {
+                  "kind": "byte"
+                }
+              },
+              {
+                "name": "owner_sig",
+                "type": {
+                  "kind": "sig"
+                }
+              }
+            ]
+          }
+        ],
+        "compiled": {
+          "script_hex": "2000000000000000000000000000000000000000000000000000000000000000000100080000000000000000b9cb519c69780100876353795379ac696778010287635279d000a0696700696868012056797e010156797e0108537958cd7e7e7eb976c97601da937cbc7eaa02000001aa7e01207e7c7e01877eb900ccc3876975757575757551",
+          "template_hash_hex": "0e9a40dcf2fd307d0288957c166beae77750f79686c43c8d42d6c4178a3ea72a",
+          "state_span": {
+            "offset": 0,
+            "len": 44
+          }
+        }
+      },
+      {
+        "name": "MinterProxy",
+        "source_path": "sil/MinterProxy.sil",
+        "runtime_state": {
+          "source": "MinterProxyState",
+          "fields": [
+            {
+              "name": "gen__kcc20_template",
+              "type": {
+                "kind": "fixed_bytes",
+                "len": 32
+              }
+            },
+            {
+              "name": "controller_id",
+              "type": {
+                "kind": "fixed_bytes",
+                "len": 32
+              }
+            }
+          ]
+        },
+        "entries": [
+          {
+            "name": "mint",
+            "selector": null,
+            "params": [
+              {
+                "name": "next_proxy",
+                "type": {
+                  "kind": "struct",
+                  "name": "MinterProxyState"
+                }
+              },
+              {
+                "name": "recipient",
+                "type": {
+                  "kind": "struct",
+                  "name": "KCC20State"
+                }
+              },
+              {
+                "name": "gen__kcc20_prefix",
+                "type": {
+                  "kind": "bytes"
+                }
+              },
+              {
+                "name": "gen__kcc20_suffix",
+                "type": {
+                  "kind": "bytes"
+                }
+              }
+            ]
+          }
+        ],
+        "compiled": {
+          "script_hex": "200000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000b9cb529c6976d000a0695779788769012052797e012059797e7eb976c976028f80937cbc7eaa02000001aa7e01207e7c7e01877eb900ccc38769785479827c75519658cd55797e5479827c75519658cd55797e7eaa8769012057797e010157797e0108577958cd7e7e7e54797c7e53797eaa02000001aa7e01207e7c7e01877eb951ccc38769757575757575757551",
+          "template_hash_hex": "9da6d72a5edff6ba4dc43b7db896871cffa553d3fc0f5d8180dc137c8afe3cad",
+          "state_span": {
+            "offset": 0,
+            "len": 66
+          }
+        }
+      }
+    ]
+  }
+}

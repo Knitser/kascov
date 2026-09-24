@@ -1,0 +1,33 @@
+pragma silverscript ^0.1.0;
+
+contract Mecenas(pubkey recipient, byte[32] funder, int pledge, int period) {
+    entrypoint function receive() {
+        require(this.age >= period);
+
+        // Check that the first output sends to the recipient
+        byte[34] recipientScriptPubKey = new ScriptPubKeyP2PK(recipient);
+        require(tx.outputs[0].scriptPubKey == byte[](recipientScriptPubKey));
+
+        // Calculate the value that's left
+        int minerFee = 1000;
+        int currentValue = tx.inputs[this.activeInputIndex].value;
+        int changeValue = currentValue - pledge - minerFee;
+
+        // If there is not enough left for *another* pledge after this one,
+        // we send the remainder to the recipient. Otherwise we send the
+        // pledge to the recipient and the change back to the contract
+        if (changeValue <= pledge + minerFee) {
+            require(tx.outputs[0].value == currentValue - minerFee);
+        } else {
+            require(tx.outputs[0].value == pledge);
+            byte[] changeScriptPubKey = tx.inputs[this.activeInputIndex].scriptPubKey;
+            require(tx.outputs[1].scriptPubKey == changeScriptPubKey);
+            require(tx.outputs[1].value == changeValue);
+        }
+    }
+
+    entrypoint function reclaim(pubkey pk, sig s) {
+        require(blake2b(pk) == funder);
+        require(checkSig(s, pk));
+    }
+}

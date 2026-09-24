@@ -1,0 +1,559 @@
+{
+  "schema_version": 1,
+  "id": "155f17c47395712debc8f7a2c58434e60749c95a38f780afda60611c44dc7caf",
+  "generator": {
+    "name": "argentc",
+    "version": "0.1.0"
+  },
+  "app": "Tickets",
+  "dependencies": [],
+  "root": "examples/tickets.ag",
+  "modules": [
+    "examples/tickets.ag"
+  ],
+  "argent": {
+    "templates": [
+      {
+        "id": "template/issuer",
+        "actor": "Issuer",
+        "symbol": "gen__issuer_template"
+      },
+      {
+        "id": "template/ticket",
+        "actor": "Ticket",
+        "symbol": "gen__ticket_template"
+      }
+    ],
+    "template_plan": {
+      "templates": [
+        {
+          "id": "template/issuer",
+          "actor": "Issuer",
+          "contract": "Issuer",
+          "symbol": "gen__issuer_template",
+          "sil_template_hash": "0947355c8bd78a1f3d8048356c8cd32dff225bd709fb181b8aa30f0cf2dc7f1e",
+          "actor_type_handle": {
+            "state": "IssuerState",
+            "context_fields": [
+              "gen__ticket_template"
+            ],
+            "template": {
+              "prefix_hex": "208e1fce8348130f97e7239abaecfa7786a4b2114ac15d136a2a30a80657693f1c",
+              "suffix_hex": "b9cb529c69b900ccb951cc5879aa5479876959795979ac6978c2b9be9c6976c200a069012055797e012055797e01085579519358cd7e7e7eb976c97602af80937cbc7eaa02000001aa7e01207e7c7e01877e5279c3876954795779827c75519658cd58797e5779827c75519658cd58797e7eaa876901205879aa7e0108547958cd7e01080058cd7e7e7e57797c7e56797eaa02000001aa7e01207e7c7e01877e78c387697575757575757575757551",
+              "hash_hex": "769041244e5b0a9001279c93b51ac9086b3bd84d2de19bf8e445d1a2be5a058f"
+            }
+          }
+        },
+        {
+          "id": "template/ticket",
+          "actor": "Ticket",
+          "contract": "Ticket",
+          "symbol": "gen__ticket_template",
+          "sil_template_hash": "8e1fce8348130f97e7239abaecfa7786a4b2114ac15d136a2a30a80657693f1c",
+          "actor_type_handle": {
+            "state": "TicketState",
+            "context_fields": [],
+            "template": {
+              "prefix_hex": "",
+              "suffix_hex": "b9cb519c69b900cc5479aa5479876955795579ac6978009c6976c2b9be9c69012054797e0108547958cd7e01085158cd7e7e7eb976c97601d7937cbc7eaa02000001aa7e01207e7c7e01877e78c3876975757575757551",
+              "hash_hex": "8e1fce8348130f97e7239abaecfa7786a4b2114ac15d136a2a30a80657693f1c"
+            }
+          }
+        }
+      ],
+      "runtime_states": [
+        {
+          "contract": "Issuer",
+          "source": "IssuerState",
+          "field_roles": [
+            {
+              "name": "gen__ticket_template",
+              "role": {
+                "kind": "template",
+                "contract": "Ticket"
+              }
+            }
+          ]
+        }
+      ],
+      "route_tables": [],
+      "route_proofs": [],
+      "route_families": [],
+      "witness_recipes": [
+        {
+          "id": "witness/ticket/template_prefix_bytes",
+          "template_id": "template/ticket",
+          "subject": {
+            "kind": "actor",
+            "actor": "Ticket"
+          },
+          "param": "gen__ticket_prefix",
+          "purpose": {
+            "kind": "template_prefix_bytes"
+          }
+        },
+        {
+          "id": "witness/ticket/template_suffix_bytes",
+          "template_id": "template/ticket",
+          "subject": {
+            "kind": "actor",
+            "actor": "Ticket"
+          },
+          "param": "gen__ticket_suffix",
+          "purpose": {
+            "kind": "template_suffix_bytes"
+          }
+        }
+      ]
+    },
+    "interfaces": {
+      "exports": [
+        {
+          "id": "interface/actor/Issuer",
+          "app": "Tickets",
+          "actor": "Issuer",
+          "state": "IssuerState",
+          "fingerprint_hex": "05f8522be84d6ca43bb946115abd2a347ae4a21372a41183d395e4e6276d27f9"
+        },
+        {
+          "id": "interface/actor/Ticket",
+          "app": "Tickets",
+          "actor": "Ticket",
+          "state": "TicketState",
+          "fingerprint_hex": "6bb34bb1dc4c51423123a9450c635a77c42aa09f250efc4c72992c34013bae46"
+        }
+      ],
+      "imports": []
+    },
+    "states": [
+      {
+        "name": "IssuerState",
+        "fields": [
+          {
+            "name": "admin",
+            "type": {
+              "kind": "fixed_bytes",
+              "len": 32
+            }
+          },
+          {
+            "name": "next_serial",
+            "type": {
+              "kind": "int"
+            }
+          }
+        ]
+      },
+      {
+        "name": "TicketState",
+        "fields": [
+          {
+            "name": "owner",
+            "type": {
+              "kind": "fixed_bytes",
+              "len": 32
+            }
+          },
+          {
+            "name": "serial",
+            "type": {
+              "kind": "int"
+            }
+          },
+          {
+            "name": "redeemed",
+            "type": {
+              "kind": "int"
+            }
+          }
+        ]
+      }
+    ],
+    "actor_enums": [],
+    "actors": [
+      {
+        "name": "Issuer",
+        "state": "IssuerState",
+        "abi": {
+          "actor": "Issuer"
+        },
+        "entries": [
+          {
+            "name": "issue",
+            "kind": "leader",
+            "abi": {
+              "actor": "Issuer",
+              "entry": "issue"
+            },
+            "route_plan": {
+              "active_input": {
+                "name": "self",
+                "actor": "Issuer",
+                "cov_index": 0
+              },
+              "leader_input": {
+                "name": "self",
+                "actor": "Issuer",
+                "cov_index": 0
+              },
+              "consumes": [],
+              "outputs": [
+                {
+                  "name": "issuer",
+                  "auth_index": 0,
+                  "actors": [
+                    "Issuer"
+                  ]
+                },
+                {
+                  "name": "ticket",
+                  "auth_index": 1,
+                  "actors": [
+                    "Ticket"
+                  ]
+                }
+              ],
+              "witness_recipe_ids": [
+                "witness/ticket/template_prefix_bytes",
+                "witness/ticket/template_suffix_bytes"
+              ]
+            },
+            "hidden_params": [
+              {
+                "recipe_id": "witness/ticket/template_prefix_bytes",
+                "name": "gen__ticket_prefix",
+                "type": {
+                  "kind": "bytes"
+                },
+                "subject": {
+                  "kind": "actor",
+                  "actor": "Ticket"
+                },
+                "purpose": {
+                  "kind": "template_prefix_bytes"
+                }
+              },
+              {
+                "recipe_id": "witness/ticket/template_suffix_bytes",
+                "name": "gen__ticket_suffix",
+                "type": {
+                  "kind": "bytes"
+                },
+                "subject": {
+                  "kind": "actor",
+                  "actor": "Ticket"
+                },
+                "purpose": {
+                  "kind": "template_suffix_bytes"
+                }
+              }
+            ],
+            "template_selectors": [],
+            "witnesses": [
+              {
+                "recipe_id": "witness/ticket/template_prefix_bytes",
+                "param": "gen__ticket_prefix",
+                "subject": {
+                  "kind": "actor",
+                  "actor": "Ticket"
+                },
+                "purpose": {
+                  "kind": "template_prefix_bytes"
+                }
+              },
+              {
+                "recipe_id": "witness/ticket/template_suffix_bytes",
+                "param": "gen__ticket_suffix",
+                "subject": {
+                  "kind": "actor",
+                  "actor": "Ticket"
+                },
+                "purpose": {
+                  "kind": "template_suffix_bytes"
+                }
+              }
+            ],
+            "consumes": [],
+            "emits": {
+              "kind": "outputs",
+              "outputs": [
+                {
+                  "name": "issuer",
+                  "auth_index": 0,
+                  "actors": [
+                    "Issuer"
+                  ]
+                },
+                {
+                  "name": "ticket",
+                  "auth_index": 1,
+                  "actors": [
+                    "Ticket"
+                  ]
+                }
+              ]
+            },
+            "routes": [
+              {
+                "output": "issuer",
+                "actor": "Issuer",
+                "template_id": "template/issuer",
+                "state_expr": "next_issuer"
+              },
+              {
+                "output": "ticket",
+                "actor": "Ticket",
+                "template_id": "template/ticket",
+                "state_expr": "new_ticket"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Ticket",
+        "state": "TicketState",
+        "abi": {
+          "actor": "Ticket"
+        },
+        "entries": [
+          {
+            "name": "redeem",
+            "kind": "leader",
+            "abi": {
+              "actor": "Ticket",
+              "entry": "redeem"
+            },
+            "route_plan": {
+              "active_input": {
+                "name": "self",
+                "actor": "Ticket",
+                "cov_index": 0
+              },
+              "leader_input": {
+                "name": "self",
+                "actor": "Ticket",
+                "cov_index": 0
+              },
+              "consumes": [],
+              "outputs": [
+                {
+                  "name": "next",
+                  "auth_index": 0,
+                  "actors": [
+                    "Ticket"
+                  ]
+                }
+              ],
+              "witness_recipe_ids": []
+            },
+            "hidden_params": [],
+            "template_selectors": [],
+            "witnesses": [],
+            "consumes": [],
+            "emits": {
+              "kind": "outputs",
+              "outputs": [
+                {
+                  "name": "next",
+                  "auth_index": 0,
+                  "actors": [
+                    "Ticket"
+                  ]
+                }
+              ]
+            },
+            "routes": [
+              {
+                "output": "next",
+                "actor": "Ticket",
+                "template_id": "template/ticket",
+                "state_expr": "redeemed_ticket"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "sil_abi": {
+    "schema_version": 1,
+    "states": [
+      {
+        "name": "IssuerState",
+        "fields": [
+          {
+            "name": "admin",
+            "type": {
+              "kind": "fixed_bytes",
+              "len": 32
+            }
+          },
+          {
+            "name": "next_serial",
+            "type": {
+              "kind": "int"
+            }
+          }
+        ]
+      },
+      {
+        "name": "TicketState",
+        "fields": [
+          {
+            "name": "owner",
+            "type": {
+              "kind": "fixed_bytes",
+              "len": 32
+            }
+          },
+          {
+            "name": "serial",
+            "type": {
+              "kind": "int"
+            }
+          },
+          {
+            "name": "redeemed",
+            "type": {
+              "kind": "int"
+            }
+          }
+        ]
+      }
+    ],
+    "contracts": [
+      {
+        "name": "Issuer",
+        "source_path": "sil/Issuer.sil",
+        "runtime_state": {
+          "source": "IssuerState",
+          "fields": [
+            {
+              "name": "gen__ticket_template",
+              "type": {
+                "kind": "fixed_bytes",
+                "len": 32
+              }
+            },
+            {
+              "name": "admin",
+              "type": {
+                "kind": "fixed_bytes",
+                "len": 32
+              }
+            },
+            {
+              "name": "next_serial",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        },
+        "entries": [
+          {
+            "name": "issue",
+            "selector": null,
+            "params": [
+              {
+                "name": "admin_sig",
+                "type": {
+                  "kind": "sig"
+                }
+              },
+              {
+                "name": "admin_pk",
+                "type": {
+                  "kind": "pubkey"
+                }
+              },
+              {
+                "name": "owner_pk",
+                "type": {
+                  "kind": "pubkey"
+                }
+              },
+              {
+                "name": "gen__ticket_prefix",
+                "type": {
+                  "kind": "bytes"
+                }
+              },
+              {
+                "name": "gen__ticket_suffix",
+                "type": {
+                  "kind": "bytes"
+                }
+              }
+            ]
+          }
+        ],
+        "compiled": {
+          "script_hex": "200000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000080000000000000000b9cb529c69b900ccb951cc5879aa5479876959795979ac6978c2b9be9c6976c200a069012055797e012055797e01085579519358cd7e7e7eb976c97602af80937cbc7eaa02000001aa7e01207e7c7e01877e5279c3876954795779827c75519658cd58797e5779827c75519658cd58797e7eaa876901205879aa7e0108547958cd7e01080058cd7e7e7e57797c7e56797eaa02000001aa7e01207e7c7e01877e78c387697575757575757575757551",
+          "template_hash_hex": "0947355c8bd78a1f3d8048356c8cd32dff225bd709fb181b8aa30f0cf2dc7f1e",
+          "state_span": {
+            "offset": 0,
+            "len": 75
+          }
+        }
+      },
+      {
+        "name": "Ticket",
+        "source_path": "sil/Ticket.sil",
+        "runtime_state": {
+          "source": "TicketState",
+          "fields": [
+            {
+              "name": "owner",
+              "type": {
+                "kind": "fixed_bytes",
+                "len": 32
+              }
+            },
+            {
+              "name": "serial",
+              "type": {
+                "kind": "int"
+              }
+            },
+            {
+              "name": "redeemed",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        },
+        "entries": [
+          {
+            "name": "redeem",
+            "selector": null,
+            "params": [
+              {
+                "name": "owner_sig",
+                "type": {
+                  "kind": "sig"
+                }
+              },
+              {
+                "name": "owner_pk",
+                "type": {
+                  "kind": "pubkey"
+                }
+              }
+            ]
+          }
+        ],
+        "compiled": {
+          "script_hex": "200000000000000000000000000000000000000000000000000000000000000000080000000000000000080000000000000000b9cb519c69b900cc5479aa5479876955795579ac6978009c6976c2b9be9c69012054797e0108547958cd7e01085158cd7e7e7eb976c97601d7937cbc7eaa02000001aa7e01207e7c7e01877e78c3876975757575757551",
+          "template_hash_hex": "8e1fce8348130f97e7239abaecfa7786a4b2114ac15d136a2a30a80657693f1c",
+          "state_span": {
+            "offset": 0,
+            "len": 51
+          }
+        }
+      }
+    ]
+  }
+}

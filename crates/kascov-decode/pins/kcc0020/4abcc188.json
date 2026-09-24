@@ -1,0 +1,52 @@
+{
+  "spec_commit": "ea5176aa",
+  "template_hash": "4abcc18873220d197d2dd5ddf46b24180bdb7fac48afd19f80bae6e1dd64e7eb",
+  "name": "kascov KCC-0020 vector (reduced)",
+  "dispatch": {
+    "kind": "silverc-selector",
+    "transfer": "0",
+    "transfer_delegator": "1"
+  },
+  "state": {
+    "start": 1,
+    "len": 112
+  },
+  "owner_schemes": [
+    0,
+    3
+  ],
+  "max_token_inputs": 3,
+  "max_token_outputs": 3,
+  "borrow_schemes": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "extension": {
+    "scheme": "opaque"
+  },
+  "entrypoints": [
+    {
+      "name": "transfer",
+      "types": "KCC20State[],byte[]",
+      "select": "0",
+      "role": "transfer"
+    },
+    {
+      "name": "transfer_delegator",
+      "types": "byte[]",
+      "select": "1",
+      "role": "delegator"
+    }
+  ],
+  "in_script_template_hash_fn": "blake2b",
+  "review": {
+    "status": "reviewed",
+    "fixtures": [
+      "vector_template_a",
+      "vector_template_b"
+    ],
+    "note": "kascov's own reduced vector, compiled from contracts/kcc0020_vector.sil with silverc e8a7762. Spec-shaped, deliberately NOT conformant: owner schemes p2pk and p2sh only, and one extension class per family, so cross-class shapes are rejected by the program rather than merely unvalidated. Reviewed 2026-08-24 on three legs. Source to bytes: both committed sentinels recompile byte-identically from the source with the pinned compiler. Bytes to chain: the leader reveal fetched from a public testnet-10 node carries template halves identical to the sentinels, so the program running on chain is the program in this repository. Behaviour: the compiled program was exercised by the real Kaspa script engine on every rule this pin declares, and the engine itself rejected cross-class families, a successor class no input carries, a minting family total, a forged hash-chain preimage, a stale guard, a threshold-equal delta, a reduced KAS floor, a foreign owner signature, a delegator posing as leader and an invalid path byte. The live ladder on testnet-10 (covenant 94d927e08ecdcf8833c012aba39961ac3d07d42051870205b8db946b95633109) is that same program accepted by consensus."
+  }
+}

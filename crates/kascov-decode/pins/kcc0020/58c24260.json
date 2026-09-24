@@ -1,0 +1,73 @@
+{
+  "spec_commit": "ea5176aa",
+  "template_hash": "58c24260f2d81c34fc5ad0890f49f9670297cc6ac0a5136f6131b16a04540728",
+  "name": "ZealousSwap token cell, 3,037 B generation (KCC-0020 State, KCC-1 tag dispatch)",
+  "family": "Zealous · token",
+  "dispatch": {
+    "kind": "kcc1-tag",
+    "transfer": "ddeb2d66",
+    "transfer_delegator": "d64f42e5"
+  },
+  "state": {
+    "start": 1,
+    "len": 112
+  },
+  "owner_schemes": [
+    0,
+    1,
+    3,
+    4
+  ],
+  "max_token_inputs": 2,
+  "max_token_outputs": 2,
+  "borrow_schemes": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "extension": {
+    "scheme": "opaque"
+  },
+  "entrypoints": [
+    {
+      "name": "transfer",
+      "types": "int,byte[32],byte,byte,byte[32],byte[65],byte[32],byte[]",
+      "select": "ddeb2d66",
+      "role": "transfer"
+    },
+    {
+      "name": "merge",
+      "types": "byte[65],byte[32],byte[]",
+      "select": "bdaf5113",
+      "role": "program-specific"
+    },
+    {
+      "name": "transfer_whole",
+      "types": "byte[32],byte,byte,byte[32],byte[65],byte[32],byte[]",
+      "select": "5f4c9820",
+      "role": "program-specific"
+    },
+    {
+      "name": "transfer_borrowed",
+      "types": "int,byte[32],byte[32],byte[65],byte[]",
+      "select": "13f87a5b",
+      "role": "program-specific"
+    },
+    {
+      "name": "transfer_delegator",
+      "types": "byte[65],byte[32],byte[]",
+      "select": "d64f42e5",
+      "role": "delegator"
+    }
+  ],
+  "in_script_template_hash_fn": "blake3",
+  "review": {
+    "status": "reviewed",
+    "fixtures": [
+      "zealous_token_3037_a",
+      "zealous_token_3037_b"
+    ],
+    "note": "ZealousSwap's token cell on testnet-10 in the generation that followed the pinned 2,641 B build (2026-09-13), decoded from chain bytes only: the 3,037 B program carries the KCC-0020 State layout at offset 1 (amount, owner, owner scheme, borrow scheme, guard, extension commitment) and the five-arm KCC-1 tag dispatch of the 2,641 B build, compared in program order: transfer_whole (5f4c9820), transfer (ddeb2d66), merge (bdaf5113), the borrowed receive (13f87a5b), transfer_delegator (d64f42e5); any other tag falls to OP_RETURN. The tags do not reproduce from KCC-1 dispatch of the names and types listed here, which are kascov's reading of the argument layouts (the venue's names are unknown), so they are pin knowledge read from the bytes; every argument list is the 2,641 B build's, the borrowed receive's five slots included. Three launches carry this build (MPC, covenant f38fa511; TST, fca43a0e; HOMET, 0e122d7f), 34 reveals across them, every one the same push-unit stream and this template hash: four arms were read from those spends (6 whole moves, 18 transfers, 5 merges, 5 delegator consents); the borrowed receive was read from the bytes alone and no spend on chain has used it. Their genesis payloads are JSON frames (decimals, ticker, name, image), not the KCC20M frame the 2,641 B launch wrote. Bytes to chain: both fixtures are leader reveals of two different launches fetched from testnet-10 (MPC's platform-key-owned cell under scheme 0x01 and TST's pool-owned cell under 0x04), differ only in the state window, and recompute this template hash; 42 pushes carry the program's length 3,037 and six carry the suffix offset 113 - 3,037 = -2,924, and every successor is rebuilt from the leader's own signature script as the 1-byte prefix and that 2,924-byte suffix around a state the program encodes itself. Bytes: every arm was read instruction by instruction and compared with 2f2671fc, from which its push-unit stream differs in 45 hunks that reduce to three changes. First, every signature the program checks must carry hash type 0x01 (SIGHASH_ALL): the owner-authentication block takes bytes 64..65 of the 65-byte slot (OpSubstr) and requires them to equal 0x01 before OpCheckSig under schemes 0x00 and 0x01, and the borrowed receive requires the same of the guard key's signature under borrow scheme 0x02 and of the committed chain key's signature under 0x03. The engine itself accepts six hash types (ALL, NONE and SINGLE, each with or without ANYONECANPAY), so under the 2,641 B build an owner could sign a spend that did not commit to every output or every input; this build refuses those five. Second, under owner scheme 0x04 the owner may not be 32 zero bytes, on the spending side of every arm and for every successor a transfer or whole move declares: OpInputCovenantId yields 32 zero bytes for an input that carries no covenant id, so a zero-owned cell of the 2,641 B build could be spent by naming any plain input, and this build refuses the owner before the named input is read. Third, the length constants. What a spender presents, keyed on the spent cell's own scheme byte: 0x00 the 65-byte slot is the owner key's Schnorr signature over the transaction with hash type 0x01, the 32-byte slot and the small argument unread; 0x01 the 32-byte slot is the x-only key whose keyed BLAKE3 ('PublicKeyHash') equals the owner and the 65-byte slot that key's signature with hash type 0x01; 0x03 the input named by the small argument must spend the version-0 P2SH whose script hash is the owner, both slots unread; 0x04 the input named by the small argument must carry the owner as its covenant id, the owner being neither this family's id nor zero, both slots unread; scheme 0x02 has no arm and no cell or successor may carry it. Everything else is the 2,641 B build's byte for byte: the successor scheme sets (owner in {0,1,3,4} with 0x04 never the family's own id and now never zero, borrow in 0..=3, any guard), the family counts, the KAS floors, the whole move's non-negative amount, the transfer's amount strictly between 0 and the balance with the recipient cell (k=0) holding at least 1 KAS (100,000,000 sompi) and the change cell (k=1) the spent cell's KAS, the merge of exactly two family inputs of one class into a positive sum under the leader's owner, scheme, borrow scheme and guard with the leader's KAS floor, the borrowed receive (exactly two family inputs with this cell first, its amount non-negative, a borrow scheme other than 0x00 and the follower's class, five arguments; 0x01 the int in guard bytes 0..8 non-negative and strictly exceeded by the amount, the three slots unread; 0x02 CheckSig by the guard as a key over the 65-byte slot; 0x03 BLAKE3 of the next slot concatenated with the key slot equal to the guard, the key slot signing, the successor's guard becoming the next slot; a non-negative remainder that sums with the amount to the follower's amount, a zero remainder legal; k=0 the leader grown by the amount under its own owner, scheme and borrow scheme with the spent cell's KAS floor, k=1 the follower's state at the remainder holding at least 1 KAS) and the delegator arm (at least two family inputs, this cell not first, its owner's authentication, no bound output, the leader's state read without constraint). Arithmetic is the engine's checked i64. Conservation holds by construction inside the program and the family is closed as before: with three or more family inputs no leader arm accepts the count, a follower can never bind an output, and every output the program binds is this template again. Each check this generation adds was attributed on the engine by ablation, with that check alone replaced by OpNop the shape it rejects passes: the hash-type check in the 0x00 and 0x01 arms of every owner block (whole, transfer, merge, delegator) and on both borrow signatures, and the zero-owner refusal on the spending side of every arm and on the successors of transfer and whole; the checks inherited from the 2,641 B build (the whole move's amount sign, the recipient and remainder floors, the borrowed leader's amount sign, the threshold sign, the remainder sign, the chain key's signature) were attributed the same way in these bytes. Engine: fixture A was exercised by the real Kaspa script engine with the covenant context (crates/kascov-labkit/src/kcc0020_zealous_3037.rs, rungs shared with the 3,223 B ladder in kcc0020_zealous_later.rs) on every rule above, all four owner schemes on the spending side and the three borrow schemes including a two-step keyed hash chain, and the program itself rejected a transfer of zero, of the whole balance or above it, a forged change or recipient cell, a fresh class, a change cell handed to another owner, a recipient cell one sompi under 1 KAS, swapped continuations, successor schemes 0x02 and 0x05 and borrow scheme 0x04, a successor owned by the family or by the zero id, a whole move of a cell whose amount carries the sign bit, a foreign signature, a signature with hash type NONE or ALL|ANYONECANPAY under both key schemes, a wrong-width slot, a key that does not hash to a p2pkh owner, the right key with a foreign signature, an authority input that is not the owner script or covenant, a zero-owned covenant cell naming a plain input, a cell under scheme 0x02 through every arm, a minting or burning whole, a minting or misowned merge, a cross-class merge, a transfer with a follower present, three family inputs, a delegator posing as leader or standing alone, a follower binding an output, an unknown tag and the retired tag a85e5b91, a threshold-equal borrow, an unconserved remainder, a negative remainder that balanced the arithmetic, a threshold guard carrying the sign bit, a borrow into a cell whose amount carries the sign bit, a remainder cell one sompi under 1 KAS, a borrow into a disabled cell, a foreign borrow key, a borrow signature with hash type ALL|ANYONECANPAY under schemes 0x02 and 0x03, a forged chain head, the right head with a key the guard does not commit to, the right head and key with a foreign or zeroed signature, a stale or replayed chain reveal, the unkeyed chain, and every reduced KAS floor. Signature validity stays consensus's: the engine checked it in the ladder, kascov's reader does not re-run sighash on chain data and does not read the hash-type byte (a guard-key or chain-key borrow is judged structurally, threshold and hash from bytes). Bounds are the program's own (two family inputs, two bound outputs). The reader derives the borrowed receive's two successors the same hash-gated way as the other arms, taking the next slot as the successor's guard under scheme 0x03. The generation after this one (3,223 B, template 50ff50d8) is its own pin."
+  }
+}

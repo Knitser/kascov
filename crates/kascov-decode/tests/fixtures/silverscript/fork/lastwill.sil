@@ -1,0 +1,28 @@
+pragma silverscript ^0.1.0;
+
+contract LastWill(byte[32] inheritor, byte[32] cold, byte[32] hot) {
+    entrypoint function inherit(pubkey pk, sig s) {
+        require(this.age >= 180);
+        require(blake2b(pk) == inheritor);
+        require(checkSig(s, pk));
+    }
+
+    entrypoint function cold(pubkey pk, sig s) {
+        require(blake2b(pk) == cold);
+        require(checkSig(s, pk));
+    }
+
+    entrypoint function refresh(pubkey pk, sig s) {
+        require(blake2b(pk) == hot);
+        require(checkSig(s, pk));
+
+        // Check that the correct amount is sent
+        int minerFee = 1000; // hardcoded fee
+        int amount = tx.inputs[this.activeInputIndex].value - minerFee;
+        require(tx.outputs[0].value == amount);
+
+        // Check that the funds are sent back to the contract
+        byte[] selfLock = tx.inputs[this.activeInputIndex].scriptPubKey;
+        require(tx.outputs[0].scriptPubKey == selfLock);
+    }
+}

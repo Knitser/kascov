@@ -1,0 +1,39 @@
+const int MAX_ACCOUNTS = 3;
+
+state BatchState {
+    int marker;
+}
+
+state AccountState {
+    int balance;
+}
+
+actor Batch owns BatchState {
+    entry distribute()
+    emits {
+        next: Account[1..=MAX_ACCOUNTS],
+    } {
+        AccountState[] next_states;
+        for (i, 0, next.length, MAX_ACCOUNTS) {
+            AccountState next_state = {
+                balance: i + 1,
+            };
+            next_states = next_states.append(next_state);
+            require(next[i].value >= 0);
+        }
+        become {
+            next <- Account[](next_states),
+        };
+    }
+}
+
+actor Account owns AccountState {
+    entry hold() emits none {
+        require(balance >= 0);
+    }
+}
+
+app EntryRangeOnly {
+    actor Batch;
+    actor Account;
+}

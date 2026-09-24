@@ -1,0 +1,55 @@
+Recovery fixtures: real TN10 bytes for the witness-recovery tests in
+crates/kascov-core/src/tokens.rs. Every program below hashes (blake2b-256)
+to the P2SH commitment of the outpoint it was revealed from, and every
+witness is the spent_sig of the outpoint named, whose last push is that
+program. Parents already present one directory up (zealous_token_1811_a.bin
+= c0c67773:0, kcc20_a_a.bin = 194cbc1b:4) are reused, not duplicated.
+
+kcom_2671_parent_56fc521e_0.bin
+  2671 bytes, blake2b-256 7cec521a9350d30408dae91466aeedc31fa0f34b43d30d6d23c06f650f333820
+  56fc521e1ed185d347c643ca464c63f44f878cbd6166d9c6915d11e8dbdfaedc:0 (revealed program of that outpoint, spent by 7d5f35f096853463d7f2822b660ce03b5bd27b9e464c5f19faa729a2793a074f)
+
+kcom_witness_7d5f35f0.bin
+  2718 bytes, blake2b-256 df9ba349efe4dab0d6950f07a19fb6e4940f5d896fab6a5503aa1032f726efe1
+  spent_sig of 56fc521e1ed185d347c643ca464c63f44f878cbd6166d9c6915d11e8dbdfaedc:0 (the witness of tx 7d5f35f096853463d7f2822b660ce03b5bd27b9e464c5f19faa729a2793a074f; its last push is the 2671-byte program above)
+
+kcom_8076_parent_e7da23e7_1.bin
+  8076 bytes, blake2b-256 e1f1a2ce0e5280b5c37254d007f36e76ecb0447567b4c1c758fe7fa2b54d6af1
+  e7da23e72be08353c2491be5b8791d1790c12793c2ad28de6e1df376f3174c43:1 (revealed program of that outpoint, spent by 5ca473c7eed7a14549c0c735846dfdf6552f2c8586afa79449f367691da8fcb0)
+
+kcom_witness_5ca473c7.bin
+  8125 bytes, blake2b-256 a438bbde9812ab7d90cd603964911358c91f338efdbe327d3ee8070444f1a50d
+  spent_sig of e7da23e72be08353c2491be5b8791d1790c12793c2ad28de6e1df376f3174c43:1 (the witness of tx 5ca473c7eed7a14549c0c735846dfdf6552f2c8586afa79449f367691da8fcb0; its last push is the 8076-byte program above)
+
+zealous_witness_f296e570.bin
+  1955 bytes, blake2b-256 48af779235f5612e1589d4d22e0671cfa2a972cb9463eee1854a4c3e5a1eac19
+  spent_sig of c0c67773dbd06dc894c570f3675a583d3497469231162f89cb0a43daa9b3d644:0 (the witness of tx f296e570fae81a1a3ce9bae9d5b96621a34109c590c626d20843a9b2eda9f23c; its last push is the 1811-byte program above)
+
+zealous_1363_parent_9ccf742a_0.bin
+  1363 bytes, blake2b-256 465ce984c3ca7472949b6fc0414d01cb0482f950c29f3c95d30ce400472edb3a
+  9ccf742aaba9f0d1ddfdc20c95c7cc3d7c29a50cb8829cd1a7a60df16d427b39:0 (revealed program of that outpoint, spent by ecdd9ee7a38f45da55a666e6de4723af7d4f2b2cac6328058a5a365ea3d53100)
+
+zealous_witness_ecdd9ee7.bin
+  1502 bytes, blake2b-256 934e2a71f39ec511be9e58d5f3278377769df08aad775888b764ecdae33e2973
+  spent_sig of 9ccf742aaba9f0d1ddfdc20c95c7cc3d7c29a50cb8829cd1a7a60df16d427b39:0 (the witness of tx ecdd9ee7a38f45da55a666e6de4723af7d4f2b2cac6328058a5a365ea3d53100; its last push is the 1363-byte program above)
+
+zealous_1279_parent_5d4b4f8c_0.bin
+  1279 bytes, blake2b-256 fee3c9e3a33e6273fb01aedc77f8e0faa02d38277471ebfaf14c3bc6f9400a75
+  5d4b4f8ca0142d90e6291dcb5cc96f4efad088bde827c19a59290007d78215ff:0 (revealed program of that outpoint, spent by 3b71d4b73d5d6021260954335f5834581b6d30110bdfb255bcca54c36cd70410)
+
+zealous_witness_3b71d4b7.bin
+  1423 bytes, blake2b-256 61d8851fded57702b8ac82a8a22471ad365d44f76ef7702352b0f536715962f3
+  spent_sig of 5d4b4f8ca0142d90e6291dcb5cc96f4efad088bde827c19a59290007d78215ff:0 (the witness of tx 3b71d4b73d5d6021260954335f5834581b6d30110bdfb255bcca54c36cd70410; its last push is the 1279-byte program above)
+
+kcc20_witness_b438a262.bin
+  1728 bytes, blake2b-256 7fc2af60e8126479acd2173de060b18a2933e1bea13f861d1287a5e192de321b
+  spent_sig of aacd228491b59c19aec2e4eebf920e494e62231064c98e35e2f48c00b4b13d56:0 (the witness of tx b438a26252eacf2c7767c01997231a6462db2d587660d8205f8c1a4ba3b7be90; its last push is the 1568-byte program above)
+
+kcc20_2728_parent_4146f7d2_0.bin
+  2728 bytes, blake2b-256 4e03132857524cc6522cb93238f858c8a855b80c6a74a46aedc6dd56cb96fd54
+  4146f7d298b65b35e3a4400faaec8fbcbbda4bf908898366e2643aa1bb3f7fad:0 (revealed program of that outpoint, spent by f2d011e66aadf8acbf48b5e8d2f4f3cf57bafc95400d49658327c9311d2cb794)
+
+kcc20_foreign_witness_0dd4fbe2_3.bin
+  3230 bytes, blake2b-256 43318db5ce9e5bc358b3d18b955ba2ffae175be119f50be7945faa41d4e5fdb1
+  spent_sig of de3919e8c4e1873da418bc516b6a5ba16357557d159819ef3c1e3db424983d7d 0dd4fbe2e74309ff3bccca0a12cfafae79b1e86d8746999972d44eb8318a7322:3 (the leader witness of tx 9e629f204b6a68a31d244b738eaa900deb0215e78f160bb3457e90e652312c19), re-encoded push by push from the replay trace; its last push, the 2757-byte leader program, hashes to 2d4c98ae91a6501c37c2a5b164917d5336a9aa6003fc3bd8a8b872928febe146, the commitment that trace checks
+

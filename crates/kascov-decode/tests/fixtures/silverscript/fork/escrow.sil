@@ -1,0 +1,20 @@
+pragma silverscript ^0.1.0;
+
+contract Escrow(byte[32] arbiter, pubkey buyer, pubkey seller) {
+    entrypoint function spend(pubkey pk, sig s) {
+        require(blake2b(pk) == arbiter);
+        require(checkSig(s, pk));
+
+        // Check that the correct amount is sent
+        int minerFee = 1000; // hardcoded fee
+        int amount = tx.inputs[this.activeInputIndex].value - minerFee;
+        require(tx.outputs[0].value == amount);
+
+        // Check that the transaction sends to either the buyer or the seller
+        byte[34] buyerLock = new ScriptPubKeyP2PK(buyer);
+        byte[34] sellerLock = new ScriptPubKeyP2PK(seller);
+        bool sendsToBuyer = tx.outputs[0].scriptPubKey == byte[](buyerLock);
+        bool sendsToSeller = tx.outputs[0].scriptPubKey == byte[](sellerLock);
+        require(sendsToBuyer || sendsToSeller);
+    }
+}
