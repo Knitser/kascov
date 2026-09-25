@@ -95,6 +95,6 @@ The indexer, the API server and the web explorer are still being reworked in pri
 
 ## Contact
 
-[@0xKnitser](https://x.com/0xKnitser) · [kascov.io](https://kascov.io)
+[@kascovio](https://x.com/kascovio) · [kascov.io](https://kascov.io)
 
 The code here is MIT licensed, as it was: see [LICENSE](LICENSE). Some test fixtures come from kaspanet/silverscript and argent-lang/argent under the ISC license: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
