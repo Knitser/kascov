@@ -1,12 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/kascov-decode"]
+members = ["crates/kascov-decode", "crates/kascov-decode-wasm"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/Knitser/kascov"
+homepage = "https://kascov.io"
 
 [workspace.dependencies]
 blake2b_simd = "1"

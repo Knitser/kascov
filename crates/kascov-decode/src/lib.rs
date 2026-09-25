@@ -1,5 +1,44 @@
-//! Covenant state decoding. Template-specific decoders are additive; the
-//! always-correct fallback is an opcode disassembly of the state script.
+//! Name Kaspa covenant programs from their bytes.
+//!
+//! This is the decoder behind every name kascov.io shows. A covenant's
+//! output commits to a program by hash (P2SH), and the spend that consumes
+//! it reveals the program as the last push of its signature script. Given
+//! those bytes, this crate says what the program is: which SilverScript or
+//! Argent build, which launchpad, market or token family, and what sits in
+//! its labelled fields. It reads nothing but the bytes it is given: no node,
+//! no network, no database.
+//!
+//! ```
+//! use kascov_decode::{p2sh_reveal, Registry};
+//!
+//! // a KaspaCom token program on testnet-10, and the signature script of
+//! // the spend that revealed it (fixtures/PROVENANCE.md says where each
+//! // came from)
+//! let program = include_bytes!("../fixtures/recovery/kcom_2671_parent_56fc521e_0.bin");
+//! let spend = include_bytes!("../fixtures/recovery/kcom_witness_7d5f35f0.bin");
+//!
+//! let decoded = Registry::default().decode(0, program);
+//! assert_eq!(decoded.template, Some("KaspaCom · token"));
+//!
+//! // the output that spend consumed commits to the program's BLAKE2b-256
+//! let hash = blake2b_simd::Params::new().hash_length(32).hash(program);
+//! let spk = [&[0xaa, 0x20][..], hash.as_bytes(), &[0x87]].concat();
+//! assert_eq!(p2sh_reveal(&spk, spend).as_deref(), Some(&program[..]));
+//! ```
+//!
+//! Where to start:
+//!
+//! - [`Registry`] tries each template decoder in turn. When none matches,
+//!   the always-correct fallback is a plain opcode disassembly.
+//! - [`report`] gives the answers of the `kascov-decode` command as JSON.
+//! - [`p2sh_reveal`] checks a spend's revealed program against the output
+//!   it spends, the same test kascov runs on every spend.
+//! - [`argent`] recognizes programs Argent generated and computes the
+//!   template hash that names their build.
+//! - [`kcc20`] and [`kcc0020`] read token cells; [`kcc1`] holds the KCC-0001
+//!   byte layouts and hashes they build on.
+//! - [`disasm`] is the opcode table and disassembler, covenant and ZK
+//!   opcodes included.
 
 pub mod argent;
 pub mod disasm;
@@ -7,6 +46,7 @@ pub mod kcc1;
 pub mod kcc0020;
 pub mod kcc20;
 pub mod observed;
+pub mod report;
 pub mod vesting;
 
 use disasm::{disassemble, Instruction, OpGroup};
@@ -1337,7 +1377,7 @@ mod tests {
         assert_eq!(Registry::default().decode(0, &plain).zk_system, None);
 
         // A ~192-byte proof push (Groth16 band) then OpZkPrecompile → groth16.
-        let mut groth = encode_push(&vec![0x01; 192]);
+        let mut groth = encode_push(&[0x01; 192]);
         groth.push(0xa6);
         assert_eq!(zk_system(&groth), Some("groth16"));
         assert!(Registry::default().decode(0, &groth).uses_zk_ops);
@@ -1348,12 +1388,12 @@ mod tests {
 
         // A 2 KiB seal push → STARK scale → risc0 (wins over any small push).
         let mut risc0 = encode_push(&vec![0xab; 2048]);
-        risc0.extend(encode_push(&vec![0xcd; 32])); // image id
+        risc0.extend(encode_push(&[0xcd; 32])); // image id
         risc0.push(0xa6);
         assert_eq!(zk_system(&risc0), Some("risc0"));
 
         // ZK op present but only generic 32-byte pushes → too ambiguous.
-        let mut ambiguous = encode_push(&vec![0x07; 32]);
+        let mut ambiguous = encode_push(&[0x07; 32]);
         ambiguous.push(0xa6);
         assert_eq!(zk_system(&ambiguous), None);
     }

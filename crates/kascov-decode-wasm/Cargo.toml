@@ -1,0 +1,16 @@
+[package]
+name = "kascov-decode-wasm"
+description = "kascov-decode as a WebAssembly module, with a small JavaScript loader for browsers and Node."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kascov-decode = { path = "../kascov-decode" }
+serde_json = { workspace = true }

@@ -501,7 +501,7 @@ mod tests {
         assert_eq!(push_explicit(&[0x01]), vec![0x01, 0x01]);
         assert_eq!(push_explicit(&[]), vec![0x00]); // OP_0 is still the empty push
         assert_eq!(push_explicit(&[0x81]), vec![0x01, 0x81]); // not OP_1NEGATE
-        assert_eq!(push_explicit(&vec![0xee; 76])[..2], [0x4c, 76]);
+        assert_eq!(push_explicit(&[0xee; 76])[..2], [0x4c, 76]);
         assert_eq!(push_explicit(&vec![0xee; 0x100])[..3], [0x4d, 0x00, 0x01]);
     }
 

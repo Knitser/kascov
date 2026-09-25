@@ -1489,7 +1489,6 @@ mod kaspacom_tn10_tests {
 
 #[cfg(test)]
 mod kaspacom_token_tests {
-    use super::*;
     use crate::Registry;
 
     /// The whole point: a real KaspaCom token's revealed program must come
@@ -1692,7 +1691,6 @@ mod venue_tn10_tests {
 
 #[cfg(test)]
 mod genesis0_mint_tests {
-    use super::*;
     use crate::Registry;
 
     /// Same instruction stream as the 565 B slot-mint build, different tag

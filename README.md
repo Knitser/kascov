@@ -2,6 +2,8 @@
 
 **Live: [kascov.io](https://kascov.io)** · open JSON API, no keys · verify everything from chain
 
+[![CI](https://github.com/Knitser/kascov/actions/workflows/ci.yml/badge.svg)](https://github.com/Knitser/kascov/actions/workflows/ci.yml)
+
 ## A note on the reset
 
 If you followed this repository before: it used to carry the full kascov codebase, and one day it went quiet. Here is exactly what happened, because a project built on verification does not get to be vague about itself.
@@ -43,22 +45,49 @@ What it reads:
 
 ### Use it
 
+Install the command:
+
 ```bash
-cargo test
-cargo run --example name -- <program hex>
-cargo run --example decode_hex -- <program hex>
+cargo install kascov-decode
 ```
 
-`name` prints the verdict as JSON: the decoder that matched, the template, the compiler generation and the labelled fields, plus the Argent reading when there is one. `decode_hex` prints the opcode listing. As a library:
+or the latest from this repository with `cargo install --git https://github.com/Knitser/kascov kascov-decode`.
+
+```text
+kascov-decode name   <program hex | ->   what the program is, as JSON
+kascov-decode disasm <program hex | ->   the opcode listing
+kascov-decode hash   <program hex | ->   its BLAKE2b-256 and the P2SH script committing to it
+kascov-decode check  <signature script hex | -> [--spk <script public key hex>]
+```
+
+`name` prints the verdict as JSON: the decoder that matched, the template, the compiler generation and the labelled fields, plus the Argent reading when there is one. The [crate README](crates/kascov-decode) has a worked example on real chain bytes. As a library:
 
 ```rust
 let decoded = kascov_decode::Registry::default().decode(0, &program_bytes);
 println!("{:?} {:?}", decoded.template, decoded.fields);
 ```
 
+In a browser or Node, [`crates/kascov-decode-wasm`](crates/kascov-decode-wasm) builds the same answers into a WebAssembly module with a small JavaScript loader, and its tests check that the module and the command agree on every program fixture.
+
+To build and test everything here:
+
+```bash
+cargo test --workspace
+```
+
 ### Check kascov against the chain
 
-Every name kascov.io shows comes from this crate, so no name has to be taken on trust. Take the program from your own Kaspa node. A covenant output usually commits to its program as `aa20<blake2b-256 of the program>87`, and the input that spends it ends its signature script with a push of the full program. Check that the BLAKE2b-256 hash of those bytes matches the output, run `cargo run --example name -- <program hex>`, and compare the answer with kascov.io. If the two ever differ, please open an issue.
+Every name kascov.io shows comes from this crate, so no name has to be taken on trust. A covenant output usually commits to its program as `aa20<blake2b-256 of the program>87`, and the input that spends it ends its signature script with a push of the full program. Take the spending transaction from your own Kaspa node and run
+
+```bash
+kascov-decode check <that input's signature script hex> --spk <the spent output's script public key hex>
+```
+
+It pulls out the program the spend revealed, checks that its BLAKE2b-256 matches what the output committed to, and names it. Compare the answer with kascov.io. If the two ever differ, please [open an issue](https://github.com/Knitser/kascov/issues).
+
+### Where the fixtures come from
+
+Every program fixture was either read off Kaspa mainnet or testnet-10, or built from published source. [`PROVENANCE.md`](crates/kascov-decode/fixtures/PROVENANCE.md) says which, and for each program read off a chain it names the spend that revealed it, so the bytes can be checked from your own node. A test fails when a fixture is added without saying where it came from.
 
 ### Not here yet
 

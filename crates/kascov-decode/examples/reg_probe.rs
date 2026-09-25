@@ -1,4 +1,9 @@
-use kascov_decode::{kcc20, p2sh_hash, Registry};
+//! Print what the registry and the KCC-20 cell readers make of program files:
+//! the decoder and template that matched, every labelled field, and whether
+//! the program reads as a KCC-20 token cell.
+//!
+//!   cargo run -p kascov-decode --example reg_probe -- <program file>...
+use kascov_decode::{kcc20, Registry};
 fn main() {
     let reg = Registry::default();
     for path in std::env::args().skip(1) {
@@ -43,6 +48,5 @@ fn main() {
             ),
             None => println!("   token_state = None"),
         }
-        let _ = p2sh_hash;
     }
 }

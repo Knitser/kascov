@@ -1,0 +1,5 @@
+# Fixtures and pins are bytes read off a chain or written by a compiler:
+# check them out exactly as committed, whatever the platform's line endings.
+crates/kascov-decode/fixtures/** -text
+crates/kascov-decode/tests/fixtures/** -text
+crates/kascov-decode/pins/** -text

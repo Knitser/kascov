@@ -425,6 +425,9 @@ fn family_slot_ranges(
         .find_map(|s| s.slot_ranges(program))
 }
 
+/// A cell family's named slots, each with its byte range in the program.
+type SlotRanges = Vec<(&'static str, Range<usize>)>;
+
 /// A registered family's layout in one program: the family row and the byte
 /// range of every labelled slot, under the skeleton that fits this build.
 /// `None` when the registry does not name the program as a cell family or
@@ -432,7 +435,7 @@ fn family_slot_ranges(
 fn family_layout(
     registry: &Registry,
     program: &[u8],
-) -> Option<(&'static CellFamily, Vec<(&'static str, Range<usize>)>)> {
+) -> Option<(&'static CellFamily, SlotRanges)> {
     let template = registry.decode(0, program).template?;
     let fam = CELL_FAMILIES.iter().find(|f| f.template == template)?;
     let ranges = family_slot_ranges(template, program)?;
@@ -962,7 +965,7 @@ mod cell_family_tests {
         assert_eq!(st.owner.len(), 32);
         // their build pads the owner-scheme byte to eight bytes; the reader
         // narrows it only when the high bytes are zero
-        assert!(matches!(st.identifier_type, 0 | 1 | 2 | 3));
+        assert!(matches!(st.identifier_type, 0..=3));
         assert_eq!(
             u64::from_le_bytes(st.amount_raw[..8].try_into().unwrap()),
             90_000_000_000_000_000,
@@ -1454,8 +1457,10 @@ mod splice_cost_tests {
     /// dominated by re-deriving every skeleton, the pass burned its three
     /// seconds after ~1,100 attempts and gave up with cells still unproven.
     /// This pins the attempt cost low enough that the hash budget, not the
-    /// clock, is what bounds the search.
+    /// clock, is what bounds the search. The budget is an optimized build's,
+    /// which is what production runs, so an unoptimized test build skips it.
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "a timing check on optimized code: run it with --release")]
     fn a_splice_attempt_is_cheap_enough_for_the_recovery_budget() {
         let reg = Registry::default();
         let program = include_bytes!("../fixtures/kcom_token_b.bin").as_slice();

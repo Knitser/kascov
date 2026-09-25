@@ -1392,7 +1392,7 @@ mod tests {
         let a = state(0x44);
         let spk = t.reconstruct_spk(&a).unwrap();
         assert_eq!(spk.len(), 35);
-        assert!(prove_next_states(&t, &[a], &[spk.clone()]));
+        assert!(prove_next_states(&t, &[a], std::slice::from_ref(&spk)));
         // any drifted field is a different program, hence a different SPK
         for drift in [
             State { amount: a.amount + 1, ..a },
@@ -1402,10 +1402,10 @@ mod tests {
             State { borrow_guard: [1; 32], ..a },
             State { extension_commitment: [1; 32], ..a },
         ] {
-            assert!(!prove_next_states(&t, &[drift], &[spk.clone()]));
+            assert!(!prove_next_states(&t, &[drift], std::slice::from_ref(&spk)));
         }
         // count mismatches prove nothing
-        assert!(!prove_next_states(&t, &[a, a], &[spk.clone()]));
+        assert!(!prove_next_states(&t, &[a, a], std::slice::from_ref(&spk)));
         assert!(!prove_next_states(&t, &[], &[spk]));
     }
 
