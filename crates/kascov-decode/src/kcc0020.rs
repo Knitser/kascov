@@ -1,20 +1,35 @@
-//! KCC-0020 conformance primitives — the merged token convention
-//! (kaspanet/kccs, Draft at commit ea5176aa), byte layouts only.
+//! KCC-20 conformance primitives — the fungible token convention
+//! (kaspanet/kccs kcc-0020.md, tracking the Last Call text at 1516a6c),
+//! byte layouts and transition rules.
 //!
 //! Everything here is verifiable from bytes plus one declared input, a pin
 //! (kascov's committed description of a program, keyed by its KCC-1 template
-//! hash). Nothing is wired into the indexer yet, and nothing may publish a
-//! balance: recognising a shape is not proving a state.
+//! hash). Recognising a shape is not proving a state, and nothing here
+//! publishes a balance.
 //!
-//! Five programs carry this layout on chain: kascov's own reduced vector
-//! and four generations of ZealousSwap's token cell (all pinned below, each
-//! read and exercised on the engine before it was). Every other
-//! deployed token (KRON, KaspaCom, KaspaKaha) uses the gist-era 46-byte state that
+//! The rules moved between the merged Draft (ea5176aa) and Last Call: the
+//! hash-chain borrow commits to a one-time key (#18), a negative threshold
+//! behaves as zero (#31), P2PKH owners hash unkeyed (KCC-2 #30), and every
+//! input and output of a standard transfer shares one extension commitment
+//! (#16). A program keeps the rules it was compiled with, so each pin states
+//! which ones its bytes check ([`Rules`]); a pin that says nothing gets the
+//! Last Call rules.
+//!
+//! Six pinned programs carry this layout on chain. Five were
+//! compiled against the Draft: kascov's own reduced vector and four
+//! generations of ZealousSwap's token cell, each read and exercised on the
+//! engine before it was pinned, and none of them is conformant to the Last
+//! Call text ([`Pin::conformant`]). The sixth is the KCC20 actor of the
+//! official reference app (argent-lang/kcc20-reference c8a0871), pinned from
+//! its published source and artifact rather than from chain bytes. Its
+//! template is now on mainnet and testnet-10, and its pin stays unreviewed until the
+//! bytes-to-chain leg and an engine ladder are done. Every other deployed
+//! token (KRON, KaspaCom, KaspaKaha) uses the gist-era 46-byte state that
 //! `kcc20.rs` reads; the spec state is six fields, 112 bytes encoded, with
-//! different scheme bytes. No shipped legacy build carries a decodable spec
-//! window (tests check every fixture, both directions), and a window alone
-//! never claims a program anyway: only reconstruction against the family
-//! outputs does, and that is the part an adversary cannot forge.
+//! different scheme bytes. No shipped legacy build carries a
+//! decodable spec window (tests check every fixture, both directions), and a
+//! window alone never claims a program anyway: only reconstruction against
+//! the family outputs does, and that is the part an adversary cannot forge.
 //!
 //! The one structural gift of the spec: output states are PROVEN, not
 //! recovered. The leader's `transfer` arguments declare every successor
@@ -25,22 +40,47 @@
 
 use crate::encode_push;
 use crate::kcc1;
+use crate::kcc2;
 
 use serde::Deserialize;
+use std::fmt;
 use std::sync::OnceLock;
 
-/// The kccs commit whose text defines every rule in this module. A spec
-/// change re-derives everything; fixtures are regenerated, never patched.
-pub const SPEC_COMMIT: &str = "ea5176aa";
+/// The kccs commit whose text this module tracks: KCC-20 in Last Call. A
+/// pin described against it can be judged conformant ([`Pin::conformant`]);
+/// a spec change re-derives everything, and fixtures are regenerated, never
+/// patched.
+pub const SPEC_COMMIT: &str = "1516a6c";
 
-/// The template name a pinned KCC-0020 build is stamped with when its pin
-/// declares no family of its own, everywhere a legacy build says
-/// "KCC20 token". A pin that declares a `family` stamps that instead (see
-/// [`Pin::family_label`]); [`is_spec_template`] recognises either.
-pub const SPEC_TOKEN_TEMPLATE: &str = "KCC-0020 token";
+/// The merged Draft the first five pins were reviewed against. Its rules
+/// stay readable per pin ([`Rules`]), because the programs compiled against
+/// it check them on chain for good.
+pub const DRAFT_SPEC_COMMIT: &str = "ea5176aa";
+
+/// The template name a pinned build without a family of its own is stamped
+/// with once kascov judges it conformant to [`SPEC_COMMIT`], everywhere a
+/// legacy build says "KCC20 token". A pin that declares a `family` stamps
+/// that instead (see [`Pin::family_label`]); [`is_spec_template`] recognises
+/// every label.
+pub const SPEC_TOKEN_TEMPLATE: &str = "KCC-20 token";
+
+/// The name for a build described against [`SPEC_COMMIT`] that kascov has
+/// not judged conformant (an unreviewed pin, say): it carries the state
+/// layout, and the name claims nothing more.
+pub const LAYOUT_TEMPLATE: &str = "KCC-20 state layout";
+
+/// The name for a build compiled against a Draft before Last Call. Such a
+/// program carries the state layout but checks rules the spec has since
+/// replaced, so it must never read as a token of the standard.
+pub const DRAFT_BUILD_TEMPLATE: &str = "KCC-20 state layout, pre-Final draft build";
+
+/// The generic name rows were stamped with before the Last Call labels.
+/// Still recognised, so a stored row keeps routing as a spec cell until the
+/// re-stamp pass rewrites it.
+pub const RETIRED_SPEC_TEMPLATE: &str = "KCC-0020 token";
 
 /// The default configuration's entrypoint signatures (§3) written under
-/// KCC-1 §6.1, and their dispatch tags. §6.1 expands a record to its
+/// KCC-1 §3.5.1, and their dispatch tags. §3.5.1 expands a record to its
 /// ordered field types with the record's name omitted, so `KCC20State[]`
 /// is `{int,byte[32],byte,byte,byte[32],byte[32]}[]` in the signature the
 /// tag is hashed from; the spec's own `transfer(KCC20State[],byte[])` is
@@ -73,7 +113,7 @@ pub const OWNER_COVENANT_ID: u8 = 0x04;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct State {
     /// Token quantity in base units. Non-negative by construction: decode
-    /// rejects a set §5.3 sign bit, negative zero included.
+    /// rejects a set KCC-1 §3.4.3 sign bit, negative zero included.
     pub amount: i64,
     /// Owner bytes, interpreted per `owner_scheme` (KCC-2).
     pub owner: [u8; 32],
@@ -87,7 +127,7 @@ pub struct State {
     pub extension_commitment: [u8; 32],
 }
 
-/// The §8.1 encoded width: six `PushExplicit` fields,
+/// The KCC-1 §3.7.1 encoded width: six `PushExplicit` fields,
 /// `(1+8) + (1+32) + (1+1) + (1+1) + (1+32) + (1+32)`.
 pub const STATE_LEN: usize = 112;
 
@@ -119,7 +159,7 @@ impl State {
         out.try_into().ok()
     }
 
-    /// Strict §8.1 decode: exactly 112 bytes, the six explicit pushes at
+    /// Strict KCC-1 §3.7.1 decode: exactly 112 bytes, the six explicit pushes at
     /// their fixed offsets, nothing else. A set amount sign bit (negative
     /// zero included) is rejected, never absolute-valued.
     pub fn decode(bytes: &[u8]) -> Option<State> {
@@ -175,7 +215,7 @@ impl Template {
         })
     }
 
-    /// KCC-1 §8.3 TemplateHash (BLAKE3) — the template's canonical name.
+    /// KCC-1 §3.7.3 TemplateHash (BLAKE3) — the template's canonical name.
     pub fn hash(&self) -> [u8; 32] {
         kcc1::template_hash(&self.prefix, &self.suffix)
     }
@@ -199,7 +239,7 @@ impl Template {
 /// Every offset where `program` carries a decodable 112-byte state. A match
 /// is a CANDIDATE cut, nothing more: only reconstruction confirms it
 /// ([`confirm_cut`]), because state bytes can imitate the pattern by chance
-/// and the true `state.start` is artifact knowledge (K1 §8.2).
+/// and the true `state.start` is artifact knowledge (K1 §3.4.7).
 pub fn locate_state_cuts(program: &[u8]) -> Vec<usize> {
     if program.len() < STATE_LEN {
         return Vec::new();
@@ -214,7 +254,7 @@ pub fn locate_state_cuts(program: &[u8]) -> Vec<usize> {
 /// covenant id — interleaved non-family outputs shift nothing). True only
 /// when the counts match and every reconstruction equals the output's SPK
 /// byte for byte. The caller MUST pass version-0 output scripts only (K1
-/// §7); `check_family` enforces that with [`FamilyOutput::spk_version`].
+/// §3.6); `check_family` enforces that with [`FamilyOutput::spk_version`].
 ///
 /// What a `true` proves, exactly: UNDER THE GIVEN TEMPLATE, the declared
 /// states are what the outputs commit to. Whether the template is a
@@ -259,7 +299,7 @@ pub fn confirm_cut(
 }
 
 /// `transfer(KCC20State[] next_states, byte[] witness)` — the leader's
-/// argument payloads. A `KCC20State[]` lowers field-major (K1 §5.6): six
+/// argument payloads. A `KCC20State[]` lowers field-major (K1 §3.4.6): six
 /// grouped pushes, one per field, each the concatenation of that field's
 /// fixed payloads across all elements, every count equal; then the witness.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -400,7 +440,7 @@ pub fn witness_path(witness: &[u8]) -> Option<WitnessPath<'_>> {
 /// The default configuration's owner-authentication shape (§2). Structure
 /// only — signatures are consensus's to verify — EXCEPT the p2pkh binding,
 /// which is byte-provable here: the revealed pubkey must hash to the owner
-/// under KCC-2's keyed `P2PKHHash`.
+/// under the `P2PKHHash` the program checks (KCC-2, per [`Rules::p2pkh_hash`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnerAuth {
     /// p2pk-schnorr/v1: a 65-byte transaction signature; the owner bytes are
@@ -420,8 +460,9 @@ pub enum OwnerAuth {
 
 /// Check the owner-auth bytes of a NORMAL path against `state`. `None` for a
 /// wrong shape, an unknown scheme, or a p2pkh pubkey that does not hash to
-/// the owner. A `Some` never claims a signature was valid.
-pub fn owner_auth(state: &State, auth: &[u8]) -> Option<OwnerAuth> {
+/// the owner under `p2pkh` (an ECDSA key must also be in compressed form,
+/// KCC-2's rule). A `Some` never claims a signature was valid.
+pub fn owner_auth(state: &State, auth: &[u8], p2pkh: kcc2::P2pkhHash) -> Option<OwnerAuth> {
     match state.owner_scheme {
         OWNER_P2PK_SCHNORR => (auth.len() == 65).then_some(OwnerAuth::P2pkSignature),
         OWNER_P2PKH_SCHNORR => {
@@ -429,14 +470,16 @@ pub fn owner_auth(state: &State, auth: &[u8]) -> Option<OwnerAuth> {
                 return None;
             }
             let pubkey: [u8; 32] = auth[..32].try_into().ok()?;
-            (kcc1::p2pkh_hash(&pubkey) == state.owner).then_some(OwnerAuth::P2pkhSchnorr { pubkey })
+            kcc2::bind_public_key(kcc2::Scheme::P2pkhSchnorr, &state.owner, &pubkey, p2pkh).ok()?;
+            Some(OwnerAuth::P2pkhSchnorr { pubkey })
         }
         OWNER_P2PKH_ECDSA => {
             if auth.len() != 33 + 65 {
                 return None;
             }
             let pubkey: [u8; 33] = auth[..33].try_into().ok()?;
-            (kcc1::p2pkh_hash(&pubkey) == state.owner).then_some(OwnerAuth::P2pkhEcdsa { pubkey })
+            kcc2::bind_public_key(kcc2::Scheme::P2pkhEcdsa, &state.owner, &pubkey, p2pkh).ok()?;
+            Some(OwnerAuth::P2pkhEcdsa { pubkey })
         }
         OWNER_P2SH => {
             let [index] = auth else { return None };
@@ -447,33 +490,111 @@ pub fn owner_auth(state: &State, auth: &[u8]) -> Option<OwnerAuth> {
     }
 }
 
-/// The fixed borrow-scheme mapping (§3, restated with guard semantics in §5). `None` for a threshold guard whose
-/// first eight bytes are not a non-negative KCC-1 int payload.
+/// Which hash-chain borrow rule a program checks. Per program, because a
+/// program keeps the rule it was compiled with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HashChainRule {
+    /// #18 (Last Call): the witness is exactly `next_borrow_guard[32] ‖
+    /// one_time_pubkey[32] ‖ sig[65]`, `Hash(next ‖ pubkey)` must equal the
+    /// current guard, the guard advances to `next`, and the one-time key
+    /// must sign. The signature is consensus's to verify, so the best this
+    /// reader can say is structural.
+    #[default]
+    Keyed,
+    /// The Draft's rule (ea5176aa): the witness is a 32-byte preimage that
+    /// must hash to the guard, which then advances to it. Anyone who sees the
+    /// preimage in the mempool can race the borrow, which is why #18 replaced
+    /// it, but the programs compiled against it check it on chain for good.
+    Preimage,
+}
+
+/// The rules a pinned program checks wherever the Draft and the Last Call
+/// text differ. The default is the Last Call text, so a pin that declares
+/// nothing is read by the current rules, never by a retired one. Each rule is
+/// the pin's own, never derived from [`SPEC_COMMIT`]: moving that constant
+/// to the Final text must not change what an existing build is held to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rules {
+    #[serde(default)]
+    pub hash_chain: HashChainRule,
+    /// How a p2pkh owner is bound to the revealed key (KCC-2 #30 made it
+    /// unkeyed; the Draft's programs check the keyed form).
+    #[serde(default)]
+    pub p2pkh_hash: kcc2::P2pkhHash,
+    /// The program refuses an amount-threshold guard whose DECODED int is
+    /// below zero. The spec lets a contract require a non-negative threshold
+    /// (#31 MAY); without this flag a negative one acts as an effective
+    /// threshold of zero. Negative zero decodes to 0 and passes: every pinned
+    /// program that sets this flag reads the guard with OpBin2Num and
+    /// compares, and the engine accepts a `-0` guard under each of them.
+    #[serde(default)]
+    pub threshold_non_negative: bool,
+    /// #16 (Last Call): a standard transfer carries ONE extension
+    /// commitment, so a family transition that moves several classes side by
+    /// side breaches it even when each class balances. The Draft allowed
+    /// that, and a build of it is held to per-class balance alone.
+    #[serde(default = "Rules::last_call_single_class")]
+    pub single_class: bool,
+}
+
+impl Rules {
+    fn last_call_single_class() -> bool {
+        true
+    }
+}
+
+impl Default for Rules {
+    fn default() -> Rules {
+        Rules {
+            hash_chain: HashChainRule::default(),
+            p2pkh_hash: kcc2::P2pkhHash::default(),
+            threshold_non_negative: false,
+            single_class: Rules::last_call_single_class(),
+        }
+    }
+}
+
+/// The fixed borrow-scheme mapping (§3, restated with guard semantics in §5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BorrowScheme {
     Disabled,
-    /// The increase must strictly exceed this threshold; guard bytes 8..32
-    /// are unused and deliberately unconstrained (§5).
+    /// The guard's first eight bytes as a KCC-1 signed-magnitude int,
+    /// negative zero read as zero. The increase must strictly exceed
+    /// `max(threshold, 0)`; guard bytes 8..32 carry no meaning but must be
+    /// preserved with the rest of the guard (§5).
     AmountThreshold(i64),
     /// The guard is a Schnorr pubkey; validity of the witness signature is
     /// consensus's, so a check here can only ever be structural.
     SchnorrSignature([u8; 32]),
-    /// The guard is the current chain head; each borrow reveals its preimage
-    /// and advances the guard to it.
+    /// The guard is the current chain head; each borrow reveals the next
+    /// head and advances the guard to it, under the program's
+    /// [`HashChainRule`].
     HashChain([u8; 32]),
     Reserved(u8),
 }
 
 impl BorrowScheme {
-    pub fn of(state: &State) -> Option<BorrowScheme> {
-        Some(match state.borrow_scheme {
+    /// Read a leader's borrow scheme and guard. `Err` only for a threshold
+    /// that decodes below zero under a program that requires non-negative.
+    pub fn of(state: &State, rules: &Rules) -> Result<BorrowScheme, BorrowRefusal> {
+        Ok(match state.borrow_scheme {
             0x00 => BorrowScheme::Disabled,
             0x01 => {
-                let payload: [u8; 8] = state.borrow_guard[..8].try_into().ok()?;
-                if payload[7] & 0x80 != 0 {
-                    return None;
+                let mut magnitude = [0u8; 8];
+                magnitude.copy_from_slice(&state.borrow_guard[..8]);
+                let sign = magnitude[7] & 0x80 != 0;
+                magnitude[7] &= 0x7f;
+                // 63 magnitude bits always fit an i64
+                let magnitude = u64::from_le_bytes(magnitude) as i64;
+                // the sign bit over a zero magnitude is negative zero, which
+                // decodes to 0: the rule is on the value, not on the bit
+                let threshold = if sign { -magnitude } else { magnitude };
+                if threshold < 0 && rules.threshold_non_negative {
+                    return Err(BorrowRefusal::NegativeThreshold);
                 }
-                BorrowScheme::AmountThreshold(kcc1::decode_state_int(&payload)?)
+                BorrowScheme::AmountThreshold(threshold)
             }
             0x02 => BorrowScheme::SchnorrSignature(state.borrow_guard),
             0x03 => BorrowScheme::HashChain(state.borrow_guard),
@@ -482,26 +603,173 @@ impl BorrowScheme {
     }
 }
 
-/// What the bytes allow saying about a borrowed receive. Two tiers on
-/// purpose: hash-chain and amount-threshold are proven from bytes alone;
-/// schnorr-signature is structural, because kascov does not re-run the
-/// sighash and must never claim it did.
+/// `Hash(next ‖ pubkey)`: one link of a #18 hash chain. Built backwards,
+/// `x_i = Hash(x_(i-1) ‖ pubkey_i)`, so revealing `x_(i-1)` with `pubkey_i`
+/// proves the link and commits the borrow to that key.
+pub fn hash_chain_link(next: &[u8; 32], pubkey: &[u8; 32]) -> [u8; 32] {
+    let mut preimage = [0u8; 64];
+    preimage[..32].copy_from_slice(next);
+    preimage[32..].copy_from_slice(pubkey);
+    kcc1::hash(&preimage)
+}
+
+/// The #18 borrow witness, `next[32] ‖ one_time_pubkey[32] ‖ sig[65]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyedLink {
+    pub next: [u8; 32],
+    pub pubkey: [u8; 32],
+    pub signature: [u8; 65],
+}
+
+impl KeyedLink {
+    pub const LEN: usize = 32 + 32 + 65;
+
+    /// Exactly 129 bytes, or `None`.
+    pub fn parse(witness: &[u8]) -> Option<KeyedLink> {
+        if witness.len() != Self::LEN {
+            return None;
+        }
+        Some(KeyedLink {
+            next: witness[..32].try_into().ok()?,
+            pubkey: witness[32..64].try_into().ok()?,
+            signature: witness[64..].try_into().ok()?,
+        })
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::LEN);
+        out.extend_from_slice(&self.next);
+        out.extend_from_slice(&self.pubkey);
+        out.extend_from_slice(&self.signature);
+        out
+    }
+}
+
+/// Why a borrowed receive is invalid. Each rule has its own reason, so a
+/// refusal says which rule failed and a test can hold a vector to the rule
+/// it was written to break. The texts of the reasons that predate Last Call
+/// are unchanged: stored verdicts carry them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BorrowRefusal {
+    /// owner, owner_scheme, borrow_scheme or extension_commitment changed.
+    NotPreserved,
+    /// The output carrying `next_states[0]` holds less KAS than the
+    /// borrowed input did.
+    KasReduced,
+    /// #31: a state whose owner scheme KCC-2 does not assign cannot be
+    /// borrowed.
+    UnassignedOwnerScheme(u8),
+    /// A threshold that decodes below zero under a program that requires
+    /// non-negative (negative zero is 0 and is not refused).
+    NegativeThreshold,
+    Disabled,
+    ThresholdWitness,
+    SchnorrWitness,
+    /// [`HashChainRule::Preimage`]: the witness is not 32 bytes.
+    PreimageWitness,
+    /// [`HashChainRule::Preimage`]: `Hash(preimage) != guard`.
+    PreimageMismatch,
+    /// [`HashChainRule::Keyed`]: the witness is not 129 bytes.
+    KeyedWitness,
+    /// [`HashChainRule::Keyed`]: `Hash(next ‖ pubkey) != guard`.
+    LinkMismatch,
+    /// An unassigned borrow scheme byte (§3: reserved, MUST be invalid).
+    Reserved(u8),
+    /// The increase does not strictly exceed the effective threshold, a
+    /// decrease included.
+    NotIncreased,
+    /// The successor's guard is not the leader's guard (threshold, schnorr)
+    /// or the revealed next head (hash chain).
+    GuardNotExpected,
+    /// `next_states[0]` was not proven to be the cell behind family output
+    /// zero, so nothing about it can be judged.
+    SuccessorNotProven,
+    NoSuccessor,
+}
+
+impl fmt::Display for BorrowRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BorrowRefusal::NotPreserved => f.write_str(
+                "the borrowed successor must preserve owner, owner_scheme, borrow_scheme and extension_commitment",
+            ),
+            BorrowRefusal::KasReduced => f.write_str("the borrowed cell's KAS value cannot be reduced"),
+            BorrowRefusal::UnassignedOwnerScheme(byte) => {
+                // KCC-2 splits the bytes it does not assign: reserved ones
+                // MUST be rejected, custom ones are defined elsewhere; name
+                // which, as the owner-scheme refusal in core does
+                let class = if kcc2::is_custom(*byte) { "custom (defined outside KCC-2)" } else { "reserved" };
+                write!(
+                    f,
+                    "a cell under {class} owner scheme 0x{byte:02x} cannot be borrowed; KCC-2 assigns 0x00-0x04"
+                )
+            }
+            BorrowRefusal::NegativeThreshold => f.write_str("the threshold guard is not a non-negative int payload"),
+            BorrowRefusal::Disabled => f.write_str("borrowing is disabled for this cell"),
+            BorrowRefusal::ThresholdWitness => f.write_str("the amount-threshold borrow witness must be empty"),
+            BorrowRefusal::SchnorrWitness => f.write_str("the schnorr borrow witness must be a 65-byte signature"),
+            BorrowRefusal::PreimageWitness => f.write_str("the hash-chain borrow witness must be a 32-byte preimage"),
+            BorrowRefusal::PreimageMismatch => f.write_str("the preimage does not hash to the current guard"),
+            BorrowRefusal::KeyedWitness => f.write_str(
+                "the hash-chain borrow witness must be 129 bytes: next guard, one-time key, signature",
+            ),
+            BorrowRefusal::LinkMismatch => {
+                f.write_str("the revealed next guard and one-time key do not hash to the current guard")
+            }
+            BorrowRefusal::Reserved(_) => f.write_str("a reserved borrow scheme byte; the pinned text rejects it"),
+            BorrowRefusal::NotIncreased => f.write_str("the token increase must strictly exceed the threshold"),
+            BorrowRefusal::GuardNotExpected => {
+                f.write_str("the successor does not carry the expected next borrow guard")
+            }
+            BorrowRefusal::SuccessorNotProven => {
+                f.write_str("the borrowed successor is not proven against the family outputs")
+            }
+            BorrowRefusal::NoSuccessor => {
+                f.write_str("a borrowed receive needs a successor at family position zero")
+            }
+        }
+    }
+}
+
+/// What the bytes allow saying about a borrowed receive, in two tiers:
+///
+/// - `Proven`: kascov reproduced EVERY condition the scheme imposes, from
+///   bytes alone (amount-threshold; the Draft's preimage hash chain).
+/// - `Structural`: kascov reproduced every condition except a signature that
+///   consensus checks and this reader does not re-run (schnorr-signature;
+///   the #18 keyed hash chain, whose one-time key must sign).
+///
+/// Consensus accepted every transaction this judges, so `Structural` is not
+/// doubt about the chain; it is a statement of what kascov itself checked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BorrowVerdict {
     Proven(BorrowScheme),
     Structural(BorrowScheme),
-    Invalid(&'static str),
+    Invalid(BorrowRefusal),
 }
 
-/// The §5 borrowed-receive algorithm as the pinned text states it:
-/// preservation, the per-scheme witness rule, `amount_difference >
-/// amount_threshold` (0 unless the threshold scheme raises it), the expected
-/// next guard, and the KAS floor (the family output carrying
-/// `next_states[0]` may not hold less KAS than the borrowed input did). A
-/// reserved scheme byte is `reject` under the pinned algorithm's final
-/// `else` (§5), so it verdicts Invalid, not unknown; a future commit that
-/// assigns the byte re-derives this module.
+impl BorrowVerdict {
+    /// The tier as event rows carry it: "proven" or "structural"; `None`
+    /// when invalid.
+    pub fn tier(&self) -> Option<&'static str> {
+        match self {
+            BorrowVerdict::Proven(_) => Some("proven"),
+            BorrowVerdict::Structural(_) => Some("structural"),
+            BorrowVerdict::Invalid(_) => None,
+        }
+    }
+}
+
+/// The §5 borrowed-receive algorithm under the program's `rules`:
+/// preservation, the KAS floor (the family output carrying `next_states[0]`
+/// may not hold less KAS than the borrowed input did), the leader's owner
+/// scheme being assigned (#31), the per-scheme witness rule,
+/// `amount_increase > max(threshold, 0)` (the threshold is 0 unless the
+/// threshold scheme raises it), and the expected next guard. A reserved scheme byte is
+/// `reject` under the algorithm's final `else`, so it verdicts Invalid, not
+/// unknown.
 pub fn verify_borrow(
+    rules: &Rules,
     leader: &State,
     next0: &State,
     borrow_witness: &[u8],
@@ -513,51 +781,61 @@ pub fn verify_borrow(
         || next0.borrow_scheme != leader.borrow_scheme
         || next0.extension_commitment != leader.extension_commitment
     {
-        return BorrowVerdict::Invalid(
-            "the borrowed successor must preserve owner, owner_scheme, borrow_scheme and extension_commitment",
-        );
+        return BorrowVerdict::Invalid(BorrowRefusal::NotPreserved);
     }
     if output0_kas < leader_kas {
-        return BorrowVerdict::Invalid("the borrowed cell's KAS value cannot be reduced");
+        return BorrowVerdict::Invalid(BorrowRefusal::KasReduced);
     }
-    let Some(scheme) = BorrowScheme::of(leader) else {
-        return BorrowVerdict::Invalid("the threshold guard is not a non-negative int payload");
+    if !kcc2::is_assigned(leader.owner_scheme) {
+        return BorrowVerdict::Invalid(BorrowRefusal::UnassignedOwnerScheme(leader.owner_scheme));
+    }
+    let scheme = match BorrowScheme::of(leader, rules) {
+        Ok(scheme) => scheme,
+        Err(refusal) => return BorrowVerdict::Invalid(refusal),
     };
     let (threshold, next_guard, structural) = match scheme {
-        BorrowScheme::Disabled => return BorrowVerdict::Invalid("borrowing is disabled for this cell"),
+        BorrowScheme::Disabled => return BorrowVerdict::Invalid(BorrowRefusal::Disabled),
         BorrowScheme::AmountThreshold(threshold) => {
             if !borrow_witness.is_empty() {
-                return BorrowVerdict::Invalid("the amount-threshold borrow witness must be empty");
+                return BorrowVerdict::Invalid(BorrowRefusal::ThresholdWitness);
             }
-            (threshold, leader.borrow_guard, false)
+            // the whole 32-byte guard is preserved, not just the int it starts with
+            (threshold.max(0), leader.borrow_guard, false)
         }
         BorrowScheme::SchnorrSignature(_) => {
             if borrow_witness.len() != 65 {
-                return BorrowVerdict::Invalid("the schnorr borrow witness must be a 65-byte signature");
+                return BorrowVerdict::Invalid(BorrowRefusal::SchnorrWitness);
             }
             (0, leader.borrow_guard, true)
         }
-        BorrowScheme::HashChain(guard) => {
-            if borrow_witness.len() != 32 {
-                return BorrowVerdict::Invalid("the hash-chain borrow witness must be a 32-byte preimage");
+        BorrowScheme::HashChain(guard) => match rules.hash_chain {
+            HashChainRule::Keyed => {
+                let Some(link) = KeyedLink::parse(borrow_witness) else {
+                    return BorrowVerdict::Invalid(BorrowRefusal::KeyedWitness);
+                };
+                if hash_chain_link(&link.next, &link.pubkey) != guard {
+                    return BorrowVerdict::Invalid(BorrowRefusal::LinkMismatch);
+                }
+                (0, link.next, true)
             }
-            if kcc1::hash(borrow_witness) != guard {
-                return BorrowVerdict::Invalid("the preimage does not hash to the current guard");
+            HashChainRule::Preimage => {
+                let Ok(preimage) = <[u8; 32]>::try_from(borrow_witness) else {
+                    return BorrowVerdict::Invalid(BorrowRefusal::PreimageWitness);
+                };
+                if kcc1::hash(&preimage) != guard {
+                    return BorrowVerdict::Invalid(BorrowRefusal::PreimageMismatch);
+                }
+                (0, preimage, false)
             }
-            let mut advanced = [0u8; 32];
-            advanced.copy_from_slice(borrow_witness);
-            (0, advanced, false)
-        }
-        BorrowScheme::Reserved(_) => {
-            return BorrowVerdict::Invalid("a reserved borrow scheme byte; the pinned text rejects it")
-        }
+        },
+        BorrowScheme::Reserved(byte) => return BorrowVerdict::Invalid(BorrowRefusal::Reserved(byte)),
     };
     let difference = i128::from(next0.amount) - i128::from(leader.amount);
     if difference <= i128::from(threshold) {
-        return BorrowVerdict::Invalid("the token increase must strictly exceed the threshold");
+        return BorrowVerdict::Invalid(BorrowRefusal::NotIncreased);
     }
     if next0.borrow_guard != next_guard {
-        return BorrowVerdict::Invalid("the successor does not carry the expected next borrow guard");
+        return BorrowVerdict::Invalid(BorrowRefusal::GuardNotExpected);
     }
     if structural {
         BorrowVerdict::Structural(scheme)
@@ -570,7 +848,7 @@ pub fn verify_borrow(
 #[derive(Clone, Debug)]
 pub struct FamilyInput {
     /// Position within the spending transaction; the LEADER is the lowest
-    /// (K1 §9.1) and must carry the `transfer` invocation.
+    /// (K1 §3.8.1) and must carry the `transfer` invocation.
     pub input_index: u32,
     pub state: State,
     /// The spent UTXO's KAS value.
@@ -578,7 +856,7 @@ pub struct FamilyInput {
 }
 
 /// One continuation output of the family, in family output order. A KCC-1
-/// instance lives under scriptPublicKey VERSION 0 (K1 §7); the version
+/// instance lives under scriptPublicKey VERSION 0 (K1 §3.6); the version
 /// travels with the script bytes so the proof cannot be satisfied by
 /// identical bytes under another version.
 #[derive(Clone, Debug)]
@@ -588,14 +866,16 @@ pub struct FamilyOutput {
     pub kas: u64,
 }
 
-/// The bounds and scheme sets a transition is judged against — pin
-/// knowledge, defaulting to the spec's default configuration (§3).
+/// The bounds, scheme sets and rules a transition is judged against — pin
+/// knowledge, defaulting to the spec's default configuration (§3) under the
+/// Last Call rules.
 #[derive(Clone, Debug)]
 pub struct Bounds {
     pub max_token_inputs: usize,
     pub max_token_outputs: usize,
     pub owner_schemes: Vec<u8>,
     pub borrow_schemes: Vec<u8>,
+    pub rules: Rules,
 }
 
 impl Default for Bounds {
@@ -611,6 +891,7 @@ impl Default for Bounds {
                 OWNER_COVENANT_ID,
             ],
             borrow_schemes: vec![0x00, 0x01, 0x02, 0x03],
+            rules: Rules::default(),
         }
     }
 }
@@ -643,18 +924,19 @@ pub struct Verdict {
     /// §2/§4: `extension_commitment` must be preserved unchanged. True when
     /// every successor's class appears among the input classes AND the
     /// per-class sums balance. A successor class matching no input is a flat
-    /// breach and lands in `violations`; an imbalance among existing classes
-    /// is left to the accounting layer's judgment (its resolution on kccs
-    /// issue #14 may still move), so it clears this flag without a
-    /// violation string.
+    /// breach and lands in `violations`; so is any mixing ([`Self::mixed_classes`]),
+    /// which is how an imbalance between classes would have to arise.
     pub classes_preserved: bool,
     /// A single-successor family drew all inputs from one class equal to the
     /// successor's (§2's consolidation sentence). Vacuously true otherwise.
     pub consolidation_within_class: bool,
-    /// More than one distinct class among inputs and successors. Not by
-    /// itself a breach when every class is preserved — a family may carry a
-    /// rock cell and a paper cell side by side — but the authors' stated
-    /// intent is uniformity, so the accounting layer treats it cautiously.
+    /// More than one distinct class among inputs and successors. A breach on
+    /// its own since #16 (Last Call §2): every input and continuation output
+    /// of a standard transfer shares ONE extension commitment, so a rock
+    /// cell and a paper cell may not even travel side by side, each class
+    /// preserved. Before #16 that shape was legal and only consolidation
+    /// across classes was refused; no official vector covers it, so kascov
+    /// carries its own (tests/kcc20_vectors.rs).
     pub mixed_classes: bool,
     /// The leader's path; `None` when the witness carries an invalid prefix.
     pub path_normal: Option<bool>,
@@ -700,6 +982,13 @@ pub fn check_family(
         violations.push("declared successor states do not reconstruct to the family outputs".into());
     }
 
+    // §1: an amount is a non-negative quantity. The codec cannot carry a
+    // negative successor, but a caller-built declaration can, and the total
+    // check below would wave through a -600/+1600 split of 1000.
+    if transfer.next_states.iter().any(|state| state.amount < 0) {
+        violations.push("a successor amount is negative".into());
+    }
+
     let sum_in: i128 = inputs.iter().map(|input| i128::from(input.state.amount)).sum();
     let sum_out: i128 = transfer
         .next_states
@@ -743,10 +1032,15 @@ pub fn check_family(
     classes.sort_unstable();
     classes.dedup();
     let mixed_classes = classes.len() > 1;
+    if mixed_classes {
+        violations.push(format!(
+            "the inputs and successors carry {} different extension commitments; a standard transfer keeps one",
+            classes.len()
+        ));
+    }
 
     // §2/§4: the commitment is preserved unchanged. A successor whose class
-    // matches no input is a flat breach; an imbalance among existing classes
-    // clears the flag and is judged upstream.
+    // matches no input is a flat breach of its own, named for what it is.
     let fresh_class = transfer.next_states.iter().find(|state| {
         !inputs
             .iter()
@@ -805,7 +1099,7 @@ pub fn check_family(
     };
     let owner_auth = match path {
         Some(WitnessPath::Normal(auth_bytes)) => {
-            let auth = owner_auth(&leader.state, auth_bytes);
+            let auth = owner_auth(&leader.state, auth_bytes, bounds.rules.p2pkh_hash);
             if auth.is_none() {
                 violations.push(
                     "the leader's owner-auth bytes do not fit its scheme (shape or p2pkh binding)".into(),
@@ -821,13 +1115,18 @@ pub fn check_family(
             // behind family output zero; only reconstruction establishes
             // that, so an unproven family cannot carry a proven borrow.
             let verdict = if !successors_proven {
-                BorrowVerdict::Invalid("the borrowed successor is not proven against the family outputs")
+                BorrowVerdict::Invalid(BorrowRefusal::SuccessorNotProven)
             } else {
                 match (transfer.next_states.first(), family_outputs.first()) {
-                    (Some(next0), Some(output0)) => {
-                        verify_borrow(&leader.state, next0, borrow_witness, leader.kas, output0.kas)
-                    }
-                    _ => BorrowVerdict::Invalid("a borrowed receive needs a successor at family position zero"),
+                    (Some(next0), Some(output0)) => verify_borrow(
+                        &bounds.rules,
+                        &leader.state,
+                        next0,
+                        borrow_witness,
+                        leader.kas,
+                        output0.kas,
+                    ),
+                    _ => BorrowVerdict::Invalid(BorrowRefusal::NoSuccessor),
                 }
             };
             if let BorrowVerdict::Invalid(reason) = &verdict {
@@ -858,8 +1157,8 @@ pub fn check_family(
 // ───────────────────────────── pins ──────────────────────────────
 
 /// How a program's signature script selects entrypoints. The michaelsutton
-/// fork at d57e5df (the compiler every pinned token so far was built with)
-/// emits a one-byte numeric selector and ends a chain with `6a`; silverscript
+/// silverscript fork (d57e5df) emits a one-byte numeric selector and ends a
+/// chain with `6a`; silverscript
 /// v1.0.0 (3ed9733) emits the KCC-1 `OP_DATA_4` tag rung. A trailing
 /// `byte[4]` argument is indistinguishable from a tag by bytes alone, so the
 /// encoding is declared, never inferred (`kcc1::read_invocation` documents
@@ -880,10 +1179,26 @@ pub struct PinDispatch {
     pub transfer_delegator: String,
 }
 
+/// Where a program's state window sits, and where the 112-byte KCC20State
+/// record sits inside it. The canonical KCC-1 TemplateHash is taken around
+/// the WHOLE window (§3.7.3); the record view, the bytes around the record
+/// alone, is what a successor is rebuilt from, because whatever else the
+/// window holds is context the family never changes.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PinStateRange {
     pub start: usize,
     pub len: usize,
+    /// The record's offset inside the window: zero where the window IS the
+    /// record, 33 for an Argent actor that keeps its own template hash
+    /// (`gen__kcc20_template`, one 32-byte push) ahead of it.
+    #[serde(default)]
+    pub record_offset: usize,
+}
+
+impl PinStateRange {
+    pub fn record_start(&self) -> usize {
+        self.start + self.record_offset
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -899,13 +1214,33 @@ pub struct PinExtension {
     pub plain_commitment: Option<String>,
 }
 
+/// The standard entrypoints' declared argument types (§2), as a pin writes
+/// them. An entry is read as the standard transfer or delegator only when
+/// both its role and these types say so; the entry's name decides nothing.
+pub const STANDARD_TRANSFER_TYPES: &str = "KCC20State[],byte[]";
+pub const STANDARD_DELEGATOR_TYPES: &str = "byte[]";
+
+/// An issuer's mint or create: one KCC20State for the recipient, then the
+/// KCC20 template halves the issuer rebuilds the recipient program from.
+pub const ISSUE_TYPES: &str = "KCC20State,byte[],byte[]";
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct PinEntrypoint {
     pub name: String,
     pub types: String,
     /// Tag hex or selector decimal, matching the dispatch kind.
     pub select: String,
-    /// "transfer" | "delegator" | "extension-update" | "program-specific"
+    /// What the reader does with a reveal of this entry:
+    /// - "transfer" / "delegator": the standard entrypoints, read by their
+    ///   declared types ([`STANDARD_TRANSFER_TYPES`],
+    ///   [`STANDARD_DELEGATOR_TYPES`]); any other types are not the standard
+    ///   layout and are not read as it.
+    /// - "issue": an issuer actor's mint or create ([`ISSUE_TYPES`]).
+    /// - "program-specific": a venue's own arm, read only when its name is
+    ///   one kascov implements a reader for (the `zealous-*` arms of
+    ///   [`parse_tag_reveal`]), never because it happens to be called
+    ///   "transfer".
+    /// - "extension-update": declared, not read yet.
     pub role: String,
     #[serde(default)]
     pub opening_arg: Option<usize>,
@@ -917,8 +1252,7 @@ pub struct PinReview {
     /// verified, and only a reviewed pin's labels may name a class.
     pub status: String,
     /// Fixture basenames under fixtures/kcc0020/ whose reveals must
-    /// recompute the pin's template hash (enforcement lands with the first
-    /// fixtures, Phase 2).
+    /// recompute the pin's template hash.
     pub fixtures: Vec<String>,
     /// True when both fixtures are chain reveals of the one launch the
     /// chain carries of this build, so their extension commitments cannot
@@ -931,25 +1265,85 @@ pub struct PinReview {
     pub note: String,
 }
 
-/// kascov's committed description of one KCC-0020 program — the artifact as
-/// this reader holds it, keyed by the KCC-1 template hash. The hash MUST be
-/// recomputed from the pin's fixture reveals before anything trusts it;
-/// that recompute lands with the first pinned fixtures (Phase 2) and is not
-/// enforced yet, which is safe only because the pin set ships empty.
+/// What an issuer actor does for the token family.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum IssuerRole {
+    /// Issues a positive amount out of an allowance it carries in its own
+    /// state (the reference app's `PublicMint`).
+    Mint,
+    /// Creates a zero-amount receiving cell and keeps its own state (the
+    /// reference app's `TokenSeed`).
+    Seed,
+}
+
+/// Which window fields of an issuer carry meaning kascov reads, as indexes
+/// into [`PinIssuer::state_types`].
+#[derive(Clone, Debug, Deserialize)]
+pub struct IssuerFields {
+    /// The KCC20 template the issuer builds recipient cells of; it must be
+    /// the token pin's own canonical hash, or the issuer issues something
+    /// else.
+    pub kcc20_template: usize,
+    pub extension_commitment: usize,
+    /// The allowance still issuable (mint role).
+    #[serde(default)]
+    pub remaining: Option<usize>,
+    /// The most one issue may hand out (mint role).
+    #[serde(default)]
+    pub per_issue_limit: Option<usize>,
+}
+
+/// An issuer actor inside the token's covenant family: a separate program,
+/// with its own template, that creates KCC20 cells. KCC-20 itself defines no
+/// issuance; the reference app (argent-lang/kcc20-reference) mints through
+/// `PublicMint` and seeds receiving cells through `TokenSeed`, both sharing
+/// the token's covenant id. Without knowing them, every mint would read as a
+/// transfer whose outputs exceed its inputs.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PinIssuer {
+    /// The actor's name in its artifact.
+    pub name: String,
+    pub role: IssuerRole,
+    /// The issuer's canonical KCC-1 template hash, around its whole window.
+    pub template_hash: String,
+    pub state: PinStateRange,
+    /// The window's KCC-1 field types, in order, comma-separated.
+    pub state_types: String,
+    pub fields: IssuerFields,
+    pub entrypoints: Vec<PinEntrypoint>,
+    /// Fixture basenames that must recompute `template_hash`.
+    pub fixtures: Vec<String>,
+}
+
+/// kascov's committed description of one KCC-20 program — the artifact as
+/// this reader holds it, keyed by the KCC-1 template hash. The hash is never
+/// trusted from the file: every fixture the review names must recompute it
+/// (`every_committed_pin_parses_and_names_its_spec`).
 #[derive(Clone, Debug, Deserialize)]
 pub struct Pin {
+    /// The kccs commit whose text the program was compiled against:
+    /// [`SPEC_COMMIT`] or [`DRAFT_SPEC_COMMIT`].
     pub spec_commit: String,
+    /// The canonical KCC-1 TemplateHash, around the whole state window.
     pub template_hash: String,
+    /// The record view's hash, where the window holds more than the record:
+    /// the TemplateHash around the 112-byte record alone (an Argent
+    /// `actor_type_handle`). Registered as an alias: [`pin_for`] resolves it
+    /// to this pin, and a program is only claimed when both hashes
+    /// reproduce, so the context bytes in the window are pinned too.
+    #[serde(default)]
+    pub view_template_hash: Option<String>,
     pub name: String,
     /// The display family a reveal of this program is stamped with, where
     /// the pin declares one: "Zealous · token" for ZealousSwap's cell, so
     /// the venue prefix rules ("Zealous · ") own it the way they own every
-    /// other family kascov names from bytes. A pin without one stamps the
-    /// generic [`SPEC_TOKEN_TEMPLATE`]. Display only: every spec-route
-    /// decision keys on the pin match, never on this string, and the label
-    /// must not collide with a legacy cell family or an observed skeleton
-    /// name, or the legacy decoders would claim a spec program by name
-    /// (guarded by `every_committed_pin_parses_and_names_this_spec`).
+    /// other family kascov names from bytes. A pin without one stamps its
+    /// [`Pin::standing`]. Display only: every spec-route decision keys on
+    /// the pin match, never on this string, and the label must not collide
+    /// with a legacy cell family or an observed skeleton name, or the legacy
+    /// decoders would claim a spec program by name (guarded by
+    /// `every_committed_pin_parses_and_names_its_spec`).
     #[serde(default)]
     pub family: Option<String>,
     pub dispatch: PinDispatch,
@@ -958,13 +1352,19 @@ pub struct Pin {
     pub max_token_inputs: usize,
     pub max_token_outputs: usize,
     pub borrow_schemes: Vec<u8>,
+    /// The Draft-versus-Last-Call rules the program checks.
+    #[serde(default)]
+    pub rules: Rules,
     pub extension: PinExtension,
     pub entrypoints: Vec<PinEntrypoint>,
+    /// Issuer actors sharing the token's covenant family.
+    #[serde(default)]
+    pub issuers: Vec<PinIssuer>,
     /// What the program's own in-script templateHash builtin computes:
-    /// "blake2b" for builds of the michaelsutton fork at d57e5df (the
-    /// generation every pinned token runs), "blake3" for silverscript
-    /// v1.0.0 (3ed9733) builds, which store the §8.3 value on chain and
-    /// check it with OpBlake3. Distinct from the BLAKE3 pin key either way.
+    /// "blake2b" for builds of the michaelsutton fork at d57e5df, "blake3"
+    /// for silverscript v1.0.0 (3ed9733) and argentc builds, which store the
+    /// KCC-1 §3.7.3 value on chain and check it with OpBlake3. Distinct from
+    /// the BLAKE3 pin key either way.
     pub in_script_template_hash_fn: String,
     pub review: PinReview,
 }
@@ -976,51 +1376,168 @@ impl Pin {
             max_token_outputs: self.max_token_outputs,
             owner_schemes: self.owner_schemes.clone(),
             borrow_schemes: self.borrow_schemes.clone(),
+            rules: self.rules,
+        }
+    }
+
+    /// The canonical TemplateHash of `program` under this pin's window: the
+    /// bytes before the window and the bytes after it. `None` when the
+    /// window does not fit.
+    pub fn canonical_hash(&self, program: &[u8]) -> Option<[u8; 32]> {
+        let end = self.state.start.checked_add(self.state.len)?;
+        (end <= program.len()).then(|| kcc1::template_hash(&program[..self.state.start], &program[end..]))
+    }
+
+    /// The record view of `program`: the template a successor is rebuilt
+    /// from, cut around the 112-byte record. For a window that is only the
+    /// record this is the canonical template.
+    pub fn cut(&self, program: &[u8]) -> Option<Template> {
+        if self.state.record_offset + STATE_LEN > self.state.len {
+            return None;
+        }
+        Template::cut(program, self.state.record_start())
+    }
+
+    /// The entry this pin declares for a standard role, by role and types.
+    pub fn standard_entry(&self, role: &str) -> Option<&PinEntrypoint> {
+        let types = match role {
+            "transfer" => STANDARD_TRANSFER_TYPES,
+            "delegator" => STANDARD_DELEGATOR_TYPES,
+            _ => return None,
+        };
+        self.entrypoints.iter().find(|e| e.role == role && e.types == types)
+    }
+
+    /// Every way this pin's program departs from the Last Call text
+    /// ([`SPEC_COMMIT`]), read off the pin's own declarations, one reason
+    /// per rule. Empty when every declared rule is the spec's. A reduced
+    /// owner-scheme subset is a configuration the spec allows (§3) and is
+    /// not listed.
+    pub fn nonconformities(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.spec_commit != SPEC_COMMIT {
+            out.push(format!(
+                "built to a pre-Final draft (read by kccs {}), not the Last Call text ({SPEC_COMMIT})",
+                self.spec_commit
+            ));
+        }
+        if self.dispatch.kind != DispatchKind::Kcc1Tag {
+            out.push("dispatches on a numeric selector, not the KCC-1 dispatch tags".into());
+        }
+        for (role, tag) in [("transfer", transfer_tag()), ("delegator", delegator_tag())] {
+            let tag = hex::encode(tag);
+            if self.standard_entry(role).is_none_or(|e| e.select != tag) {
+                out.push(format!("no standard {role} entrypoint dispatched by {tag}"));
+            }
+        }
+        if self.rules.hash_chain != HashChainRule::Keyed {
+            out.push("its hash-chain borrow is the Draft's preimage rule, not the keyed link of #18".into());
+        }
+        let p2pkh_owned = self
+            .owner_schemes
+            .iter()
+            .any(|s| matches!(*s, OWNER_P2PKH_SCHNORR | OWNER_P2PKH_ECDSA));
+        if p2pkh_owned && self.rules.p2pkh_hash != kcc2::P2pkhHash::Unkeyed {
+            out.push("its p2pkh owners hash under the Draft's keyed P2PKHHash, not KCC-2's unkeyed one".into());
+        }
+        if !self.rules.single_class {
+            out.push("it is held to the Draft's per-class balance, not #16's one class per transfer".into());
+        }
+        if self.borrow_schemes != [0x00, 0x01, 0x02, 0x03] {
+            out.push("its borrow schemes are not the fixed mapping 0x00-0x03".into());
+        }
+        if self.owner_schemes.is_empty() || !self.owner_schemes.iter().all(|s| kcc2::is_assigned(*s)) {
+            out.push("its owner schemes are not a subset of KCC-2's assigned schemes".into());
+        }
+        if self.in_script_template_hash_fn != "blake3" {
+            out.push(format!(
+                "its in-script template hash is {}, not KCC-1's BLAKE3",
+                self.in_script_template_hash_fn
+            ));
+        }
+        if self.max_token_inputs == 0 || self.max_token_outputs == 0 {
+            out.push("its family bounds admit no transfer".into());
+        }
+        out
+    }
+
+    /// The conformance verdict the API's `standard` object serves:
+    /// `Some(false)` when any declared rule departs from the Last Call text,
+    /// `Some(true)` when none does AND the pin is reviewed (the declarations
+    /// were checked against the bytes), `None` when none does but the pin is
+    /// unreviewed. A verdict about one program; it never speaks for kascov.
+    pub fn conformant(&self) -> Option<bool> {
+        if !self.nonconformities().is_empty() {
+            Some(false)
+        } else if self.review.status == "reviewed" {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    /// What this build is, measured against the spec, in the words kascov
+    /// shows for it: [`DRAFT_BUILD_TEMPLATE`] for a program compiled against
+    /// a Draft, [`SPEC_TOKEN_TEMPLATE`] once judged conformant,
+    /// [`LAYOUT_TEMPLATE`] otherwise. A venue family names the build; this
+    /// says where it stands, and is never replaced by it.
+    pub fn standing(&self) -> &'static str {
+        if self.spec_commit != SPEC_COMMIT {
+            DRAFT_BUILD_TEMPLATE
+        } else if self.conformant() == Some(true) {
+            SPEC_TOKEN_TEMPLATE
+        } else {
+            LAYOUT_TEMPLATE
         }
     }
 
     /// The template name a reveal of this program is filed under: the pin's
-    /// declared family, or [`SPEC_TOKEN_TEMPLATE`] when it declares none.
+    /// declared family, or its [`Pin::standing`] when it declares none.
     /// Borrowed from the pin, so on a committed pin (`pins()`) it is
     /// `'static` and fits the reveal-time stamp directly.
     pub fn family_label(&self) -> &str {
-        self.family.as_deref().unwrap_or(SPEC_TOKEN_TEMPLATE)
+        self.family.as_deref().unwrap_or(self.standing())
     }
 }
 
-/// Every template name a pinned KCC-0020 reveal can be stamped with: the
-/// generic [`SPEC_TOKEN_TEMPLATE`] first (a pin without a family, and every
-/// row stamped before pins carried families), then each committed pin's
-/// declared family, deduplicated in pin order.
+/// Every template name a pinned KCC-20 reveal can be stamped with: the
+/// three standings, the retired generic label (rows stamped before the
+/// Last Call labels, until the re-stamp pass rewrites them), then each
+/// committed pin's declared family, deduplicated in pin order.
 pub fn spec_template_names() -> Vec<&'static str> {
-    let mut names = vec![SPEC_TOKEN_TEMPLATE];
-    for pin in pins() {
-        let label = pin.family_label();
-        if !names.contains(&label) {
-            names.push(label);
+    let mut names = STANDING_LABELS.to_vec();
+    // a pin without a family is stamped with a standing, listed already
+    for family in pins().iter().filter_map(|pin| pin.family.as_deref()) {
+        if !names.contains(&family) {
+            names.push(family);
         }
     }
     names
 }
 
-/// Whether a stored template name means "a pinned KCC-0020 build": the
-/// generic label or any pin's family. Callers that need to know a row is a
-/// spec cell test this, never the one literal, so a pin gaining a family
-/// cannot silently drop its rows out of a name-keyed gate.
+/// The labels a pin's standing can stamp, and the one they replaced.
+const STANDING_LABELS: [&str; 4] = [SPEC_TOKEN_TEMPLATE, LAYOUT_TEMPLATE, DRAFT_BUILD_TEMPLATE, RETIRED_SPEC_TEMPLATE];
+
+/// Whether a stored template name means "a pinned KCC-20 build": any label
+/// [`spec_template_names`] lists. Callers that need to know a row is a spec
+/// cell test this, never one literal, so a pin gaining a family or a
+/// standing cannot silently drop its rows out of a name-keyed gate.
 pub fn is_spec_template(name: &str) -> bool {
-    name == SPEC_TOKEN_TEMPLATE || pins().iter().any(|pin| pin.family_label() == name)
+    // the store asks this for every row it writes, so no pin's standing is
+    // computed here: a familyless pin's label is one of the standings
+    STANDING_LABELS.contains(&name) || pins().iter().any(|pin| pin.family.as_deref() == Some(name))
 }
 
 /// Pin sources are embedded at compile time — layouts are data, but the data
 /// ships inside the binary and is self-checked by tests, never read from
-/// disk at runtime (the same stance as `CELL_FAMILIES`). Phase 2 adds the
-/// first entry: `("kcc0020-vector", include_str!("../pins/kcc0020/….json"))`.
+/// disk at runtime (the same stance as `CELL_FAMILIES`).
 const PIN_SOURCES: &[(&str, &str)] = &[
     ("kcc0020-vector", include_str!("../pins/kcc0020/4abcc188.json")),
     ("zealous-token-cell", include_str!("../pins/kcc0020/653012f1.json")),
     ("zealous-token-cell-2641", include_str!("../pins/kcc0020/2f2671fc.json")),
     ("zealous-token-cell-3037", include_str!("../pins/kcc0020/58c24260.json")),
     ("zealous-token-cell-3223", include_str!("../pins/kcc0020/50ff50d8.json")),
+    ("kcc20-reference", include_str!("../pins/kcc0020/9703112e.json")),
 ];
 
 /// Every committed pin, parsed once. A pin that fails to parse is a build
@@ -1039,48 +1556,421 @@ pub fn pins() -> &'static [Pin] {
     })
 }
 
-/// A short fingerprint over every committed pin's identity and review
-/// status. What a token DERIVES AS depends on these, so the accounting
-/// layer composes this into its derivation stamp: reviewing a pin, adding
-/// one, or changing a declared bound re-derives every stored token
-/// mechanically, instead of by someone remembering to bump a constant.
+/// A short fingerprint over every committed pin's identity, review status
+/// and every declaration that changes what a token derives as. The
+/// accounting layer composes it into its derivation stamp: reviewing a pin,
+/// adding one, or changing any such declaration re-derives every stored
+/// token mechanically, instead of by someone remembering to bump a
+/// constant. A declaration left out of here would ship without a re-derive,
+/// so a test changes each one and watches this move.
 pub fn pins_fingerprint() -> String {
+    fingerprint_of(pins())
+}
+
+/// A short fingerprint over the label each committed pin stamps on its
+/// reveals ([`Pin::family_label`]). A pin without a family is labelled by its
+/// standing, which moves with its review and with [`SPEC_COMMIT`], and a
+/// stored label changes only when the store's restamp walk rewrites it; the
+/// walk's gate carries this, so whatever moves a label also reruns the walk.
+pub fn labels_fingerprint() -> String {
+    labels_fingerprint_of(pins())
+}
+
+fn labels_fingerprint_of(pins: &[Pin]) -> String {
     let mut hasher = blake3::Hasher::new();
-    for pin in pins() {
-        hasher.update(pin.template_hash.as_bytes());
-        hasher.update(pin.review.status.as_bytes());
-        hasher.update(&[pin.max_token_inputs as u8, pin.max_token_outputs as u8]);
-        hasher.update(&pin.owner_schemes);
-        hasher.update(&pin.borrow_schemes);
-        hasher.update(pin.spec_commit.as_bytes());
+    for pin in pins {
+        for field in [pin.template_hash.as_str(), pin.family_label()] {
+            hasher.update(&(field.len() as u64).to_le_bytes());
+            hasher.update(field.as_bytes());
+        }
     }
     hex::encode(&hasher.finalize().as_bytes()[..4])
 }
 
-/// The pin describing a template, by its canonical (BLAKE3) hash.
-pub fn pin_for(template_hash: &[u8; 32]) -> Option<&'static Pin> {
-    let hex = hex::encode(template_hash);
-    pins().iter().find(|pin| pin.template_hash == hex)
+fn fingerprint_of(pins: &[Pin]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    // every field length-framed, so adjacent fields cannot trade bytes
+    let mut put = |bytes: &[u8]| {
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    };
+    let window = |put: &mut dyn FnMut(&[u8]), state: &PinStateRange| {
+        for n in [state.start, state.len, state.record_offset] {
+            put(&(n as u64).to_le_bytes());
+        }
+    };
+    let entries = |put: &mut dyn FnMut(&[u8]), entries: &[PinEntrypoint]| {
+        put(&(entries.len() as u64).to_le_bytes());
+        for e in entries {
+            put(e.name.as_bytes());
+            put(e.types.as_bytes());
+            put(e.select.as_bytes());
+            put(e.role.as_bytes());
+        }
+    };
+    for pin in pins {
+        put(pin.template_hash.as_bytes());
+        put(pin.review.status.as_bytes());
+        put(&[pin.max_token_inputs as u8, pin.max_token_outputs as u8]);
+        put(&pin.owner_schemes);
+        put(&pin.borrow_schemes);
+        put(pin.spec_commit.as_bytes());
+        put(pin.view_template_hash.as_deref().unwrap_or("").as_bytes());
+        window(&mut put, &pin.state);
+        put(&[
+            match pin.dispatch.kind {
+                DispatchKind::Kcc1Tag => 0,
+                DispatchKind::SilvercSelector => 1,
+            },
+            match pin.rules.hash_chain {
+                HashChainRule::Keyed => 0,
+                HashChainRule::Preimage => 1,
+            },
+            match pin.rules.p2pkh_hash {
+                kcc2::P2pkhHash::Unkeyed => 0,
+                kcc2::P2pkhHash::KeyedDraft => 1,
+            },
+            u8::from(pin.rules.threshold_non_negative),
+            u8::from(pin.rules.single_class),
+        ]);
+        entries(&mut put, &pin.entrypoints);
+        put(&(pin.issuers.len() as u64).to_le_bytes());
+        for issuer in &pin.issuers {
+            put(issuer.name.as_bytes());
+            put(&[match issuer.role {
+                IssuerRole::Mint => 0,
+                IssuerRole::Seed => 1,
+            }]);
+            put(issuer.template_hash.as_bytes());
+            window(&mut put, &issuer.state);
+            put(issuer.state_types.as_bytes());
+            let f = &issuer.fields;
+            for index in [Some(f.kcc20_template), Some(f.extension_commitment), f.remaining, f.per_issue_limit] {
+                // u64::MAX stands for an undeclared field: no real index
+                put(&index.map_or(u64::MAX, |i| i as u64).to_le_bytes());
+            }
+            entries(&mut put, &issuer.entrypoints);
+        }
+    }
+    hex::encode(&hasher.finalize().as_bytes()[..4])
 }
 
-/// Recognise a revealed program as a pinned KCC-0020 build: cut it at the
-/// pin's declared state offset, require the template hash to reproduce, and
-/// decode the embedded state. Pin-gated on purpose — an unpinned program is
-/// never claimed, however spec-shaped its bytes look, so arbitrary scripts
-/// cannot become token candidates by accident.
+/// The pin describing a template, by its canonical (BLAKE3) hash or by the
+/// record-view hash it registers as an alias.
+pub fn pin_for(template_hash: &[u8; 32]) -> Option<&'static Pin> {
+    let hex = hex::encode(template_hash);
+    pins()
+        .iter()
+        .find(|pin| pin.template_hash == hex || pin.view_template_hash.as_deref() == Some(hex.as_str()))
+}
+
+/// Recognise a revealed program as a pinned KCC-20 build: the canonical
+/// hash around the pin's declared window must reproduce, and the record
+/// view's too where the pin declares one, then the embedded record decodes.
+/// Pin-gated on purpose — an unpinned program is never claimed, however
+/// spec-shaped its bytes look, so arbitrary scripts cannot become token
+/// candidates by accident.
 pub fn pinned_program_state(program: &[u8]) -> Option<(&'static Pin, State)> {
     for pin in pins() {
-        let Some(template) = Template::cut(program, pin.state.start) else {
-            continue;
-        };
-        if hex::encode(template.hash()) != pin.template_hash {
+        if pin.state.record_offset + STATE_LEN > pin.state.len {
             continue;
         }
-        let state = State::decode(&program[pin.state.start..pin.state.start + STATE_LEN])?;
+        // The record decode first: it refuses almost every program for the
+        // price of a few header compares, where the hashes cost a full pass
+        // over the program per pin. This runs on every reveal the follower
+        // stamps and on every row the boot restamp walks.
+        let at = pin.state.record_start();
+        let Some(state) = program.get(at..at + STATE_LEN).and_then(State::decode) else {
+            continue;
+        };
+        if pin.canonical_hash(program).map(hex::encode).as_deref() != Some(pin.template_hash.as_str()) {
+            continue;
+        }
+        if pin.view_template_hash.as_deref().is_some_and(|want| {
+            hex::encode(kcc1::template_hash(&program[..at], &program[at + STATE_LEN..])) != want
+        }) {
+            continue;
+        }
         return Some((pin, state));
     }
     None
 }
+
+// ── issuers ──────────────────────────────────────────────────────────
+
+/// The KCC20State record as a KCC-1 type, for the codec's argument reader.
+fn state_record_type() -> kcc1::Type {
+    let bytes32 = || kcc1::Type::Array(Box::new(kcc1::Type::Byte), Some(32));
+    kcc1::Type::Record(kcc1::Record {
+        name: "KCC20State".into(),
+        fields: vec![
+            ("amount".into(), kcc1::Type::Int),
+            ("owner".into(), bytes32()),
+            ("owner_scheme".into(), kcc1::Type::Byte),
+            ("borrow_scheme".into(), kcc1::Type::Byte),
+            ("borrow_guard".into(), bytes32()),
+            ("extension_commitment".into(), bytes32()),
+        ],
+    })
+}
+
+fn state_from_record(value: &kcc1::Value) -> Option<State> {
+    let kcc1::Value::Record(fields) = value else { return None };
+    let [kcc1::Value::Int(amount), kcc1::Value::Bytes(owner), kcc1::Value::Bytes(owner_scheme), kcc1::Value::Bytes(borrow_scheme), kcc1::Value::Bytes(borrow_guard), kcc1::Value::Bytes(extension_commitment)] =
+        fields.as_slice()
+    else {
+        return None;
+    };
+    Some(State {
+        amount: *amount,
+        owner: owner.as_slice().try_into().ok()?,
+        owner_scheme: *owner_scheme.first()?,
+        borrow_scheme: *borrow_scheme.first()?,
+        borrow_guard: borrow_guard.as_slice().try_into().ok()?,
+        extension_commitment: extension_commitment.as_slice().try_into().ok()?,
+    })
+}
+
+/// An issuer's window, decoded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssuerState {
+    pub kcc20_template: [u8; 32],
+    pub extension_commitment: [u8; 32],
+    /// The allowance still issuable, where the pin declares it readable.
+    pub remaining: Option<i64>,
+    pub per_issue_limit: Option<i64>,
+    /// Every window field, so a successor re-encodes with one field changed.
+    values: Vec<kcc1::Value>,
+}
+
+impl PinIssuer {
+    fn types(&self) -> Option<Vec<kcc1::Type>> {
+        self.state_types
+            .split(',')
+            .map(|t| kcc1::Type::parse(t, &[]).ok())
+            .collect()
+    }
+
+    /// Read `program` as this issuer: its canonical hash around the declared
+    /// window must reproduce, and the window must decode under the declared
+    /// types with each named field of the right shape.
+    pub fn read_state(&self, program: &[u8]) -> Option<IssuerState> {
+        let end = self.state.start.checked_add(self.state.len)?;
+        let window = program.get(self.state.start..end)?;
+        // the window decode first: it refuses almost every program without
+        // the full-program hash (see pinned_program_state)
+        let values = kcc1::decode_state_values(&self.types()?, window).ok()?;
+        if hex::encode(kcc1::template_hash(&program[..self.state.start], &program[end..])) != self.template_hash {
+            return None;
+        }
+        let bytes32 = |i: usize| match values.get(i)? {
+            kcc1::Value::Bytes(b) => <[u8; 32]>::try_from(b.as_slice()).ok(),
+            _ => None,
+        };
+        let int = |i: Option<usize>| -> Option<Option<i64>> {
+            match i {
+                None => Some(None),
+                Some(i) => match values.get(i)? {
+                    kcc1::Value::Int(v) => Some(Some(*v)),
+                    _ => None,
+                },
+            }
+        };
+        Some(IssuerState {
+            kcc20_template: bytes32(self.fields.kcc20_template)?,
+            extension_commitment: bytes32(self.fields.extension_commitment)?,
+            remaining: int(self.fields.remaining)?,
+            per_issue_limit: int(self.fields.per_issue_limit)?,
+            values,
+        })
+    }
+
+    /// The program this issuer continues as after issuing `amount`: a mint
+    /// with its allowance reduced by it, a seed unchanged.
+    fn successor_program(&self, program: &[u8], state: &IssuerState, amount: i64) -> Option<Vec<u8>> {
+        let mut values = state.values.clone();
+        if self.role == IssuerRole::Mint {
+            let at = self.fields.remaining?;
+            values[at] = kcc1::Value::Int(state.remaining?.checked_sub(amount)?);
+        }
+        let fields: Vec<(kcc1::Type, kcc1::Value)> = self.types()?.into_iter().zip(values).collect();
+        let window = kcc1::encode_state_values(&fields).ok()?;
+        let end = self.state.start + self.state.len;
+        Some([&program[..self.state.start], window.as_slice(), &program[end..]].concat())
+    }
+
+    fn issue_entry(&self) -> Option<&PinEntrypoint> {
+        self.entrypoints.iter().find(|e| e.role == "issue" && e.types == ISSUE_TYPES)
+    }
+}
+
+/// A revealed program read as a pinned token's issuer.
+pub fn pinned_issuer_state(program: &[u8]) -> Option<(&'static Pin, &'static PinIssuer, IssuerState)> {
+    pins().iter().find_map(|pin| {
+        pin.issuers
+            .iter()
+            .find_map(|issuer| Some((pin, issuer, issuer.read_state(program)?)))
+    })
+}
+
+/// What an issuer's mint or create declares: the recipient's state, and the
+/// KCC20 template halves the issuer rebuilds the recipient program from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Issue {
+    pub recipient: State,
+    pub kcc20_prefix: Vec<u8>,
+    pub kcc20_suffix: Vec<u8>,
+}
+
+/// Parse an issuer reveal: the program last, the issue entry's tag before
+/// it, its three arguments (the record's six leaves, prefix, suffix) before
+/// that, every push canonical (KCC-1 §3.4.2). `None` for any other entry.
+pub fn parse_issue_reveal(sig_script: &[u8], issuer: &PinIssuer) -> Option<Issue> {
+    let entry = issuer.issue_entry()?;
+    let mut payloads = split_pushes(sig_script)?;
+    let _program = payloads.pop()?;
+    if payloads.pop()? != hex::decode(&entry.select).ok()? {
+        return None;
+    }
+    let bytes = kcc1::Type::Array(Box::new(kcc1::Type::Byte), None);
+    let values = kcc1::decode_arg_pushes(&[state_record_type(), bytes.clone(), bytes], &payloads).ok()?;
+    let [record, kcc1::Value::Bytes(kcc20_prefix), kcc1::Value::Bytes(kcc20_suffix)] = values.as_slice() else {
+        return None;
+    };
+    Some(Issue {
+        recipient: state_from_record(record)?,
+        kcc20_prefix: kcc20_prefix.clone(),
+        kcc20_suffix: kcc20_suffix.clone(),
+    })
+}
+
+/// The event kind and auth an issue is recorded under. A seed's zero-amount
+/// cell is a mint of nothing: it moves no supply, and keeping one kind keeps
+/// the token_kind vocabulary closed.
+pub const ISSUE_EVENT_KIND: &str = "mint";
+pub const ISSUER_AUTH: &str = "issuer";
+
+/// The facts an issue establishes from bytes, as [`check_family`] does for
+/// a transfer.
+#[derive(Clone, Debug)]
+pub struct IssueVerdict {
+    pub role: IssuerRole,
+    pub recipient: State,
+    /// The recipient output is a version-0 P2SH of the pinned KCC20 build
+    /// carrying exactly `recipient`: the template halves hash to the pin's
+    /// canonical hash, which the issuer's own state also names, and the
+    /// rebuilt program commits to the output.
+    pub recipient_proven: bool,
+    /// The issuer's continuation is its own program with the allowance
+    /// reduced by the amount (mint) or unchanged (seed), at no less KAS.
+    pub issuer_successor_proven: bool,
+    pub remaining_before: Option<i64>,
+    pub remaining_after: Option<i64>,
+    pub violations: Vec<String>,
+}
+
+/// Check one issue against the issuer's own rules, as the reference app's
+/// `mint` and `create` state them: a mint issues `0 < amount <=
+/// min(per_issue_limit, remaining)` and decrements its allowance by it; a
+/// seed creates an amount of exactly zero and continues unchanged; either
+/// way the recipient carries the issuer's extension commitment, an owner
+/// scheme the token pin supports and a borrow scheme of the fixed mapping,
+/// and the issuer's continuation keeps the issuer input's KAS. The outputs
+/// are the two the issuer input authorises, in order: its continuation,
+/// then the recipient. `None` when `issuer_program` is not this issuer.
+pub fn check_issue(
+    pin: &Pin,
+    issuer: &PinIssuer,
+    issuer_program: &[u8],
+    issuer_kas: u64,
+    issue: &Issue,
+    issuer_output: &FamilyOutput,
+    recipient_output: &FamilyOutput,
+) -> Option<IssueVerdict> {
+    let state = issuer.read_state(issuer_program)?;
+    let recipient = issue.recipient;
+    let mut violations = Vec::new();
+
+    let canonical = hex::encode(kcc1::template_hash(&issue.kcc20_prefix, &issue.kcc20_suffix));
+    let builds_pinned = canonical == pin.template_hash && hex::encode(state.kcc20_template) == pin.template_hash;
+    if !builds_pinned {
+        violations.push("the issue names a KCC20 template other than the pinned build".into());
+    }
+    // The recipient program is the template halves around the window, whose
+    // context is the template field the issuer carries, then the record.
+    let head = kcc1::push_explicit(&state.kcc20_template);
+    let view = Template {
+        prefix: [issue.kcc20_prefix.as_slice(), head.as_slice()].concat(),
+        suffix: issue.kcc20_suffix.clone(),
+    };
+    let view_ok = head.len() == pin.state.record_offset
+        && pin.state.record_offset + STATE_LEN == pin.state.len
+        && pin
+            .view_template_hash
+            .as_deref()
+            .is_none_or(|want| hex::encode(view.hash()) == want);
+    let recipient_proven = builds_pinned
+        && view_ok
+        && recipient_output.spk_version == 0
+        && view.reconstruct_spk(&recipient).is_some_and(|spk| spk == recipient_output.spk);
+    if !recipient_proven {
+        violations.push("the recipient output does not commit to the declared state under the pinned build".into());
+    }
+
+    match issuer.role {
+        IssuerRole::Mint => {
+            let within = |limit: Option<i64>| limit.is_some_and(|l| recipient.amount <= l);
+            if recipient.amount <= 0 || !within(state.per_issue_limit) || !within(state.remaining) {
+                violations.push(format!(
+                    "a mint of {} is outside 0 < amount <= min(per-mint limit, remaining allowance)",
+                    recipient.amount
+                ));
+            }
+        }
+        IssuerRole::Seed => {
+            if recipient.amount != 0 {
+                violations.push(format!("a seed creates a zero-amount cell, not {}", recipient.amount));
+            }
+        }
+    }
+    if recipient.extension_commitment != state.extension_commitment {
+        violations.push("the recipient's extension commitment is not the issuer's".into());
+    }
+    if !pin.owner_schemes.contains(&recipient.owner_scheme) || recipient.borrow_scheme > 0x03 {
+        violations.push(
+            "the recipient carries an owner scheme outside the supported subset or a borrow scheme outside the fixed mapping".into(),
+        );
+    }
+
+    let remaining_after = match issuer.role {
+        IssuerRole::Mint => state.remaining.and_then(|r| r.checked_sub(recipient.amount)),
+        IssuerRole::Seed => state.remaining,
+    };
+    let issuer_successor_proven = issuer_output.spk_version == 0
+        && issuer_output.kas == issuer_kas
+        && issuer
+            .successor_program(issuer_program, &state, recipient.amount)
+            .is_some_and(|program| kcc1::envelope_spk(&program) == issuer_output.spk);
+    if !issuer_successor_proven {
+        violations.push(match issuer.role {
+            IssuerRole::Mint => "the minter's continuation is not itself with the allowance reduced by the amount, at its KAS",
+            IssuerRole::Seed => "the seed's continuation is not itself unchanged, at its KAS",
+        }
+        .into());
+    }
+
+    Some(IssueVerdict {
+        role: issuer.role,
+        recipient,
+        recipient_proven,
+        issuer_successor_proven,
+        remaining_before: state.remaining,
+        remaining_after,
+        violations,
+    })
+}
+
+// ── reveals ──────────────────────────────────────────────────────────
 
 /// The push payloads of a signature script, split; `None` on any non-minimal
 /// or torn push.
@@ -1095,62 +1985,94 @@ fn split_pushes(sig_script: &[u8]) -> Option<Vec<Vec<u8>>> {
     Some(payloads)
 }
 
-/// The selector payload a silverc-dispatched entrypoint pushes: script-number
-/// bytes of the decimal in the pin (`snum(0)` is the empty payload).
-fn selector_payload(select: &str) -> Option<Vec<u8>> {
-    Some(crate::snum(select.parse::<i64>().ok()?))
+/// The payload a spender pushes before the program to select `entry`: the
+/// 4-byte tag of a KCC-1-tag pin, or for a silverc pin the script-number
+/// bytes of the decimal selector (`snum(0)` is the empty payload).
+fn selector_payload(pin: &Pin, entry: &PinEntrypoint) -> Option<Vec<u8>> {
+    match pin.dispatch.kind {
+        DispatchKind::Kcc1Tag => hex::decode(&entry.select).ok().filter(|tag| tag.len() == 4),
+        DispatchKind::SilvercSelector => Some(crate::snum(entry.select.parse::<i64>().ok()?)),
+    }
 }
 
-/// Parse a leader reveal against a pin: the program last, the entrypoint
-/// selector before it (per the pin's dispatch), the transfer arguments before
-/// that. `None` when the script is not this pin's transfer invocation — which
-/// includes every delegator reveal, so callers probe both.
-pub fn parse_transfer_reveal(sig_script: &[u8], pin: &Pin) -> Option<TransferArgs> {
-    if pin.dispatch.kind != DispatchKind::SilvercSelector {
-        return None;
-    }
+/// The argument payloads of a reveal of the pin's standard `role` entry:
+/// the program last, the entry's selector before it, the arguments before
+/// that. `None` when the pin declares no standard entry for the role or the
+/// script selects another one.
+fn standard_args(sig_script: &[u8], pin: &Pin, role: &str) -> Option<Vec<Vec<u8>>> {
+    let entry = pin.standard_entry(role)?;
     let mut payloads = split_pushes(sig_script)?;
     let _program = payloads.pop()?;
-    let selector = payloads.pop()?;
-    if selector != selector_payload(&pin.dispatch.transfer)? {
+    if payloads.pop()? != selector_payload(pin, entry)? {
         return None;
     }
-    TransferArgs::from_args(&payloads)
+    Some(payloads)
 }
 
-/// What a KCC-1-tag leader reveal declares, read against the pin's
-/// entrypoint table. Builds that dispatch on a 4-byte tag do not lower
-/// `KCC20State[]` field-major the way the pinned silverc does: the ones
-/// seen on chain push the successor's fields one by one and let the program
-/// compute the rest (the change cell, or a merge's sum), so the reader
-/// derives every successor from the leader's inputs and hash-checks each
-/// candidate against the output's own commitment. Nothing here is trusted
-/// until that check passes.
+/// Parse a leader reveal of the pin's standard transfer, under either
+/// dispatch kind: `transfer(KCC20State[] next_states, byte[] witness)`,
+/// field-major (K1 §3.4.6), the tag `79c71c23` for a conformant build. `None`
+/// when the script is not this pin's standard transfer — which includes every
+/// delegator reveal and every program-specific arm, so callers probe those
+/// too.
+pub fn parse_transfer_reveal(sig_script: &[u8], pin: &Pin) -> Option<TransferArgs> {
+    TransferArgs::from_args(&standard_args(sig_script, pin, "transfer")?)
+}
+
+/// What a program-specific leader reveal declares, read against the pin's
+/// entrypoint table. The ZealousSwap builds dispatch on 4-byte tags but do
+/// not lower `KCC20State[]` field-major: they push the successor's fields
+/// one by one and let the program compute the rest (the change cell, or a
+/// merge's sum), so the reader derives every successor from the leader's
+/// inputs and hash-checks each candidate against the output's own
+/// commitment. Nothing here is trusted until that check passes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TagReveal {
-    /// `transfer`: one declared successor; the leader's owner keeps the
-    /// remainder in a second cell when there is one.
+    /// `zealous-transfer`: one declared successor; the leader's owner keeps
+    /// the remainder in a second cell when there is one.
     Transfer { amount: i64, owner: [u8; 32], owner_scheme: u8, borrow_scheme: u8, borrow_guard: [u8; 32] },
-    /// `merge`: every family input folds into one cell owned like the leader.
+    /// `zealous-merge`: every family input folds into one cell owned like
+    /// the leader.
     Merge,
-    /// `transfer_whole`: the leader's whole amount moves to a declared owner.
+    /// `zealous-transfer-whole`: the leader's whole amount moves to a
+    /// declared owner.
     Whole { owner: [u8; 32], owner_scheme: u8, borrow_scheme: u8, borrow_guard: [u8; 32] },
-    /// The borrowed receive (the venue's name for it is unknown, kascov
-    /// files it as `transfer_borrowed`): `amount` flows from the one
-    /// follower into this leader under the leader's borrow rule, no owner
-    /// signature. `preimage` is the hash-chain reveal, the value the
-    /// successor's guard becomes under scheme 0x03, and `signature` a
-    /// transaction signature (each zero under the schemes that do not use
-    /// it); `follower_change` is what the follower keeps. The program
-    /// requires `amount + follower_change` to equal the follower's amount,
-    /// so the reader derives both successors from the two proven inputs and
-    /// hash-checks each. Two layouts exist, declared per pin by the
-    /// entrypoint's types: the 2,590 B build (tag `a85e5b91`) takes four
-    /// slots, the 2,641 B build and the 3,037 B and 3,223 B builds after
-    /// it (tag `13f87a5b`) five, their hash chain committing to a key that
-    /// must sign as well; the key slot is not carried here because the
-    /// reader never re-runs a signature.
-    Borrowed { amount: i64, preimage: [u8; 32], signature: [u8; 65], follower_change: i64 },
+    /// `zealous-borrowed-receive` (the venue's name for it is unknown):
+    /// `amount` flows from the one follower into this leader under the
+    /// leader's borrow rule, no owner signature. `preimage` is the
+    /// hash-chain reveal, the value the successor's guard becomes under
+    /// scheme 0x03, `key` the one-time key the 2,641 B build and the two
+    /// after it commit each link to (`None` for the 2,590 B build's
+    /// unkeyed chain), and `signature` a transaction signature (each zero
+    /// under the schemes that do not use it); `follower_change` is what the
+    /// follower keeps. The program requires `amount + follower_change` to
+    /// equal the follower's amount, so the reader derives both successors
+    /// from the two proven inputs and hash-checks each. Two layouts exist,
+    /// declared per pin by the entrypoint's types: the 2,590 B build (tag
+    /// `a85e5b91`) takes four slots, the later builds (tag `13f87a5b`) five.
+    Borrowed { amount: i64, preimage: [u8; 32], key: Option<[u8; 32]>, signature: [u8; 65], follower_change: i64 },
+}
+
+impl TagReveal {
+    /// A borrowed receive's witness as [`verify_borrow`] reads it under the
+    /// leader's borrow scheme and the pin's rules: nothing under a
+    /// threshold, the signature under a guard key, the preimage under the
+    /// Draft's chain, `next ‖ key ‖ signature` under the keyed chain. `None`
+    /// for any other reveal, or a keyed rule with no key slot (a pin whose
+    /// rule and layout disagree).
+    pub fn borrow_witness(&self, borrow_scheme: u8, rules: &Rules) -> Option<Vec<u8>> {
+        let TagReveal::Borrowed { preimage, key, signature, .. } = self else {
+            return None;
+        };
+        Some(match (borrow_scheme, rules.hash_chain) {
+            (0x02, _) => signature.to_vec(),
+            (0x03, HashChainRule::Preimage) => preimage.to_vec(),
+            (0x03, HashChainRule::Keyed) => {
+                KeyedLink { next: *preimage, pubkey: (*key)?, signature: *signature }.encode()
+            }
+            _ => Vec::new(),
+        })
+    }
 }
 
 /// A minimally encoded, non-negative script number of at most eight bytes;
@@ -1179,10 +2101,13 @@ fn minimal_amount_or_zero(payload: &[u8]) -> Option<i64> {
     Some(i64::from_le_bytes(b))
 }
 
-/// Parse a leader reveal of a KCC-1-tag pin: the program last, the 4-byte
-/// tag before it, the entrypoint's arguments before that. `None` for a
-/// follower (delegator) reveal, an unknown tag, or arguments that do not fit
-/// the entrypoint's declared layout.
+/// Parse a leader reveal of one of a KCC-1-tag pin's program-specific arms:
+/// the program last, the 4-byte tag before it, the entrypoint's arguments
+/// before that. The arm is chosen by the entry's name, which names a reader
+/// kascov implements, and only for an entry whose role is
+/// "program-specific"; the standard roles are [`parse_transfer_reveal`]'s.
+/// `None` for a follower (delegator) reveal, an unknown tag, or arguments
+/// that do not fit the entrypoint's declared layout.
 pub fn parse_tag_reveal(sig_script: &[u8], pin: &Pin) -> Option<TagReveal> {
     if pin.dispatch.kind != DispatchKind::Kcc1Tag {
         return None;
@@ -1194,12 +2119,15 @@ pub fn parse_tag_reveal(sig_script: &[u8], pin: &Pin) -> Option<TagReveal> {
         return None;
     }
     let tag_hex = hex::encode(&tag);
-    let entry = pin.entrypoints.iter().find(|e| e.select == tag_hex)?;
+    let entry = pin
+        .entrypoints
+        .iter()
+        .find(|e| e.select == tag_hex && e.role == "program-specific")?;
     let fixed = |i: usize, n: usize| -> Option<&[u8]> {
         payloads.get(i).filter(|p| p.len() == n).map(|p| p.as_slice())
     };
     match entry.name.as_str() {
-        "transfer" => {
+        "zealous-transfer" => {
             if payloads.len() < 6 {
                 return None;
             }
@@ -1210,8 +2138,8 @@ pub fn parse_tag_reveal(sig_script: &[u8], pin: &Pin) -> Option<TagReveal> {
             let borrow_guard: [u8; 32] = fixed(4, 32)?.try_into().ok()?;
             Some(TagReveal::Transfer { amount, owner, owner_scheme, borrow_scheme, borrow_guard })
         }
-        "merge" => Some(TagReveal::Merge),
-        "transfer_whole" => {
+        "zealous-merge" => Some(TagReveal::Merge),
+        "zealous-transfer-whole" => {
             if payloads.len() < 5 {
                 return None;
             }
@@ -1225,7 +2153,7 @@ pub fn parse_tag_reveal(sig_script: &[u8], pin: &Pin) -> Option<TagReveal> {
         // the pushes: a script with the other generation's slot count is
         // not this pin's borrowed receive, and an undeclared layout parses
         // nothing.
-        "transfer_borrowed" => match entry.types.as_str() {
+        "zealous-borrowed-receive" => match entry.types.as_str() {
             // the 2,590 B build: amount, preimage, signature, remainder
             "int,byte[32],byte[65],byte[]" => {
                 if payloads.len() < 4 {
@@ -1235,21 +2163,20 @@ pub fn parse_tag_reveal(sig_script: &[u8], pin: &Pin) -> Option<TagReveal> {
                 let preimage: [u8; 32] = fixed(1, 32)?.try_into().ok()?;
                 let signature: [u8; 65] = fixed(2, 65)?.try_into().ok()?;
                 let follower_change = minimal_amount_or_zero(payloads.get(3)?)?;
-                Some(TagReveal::Borrowed { amount, preimage, signature, follower_change })
+                Some(TagReveal::Borrowed { amount, preimage, key: None, signature, follower_change })
             }
             // the 2,641 B build and the two after it: amount, next head,
-            // committed key, signature, remainder; the key is read by the
-            // program, not by the reader
+            // the one-time key that link commits to, signature, remainder
             "int,byte[32],byte[32],byte[65],byte[]" => {
                 if payloads.len() < 5 {
                     return None;
                 }
                 let amount = minimal_amount(payloads.first()?)?;
                 let preimage: [u8; 32] = fixed(1, 32)?.try_into().ok()?;
-                fixed(2, 32)?;
+                let key: [u8; 32] = fixed(2, 32)?.try_into().ok()?;
                 let signature: [u8; 65] = fixed(3, 65)?.try_into().ok()?;
                 let follower_change = minimal_amount_or_zero(payloads.get(4)?)?;
-                Some(TagReveal::Borrowed { amount, preimage, signature, follower_change })
+                Some(TagReveal::Borrowed { amount, preimage, key: Some(key), signature, follower_change })
             }
             _ => None,
         },
@@ -1257,19 +2184,10 @@ pub fn parse_tag_reveal(sig_script: &[u8], pin: &Pin) -> Option<TagReveal> {
     }
 }
 
-/// Parse a delegator reveal against a pin: one witness push, the delegator
-/// selector, the program.
+/// Parse a reveal of the pin's standard delegator: one witness push, the
+/// delegator selector, the program.
 pub fn parse_delegator_reveal(sig_script: &[u8], pin: &Pin) -> Option<DelegatorArgs> {
-    if pin.dispatch.kind != DispatchKind::SilvercSelector {
-        return None;
-    }
-    let mut payloads = split_pushes(sig_script)?;
-    let _program = payloads.pop()?;
-    let selector = payloads.pop()?;
-    if selector != selector_payload(&pin.dispatch.transfer_delegator)? {
-        return None;
-    }
-    DelegatorArgs::from_args(&payloads)
+    DelegatorArgs::from_args(&standard_args(sig_script, pin, "delegator")?)
 }
 
 #[cfg(test)]
@@ -1295,7 +2213,7 @@ mod tests {
 
     #[test]
     fn default_dispatch_tags_are_pinned() {
-        // the §6.1 preimage expands KCC20State to its six field types; the
+        // the KCC-1 §3.5.1 preimage expands KCC20State to its six field types; the
         // readable `transfer(KCC20State[],byte[])` would hash to 98da4203,
         // which no conformant program dispatches on
         assert_eq!(hex::encode(transfer_tag()), "79c71c23");
@@ -1513,35 +2431,52 @@ mod tests {
         assert_eq!(witness_path(&[0x02, 0xAA]), None);
         assert_eq!(witness_path(&[]), None);
 
+        use kcc2::P2pkhHash::{KeyedDraft, Unkeyed};
         let p2pk = state(0x66);
-        assert_eq!(owner_auth(&p2pk, &[0u8; 65]), Some(OwnerAuth::P2pkSignature));
-        assert_eq!(owner_auth(&p2pk, &[0u8; 64]), None);
+        assert_eq!(owner_auth(&p2pk, &[0u8; 65], Unkeyed), Some(OwnerAuth::P2pkSignature));
+        assert_eq!(owner_auth(&p2pk, &[0u8; 64], Unkeyed), None);
 
-        // p2pkh binds the revealed pubkey to the owner by keyed hash
+        // p2pkh binds the revealed pubkey to the owner under the hash the
+        // program checks: unkeyed since KCC-2 #30, keyed for Draft builds,
+        // and an owner hashed one way never passes under the other
         let pubkey = [0x07u8; 32];
-        let mut p2pkh = state(0);
-        p2pkh.owner_scheme = OWNER_P2PKH_SCHNORR;
-        p2pkh.owner = kcc1::p2pkh_hash(&pubkey);
         let mut auth = pubkey.to_vec();
         auth.extend_from_slice(&[0u8; 65]);
-        assert_eq!(owner_auth(&p2pkh, &auth), Some(OwnerAuth::P2pkhSchnorr { pubkey }));
-        let mut wrong = auth.clone();
-        wrong[0] ^= 1;
-        assert_eq!(owner_auth(&p2pkh, &wrong), None, "a foreign pubkey must not pass");
+        for (kind, other) in [(Unkeyed, KeyedDraft), (KeyedDraft, Unkeyed)] {
+            let mut p2pkh = state(0);
+            p2pkh.owner_scheme = OWNER_P2PKH_SCHNORR;
+            p2pkh.owner = kind.hash(&pubkey);
+            assert_eq!(owner_auth(&p2pkh, &auth, kind), Some(OwnerAuth::P2pkhSchnorr { pubkey }));
+            assert_eq!(owner_auth(&p2pkh, &auth, other), None, "{kind:?} owner under {other:?}");
+            let mut wrong = auth.clone();
+            wrong[0] ^= 1;
+            assert_eq!(owner_auth(&p2pkh, &wrong, kind), None, "a foreign pubkey must not pass");
+        }
+        // an ECDSA key must be compressed: 0x02/0x03, never 0x04
+        let mut ecdsa = state(0);
+        ecdsa.owner_scheme = OWNER_P2PKH_ECDSA;
+        for prefix in [0x02u8, 0x04] {
+            let mut key = [0x55u8; 33];
+            key[0] = prefix;
+            ecdsa.owner = Unkeyed.hash(&key);
+            let mut auth = key.to_vec();
+            auth.extend_from_slice(&[0u8; 65]);
+            assert_eq!(owner_auth(&ecdsa, &auth, Unkeyed).is_some(), prefix == 0x02, "prefix {prefix:02x}");
+        }
 
         let mut p2sh = state(0);
         p2sh.owner_scheme = OWNER_P2SH;
-        assert_eq!(owner_auth(&p2sh, &[3]), Some(OwnerAuth::P2shAuthorityInput(3)));
-        assert_eq!(owner_auth(&p2sh, &[3, 4]), None);
+        assert_eq!(owner_auth(&p2sh, &[3], Unkeyed), Some(OwnerAuth::P2shAuthorityInput(3)));
+        assert_eq!(owner_auth(&p2sh, &[3, 4], Unkeyed), None);
 
         let mut covenant = state(0);
         covenant.owner_scheme = OWNER_COVENANT_ID;
-        assert_eq!(owner_auth(&covenant, &[]), Some(OwnerAuth::CovenantId));
-        assert_eq!(owner_auth(&covenant, &[0]), None);
+        assert_eq!(owner_auth(&covenant, &[], Unkeyed), Some(OwnerAuth::CovenantId));
+        assert_eq!(owner_auth(&covenant, &[0], Unkeyed), None);
 
         let mut unknown = state(0);
         unknown.owner_scheme = 0x05;
-        assert_eq!(owner_auth(&unknown, &[]), None);
+        assert_eq!(owner_auth(&unknown, &[], Unkeyed), None);
     }
 
     // ── borrow schemes ───────────────────────────────────────────
@@ -1550,69 +2485,170 @@ mod tests {
         State { borrow_scheme: scheme, borrow_guard: guard, ..state(0x77) }
     }
 
+    /// The Draft-era rules the vector pin and the 2,590 B Zealous build check.
+    const DRAFT: Rules = Rules {
+        hash_chain: HashChainRule::Preimage,
+        p2pkh_hash: kcc2::P2pkhHash::KeyedDraft,
+        threshold_non_negative: true,
+        single_class: false,
+    };
+    const LAST_CALL: Rules = Rules {
+        hash_chain: HashChainRule::Keyed,
+        p2pkh_hash: kcc2::P2pkhHash::Unkeyed,
+        threshold_non_negative: false,
+        single_class: true,
+    };
+
+    #[test]
+    fn the_default_rules_are_the_last_call_text() {
+        assert_eq!(Rules::default(), LAST_CALL);
+        assert_eq!(Bounds::default().rules, LAST_CALL);
+        let pin: Rules = serde_json::from_str("{}").unwrap();
+        assert_eq!(pin, LAST_CALL, "a pin that says nothing gets the current rules");
+        let draft: Rules =
+            serde_json::from_str(
+                r#"{"hash_chain": "preimage", "p2pkh_hash": "keyed-draft", "threshold_non_negative": true, "single_class": false}"#,
+            )
+            .unwrap();
+        assert_eq!(draft, DRAFT);
+        assert!(serde_json::from_str::<Rules>(r#"{"hash_chain": "keyed", "typo": 1}"#).is_err());
+    }
+
     #[test]
     fn threshold_borrow_is_proven_and_strict() {
         let mut guard = [0xCC; 32]; // bytes 8..32 unused and non-zero on purpose
         guard[..8].copy_from_slice(&kcc1::encode_state_int(100).unwrap());
         let leader = borrowable(0x01, guard);
         let next = |amount: i64| State { amount, ..leader };
-        // delta 101 > 100: proven
+        for rules in [DRAFT, LAST_CALL] {
+            // delta 101 > 100: proven
+            assert_eq!(
+                verify_borrow(&rules, &leader, &next(leader.amount + 101), &[], 5, 5),
+                BorrowVerdict::Proven(BorrowScheme::AmountThreshold(100))
+            );
+            // delta == threshold is invalid, strictly
+            assert_eq!(
+                verify_borrow(&rules, &leader, &next(leader.amount + 100), &[], 5, 5),
+                BorrowVerdict::Invalid(BorrowRefusal::NotIncreased)
+            );
+            // the witness must be empty
+            assert_eq!(
+                verify_borrow(&rules, &leader, &next(leader.amount + 101), &[0x01], 5, 5),
+                BorrowVerdict::Invalid(BorrowRefusal::ThresholdWitness)
+            );
+            // less KAS on the rebuilt cell is invalid
+            assert_eq!(
+                verify_borrow(&rules, &leader, &next(leader.amount + 101), &[], 5, 4),
+                BorrowVerdict::Invalid(BorrowRefusal::KasReduced)
+            );
+        }
+        // a negative threshold: refused by a program that requires
+        // non-negative, an effective zero for one that does not (#31)
+        let mut negative = guard;
+        negative[7] |= 0x80;
+        let bad = borrowable(0x01, negative);
+        let grown = State { amount: bad.amount + 1, ..bad };
         assert_eq!(
-            verify_borrow(&leader, &next(leader.amount + 101), &[], 5, 5),
-            BorrowVerdict::Proven(BorrowScheme::AmountThreshold(100))
+            verify_borrow(&DRAFT, &bad, &grown, &[], 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::NegativeThreshold)
         );
-        // delta == threshold is invalid, strictly
-        assert!(matches!(
-            verify_borrow(&leader, &next(leader.amount + 100), &[], 5, 5),
-            BorrowVerdict::Invalid(_)
-        ));
-        // the witness must be empty
-        assert!(matches!(
-            verify_borrow(&leader, &next(leader.amount + 101), &[0x01], 5, 5),
-            BorrowVerdict::Invalid(_)
-        ));
-        // less KAS on the rebuilt cell is invalid
-        assert!(matches!(
-            verify_borrow(&leader, &next(leader.amount + 101), &[], 5, 4),
-            BorrowVerdict::Invalid(_)
-        ));
-        // a negative threshold payload is an invalid guard
-        let mut bad_guard = guard;
-        bad_guard[7] |= 0x80;
-        let bad = borrowable(0x01, bad_guard);
-        assert!(matches!(
-            verify_borrow(&bad, &State { amount: bad.amount + 1, ..bad }, &[], 5, 5),
-            BorrowVerdict::Invalid(_)
-        ));
+        assert_eq!(
+            verify_borrow(&LAST_CALL, &bad, &grown, &[], 5, 5),
+            BorrowVerdict::Proven(BorrowScheme::AmountThreshold(-100))
+        );
+        assert_eq!(
+            verify_borrow(&LAST_CALL, &bad, &State { amount: bad.amount, ..bad }, &[], 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::NotIncreased),
+            "an effective threshold of zero still needs an increase"
+        );
+        // negative zero decodes to 0, so no program refuses it as negative;
+        // an increase of 1 clears it and no increase does not
+        let mut negative_zero = [0xCC; 32];
+        negative_zero[..8].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0x80]);
+        let nz = borrowable(0x01, negative_zero);
+        for rules in [DRAFT, LAST_CALL] {
+            assert_eq!(
+                verify_borrow(&rules, &nz, &State { amount: nz.amount + 1, ..nz }, &[], 5, 5),
+                BorrowVerdict::Proven(BorrowScheme::AmountThreshold(0))
+            );
+            assert_eq!(
+                verify_borrow(&rules, &nz, &State { amount: nz.amount, ..nz }, &[], 5, 5),
+                BorrowVerdict::Invalid(BorrowRefusal::NotIncreased)
+            );
+        }
+        // the stored refusal text for the Draft rule is unchanged
+        assert_eq!(
+            BorrowRefusal::NegativeThreshold.to_string(),
+            "the threshold guard is not a non-negative int payload"
+        );
     }
 
     #[test]
-    fn hash_chain_borrow_advances_the_guard() {
+    fn the_preimage_chain_advances_the_guard() {
         let preimage = [0x5A; 32];
         let leader = borrowable(0x03, kcc1::hash(&preimage));
         let mut next = State { amount: leader.amount + 1, ..leader };
         next.borrow_guard = preimage;
         assert_eq!(
-            verify_borrow(&leader, &next, &preimage, 5, 5),
+            verify_borrow(&DRAFT, &leader, &next, &preimage, 5, 5),
             BorrowVerdict::Proven(BorrowScheme::HashChain(leader.borrow_guard))
         );
         // a forged preimage
-        assert!(matches!(
-            verify_borrow(&leader, &next, &[0x5B; 32], 5, 5),
-            BorrowVerdict::Invalid(_)
-        ));
+        assert_eq!(
+            verify_borrow(&DRAFT, &leader, &next, &[0x5B; 32], 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::PreimageMismatch)
+        );
         // a successor that does not advance the guard
         let stale = State { borrow_guard: leader.borrow_guard, ..next };
-        assert!(matches!(
-            verify_borrow(&leader, &stale, &preimage, 5, 5),
-            BorrowVerdict::Invalid(_)
-        ));
+        assert_eq!(
+            verify_borrow(&DRAFT, &leader, &stale, &preimage, 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::GuardNotExpected)
+        );
         // no increase, no borrow
         let flat = State { amount: leader.amount, ..next };
-        assert!(matches!(
-            verify_borrow(&leader, &flat, &preimage, 5, 5),
-            BorrowVerdict::Invalid(_)
-        ));
+        assert_eq!(
+            verify_borrow(&DRAFT, &leader, &flat, &preimage, 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::NotIncreased)
+        );
+        // the Last Call rule does not take a bare preimage
+        assert_eq!(
+            verify_borrow(&LAST_CALL, &leader, &next, &preimage, 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::KeyedWitness)
+        );
+    }
+
+    /// #18: the link commits to a one-time key, so a front-runner who sees
+    /// `next` cannot reuse it, and the key's signature is consensus's: the
+    /// best kascov can say is structural.
+    #[test]
+    fn the_keyed_chain_is_structural_and_commits_to_its_key() {
+        let link = KeyedLink { next: [0x5A; 32], pubkey: [0xB1; 32], signature: [0x44; 65] };
+        let leader = borrowable(0x03, hash_chain_link(&link.next, &link.pubkey));
+        let next = State { amount: leader.amount + 1, borrow_guard: link.next, ..leader };
+        let verdict = verify_borrow(&LAST_CALL, &leader, &next, &link.encode(), 5, 5);
+        assert_eq!(verdict, BorrowVerdict::Structural(BorrowScheme::HashChain(leader.borrow_guard)));
+        assert_eq!(verdict.tier(), Some("structural"));
+        assert_eq!(KeyedLink::parse(&link.encode()), Some(link));
+        // another key over the same next head breaks the link
+        let foreign = KeyedLink { pubkey: [0xB2; 32], ..link };
+        assert_eq!(
+            verify_borrow(&LAST_CALL, &leader, &next, &foreign.encode(), 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::LinkMismatch)
+        );
+        // the Draft rule reads the same witness as a wrong-length preimage
+        assert_eq!(
+            verify_borrow(&DRAFT, &leader, &next, &link.encode(), 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::PreimageWitness)
+        );
+        assert_eq!(
+            verify_borrow(&LAST_CALL, &leader, &next, &link.encode()[..128], 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::KeyedWitness)
+        );
+        // the guard must advance to the revealed head
+        assert_eq!(
+            verify_borrow(&LAST_CALL, &leader, &State { borrow_guard: leader.borrow_guard, ..next }, &link.encode(), 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::GuardNotExpected)
+        );
     }
 
     #[test]
@@ -1620,31 +2656,48 @@ mod tests {
         let leader = borrowable(0x02, [0xAB; 32]);
         let next = State { amount: leader.amount + 1, ..leader };
         assert_eq!(
-            verify_borrow(&leader, &next, &[0u8; 65], 5, 5),
+            verify_borrow(&LAST_CALL, &leader, &next, &[0u8; 65], 5, 5),
             BorrowVerdict::Structural(BorrowScheme::SchnorrSignature([0xAB; 32]))
         );
-        assert!(matches!(
-            verify_borrow(&leader, &next, &[0u8; 64], 5, 5),
-            BorrowVerdict::Invalid(_)
-        ));
+        assert_eq!(
+            verify_borrow(&LAST_CALL, &leader, &next, &[0u8; 64], 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::SchnorrWitness)
+        );
     }
 
     #[test]
     fn disabled_reserved_and_drifted_borrows_refuse() {
         let leader = borrowable(0x00, [0; 32]);
         let next = State { amount: leader.amount + 1, ..leader };
-        assert!(matches!(verify_borrow(&leader, &next, &[], 5, 5), BorrowVerdict::Invalid(_)));
-        // a reserved byte is `reject` under the pinned algorithm's final else
+        assert_eq!(
+            verify_borrow(&LAST_CALL, &leader, &next, &[], 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::Disabled)
+        );
+        // a reserved byte is `reject` under the algorithm's final else
         let reserved = borrowable(0x04, [0; 32]);
-        assert!(matches!(
-            verify_borrow(&reserved, &State { amount: reserved.amount + 1, ..reserved }, &[], 5, 5),
-            BorrowVerdict::Invalid(_)
-        ));
+        assert_eq!(
+            verify_borrow(&LAST_CALL, &reserved, &State { amount: reserved.amount + 1, ..reserved }, &[], 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::Reserved(0x04))
+        );
         // any drifted preserved field refuses before scheme logic runs
         let threshold = borrowable(0x01, [0; 32]);
         let mut drifted = State { amount: threshold.amount + 1, ..threshold };
         drifted.extension_commitment = [1; 32];
-        assert!(matches!(verify_borrow(&threshold, &drifted, &[], 5, 5), BorrowVerdict::Invalid(_)));
+        assert_eq!(
+            verify_borrow(&LAST_CALL, &threshold, &drifted, &[], 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::NotPreserved)
+        );
+        // #31: a cell under an unassigned owner scheme cannot be borrowed
+        let custom = State { owner_scheme: 0x80, ..threshold };
+        assert_eq!(
+            verify_borrow(&LAST_CALL, &custom, &State { amount: custom.amount + 1, ..custom }, &[], 5, 5),
+            BorrowVerdict::Invalid(BorrowRefusal::UnassignedOwnerScheme(0x80))
+        );
+        // the reason names reserved and custom bytes apart, as KCC-2 does
+        let custom_why = BorrowRefusal::UnassignedOwnerScheme(0x80).to_string();
+        let reserved_why = BorrowRefusal::UnassignedOwnerScheme(0x05).to_string();
+        assert!(custom_why.contains("custom") && !custom_why.contains("reserved"), "{custom_why}");
+        assert!(reserved_why.contains("reserved") && !reserved_why.contains("custom"), "{reserved_why}");
     }
 
     // ── family transitions ───────────────────────────────────────
@@ -1756,11 +2809,45 @@ mod tests {
         witness.extend_from_slice(&preimage);
         let transfer = TransferArgs { next_states: vec![rebuilt], witness };
         let outputs = vec![FamilyOutput { spk_version: 0, spk: t.reconstruct_spk(&rebuilt).unwrap(), kas: 7 }];
+        let inputs = [
+            // the RECIPIENT's cell is the leader (lowest input index)
+            FamilyInput { input_index: 1, state: recipient, kas: 7 },
+            FamilyInput { input_index: 4, state: sender, kas: 2 },
+        ];
+        let draft = Bounds { rules: DRAFT, ..Bounds::default() };
+        let verdict = check_family(&inputs, &transfer, &t, &outputs, &draft).unwrap();
+        assert_eq!(verdict.path_normal, Some(false));
+        assert!(matches!(verdict.borrow, Some(BorrowVerdict::Proven(BorrowScheme::HashChain(_)))));
+        assert!(verdict.family_total_ok);
+        assert!(verdict.violations.is_empty(), "{:?}", verdict.violations);
+        // the bounds carry the pin's rules: under the Last Call rule the same
+        // bare preimage is not a witness at all
+        let verdict = check_family(&inputs, &transfer, &t, &outputs, &Bounds::default()).unwrap();
+        assert_eq!(verdict.borrow, Some(BorrowVerdict::Invalid(BorrowRefusal::KeyedWitness)));
+    }
+
+    /// #16: one extension commitment across a standard transfer's inputs and
+    /// outputs. Two classes travelling side by side, each preserved, passed
+    /// every pre-#16 check; it is a breach now. kascov's own vector, since
+    /// the official set does not cover the shape (tests/kcc20_vectors.rs
+    /// runs it in the official format).
+    #[test]
+    fn two_classes_side_by_side_are_a_breach() {
+        let t = test_template();
+        let rock = state(0x10);
+        let paper = State { extension_commitment: [0xAA; 32], amount: 50, ..state(0x10) };
+        let mut witness = vec![0x00];
+        witness.extend_from_slice(&[0u8; 65]);
+        let transfer = TransferArgs { next_states: vec![rock, paper], witness };
+        let outputs: Vec<FamilyOutput> = transfer
+            .next_states
+            .iter()
+            .map(|s| FamilyOutput { spk_version: 0, spk: t.reconstruct_spk(s).unwrap(), kas: 1 })
+            .collect();
         let verdict = check_family(
             &[
-                // the RECIPIENT's cell is the leader (lowest input index)
-                FamilyInput { input_index: 1, state: recipient, kas: 7 },
-                FamilyInput { input_index: 4, state: sender, kas: 2 },
+                FamilyInput { input_index: 0, state: rock, kas: 1 },
+                FamilyInput { input_index: 1, state: paper, kas: 1 },
             ],
             &transfer,
             &t,
@@ -1768,10 +2855,32 @@ mod tests {
             &Bounds::default(),
         )
         .unwrap();
-        assert_eq!(verdict.path_normal, Some(false));
-        assert!(matches!(verdict.borrow, Some(BorrowVerdict::Proven(BorrowScheme::HashChain(_)))));
-        assert!(verdict.family_total_ok);
-        assert!(verdict.violations.is_empty(), "{:?}", verdict.violations);
+        assert!(verdict.successors_proven && verdict.family_total_ok && verdict.classes_preserved);
+        assert!(verdict.mixed_classes);
+        assert!(verdict.violations.iter().any(|v| v.contains("2 different extension commitments")), "{:?}", verdict.violations);
+    }
+
+    /// §1: a declared negative successor is named for what it is, even when
+    /// the family total balances.
+    #[test]
+    fn a_negative_successor_is_named() {
+        let t = test_template();
+        let input = state(0x10);
+        let mut witness = vec![0x00];
+        witness.extend_from_slice(&[0u8; 65]);
+        let low = State { amount: -600, ..input };
+        let high = State { amount: input.amount + 600, ..input };
+        let transfer = TransferArgs { next_states: vec![low, high], witness };
+        let verdict = check_family(
+            &[FamilyInput { input_index: 0, state: input, kas: 1 }],
+            &transfer,
+            &t,
+            &[FamilyOutput { spk_version: 0, spk: t.reconstruct_spk(&high).unwrap(), kas: 1 }],
+            &Bounds::default(),
+        )
+        .unwrap();
+        assert!(verdict.family_total_ok, "the total hides it");
+        assert!(verdict.violations.iter().any(|v| v == "a successor amount is negative"));
     }
 
     #[test]
@@ -1906,17 +3015,40 @@ mod tests {
             "zealous_token_3037_b" => include_bytes!("../fixtures/kcc0020/zealous_token_3037_b.bin").to_vec(),
             "zealous_token_3223_a" => include_bytes!("../fixtures/kcc0020/zealous_token_3223_a.bin").to_vec(),
             "zealous_token_3223_b" => include_bytes!("../fixtures/kcc0020/zealous_token_3223_b.bin").to_vec(),
+            "reference_kcc20_a" => REFERENCE_A.to_vec(),
+            "reference_kcc20_b" => include_bytes!("../fixtures/kcc0020/reference_kcc20_b.bin").to_vec(),
+            "reference_public_mint_a" => MINTER_A.to_vec(),
+            "reference_public_mint_b" => include_bytes!("../fixtures/kcc0020/reference_public_mint_b.bin").to_vec(),
+            "reference_token_seed_a" => SEED_A.to_vec(),
+            "reference_token_seed_b" => include_bytes!("../fixtures/kcc0020/reference_token_seed_b.bin").to_vec(),
             other => panic!("a pin names fixture {other} that this test does not carry"),
         }
     }
 
+    const REFERENCE_A: &[u8] = include_bytes!("../fixtures/kcc0020/reference_kcc20_a.bin");
+    const MINTER_A: &[u8] = include_bytes!("../fixtures/kcc0020/reference_public_mint_a.bin");
+    const SEED_A: &[u8] = include_bytes!("../fixtures/kcc0020/reference_token_seed_a.bin");
+    const HASH_REFERENCE: &str = "9703112ee6e3555107cd168858992b77d3b74f655205b2b463b1f9ec2ec73cf7";
+    const VIEW_REFERENCE: &str = "734850b0af0aeef49f009167bf9ddd238fd8c5cdbe214234f97181ac6f5cc498";
+
+    fn pin_by(prefix: &str) -> &'static Pin {
+        pins().iter().find(|p| p.template_hash.starts_with(prefix)).expect("pin committed")
+    }
+
     #[test]
-    fn every_committed_pin_parses_and_names_this_spec() {
+    fn every_committed_pin_parses_and_names_its_spec() {
         for pin in pins() {
-            assert_eq!(pin.spec_commit, SPEC_COMMIT);
+            assert!(
+                pin.spec_commit == SPEC_COMMIT || pin.spec_commit == DRAFT_SPEC_COMMIT,
+                "{}: a pin names a commit this module reads",
+                pin.spec_commit
+            );
             assert_eq!(pin.template_hash.len(), 64);
             assert!(pin.template_hash.chars().all(|c| c.is_ascii_hexdigit()));
-            assert_eq!(pin.state.len, STATE_LEN);
+            assert_eq!(pin.state.len, pin.state.record_offset + STATE_LEN, "the record closes the window");
+            // a record view differs from the canonical template only where
+            // the window holds more than the record, and then it is declared
+            assert_eq!(pin.view_template_hash.is_some(), pin.state.record_offset > 0);
             assert!(!pin.review.fixtures.is_empty(), "a pin without fixtures proves nothing");
             assert!(matches!(pin.review.status.as_str(), "reviewed" | "unreviewed"));
             // A declared family is a venue-owned display name: it carries the
@@ -1925,7 +3057,7 @@ mod tests {
             // spec program would be routed into the 46-byte splice by name.
             if let Some(family) = &pin.family {
                 assert!(family.contains(" · "), "{family}: a pin family carries the venue separator");
-                assert_ne!(family, SPEC_TOKEN_TEMPLATE);
+                assert!(!spec_template_names()[..4].contains(&family.as_str()));
                 assert_ne!(family, crate::kcc20::TOKEN_TEMPLATE);
                 assert!(
                     crate::kcc20::CELL_FAMILIES.iter().all(|f| f.template != family),
@@ -1937,22 +3069,37 @@ mod tests {
                 );
                 assert_eq!(pin.family_label(), family);
             } else {
-                assert_eq!(pin.family_label(), SPEC_TOKEN_TEMPLATE);
+                assert_eq!(pin.family_label(), pin.standing());
             }
             assert!(is_spec_template(pin.family_label()));
+            assert!(is_spec_template(pin.standing()));
+            // a standard entry is selected the way the dispatch block says,
+            // and a KCC-1 tag is the hash of the entry's own signature
+            for (role, declared) in [("transfer", &pin.dispatch.transfer), ("delegator", &pin.dispatch.transfer_delegator)] {
+                let Some(entry) = pin.standard_entry(role) else { continue };
+                assert_eq!(&entry.select, declared, "{role}");
+                if pin.dispatch.kind == DispatchKind::Kcc1Tag {
+                    let tag = if role == "transfer" { transfer_tag() } else { delegator_tag() };
+                    assert_eq!(entry.select, hex::encode(tag), "{role}");
+                }
+            }
             // The claimed template hash is never trusted from the file: every
-            // fixture must recompute it at the pin's own cut, and the pair
-            // must differ in every state field so the pin cannot silently
+            // fixture must recompute it around the pin's own window, and the
+            // pair must differ in every state field so the pin cannot silently
             // narrow (the two-sentinel discipline).
             let programs: Vec<Vec<u8>> = pin.review.fixtures.iter().map(|f| fixture_bytes(f)).collect();
             assert!(programs.len() >= 2, "a pin needs a fixture pair");
             for program in &programs {
-                let template = Template::cut(program, pin.state.start).expect("fixture cuts");
-                assert_eq!(hex::encode(template.hash()), pin.template_hash, "fixture recomputes the pin's hash");
-                assert!(pinned_program_state(program).is_some(), "the pin recognises its own fixture");
+                assert_eq!(hex::encode(pin.canonical_hash(program).unwrap()), pin.template_hash, "fixture recomputes the pin's hash");
+                if let Some(view) = &pin.view_template_hash {
+                    assert_eq!(&hex::encode(pin.cut(program).unwrap().hash()), view);
+                }
+                let (named, _) = pinned_program_state(program).expect("the pin recognises its own fixture");
+                assert_eq!(named.template_hash, pin.template_hash);
             }
-            let sa = State::decode(&programs[0][pin.state.start..pin.state.start + STATE_LEN]).unwrap();
-            let sb = State::decode(&programs[1][pin.state.start..pin.state.start + STATE_LEN]).unwrap();
+            let at = pin.state.record_start();
+            let sa = State::decode(&programs[0][at..at + STATE_LEN]).unwrap();
+            let sb = State::decode(&programs[1][at..at + STATE_LEN]).unwrap();
             assert_ne!(sa.amount, sb.amount);
             assert_ne!(sa.owner, sb.owner);
             assert_ne!(sa.owner_scheme, sb.owner_scheme);
@@ -1982,6 +3129,35 @@ mod tests {
             } else {
                 assert_ne!(sa.borrow_guard, sb.borrow_guard);
             }
+            // every issuer is held to the same discipline: its fixtures
+            // recompute its hash, read as it, name this token's build, and
+            // differ in the fields kascov reads
+            for issuer in &pin.issuers {
+                assert!(issuer.issue_entry().is_some(), "{}: an issuer declares its issue entry", issuer.name);
+                if issuer.role == IssuerRole::Mint {
+                    assert!(issuer.fields.remaining.is_some() && issuer.fields.per_issue_limit.is_some());
+                }
+                let states: Vec<IssuerState> = issuer
+                    .fixtures
+                    .iter()
+                    .map(|f| {
+                        let program = fixture_bytes(f);
+                        let (owner, named, state) = pinned_issuer_state(&program).expect("the issuer reads its own fixture");
+                        assert_eq!((owner.template_hash.as_str(), named.name.as_str()), (pin.template_hash.as_str(), issuer.name.as_str()));
+                        assert!(pinned_program_state(&program).is_none(), "an issuer is never a token cell");
+                        state
+                    })
+                    .collect();
+                assert_eq!(states.len(), 2);
+                for state in &states {
+                    assert_eq!(hex::encode(state.kcc20_template), pin.template_hash);
+                }
+                assert_ne!(states[0].extension_commitment, states[1].extension_commitment);
+                if issuer.role == IssuerRole::Mint {
+                    assert_ne!(states[0].remaining, states[1].remaining);
+                    assert_ne!(states[0].per_issue_limit, states[1].per_issue_limit);
+                }
+            }
         }
         // an unpinned program is never claimed, spec-shaped or not
         let mut foreign = vec![0x6b];
@@ -1989,21 +3165,25 @@ mod tests {
         foreign.extend_from_slice(&[0x6c, 0x75, 0x75, 0x51]);
         assert!(pinned_program_state(&foreign).is_none());
         // the committed set: all four Zealous pins declare the venue family
-        // (one label, so the candidate list did not widen), the reference
-        // vector deliberately keeps the spec's own name
-        let h32 = |s: &str| -> [u8; 32] { h(s).try_into().unwrap() };
-        assert_eq!(pin_for(&h32("653012f1e68160bd87d6ac478ff3167bd154059b1c98b6dc76fd56b7ed3411cf")).unwrap().family_label(), "Zealous · token");
-        assert_eq!(pin_for(&h32("2f2671fcbe40e7acb8c3992cd61a5a68b2f8b47f983dd5af1612d4d38dfebed3")).unwrap().family_label(), "Zealous · token");
-        assert_eq!(pin_for(&h32("58c24260f2d81c34fc5ad0890f49f9670297cc6ac0a5136f6131b16a04540728")).unwrap().family_label(), "Zealous · token");
-        assert_eq!(pin_for(&h32("50ff50d8f65a057b5a14f26fa976340ee28e22e5a68328e847bd1707e7831f09")).unwrap().family_label(), "Zealous · token");
-        assert_eq!(pin_for(&h32("4abcc18873220d197d2dd5ddf46b24180bdb7fac48afd19f80bae6e1dd64e7eb")).unwrap().family_label(), SPEC_TOKEN_TEMPLATE);
-        assert_eq!(spec_template_names(), vec![SPEC_TOKEN_TEMPLATE, "Zealous · token"]);
+        // (one label, so the candidate list did not widen); the vector and
+        // the reference keep their standing, which says what they are
+        for prefix in ["653012f1", "2f2671fc", "58c24260", "50ff50d8"] {
+            assert_eq!(pin_by(prefix).family_label(), "Zealous · token");
+            assert_eq!(pin_by(prefix).standing(), DRAFT_BUILD_TEMPLATE);
+        }
+        assert_eq!(pin_by("4abcc188").family_label(), DRAFT_BUILD_TEMPLATE);
+        assert_eq!(pin_by("9703112e").family_label(), LAYOUT_TEMPLATE, "unreviewed, so no token claim");
+        assert_eq!(
+            spec_template_names(),
+            vec![SPEC_TOKEN_TEMPLATE, LAYOUT_TEMPLATE, DRAFT_BUILD_TEMPLATE, RETIRED_SPEC_TEMPLATE, "Zealous · token"]
+        );
         assert!(is_spec_template("Zealous · token"));
+        assert!(is_spec_template(RETIRED_SPEC_TEMPLATE), "rows stamped before the Last Call labels still route");
         assert!(!is_spec_template("Zealous · token cell"), "the legacy 46-byte family is not a spec label");
         assert!(!is_spec_template(crate::kcc20::TOKEN_TEMPLATE));
-        // the schema itself is exercised even while the pin set is empty
+        // the schema itself, including the optional fields
         let sample = r#"{
-            "spec_commit": "ea5176aa",
+            "spec_commit": "1516a6c",
             "template_hash": "2ed46a7edf5b168e67dba56998c58255235bebac436940a85115ca31d5c559f2",
             "name": "sample",
             "family": "Sample · token",
@@ -2023,15 +3203,321 @@ mod tests {
         let pin: Pin = serde_json::from_str(sample).unwrap();
         assert_eq!(pin.dispatch.kind, DispatchKind::SilvercSelector);
         assert_eq!(pin.bounds().max_token_inputs, 3);
+        assert_eq!(pin.rules, Rules::default(), "no rules declared: the Last Call ones");
+        assert_eq!(pin.state.record_offset, 0);
+        assert!(pin.issuers.is_empty() && pin.view_template_hash.is_none());
         assert_eq!(pin.family.as_deref(), Some("Sample · token"), "the family round-trips");
         assert_eq!(pin.family_label(), "Sample · token");
-        // the field is optional: a pin written before families existed
-        // still parses and stamps the generic label
+        // the field is optional: a pin without one stamps its standing
         let bare: Pin = serde_json::from_str(&sample.replace("\"family\": \"Sample · token\",\n", "")).unwrap();
         assert_eq!(bare.family, None);
-        assert_eq!(bare.family_label(), SPEC_TOKEN_TEMPLATE);
+        assert_eq!(bare.family_label(), bare.standing());
         assert!(pin_for(&[0u8; 32]).is_none());
         assert_eq!(h("00"), vec![0x00]);
+    }
+
+    /// The reference actor's window is its own template hash and then the
+    /// record: the pin keys on the canonical hash around the window, the
+    /// record view resolves to the same pin as an alias, and both must
+    /// reproduce, so a program with other bytes in the template field is
+    /// not this build even though its canonical halves are.
+    #[test]
+    fn the_reference_window_keys_on_the_canonical_hash_with_the_view_as_alias() {
+        let pin = pin_by("9703112e");
+        assert_eq!(pin.template_hash, HASH_REFERENCE);
+        assert_eq!(pin.view_template_hash.as_deref(), Some(VIEW_REFERENCE));
+        let h32 = |s: &str| -> [u8; 32] { h(s).try_into().unwrap() };
+        assert_eq!(pin_for(&h32(HASH_REFERENCE)).unwrap().template_hash, HASH_REFERENCE);
+        assert_eq!(pin_for(&h32(VIEW_REFERENCE)).unwrap().template_hash, HASH_REFERENCE, "the view is an alias");
+        // the template field holds the canonical hash itself
+        assert_eq!(&REFERENCE_A[1..34], [&[0x20][..], &h(HASH_REFERENCE)].concat().as_slice());
+        let (named, state) = pinned_program_state(REFERENCE_A).unwrap();
+        assert_eq!(named.template_hash, HASH_REFERENCE);
+        assert_eq!((state.amount, state.owner_scheme, state.borrow_scheme), (1000, OWNER_P2PK_SCHNORR, 0x01));
+        // the 112-byte cut a Draft pin would make finds no record at offset 1
+        assert!(Template::cut(REFERENCE_A, 1).is_none());
+        // other bytes in the template field: canonical halves intact, view not
+        let mut drifted = REFERENCE_A.to_vec();
+        drifted[2] ^= 0x01;
+        assert_eq!(hex::encode(pin.canonical_hash(&drifted).unwrap()), HASH_REFERENCE);
+        assert!(pinned_program_state(&drifted).is_none());
+        // a successor is rebuilt around the record and reads back as itself
+        let next = State { amount: 7, owner: [0x99; 32], ..state };
+        let program = pin.cut(REFERENCE_A).unwrap().program(&next).unwrap();
+        let (again, read) = pinned_program_state(&program).unwrap();
+        assert_eq!((again.template_hash.as_str(), read), (HASH_REFERENCE, next));
+    }
+
+    fn reference_transfer_script(args: &TransferArgs) -> Vec<u8> {
+        let mut sig = args.encode().unwrap();
+        sig.extend_from_slice(&kcc1::tag_push(&transfer_tag()));
+        sig.extend_from_slice(&encode_push(REFERENCE_A));
+        sig
+    }
+
+    /// The standard transfer of a KCC-1-tag build is read by the entry's
+    /// role and types, field-major, on 79c71c23; the Zealous arms are read
+    /// only by their own readers, and a standard-shaped script on a Zealous
+    /// tag is not a standard transfer.
+    #[test]
+    fn the_standard_transfer_is_read_by_role_and_types() {
+        let pin = pin_by("9703112e");
+        let args = TransferArgs {
+            next_states: vec![state(0x21), State { owner_scheme: OWNER_P2PKH_SCHNORR, ..state(0x22) }],
+            witness: [&[0x00][..], &[0x44; 65]].concat(),
+        };
+        let sig = reference_transfer_script(&args);
+        assert_eq!(parse_transfer_reveal(&sig, pin), Some(args.clone()));
+        assert_eq!(parse_tag_reveal(&sig, pin), None, "a standard entry is not a program-specific arm");
+        assert_eq!(parse_delegator_reveal(&sig, pin), None);
+        let mut delegator = DelegatorArgs { witness: vec![0x44; 65] }.encode();
+        delegator.extend_from_slice(&kcc1::tag_push(&delegator_tag()));
+        delegator.extend_from_slice(&encode_push(REFERENCE_A));
+        assert_eq!(parse_delegator_reveal(&delegator, pin), Some(DelegatorArgs { witness: vec![0x44; 65] }));
+        assert_eq!(parse_transfer_reveal(&delegator, pin), None);
+        // the same pushes on the Zealous transfer tag: no standard entry there
+        let zealous = pin_by("2f2671fc");
+        assert!(zealous.standard_entry("transfer").is_none());
+        let mut on_zealous = args.encode().unwrap();
+        on_zealous.extend_from_slice(&encode_push(&h("ddeb2d66")));
+        on_zealous.extend_from_slice(&encode_push(&fixture_bytes("zealous_token_2641_a")));
+        assert_eq!(parse_transfer_reveal(&on_zealous, zealous), None);
+        // the silverc vector pin still reads its selector-dispatched transfer
+        let vector = pin_by("4abcc188");
+        let mut silverc = args.encode().unwrap();
+        silverc.push(0x00); // selector 0: the empty push
+        silverc.extend_from_slice(&encode_push(&fixture_bytes("vector_template_a")));
+        assert_eq!(parse_transfer_reveal(&silverc, vector), Some(args));
+    }
+
+    /// The verdict the API serves, computed from the declared rules: the
+    /// five Draft builds are not conformant, each for its own reasons; the
+    /// reference build declares only Last Call rules but stays `null` until
+    /// its pin is reviewed.
+    #[test]
+    fn conformance_is_computed_from_the_declared_rules() {
+        let vector = pin_by("4abcc188");
+        assert_eq!(vector.conformant(), Some(false));
+        let reasons = vector.nonconformities().join("; ");
+        for why in ["ea5176aa", "numeric selector", "preimage rule", "blake2b"] {
+            assert!(reasons.contains(why), "{why}: {reasons}");
+        }
+        assert!(!reasons.contains("P2PKHHash"), "the vector has no p2pkh owners to hash");
+        for prefix in ["653012f1", "2f2671fc", "58c24260", "50ff50d8"] {
+            let pin = pin_by(prefix);
+            assert_eq!(pin.conformant(), Some(false));
+            let reasons = pin.nonconformities().join("; ");
+            assert!(reasons.contains("no standard transfer entrypoint dispatched by 79c71c23"), "{reasons}");
+            assert!(reasons.contains("keyed P2PKHHash"), "{reasons}");
+        }
+        assert!(pin_by("653012f1").nonconformities().join(" ").contains("preimage rule"));
+        assert!(!pin_by("2f2671fc").nonconformities().join(" ").contains("preimage rule"));
+
+        let reference = pin_by("9703112e");
+        assert!(reference.nonconformities().is_empty(), "{:?}", reference.nonconformities());
+        assert_eq!(reference.conformant(), None, "unreviewed: no verdict either way");
+        let mut reviewed = reference.clone();
+        reviewed.review.status = "reviewed".into();
+        assert_eq!(reviewed.conformant(), Some(true));
+        assert_eq!(reviewed.standing(), SPEC_TOKEN_TEMPLATE);
+        let mut keyed = reviewed.clone();
+        keyed.rules.p2pkh_hash = kcc2::P2pkhHash::KeyedDraft;
+        assert_eq!(keyed.conformant(), Some(false));
+        let mut mixing = reviewed.clone();
+        mixing.rules.single_class = false;
+        assert_eq!(mixing.conformant(), Some(false), "#16 holds a Last Call build to one class per transfer");
+        // a reduced owner subset is configuration, not a departure
+        let mut reduced = reviewed;
+        reduced.owner_schemes = vec![OWNER_P2PK_SCHNORR, OWNER_P2SH];
+        assert_eq!(reduced.conformant(), Some(true));
+        reduced.owner_schemes.push(0x80);
+        assert_eq!(reduced.conformant(), Some(false));
+    }
+
+    /// A familyless pin's stamped label is its standing, so whatever moves
+    /// the standing moves the labels fingerprint the store's restamp gate
+    /// carries; a venue family's label does not move with its review.
+    #[test]
+    fn a_moved_standing_moves_the_labels_fingerprint() {
+        let base: Vec<Pin> = pins().to_vec();
+        assert_eq!(labels_fingerprint(), labels_fingerprint_of(&base));
+        let reference = base.iter().position(|p| p.template_hash == HASH_REFERENCE).unwrap();
+        let zealous = base.iter().position(|p| p.template_hash.starts_with("2f2671fc")).unwrap();
+        let mut reviewed = base.clone();
+        reviewed[reference].review.status = "reviewed".into();
+        assert_eq!(reviewed[reference].family_label(), SPEC_TOKEN_TEMPLATE);
+        assert_ne!(labels_fingerprint_of(&reviewed), labels_fingerprint_of(&base));
+        let mut drafted = base.clone();
+        drafted[reference].spec_commit = DRAFT_SPEC_COMMIT.into();
+        assert_ne!(labels_fingerprint_of(&drafted), labels_fingerprint_of(&base));
+        let mut venue = base.clone();
+        venue[zealous].review.status = "unreviewed".into();
+        assert_eq!(labels_fingerprint_of(&venue), labels_fingerprint_of(&base), "a family names the build either way");
+    }
+
+    /// Every declaration that changes what a token derives as moves the
+    /// fingerprint, so a fix to any of them re-derives stored tokens instead
+    /// of shipping beside them.
+    #[test]
+    fn every_semantic_pin_field_moves_the_fingerprint() {
+        assert_eq!(pins_fingerprint(), fingerprint_of(pins()));
+        let base: Vec<Pin> = pins().to_vec();
+        let reference = base.iter().position(|p| p.template_hash == HASH_REFERENCE).unwrap();
+        let zealous = base.iter().position(|p| p.template_hash.starts_with("2f2671fc")).unwrap();
+        type Mutation = Box<dyn Fn(&mut Vec<Pin>)>;
+        let mutations: Vec<(&str, Mutation)> = vec![
+            ("template hash", Box::new(move |p| p[zealous].template_hash.replace_range(..1, "0"))),
+            ("review status", Box::new(move |p| p[reference].review.status = "reviewed".into())),
+            ("spec commit", Box::new(move |p| p[zealous].spec_commit = SPEC_COMMIT.into())),
+            ("bounds", Box::new(move |p| p[zealous].max_token_inputs = 3)),
+            ("owner schemes", Box::new(move |p| p[zealous].owner_schemes.truncate(3))),
+            ("borrow schemes", Box::new(move |p| p[zealous].borrow_schemes.truncate(3))),
+            ("hash-chain rule", Box::new(move |p| p[zealous].rules.hash_chain = HashChainRule::Preimage)),
+            ("p2pkh hash", Box::new(move |p| p[zealous].rules.p2pkh_hash = kcc2::P2pkhHash::Unkeyed)),
+            ("threshold flag", Box::new(move |p| p[zealous].rules.threshold_non_negative = false)),
+            ("class rule", Box::new(move |p| p[zealous].rules.single_class = true)),
+            ("window start", Box::new(move |p| p[reference].state.start = 2)),
+            ("window length", Box::new(move |p| p[reference].state.len = 146)),
+            ("record offset", Box::new(move |p| p[reference].state.record_offset = 34)),
+            ("view hash", Box::new(move |p| p[reference].view_template_hash = None)),
+            ("dispatch kind", Box::new(move |p| p[zealous].dispatch.kind = DispatchKind::SilvercSelector)),
+            ("entry name", Box::new(move |p| p[zealous].entrypoints[0].name = "transfer".into())),
+            ("entry role", Box::new(move |p| p[zealous].entrypoints[0].role = "transfer".into())),
+            ("entry types", Box::new(move |p| p[zealous].entrypoints[0].types = STANDARD_TRANSFER_TYPES.into())),
+            ("entry tag", Box::new(move |p| p[zealous].entrypoints[0].select = "79c71c23".into())),
+            ("an issuer", Box::new(move |p| drop(p[reference].issuers.pop()))),
+            ("issuer role", Box::new(move |p| p[reference].issuers[0].role = IssuerRole::Seed)),
+            ("issuer hash", Box::new(move |p| p[reference].issuers[0].template_hash.replace_range(..1, "0"))),
+            ("issuer window", Box::new(move |p| p[reference].issuers[0].state.len = 151)),
+            ("issuer types", Box::new(move |p| p[reference].issuers[0].state_types.push_str(",int"))),
+            ("issuer template field", Box::new(move |p| p[reference].issuers[0].fields.kcc20_template = 1)),
+            ("issuer class field", Box::new(move |p| p[reference].issuers[0].fields.extension_commitment = 4)),
+            ("issuer allowance field", Box::new(move |p| p[reference].issuers[0].fields.remaining = None)),
+            ("issuer limit field", Box::new(move |p| p[reference].issuers[0].fields.per_issue_limit = Some(2))),
+            ("issuer entry", Box::new(move |p| p[reference].issuers[0].entrypoints[0].select = "00000000".into())),
+        ];
+        let before = fingerprint_of(&base);
+        for (what, mutate) in mutations {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert_ne!(fingerprint_of(&changed), before, "{what} does not reach the fingerprint");
+        }
+    }
+
+    // ── issuers ──────────────────────────────────────────────────
+
+    /// The canonical halves of the reference KCC20 program, as a minter's
+    /// `mint` passes them.
+    fn reference_halves() -> (Vec<u8>, Vec<u8>) {
+        (REFERENCE_A[..1].to_vec(), REFERENCE_A[1 + 145..].to_vec())
+    }
+
+    fn issue_script(issuer_program: &[u8], tag: &str, issue: &Issue) -> Vec<u8> {
+        let s = issue.recipient;
+        let bytes = kcc1::Type::Array(Box::new(kcc1::Type::Byte), None);
+        let record = kcc1::Value::Record(vec![
+            kcc1::Value::Int(s.amount),
+            kcc1::Value::Bytes(s.owner.to_vec()),
+            kcc1::Value::Bytes(vec![s.owner_scheme]),
+            kcc1::Value::Bytes(vec![s.borrow_scheme]),
+            kcc1::Value::Bytes(s.borrow_guard.to_vec()),
+            kcc1::Value::Bytes(s.extension_commitment.to_vec()),
+        ]);
+        let mut sig = kcc1::encode_args(&[
+            (state_record_type(), record),
+            (bytes.clone(), kcc1::Value::Bytes(issue.kcc20_prefix.clone())),
+            (bytes, kcc1::Value::Bytes(issue.kcc20_suffix.clone())),
+        ])
+        .unwrap();
+        sig.extend_from_slice(&encode_push(&h(tag)));
+        sig.extend_from_slice(&encode_push(issuer_program));
+        sig
+    }
+
+    fn out(program: &[u8], kas: u64) -> FamilyOutput {
+        FamilyOutput { spk_version: 0, spk: kcc1::envelope_spk(program), kas }
+    }
+
+    /// The reference minter's fixture A: remaining 2.1e15, 1e11 per mint,
+    /// the all-zero class. A mint is proven end to end: the recipient cell
+    /// is the pinned KCC20 build carrying the declared state, and the minter
+    /// continues as itself with the allowance reduced by the amount.
+    #[test]
+    fn a_reference_mint_proves_its_recipient_and_its_allowance() {
+        let pin = pin_by("9703112e");
+        let (_, minter, allowance) = pinned_issuer_state(MINTER_A).unwrap();
+        assert_eq!(minter.role, IssuerRole::Mint);
+        assert_eq!((allowance.remaining, allowance.per_issue_limit), (Some(2_100_000_000_000_000), Some(100_000_000_000)));
+        let (prefix, suffix) = reference_halves();
+        let recipient = State { amount: 5_000, extension_commitment: [0; 32], ..state(0x31) };
+        let issue = Issue { recipient, kcc20_prefix: prefix, kcc20_suffix: suffix };
+        let sig = issue_script(MINTER_A, "0fe04b09", &issue);
+        assert_eq!(parse_issue_reveal(&sig, minter), Some(issue.clone()));
+        assert_eq!(parse_issue_reveal(&issue_script(MINTER_A, "52f03341", &issue), minter), None, "split is not an issue");
+
+        // the expected continuation, spliced by hand: `remaining` is the
+        // third window field, an 8-byte state int at bytes 68..76
+        let mut continued = MINTER_A.to_vec();
+        continued[68..76].copy_from_slice(&kcc1::encode_state_int(2_100_000_000_000_000 - 5_000).unwrap());
+        let recipient_out = FamilyOutput {
+            spk_version: 0,
+            spk: pin.cut(REFERENCE_A).unwrap().reconstruct_spk(&recipient).unwrap(),
+            kas: 1,
+        };
+        let verdict = check_issue(pin, minter, MINTER_A, 9, &issue, &out(&continued, 9), &recipient_out).unwrap();
+        assert!(verdict.recipient_proven && verdict.issuer_successor_proven, "{:?}", verdict.violations);
+        assert!(verdict.violations.is_empty(), "{:?}", verdict.violations);
+        assert_eq!((verdict.remaining_before, verdict.remaining_after), (Some(2_100_000_000_000_000), Some(2_099_999_999_995_000)));
+        assert_eq!((ISSUE_EVENT_KIND, ISSUER_AUTH), ("mint", "issuer"));
+
+        // a minter that keeps its allowance, or drops KAS, is not continuing
+        let kept = check_issue(pin, minter, MINTER_A, 9, &issue, &out(MINTER_A, 9), &recipient_out).unwrap();
+        assert!(!kept.issuer_successor_proven);
+        let poorer = check_issue(pin, minter, MINTER_A, 9, &issue, &out(&continued, 8), &recipient_out).unwrap();
+        assert!(!poorer.issuer_successor_proven);
+        // over the per-mint limit, outside the class, or under foreign halves
+        let big = Issue { recipient: State { amount: 100_000_000_001, ..recipient }, ..issue.clone() };
+        let v = check_issue(pin, minter, MINTER_A, 9, &big, &out(&continued, 9), &recipient_out).unwrap();
+        assert!(v.violations.iter().any(|v| v.contains("outside 0 < amount")), "{:?}", v.violations);
+        let classless = Issue { recipient: State { extension_commitment: [0xEE; 32], ..recipient }, ..issue.clone() };
+        let v = check_issue(pin, minter, MINTER_A, 9, &classless, &out(&continued, 9), &recipient_out).unwrap();
+        assert!(v.violations.iter().any(|v| v.contains("extension commitment is not the issuer's")));
+        let mut foreign_suffix = issue.kcc20_suffix.clone();
+        foreign_suffix.push(0x51);
+        let foreign = Issue { kcc20_suffix: foreign_suffix, ..issue.clone() };
+        let v = check_issue(pin, minter, MINTER_A, 9, &foreign, &out(&continued, 9), &recipient_out).unwrap();
+        assert!(!v.recipient_proven);
+        assert!(v.violations.iter().any(|v| v.contains("other than the pinned build")));
+        // the recipient output must be the declared state, nothing else
+        let elsewhere = FamilyOutput { spk: kcc1::envelope_spk(&[0x51]), ..recipient_out.clone() };
+        assert!(!check_issue(pin, minter, MINTER_A, 9, &issue, &out(&continued, 9), &elsewhere).unwrap().recipient_proven);
+        // and a program that is not this issuer is not judged at all
+        assert!(check_issue(pin, minter, SEED_A, 9, &issue, &out(&continued, 9), &recipient_out).is_none());
+    }
+
+    /// The seed creates a zero-amount receiving cell under its class and
+    /// continues unchanged.
+    #[test]
+    fn a_reference_seed_creates_an_empty_cell() {
+        let pin = pin_by("9703112e");
+        let (_, seed, seeded) = pinned_issuer_state(SEED_A).unwrap();
+        assert_eq!(seed.role, IssuerRole::Seed);
+        assert_eq!(seeded.remaining, None);
+        let (prefix, suffix) = reference_halves();
+        let recipient = State { amount: 0, extension_commitment: [0; 32], ..state(0x41) };
+        let issue = Issue { recipient, kcc20_prefix: prefix, kcc20_suffix: suffix };
+        assert_eq!(parse_issue_reveal(&issue_script(SEED_A, "d1f8dfa0", &issue), seed), Some(issue.clone()));
+        let recipient_out = FamilyOutput {
+            spk_version: 0,
+            spk: pin.cut(REFERENCE_A).unwrap().reconstruct_spk(&recipient).unwrap(),
+            kas: 1,
+        };
+        let verdict = check_issue(pin, seed, SEED_A, 3, &issue, &out(SEED_A, 3), &recipient_out).unwrap();
+        assert!(verdict.violations.is_empty(), "{:?}", verdict.violations);
+        assert!(verdict.recipient_proven && verdict.issuer_successor_proven);
+        let one = Issue { recipient: State { amount: 1, ..recipient }, ..issue };
+        let v = check_issue(pin, seed, SEED_A, 3, &one, &out(SEED_A, 3), &recipient_out).unwrap();
+        assert!(v.violations.iter().any(|v| v.contains("zero-amount")));
     }
 
     // ── KCC-1 tag dispatch (ZealousSwap token cell) ──────────────────────
@@ -2104,10 +3590,16 @@ mod tests {
     fn a_borrowed_receive_reveal_parses_with_an_empty_remainder() {
         let pin = zealous_pin();
         let full = tag_script(&[&crate::snum(250), &[0x5A; 32], &[0x7B; 65], &crate::snum(150)], "a85e5b91");
-        let Some(TagReveal::Borrowed { amount, preimage, signature, follower_change }) = parse_tag_reveal(&full, pin) else {
+        let Some(TagReveal::Borrowed { amount, preimage, key, signature, follower_change }) = parse_tag_reveal(&full, pin) else {
             panic!("not a borrowed receive");
         };
-        assert_eq!((amount, preimage, signature, follower_change), (250, [0x5A; 32], [0x7B; 65], 150));
+        assert_eq!((amount, preimage, key, signature, follower_change), (250, [0x5A; 32], None, [0x7B; 65], 150));
+        // the 2,590 B build checks the Draft's chain: the witness is the bare preimage
+        let reveal = parse_tag_reveal(&full, pin).unwrap();
+        assert_eq!(reveal.borrow_witness(0x03, &pin.rules), Some(vec![0x5A; 32]));
+        assert_eq!(reveal.borrow_witness(0x02, &pin.rules), Some(vec![0x7B; 65]));
+        assert_eq!(reveal.borrow_witness(0x01, &pin.rules), Some(vec![]));
+        assert_eq!(TagReveal::Merge.borrow_witness(0x03, &pin.rules), None);
         let nothing_kept = tag_script(&[&crate::snum(400), &[0u8; 32], &[0u8; 65], &[]], "a85e5b91");
         assert!(matches!(parse_tag_reveal(&nothing_kept, pin), Some(TagReveal::Borrowed { amount: 400, follower_change: 0, .. })));
         // a zero amount is not a receive; a torn slot is not a reveal
@@ -2254,8 +3746,16 @@ mod tests {
             let full = keyed(&[&crate::snum(250), &[0x5A; 32], &[0x6B; 32], &[0x7B; 65], &crate::snum(150)]);
             assert_eq!(
                 parse_tag_reveal(&full, pin),
-                Some(TagReveal::Borrowed { amount: 250, preimage: [0x5A; 32], signature: [0x7B; 65], follower_change: 150 })
+                Some(TagReveal::Borrowed { amount: 250, preimage: [0x5A; 32], key: Some([0x6B; 32]), signature: [0x7B; 65], follower_change: 150 })
             );
+            // these builds check the keyed chain (#18's rule, a generation
+            // early): the witness is next ‖ key ‖ signature, structural
+            assert_eq!(pin.rules.hash_chain, HashChainRule::Keyed);
+            let witness = parse_tag_reveal(&full, pin).unwrap().borrow_witness(0x03, &pin.rules).unwrap();
+            assert_eq!(KeyedLink::parse(&witness), Some(KeyedLink { next: [0x5A; 32], pubkey: [0x6B; 32], signature: [0x7B; 65] }));
+            let leader = State { borrow_scheme: 0x03, borrow_guard: hash_chain_link(&[0x5A; 32], &[0x6B; 32]), ..state(0x77) };
+            let grown = State { amount: leader.amount + 250, borrow_guard: [0x5A; 32], ..leader };
+            assert!(matches!(verify_borrow(&pin.rules, &leader, &grown, &witness, 5, 5), BorrowVerdict::Structural(_)));
             let nothing_kept = keyed(&[&crate::snum(400), &[0u8; 32], &[0u8; 32], &[0u8; 65], &[]]);
             assert!(matches!(parse_tag_reveal(&nothing_kept, pin), Some(TagReveal::Borrowed { amount: 400, follower_change: 0, .. })));
             // the 2,590 B build's four-slot shape is not this arm

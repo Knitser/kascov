@@ -1,0 +1,160 @@
+{
+  "spec_commit": "1516a6c",
+  "template_hash": "9703112ee6e3555107cd168858992b77d3b74f655205b2b463b1f9ec2ec73cf7",
+  "view_template_hash": "734850b0af0aeef49f009167bf9ddd238fd8c5cdbe214234f97181ac6f5cc498",
+  "name": "KCC-20 reference actor (argent-lang/kcc20-reference c8a0871, KCC20PublicMint app)",
+  "dispatch": {
+    "kind": "kcc1-tag",
+    "transfer": "79c71c23",
+    "transfer_delegator": "fd3ef14a"
+  },
+  "state": {
+    "start": 1,
+    "len": 145,
+    "record_offset": 33
+  },
+  "owner_schemes": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "max_token_inputs": 3,
+  "max_token_outputs": 3,
+  "borrow_schemes": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "rules": {
+    "hash_chain": "keyed",
+    "p2pkh_hash": "unkeyed",
+    "threshold_non_negative": false
+  },
+  "extension": {
+    "scheme": "opaque"
+  },
+  "entrypoints": [
+    {
+      "name": "transfer",
+      "types": "KCC20State[],byte[]",
+      "select": "79c71c23",
+      "role": "transfer"
+    },
+    {
+      "name": "transfer_delegator",
+      "types": "byte[]",
+      "select": "fd3ef14a",
+      "role": "delegator"
+    }
+  ],
+  "issuers": [
+    {
+      "name": "PublicMint",
+      "role": "mint",
+      "template_hash": "14b0f06bc176b78c94f19292e409c622636f31dae6bb31ff3d4d3308a6053b49",
+      "state": {
+        "start": 1,
+        "len": 150
+      },
+      "state_types": "byte[32],byte[32],int,int,pubkey,byte[32]",
+      "fields": {
+        "kcc20_template": 0,
+        "extension_commitment": 5,
+        "remaining": 2,
+        "per_issue_limit": 3
+      },
+      "entrypoints": [
+        {
+          "name": "mint",
+          "types": "KCC20State,byte[],byte[]",
+          "select": "0fe04b09",
+          "role": "issue"
+        },
+        {
+          "name": "split",
+          "types": "int,pubkey",
+          "select": "52f03341",
+          "role": "program-specific"
+        },
+        {
+          "name": "reclaim",
+          "types": "sig",
+          "select": "35eecca6",
+          "role": "program-specific"
+        },
+        {
+          "name": "reclaim_into",
+          "types": "",
+          "select": "6f52c1a9",
+          "role": "program-specific"
+        },
+        {
+          "name": "reclaim_delegator",
+          "types": "sig",
+          "select": "ebe6a147",
+          "role": "program-specific"
+        }
+      ],
+      "fixtures": [
+        "reference_public_mint_a",
+        "reference_public_mint_b"
+      ]
+    },
+    {
+      "name": "TokenSeed",
+      "role": "seed",
+      "template_hash": "f79a3fccf6f87d7076662410a17e54d1531889d9b60f630f9fbb8465a384e62d",
+      "state": {
+        "start": 1,
+        "len": 132
+      },
+      "state_types": "byte[32],byte[32],pubkey,byte[32]",
+      "fields": {
+        "kcc20_template": 0,
+        "extension_commitment": 3
+      },
+      "entrypoints": [
+        {
+          "name": "create",
+          "types": "KCC20State,byte[],byte[]",
+          "select": "d1f8dfa0",
+          "role": "issue"
+        },
+        {
+          "name": "split",
+          "types": "pubkey",
+          "select": "5dc68e50",
+          "role": "program-specific"
+        },
+        {
+          "name": "reclaim",
+          "types": "",
+          "select": "f56af4df",
+          "role": "program-specific"
+        },
+        {
+          "name": "reclaim_delegator",
+          "types": "sig",
+          "select": "ebe6a147",
+          "role": "program-specific"
+        }
+      ],
+      "fixtures": [
+        "reference_token_seed_a",
+        "reference_token_seed_b"
+      ]
+    }
+  ],
+  "in_script_template_hash_fn": "blake3",
+  "review": {
+    "status": "unreviewed",
+    "fixtures": [
+      "reference_kcc20_a",
+      "reference_kcc20_b"
+    ],
+    "note": "The official KCC-20 reference app linked from kcc-0020.md (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json, generator argentc 0.1.0): the KCC20 actor and the two issuers that share its covenant family. Read from the published source and artifact only. The KCC20 actor's template is now on mainnet and testnet-10, but the bytes-to-chain leg and an engine ladder are still to do, and the pin stays unreviewed until they are. What was checked: the artifact's compiled bytecode for each actor recomputes the artifact's own template_hash under KCC-1's BLAKE3 TemplateHash around its state_span (KCC20 1+145, PublicMint 1+150, TokenSeed 1+132), and the argent recognizer reads all three as 1.0 builds with the declared dispatch tags. The KCC20 window is the actor's own template hash (gen__kcc20_template, one 32-byte push) followed by the 112-byte KCC20State, so the record sits at offset 33; the canonical hash is taken around the whole window and the record view around the record alone (734850b0..., the artifact's actor_type_handle hash), both required. The fixtures are that bytecode with the window filled (the template field set to 9703112e..., two KCC20 states differing in every field), built, not fetched. Rules read from contracts/kcc20.ag and the generated sil/KCC20.sil: transfer(KCC20State[],byte[]) on tag 79c71c23 and transfer_delegator(byte[]) on fd3ef14a; one to three token inputs and one to three outputs (KCC20[1..=3]); every successor amount non-negative, every owner scheme 0x00-0x04 and borrow scheme 0x00-0x03 accepted, the leader's extension commitment required of every delegate and successor; p2pkh owners bound by unkeyed blake3(pubkey); an amount-threshold guard read as a signed int and clamped to zero when negative; a hash-chain borrow taking a 129-byte witness with blake3(next || one-time key) equal to the guard and the key signing. Issuers: PublicMint.mint(recipient_state, gen__kcc20_prefix, gen__kcc20_suffix) issues 0 < amount <= min(mint_amount, remaining) under the minter's extension commitment, continues as itself with remaining reduced by the amount at the same KAS, and validates the recipient output as the KCC20 template from the passed halves (which must hash to gen__kcc20_template) around the template field and the recipient state; TokenSeed.create does the same with an amount of exactly zero and continues unchanged; split, reclaim, reclaim_into and reclaim_delegator move or retire allowance and deposits without creating token cells."
+  }
+}

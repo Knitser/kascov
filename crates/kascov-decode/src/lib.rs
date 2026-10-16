@@ -1,12 +1,12 @@
 //! Name Kaspa covenant programs from their bytes.
 //!
-//! This is the decoder behind every name kascov.io shows. A covenant's
-//! output commits to a program by hash (P2SH), and the spend that consumes
-//! it reveals the program as the last push of its signature script. Given
-//! those bytes, this crate says what the program is: which SilverScript or
-//! Argent build, which launchpad, market or token family, and what sits in
-//! its labelled fields. It reads nothing but the bytes it is given: no node,
-//! no network, no database.
+//! This is the decoder kascov.io uses to name covenant programs. A
+//! covenant's output commits to a program by hash (P2SH), and the spend
+//! that consumes it reveals the program as the last push of its signature
+//! script. Given those bytes, this crate says what the program is: which
+//! SilverScript or Argent build, which launchpad, market or token family,
+//! and what sits in its labelled fields. It reads nothing but the bytes it
+//! is given: no node, no network, no database.
 //!
 //! ```
 //! use kascov_decode::{p2sh_reveal, Registry};
@@ -35,8 +35,15 @@
 //!   it spends, the same test kascov runs on every spend.
 //! - [`argent`] recognizes programs Argent generated and computes the
 //!   template hash that names their build.
-//! - [`kcc20`] and [`kcc0020`] read token cells; [`kcc1`] holds the KCC-0001
-//!   byte layouts and hashes they build on.
+//! - [`kcc20`] reads the gist-era 46-byte KCC20 token cells that KRON,
+//!   KaspaCom and KaspaKaha deploy; [`kcc0020`] reads the spec KCC-20 cells,
+//!   built to the Draft or the Last Call text, and checks their transfers
+//!   and issues against each build's pin. [`kcc1`] holds the KCC-1 byte
+//!   layouts and hashes the spec cells build on, [`kcc2`] the KCC-2
+//!   authority schemes that say who may spend, and [`kcc23`] reads KCC-23
+//!   metadata declarations (still a Draft).
+//! - [`vprogs`] reads vprogs settlement and exit-permission programs and
+//!   what each settlement and exit claim states. It verifies no proof.
 //! - [`disasm`] is the opcode table and disassembler, covenant and ZK
 //!   opcodes included.
 
@@ -44,10 +51,13 @@ pub mod argent;
 pub mod disasm;
 pub mod kcc1;
 pub mod kcc0020;
+pub mod kcc2;
 pub mod kcc20;
+pub mod kcc23;
 pub mod observed;
 pub mod report;
 pub mod vesting;
+pub mod vprogs;
 
 use disasm::{disassemble, Instruction, OpGroup};
 use std::ops::Range;
@@ -995,8 +1005,7 @@ pub fn silverscript_sentinels(name: &str) -> Option<Vec<(&'static str, Vec<u8>)>
 
 /// One skeleton per (family, generation) in [`SILVERSCRIPT_DUMPS`] order:
 /// the d25bd34 cut of each family first, so a caller that takes the first
-/// skeleton of a name (kascov-labkit's demos) keeps emitting the bytes it
-/// always did.
+/// skeleton of a name keeps emitting the bytes it always did.
 pub fn silverscript_skeletons() -> Vec<Skeleton> {
     let hex2 = |s: &str| hex::decode(s).expect("template dump hex");
     let mut out = Vec::new();
@@ -1436,6 +1445,8 @@ mod tests {
                 "KasWare · vault-pqcold",
                 "KasWare · vault-htlc",
                 "KasWare · vault-dms",
+                "vprogs · tic-tac-toe settlement",
+                "vprogs · exit permission (depth 1)",
                 "KaspaCom · token",
                 "Zealous · token cell",
                 "Zealous · token cell",

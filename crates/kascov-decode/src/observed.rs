@@ -318,6 +318,41 @@ pub fn observed_skeletons() -> Vec<Skeleton> {
         &["lock_daa", "output_spk_hash", "vault_salt"],
     ));
 
+    // vprogs settlement covenant, the tic-tac-toe build: the first vprog
+    // (verifiable program) running on testnet-10. The game's own server
+    // (vprogs-tt.izio.fr/api/config) names covenant 85165a6f…3fb097 as the one
+    // it settles, and each settlement spend proves a RISC Zero receipt on L1
+    // (OpZkPrecompile) and checks OpChainblockSeqCommit. The 99-byte prefix is
+    // vprogs' own build_redeem_script layout (kaspanet/vprogs,
+    // zk/backend/risc0/covenant/src/script.rs): OpData32 prev_lane_tip,
+    // OpData32 prev_state, OpData32 lane_key. The two fixtures are consecutive
+    // settlements and differ in exactly the first two; lane_key, the image ids
+    // and every other pin are constants of this build, so another vprog app
+    // is a different build. Fixture a hashes (blake2b-256) to the P2SH
+    // commitment its settlement output locks, 929ea610…fdba0125.
+    add(Skeleton::derive_observed(
+        "vprogs · tic-tac-toe settlement",
+        &[fixture!("vprogs_ttt_settlement_a"), fixture!("vprogs_ttt_settlement_b")],
+        &["lane_tip", "state"],
+    ));
+
+    // vprogs exit permission, for an exit tree of depth 1 (one or two exits):
+    // the output a settlement opens when its batch lets funds leave the lane,
+    // spent later by each exit claim. OpData32 exit_root, then OpData8 the
+    // number of exits not yet claimed (u64 LE); the 447 bytes after them are
+    // the same in every copy. Rebuilt byte for byte from vprogs'
+    // build_permission_redeem_script(root, count, 1) as the tic-tac-toe game
+    // builds it (kaspanet/vprogs branch fix/settlement-watch-wedge,
+    // zk/backend/risc0/api/src/permission_script.rs). The script names no
+    // app, lane or image, so the name is generic; deeper trees are longer
+    // scripts and would be pins of their own. Fixture a (2 unclaimed) was
+    // revealed by d9a42cb5…, fixture b (1 unclaimed) by 3ae86145….
+    add(Skeleton::derive_observed(
+        "vprogs · exit permission (depth 1)",
+        &[fixture!("vprogs_exit_perm_d1_a"), fixture!("vprogs_exit_perm_d1_b")],
+        &["exit_root", "unclaimed_exits"],
+    ));
+
     // KaspaCom's current token program: 8,076 bytes, 6,476 instructions, one
     // single shape across every instance found. This is the family behind the
     // tokens their testnet UI lists (WBLF, KOIN, KPOP, KARBON, FINAL6 …),

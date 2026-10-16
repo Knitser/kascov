@@ -98,12 +98,12 @@ pub fn revealed_template(
         .decode(spk_version, program)
         .template
         .or_else(|| locate_state_block(program).map(|_| TOKEN_TEMPLATE))
-        // A pinned KCC-0020 build: recognised only when a committed pin's
-        // template hash reproduces at its declared cut — an unpinned program
-        // is never claimed, however spec-shaped its bytes look. The name is
-        // the pin's own family where it declares one, so a venue's cell
-        // reads under the venue's prefix, and the generic spec label
-        // otherwise.
+        // A pinned KCC-20 build: recognised only when a committed pin's
+        // template hash reproduces around its declared window — an unpinned
+        // program is never claimed, however spec-shaped its bytes look. The
+        // name is the pin's own family where it declares one, so a venue's
+        // cell reads under the venue's prefix, and the pin's standing
+        // against the spec otherwise.
         .or_else(|| {
             crate::kcc0020::pinned_program_state(program)
                 .map(|(pin, _)| pin.family_label())
@@ -195,8 +195,8 @@ pub const CELL_FAMILIES: &[CellFamily] = &[
 /// Every template name that carries token state, for callers that need to
 /// select candidates before decoding (the store's derivation does this in
 /// SQL): the legacy [`CELL_FAMILIES`] names, then every name a pinned
-/// KCC-0020 reveal can be stamped with (the generic spec label and each
-/// pin's family, see `kcc0020::spec_template_names`). Kept in sync with
+/// KCC-20 reveal can be stamped with (the standing labels and each pin's
+/// family, see `kcc0020::spec_template_names`). Kept in sync with
 /// both tables by construction, and [`is_cell_template`] is the same set as
 /// a predicate.
 pub fn cell_template_names() -> Vec<&'static str> {
@@ -1036,10 +1036,10 @@ mod cell_family_tests {
         }
     }
 
-    /// A pinned KCC-0020 reveal is named by its pin's family where the pin
-    /// declares one, and by the generic spec label where it does not, so a
-    /// venue's cell reads under the venue's prefix while the reference
-    /// vector keeps the spec's own name.
+    /// A pinned KCC-20 reveal is named by its pin's family where the pin
+    /// declares one, and by its standing against the spec where it does not,
+    /// so a venue's cell reads under the venue's prefix while kascov's own
+    /// vector reads as the Draft build it is.
     #[test]
     fn a_pinned_reveal_is_named_by_its_pin_family() {
         let reg = Registry::default();
@@ -1056,10 +1056,12 @@ mod cell_family_tests {
             assert_eq!(revealed_template(&reg, 0, later), Some("Zealous · token"), "each later generation reads under the same family");
             assert!(locate_state_block(later).is_none());
         }
+        // kascov's own vector was compiled against the Draft: it reads as
+        // what it is, never as a token of the standard
         let vector = include_bytes!("../fixtures/kcc0020/vector_template_a.bin").as_slice();
         assert_eq!(
             revealed_template(&reg, 0, vector),
-            Some(crate::kcc0020::SPEC_TOKEN_TEMPLATE)
+            Some(crate::kcc0020::DRAFT_BUILD_TEMPLATE)
         );
         // the label is display only: the pin still matches either program
         assert!(crate::kcc0020::pinned_program_state(zealous).is_some());
@@ -1067,7 +1069,7 @@ mod cell_family_tests {
     }
 
     /// The candidate list every SQL gate is generated from carries the
-    /// generic spec label AND every pin family, once each, and the
+    /// standing labels AND every pin family, once each, and the
     /// predicate form agrees with it name for name.
     #[test]
     fn cell_template_names_carry_every_spec_label_once() {

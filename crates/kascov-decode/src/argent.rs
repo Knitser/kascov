@@ -75,7 +75,7 @@
 //! silverscript, its template hash under that generation's arm is X, it
 //! declares these entrypoints, and each authorises this many outputs. It does
 //! NOT say what the program is FOR. Role is unknown unless separately proven;
-//! see `kascov_core::argent`, which stores exactly these facts and nothing
+//! kascov stores exactly these facts and nothing
 //! that resembles a price.
 
 /// The FORK-ERA template hash: what an argent app built with the silverscript
@@ -532,12 +532,18 @@ fn count_site(program: &[u8], at: usize) -> Option<Authorised> {
 /// preamble) and `idx = [0, 0]`, which is two pins on one output rather than
 /// a permutation.
 ///
-/// A RANGE branch relaxes exactly two things, and only after its count site
+/// A RANGE branch relaxes exactly three things, and only after its count site
 /// has been seen: `b9 cb` may recur as the operand of a computed index
-/// (`count - 1` for a fixed handle behind the range), and `OpAuthOutputIdx`
-/// may take a computed operand at any depth (the range members are pinned
-/// inside the unrolled loop's conditionals). Its literal sites are still held
-/// to being pinned once each, below the fixed-handle count.
+/// (`count - 1` for a fixed handle behind the range), `OpAuthOutputIdx` may
+/// take a computed operand at any depth (the range members are pinned inside
+/// the unrolled loop's conditionals), and a literal site may READ a range
+/// member the count guarantees, `fixed <= j < fixed + min`, at any depth.
+/// The last is what the KCC20 reference actor (argent-lang/kcc20-reference
+/// c8a0871) compiles its borrowed path to: `KCC20[1..=3]` outputs, and inside
+/// the borrow arm `next_outputs[0].value >= self.value` as `b9 00 cc` three
+/// conditionals deep. That site names an output the range already pinned, so
+/// it is not counted as a fixed handle. The fixed handles' own literal sites
+/// are still held to being pinned once each, at branch top level.
 ///
 /// Since argentc e76ee07 a coordinated leader entry that consumes inputs also
 /// restates its count against its covenant group's (argent's security rule
@@ -607,12 +613,21 @@ fn scan_branch(program: &[u8], body: usize) -> Option<(usize, Authorised)> {
                         && program[at - 2] == OP_ACTIVE_INPUT_INDEX
                         && small_int(program, at - 1).is_some();
                     if literal_site {
-                        // `b9 <j> cc`, pinning a literal index: branch top
-                        // level in either form.
-                        if depth != 1 {
-                            return None;
+                        let j = small_int(program, at - 1)?;
+                        match authorised {
+                            // a read of a member the range guarantees: not a
+                            // fixed handle, and allowed at any depth
+                            Some(Authorised::Range { fixed, min, .. })
+                                if j >= fixed && j < fixed.saturating_add(min) => {}
+                            // `b9 <j> cc`, pinning a literal index: branch top
+                            // level in either form.
+                            _ => {
+                                if depth != 1 {
+                                    return None;
+                                }
+                                literal.push(j);
+                            }
                         }
-                        literal.push(small_int(program, at - 1)?);
                     } else if !ranged {
                         // Anything else reaching OpAuthOutputIdx is computing
                         // an index rather than pinning a literal one, which
@@ -1177,6 +1192,58 @@ mod tests {
             recognize(&batch).unwrap().entrypoints[0].authorised,
             Authorised::Range { fixed: 0, min: 1, max: 3 }
         );
+    }
+
+    /// The KCC-20 reference app (argent-lang/kcc20-reference c8a0871): its
+    /// three actors read as 1.0 argent with the artifact's own template
+    /// hashes. KCC20's transfer emits `KCC20[1..=3]` and its borrowed path
+    /// reads `next_outputs[0]` three conditionals deep, a member the range
+    /// guarantees; a read one past that guarantee is still refused.
+    #[test]
+    fn the_kcc20_reference_actors_are_recognised() {
+        for (program, hash, span, entries) in [
+            (
+                include_bytes!("../fixtures/kcc0020/reference_kcc20_a.bin").as_slice(),
+                "9703112ee6e3555107cd168858992b77d3b74f655205b2b463b1f9ec2ec73cf7",
+                145,
+                &["79c71c23", "fd3ef14a"][..],
+            ),
+            (
+                include_bytes!("../fixtures/kcc0020/reference_public_mint_a.bin").as_slice(),
+                "14b0f06bc176b78c94f19292e409c622636f31dae6bb31ff3d4d3308a6053b49",
+                150,
+                &["0fe04b09", "52f03341", "35eecca6", "6f52c1a9", "ebe6a147"][..],
+            ),
+            (
+                include_bytes!("../fixtures/kcc0020/reference_token_seed_a.bin").as_slice(),
+                "f79a3fccf6f87d7076662410a17e54d1531889d9b60f630f9fbb8465a384e62d",
+                132,
+                &["d1f8dfa0", "5dc68e50", "f56af4df", "ebe6a147"][..],
+            ),
+        ] {
+            let seen = recognize(program).unwrap_or_else(|| panic!("{hash} is 1.0 argent"));
+            assert_eq!(seen.generation, Generation::V1);
+            assert_eq!((seen.head_len, seen.state_len), (1, span));
+            assert_eq!(hex::encode(seen.template_hash), hash);
+            let mut read: Vec<String> = seen.entrypoints.iter().map(|e| hex::encode(e.tag().unwrap())).collect();
+            let mut want: Vec<String> = entries.iter().map(|t| t.to_string()).collect();
+            read.sort();
+            want.sort();
+            assert_eq!(read, want);
+        }
+        let kcc20 = include_bytes!("../fixtures/kcc0020/reference_kcc20_a.bin");
+        let seen = recognize(kcc20).unwrap();
+        assert_eq!(seen.entrypoints[0].authorised, Authorised::Range { fixed: 0, min: 1, max: 3 });
+        assert_eq!(seen.entrypoints[1].authorised, Authorised::Exact(0));
+        // the nested `b9 00 cc` of the borrowed path, rewritten to read
+        // output 1, which a one-output transfer need not have
+        let site = kcc20
+            .windows(3)
+            .position(|w| w == [OP_ACTIVE_INPUT_INDEX, OP_0, OP_AUTH_OUTPUT_IDX])
+            .expect("the borrowed path reads next_outputs[0]");
+        let mut past = kcc20.to_vec();
+        past[site + 1] = OP_1;
+        assert_eq!(recognize(&past), None);
     }
 
     /// Each 1.0 clause is load-bearing on the real Ticket program.

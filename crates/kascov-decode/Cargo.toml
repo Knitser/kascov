@@ -1,6 +1,6 @@
 [package]
 name = "kascov-decode"
-description = "Name Kaspa covenant programs from their bytes: SilverScript and Argent builds of either compiler generation, KCC-20 and KCC-0020 token cells, and the launchpad and market builds live on Kaspa. No node, no network, no database."
+description = "Name Kaspa covenant programs from their bytes (SilverScript and Argent builds, the launchpad and market builds it pins, gist-era KCC20 and spec KCC-20 token cells) and read the KCC-1, KCC-2, KCC-20 and KCC-23 conventions. No node, no network, no database."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

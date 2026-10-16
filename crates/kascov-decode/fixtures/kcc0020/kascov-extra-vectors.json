@@ -1,0 +1,20 @@
+{
+  "kcc": 20,
+  "format_version": 1,
+  "spec_commit": "1516a6c",
+  "note": "kascov's own KCC-20 vectors, in the shape of the official standard_transfer cases (kcc-0020/vectors/conformance.json at 1516a6c) and read against its common block. They cover a rule the official set does not: section 2 requires every input and continuation output of a standard transfer to share one extension_commitment (#16), and a reader can pass all six official standard_transfer cases while still accepting two classes side by side, each preserved. delegate_extension_commitments_hex is the one field the official format does not have: the delegate inputs' commitments, one per entry of delegate_amounts. Written for the spec authors to adopt or correct.",
+  "standard_transfer": {
+    "cases": [
+      {
+        "id": "mixed-extension-commitments",
+        "delegate_amounts": [400],
+        "delegate_extension_commitments_hex": ["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+        "next_state_amounts": [1000, 400],
+        "next_state_extension_commitments_hex": ["0000000000000000000000000000000000000000000000000000000000000000", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+        "signature_dependent": false,
+        "result": "reject",
+        "reason": "inputs and successors carry two extension_commitments, each preserved; a standard transfer keeps one"
+      }
+    ]
+  }
+}

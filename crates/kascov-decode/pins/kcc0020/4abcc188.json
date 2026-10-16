@@ -23,6 +23,11 @@
     2,
     3
   ],
+  "rules": {
+    "hash_chain": "preimage",
+    "threshold_non_negative": true,
+    "single_class": false
+  },
   "extension": {
     "scheme": "opaque"
   },

@@ -26,36 +26,42 @@
     2,
     3
   ],
+  "rules": {
+    "hash_chain": "keyed",
+    "p2pkh_hash": "keyed-draft",
+    "threshold_non_negative": true,
+    "single_class": false
+  },
   "extension": {
     "scheme": "opaque"
   },
   "entrypoints": [
     {
-      "name": "transfer",
+      "name": "zealous-transfer",
       "types": "int,byte[32],byte,byte,byte[32],byte[65],byte[32],byte[]",
       "select": "ddeb2d66",
-      "role": "transfer"
+      "role": "program-specific"
     },
     {
-      "name": "merge",
+      "name": "zealous-merge",
       "types": "byte[65],byte[32],byte[]",
       "select": "bdaf5113",
       "role": "program-specific"
     },
     {
-      "name": "transfer_whole",
+      "name": "zealous-transfer-whole",
       "types": "byte[32],byte,byte,byte[32],byte[65],byte[32],byte[]",
       "select": "5f4c9820",
       "role": "program-specific"
     },
     {
-      "name": "transfer_borrowed",
+      "name": "zealous-borrowed-receive",
       "types": "int,byte[32],byte[32],byte[65],byte[]",
       "select": "13f87a5b",
       "role": "program-specific"
     },
     {
-      "name": "transfer_delegator",
+      "name": "zealous-delegator",
       "types": "byte[65],byte[32],byte[]",
       "select": "d64f42e5",
       "role": "delegator"

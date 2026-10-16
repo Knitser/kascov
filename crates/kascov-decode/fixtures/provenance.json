@@ -1,6 +1,6 @@
 {
  "about": "Where each program fixture in this crate came from. For a chain entry, input `revealed_by.input` of transaction `revealed_by.txid` spends `outpoint`, and its signature script ends with a push of exactly the fixture's bytes, whose BLAKE2b-256 is `blake2b_256`; the spent output's script is aa20<blake2b_256>87. A witness entry is a whole signature script found as-is on chain. Paths are relative to the crate root.",
- "checked_against": "kascov's own index of mainnet and testnet-10, 2026-09-25",
+ "checked_against": "kascov's own index of mainnet and testnet-10, 2026-09-26",
  "fixtures": [
   {
    "path": "fixtures/allowance_tn_f_a.bin",
@@ -1387,6 +1387,42 @@
      }
     }
    }
+  },
+  {
+   "path": "fixtures/kcc0020/reference_kcc20_a.bin",
+   "bytes": 4031,
+   "blake2b_256": "4507670cc7ab296016bfef7ab440f52e08d8f37e38928a0952009fa9e280e5f0",
+   "origin": "The KCC20 actor of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json): the artifact's compiled bytecode with its 145-byte state window filled, the template field set to the artifact's own template hash 9703112e... and the KCC20State to amount 1000, owner 11^32, p2pk, threshold borrow 500, class 00^32. Built, not taken from chain."
+  },
+  {
+   "path": "fixtures/kcc0020/reference_kcc20_b.bin",
+   "bytes": 4031,
+   "blake2b_256": "955873b7fc5226311a3b77034c0e5b0ae2085cbdd8579650d6cc1e37d7c622ee",
+   "origin": "The KCC20 actor of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json), the same bytecode with a second KCC20State differing in every field (amount 2^62+5, owner 22^32, p2sh, hash-chain borrow, class ee^32). Built, not taken from chain."
+  },
+  {
+   "path": "fixtures/kcc0020/reference_public_mint_a.bin",
+   "bytes": 2019,
+   "blake2b_256": "6c90dcc6b78ab9fbcaf9754f0787fc36c9d445f56572f3f3181c030893452fb9",
+   "origin": "The PublicMint issuer of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json): compiled bytecode with its 150-byte state window filled (KCC20 template 9703112e..., its own template 14b0f06b..., remaining 2.1e15, 1e11 per mint, owner 33^32, class 00^32). Built, not taken from chain."
+  },
+  {
+   "path": "fixtures/kcc0020/reference_public_mint_b.bin",
+   "bytes": 2019,
+   "blake2b_256": "2fa2d50d05a3948c6af277213eb8fcb3d91f1689d2f8229aa2d0a5175b1123f8",
+   "origin": "The PublicMint issuer of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json), with a second window (remaining 5, 5 per mint, owner 44^32, class ee^32). Built, not taken from chain."
+  },
+  {
+   "path": "fixtures/kcc0020/reference_token_seed_a.bin",
+   "bytes": 1355,
+   "blake2b_256": "e7ad8dc1875294d1da718652fa2875d958d8e7257cc7ae2c1f98970ee26f54b5",
+   "origin": "The TokenSeed issuer of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json): compiled bytecode with its 132-byte state window filled (KCC20 template 9703112e..., its own template f79a3fcc..., owner 55^32, class 00^32). Built, not taken from chain."
+  },
+  {
+   "path": "fixtures/kcc0020/reference_token_seed_b.bin",
+   "bytes": 1355,
+   "blake2b_256": "1b6ff67c004d052e66115e7b4ca771302ae4bffa6c6c2a96d72b1db90adbcbc4",
+   "origin": "The TokenSeed issuer of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json), with a second window (owner 66^32, class ee^32). Built, not taken from chain."
   },
   {
    "path": "fixtures/kcc0020/vector_template_a.bin",
@@ -4345,6 +4381,116 @@
    "bytes": 18177,
    "blake2b_256": "a190110423b27dd0b70b0f07502a32b71e0dc48066ec419c2a3f7493391713d0",
    "origin": "The code of KRON's vesting template after its 69-byte state region (see src/vesting.rs). A fragment, so no output commits to it."
+  },
+  {
+   "path": "fixtures/vprogs_exit_perm_d1_a.bin",
+   "bytes": 489,
+   "blake2b_256": "b1256c9e54e43947e50545a1ebbcfb013fabb176aa9a3ef2b589df0ecf7f62e0",
+   "chain": {
+    "testnet-10": {
+     "outputs": 1,
+     "reveals_checked": 1,
+     "reveals_matching": 1,
+     "outpoint": {
+      "txid": "a2c3fe2bee31d96b2c884c8c6b6d240f1a15366a6f3b4e08a176be9cc2bddfab",
+      "index": 1
+     },
+     "covenant_id": "85165a6f453dbbd1e968c238966e297046b8f1d22c00fee1bc208de00c3fb097",
+     "created_daa": 579225403,
+     "revealed_by": {
+      "txid": "d9a42cb5bf4497e12ef873f40a54751ee110e4b248c28c9afb0a02df297f734f",
+      "input": 0
+     }
+    }
+   }
+  },
+  {
+   "path": "fixtures/vprogs_exit_perm_d1_b.bin",
+   "bytes": 489,
+   "blake2b_256": "24f428c084e952d4cd905cff75dba97ab55da01b3b07cd0682bb3510054f284a",
+   "chain": {
+    "testnet-10": {
+     "outputs": 1,
+     "reveals_checked": 1,
+     "reveals_matching": 1,
+     "outpoint": {
+      "txid": "1a88f8a096b622497a055f8fa371d395da0f5b2be607279408a2dffe2c21e894",
+      "index": 1
+     },
+     "covenant_id": "85165a6f453dbbd1e968c238966e297046b8f1d22c00fee1bc208de00c3fb097",
+     "created_daa": 579268110,
+     "revealed_by": {
+      "txid": "3ae861459025a02f3d91f1ed970afec387aab81f945e01f998d81a9f098f7284",
+      "input": 0
+     }
+    }
+   }
+  },
+  {
+   "path": "fixtures/vprogs_exit_perm_d1_c.bin",
+   "bytes": 489,
+   "blake2b_256": "e6d9983fe7912f80e5dec90af1353774599673226f708ccc080e10a1a4f24926",
+   "chain": {
+    "testnet-10": {
+     "outputs": 1,
+     "reveals_checked": 1,
+     "reveals_matching": 1,
+     "outpoint": {
+      "txid": "35ea68e2ac3ebcc1e1df38855f5d28e00e7a81bd6e743be97fdc42e047d5e563",
+      "index": 1
+     },
+     "covenant_id": "85165a6f453dbbd1e968c238966e297046b8f1d22c00fee1bc208de00c3fb097",
+     "created_daa": 580992172,
+     "revealed_by": {
+      "txid": "8b103fd4c519abd75cb5256352c5523a5ed265942427374c9e130d5939b1b25d",
+      "input": 0
+     }
+    }
+   }
+  },
+  {
+   "path": "fixtures/vprogs_ttt_settlement_a.bin",
+   "bytes": 561,
+   "blake2b_256": "929ea6106c657debb3ee53ab4fd9c7b1e019671837f2a2a9a341ce04fdba0125",
+   "chain": {
+    "testnet-10": {
+     "outputs": 1,
+     "reveals_checked": 1,
+     "reveals_matching": 1,
+     "outpoint": {
+      "txid": "5947b00f0e8c28538c1236abb984d2da269a78f3ff97836bd9ad5d05ad04a81a",
+      "index": 0
+     },
+     "covenant_id": "85165a6f453dbbd1e968c238966e297046b8f1d22c00fee1bc208de00c3fb097",
+     "created_daa": 580242893,
+     "revealed_by": {
+      "txid": "797132776bacebd5d04321dfae77b008b4ec9fd118d2cc080eff1e791319812a",
+      "input": 0
+     }
+    }
+   }
+  },
+  {
+   "path": "fixtures/vprogs_ttt_settlement_b.bin",
+   "bytes": 561,
+   "blake2b_256": "5a6e4c2521610422edb5dcd6cb46cf125d65166bbd01d620359dffe9fd2d455c",
+   "chain": {
+    "testnet-10": {
+     "outputs": 1,
+     "reveals_checked": 1,
+     "reveals_matching": 1,
+     "outpoint": {
+      "txid": "0d9719c4d5dce33232966f80a8060e25abfa4198294f3d73315776c26ba88a45",
+      "index": 0
+     },
+     "covenant_id": "85165a6f453dbbd1e968c238966e297046b8f1d22c00fee1bc208de00c3fb097",
+     "created_daa": 580229488,
+     "revealed_by": {
+      "txid": "5947b00f0e8c28538c1236abb984d2da269a78f3ff97836bd9ad5d05ad04a81a",
+      "input": 0
+     }
+    }
+   }
   },
   {
    "path": "fixtures/zealous_curve_10663_a.bin",

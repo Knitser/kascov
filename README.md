@@ -33,14 +33,16 @@ Every fact kascov publishes is derived from consensus data or from programs the 
 
 ## kascov-decode
 
-The byte-level reader behind every name kascov.io shows. Give it the bytes of a covenant program and it says what they are. It needs no node, no network and no database: it is plain functions over bytes, with five small dependencies (`hex`, `serde`, `serde_json`, `blake2b_simd`, `blake3`).
+The byte-level reader kascov.io uses to name covenant programs. Give it the bytes of a covenant program and it says what they are. It needs no node, no network and no database: it is plain functions over bytes, with five small dependencies (`hex`, `serde`, `serde_json`, `blake2b_simd`, `blake3`).
 
 What it reads:
 
 - **SilverScript contracts** from both compiler generations: the July 2026 fork (numeric dispatch selectors, BLAKE2b template hashes) and SilverScript 1.0 (four-byte KCC-1 dispatch tags, BLAKE3 template hashes). A match is made instruction by instruction against a skeleton cut from real compiler output, so it proves the template and returns the constructor values.
 - **Argent apps** compiled by argentc in either generation, including the leader and delegate security checks argent added in September 2026, with each actor's template hash recomputed from its own bytes.
-- **Launchpad and market builds live on Kaspa today**, from KRON, KaspaCom, KaspaKaha, Zealous and the KCC-20 minter, each pinned to program bytes read off mainnet or testnet-10 that ship in `fixtures/`.
-- **Token state** in KCC-20 and KCC-0020 cells.
+- **Launchpad and market builds live on Kaspa today**, from KRON, KaspaCom, KaspaKaha, Zealous and the gist-era KCC20 minter, each pinned to program bytes read off mainnet or testnet-10 that ship in `fixtures/`.
+- **Token state** in the gist-era KCC20 cells that KRON, KaspaCom and KaspaKaha deploy, and in KCC-20 cells laid out as the spec defines them.
+- **The KCC conventions at kaspanet/kccs 1516a6c** (KCC-1, KCC-2 and KCC-20 at Last Call, KCC-23 Draft), as library modules: the KCC-1 ABI codec, arrays and records included; KCC-2 authority schemes, with P2PKH keys hashed unkeyed as Last Call says and the keyed Draft hash kept for the programs compiled against it; KCC-20 transfers, borrows and issues checked against each build's pin; and KCC-23 metadata declarations verified against the covenant they bind. Each module is tested against the spec's own conformance vectors: see [Run the official vectors](#run-the-official-vectors). The `name` and `check` commands do not label KCC-20 builds yet: for them `template` is null.
+- **vprogs** settlement and exit-permission programs, with what each settlement and exit claim states. It reads them and does not verify their proofs.
 - **Anything else** as an opcode listing, including the post-Toccata covenant opcodes. This fallback always works.
 
 ### Use it
@@ -77,13 +79,23 @@ cargo test --workspace
 
 ### Check kascov against the chain
 
-Every name kascov.io shows comes from this crate, so no name has to be taken on trust. A covenant output usually commits to its program as `aa20<blake2b-256 of the program>87`, and the input that spends it ends its signature script with a push of the full program. Take the spending transaction from your own Kaspa node and run
+Most program names kascov.io shows come from this crate, and those do not have to be taken on trust. A covenant output usually commits to its program as `aa20<blake2b-256 of the program>87`, and the input that spends it ends its signature script with a push of the full program. Take the spending transaction from your own Kaspa node and run
 
 ```bash
 kascov-decode check <that input's signature script hex> --spk <the spent output's script public key hex>
 ```
 
 It pulls out the program the spend revealed, checks that its BLAKE2b-256 matches what the output committed to, and names it. Compare the answer with kascov.io. If the two ever differ, please [open an issue](https://github.com/Knitser/kascov/issues).
+
+What this recipe does not cover yet: builds that carry the spec KCC-20 state (the Draft-era ones included), and the market skeleton and Argent build labels kascov.io adds from its own index. kascov.io labels the KCC-20 builds from this crate's pins through the library (`kcc0020::Pin::family_label`, which falls back to `Pin::standing`), while the `name` and `check` commands do not label KCC-20 builds yet: for them `template` is null. For each pinned build compiled by argentc, the same answer still carries `argent.template_hash` (under `program` in the `check` answer), and that hash names its pin's file in [`crates/kascov-decode/pins/kcc0020/`](crates/kascov-decode/pins/kcc0020), so the pin behind the label can be found by hand; an issuer's hash is listed under `issuers` in its token's pin file.
+
+### Run the official vectors
+
+```bash
+cargo test -p kascov-decode --test kcc1_vectors --test kcc2_vectors --test kcc20_vectors --test kcc23_vectors -- --nocapture
+```
+
+These run the conformance files of kaspanet/kccs at 1516a6c, copied unmodified into [`crates/kascov-decode/tests/fixtures/kccs/`](crates/kascov-decode/tests/fixtures/kccs), through the crate's own functions: 103 checks for KCC-1 (one per vector), 35 for KCC-2 (5 constructions, 20 approval checks and 10 registry rows), 42 for KCC-20 and 24 for KCC-23 (9 on the binding, 3 on the mutations and 2 on each of the 6 declarations). The KCC-20 test counts 44, the 42 official checks plus 2 of its own harness, and the same run also reads Shawn Pearce's unofficial first-cut set (kccs PR #20) and kascov's own case for the one-class rule (#16), which the official set does not cover. Each runner asserts its count, so a vector that goes unread fails the run.
 
 ### Where the fixtures come from
 
@@ -97,4 +109,4 @@ The indexer, the API server and the web explorer are still being reworked in pri
 
 [@kascovio](https://x.com/kascovio) · [kascov.io](https://kascov.io)
 
-The code here is MIT licensed, as it was: see [LICENSE](LICENSE). Some test fixtures come from kaspanet/silverscript and argent-lang/argent under the ISC license: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The code here is MIT licensed, as it was: see [LICENSE](LICENSE). Some test fixtures come from kaspanet/silverscript, argent-lang/argent and argent-lang/kcc20-reference under the ISC license, and the KCC conformance vectors from kaspanet/kccs under CC0-1.0: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

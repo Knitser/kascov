@@ -1,12 +1,13 @@
 //! KCC-0020 vectors, derived OUTSIDE the crate and reproduced by it.
 //!
-//! kccs ships no conformance vectors for KCC-0020, so kascov derives its own
-//! from the merged text (ea5176aa) and pins them here: state encodings and
-//! the field-major argument lowering built structurally in python, BLAKE3
-//! values from a standalone tool, the P2SH envelope from python's blake2b.
-//! The crate reproducing every byte is the point — a drift in either
-//! direction fails here, not in the field. The fixture doubles as the set
-//! offered upstream for the authors to confirm or file errata against.
+//! kccs shipped no conformance vectors for KCC-0020 at the merged Draft
+//! (ea5176aa), so kascov derived its own from that text and pins them here:
+//! state encodings and the field-major argument lowering built structurally
+//! in python, BLAKE3 values from a standalone tool, the P2SH envelope from
+//! python's blake2b. The crate reproducing every byte is the point — a drift
+//! in either direction fails here, not in the field. The layouts these cover
+//! did not change at Last Call; the official vectors that now exist run in
+//! tests/kcc20_vectors.rs, and the rules that did change are tested there.
 
 use kascov_decode::kcc0020::{self, State, Template, TransferArgs};
 use kascov_decode::kcc1;
@@ -42,8 +43,8 @@ fn state_by_name<'a>(v: &'a serde_json::Value, name: &str) -> &'a serde_json::Va
 }
 
 #[test]
-fn the_fixture_names_the_spec_commit() {
-    assert_eq!(vectors()["spec_commit"], kcc0020::SPEC_COMMIT);
+fn the_fixture_names_the_draft_it_was_derived_from() {
+    assert_eq!(vectors()["spec_commit"], kcc0020::DRAFT_SPEC_COMMIT);
 }
 
 #[test]

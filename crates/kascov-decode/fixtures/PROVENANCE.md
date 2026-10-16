@@ -16,13 +16,13 @@ kascov-decode check <signature script hex> --spk <spent output script hex>
 
 ## Summary
 
-Checked against kascov's own index of mainnet and testnet-10 on 2026-09-25.
+Checked against kascov's own index of mainnet and testnet-10 on 2026-09-26.
 
 | What | Fixtures |
 |---|---|
-| Program on chain, and a spend reveals exactly these bytes | 254 |
+| Program on chain, and a spend reveals exactly these bytes | 259 |
 | Whole signature script found on chain | 9 |
-| Not a whole on-chain output (template, fragment, or built from source), origin noted | 16 |
+| Not a whole on-chain output (template, fragment, or built from source), origin noted | 22 |
 
 ## Programs revealed on chain
 
@@ -216,6 +216,11 @@ Checked against kascov's own index of mainnet and testnet-10 on 2026-09-25.
 | `fixtures/slot_mint_di4m_b.bin` | 370 | testnet-10 | 2 | 1 of 1 | `c673628cc62927b8:0` | `c760de1601e5bb68` (None) |
 | `fixtures/slot_mint_gz4m_a.bin` | 325 | testnet-10 | 34 | 33 of 33 | `eca3ce944124df7a:0` | `82e2c9c03cec2ca1` (None) |
 | `fixtures/slot_mint_gz4m_b.bin` | 325 | testnet-10 | 34 | 33 of 33 | `e58e14dc27c8453f:0` | `151782a2d1120fbb` (None) |
+| `fixtures/vprogs_exit_perm_d1_a.bin` | 489 | testnet-10 | 1 | 1 of 1 | `a2c3fe2bee31d96b:1` | `d9a42cb5bf4497e1` (0) |
+| `fixtures/vprogs_exit_perm_d1_b.bin` | 489 | testnet-10 | 1 | 1 of 1 | `1a88f8a096b62249:1` | `3ae861459025a02f` (0) |
+| `fixtures/vprogs_exit_perm_d1_c.bin` | 489 | testnet-10 | 1 | 1 of 1 | `35ea68e2ac3ebcc1:1` | `8b103fd4c519abd7` (0) |
+| `fixtures/vprogs_ttt_settlement_a.bin` | 561 | testnet-10 | 1 | 1 of 1 | `5947b00f0e8c2853:0` | `797132776bacebd5` (0) |
+| `fixtures/vprogs_ttt_settlement_b.bin` | 561 | testnet-10 | 1 | 1 of 1 | `0d9719c4d5dce332:0` | `5947b00f0e8c2853` (0) |
 | `fixtures/zealous_curve_10663_a.bin` | 10663 | testnet-10 | 1 | 1 of 1 | `02325f2008380508:0` | `b46663aa3b0f7df5` (0) |
 | `fixtures/zealous_curve_10663_b.bin` | 10663 | testnet-10 | 1 | 1 of 1 | `18ebb22001350c2d:0` | `1f3b08bfc993b1ae` (0) |
 | `fixtures/zealous_curve_8643_a.bin` | 8643 | testnet-10 | 1 | 1 of 1 | `0e2fe36e911a4b14:0` | `150be848ca6c2d0c` (0) |
@@ -305,6 +310,12 @@ Checked against kascov's own index of mainnet and testnet-10 on 2026-09-25.
 |---|---|---|
 | `fixtures/kcc0020/vector_template_a.bin` | 2384 | kascov's own reduced build of the KCC-0020 draft (kaspanet/kccs at ea5176aa). Built, not taken from chain. |
 | `fixtures/kcc0020/vector_template_b.bin` | 2384 | kascov's own reduced build of the KCC-0020 draft (kaspanet/kccs at ea5176aa), with different arguments. Built, not taken from chain. |
+| `fixtures/kcc0020/reference_kcc20_a.bin` | 4031 | The KCC20 actor of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json): the artifact's compiled bytecode with its 145-byte state window filled, the template field set to the artifact's own template hash 9703112e... and the KCC20State to amount 1000, owner 11^32, p2pk, threshold borrow 500, class 00^32. Built, not taken from chain. |
+| `fixtures/kcc0020/reference_kcc20_b.bin` | 4031 | The KCC20 actor of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json), the same bytecode with a second KCC20State differing in every field (amount 2^62+5, owner 22^32, p2sh, hash-chain borrow, class ee^32). Built, not taken from chain. |
+| `fixtures/kcc0020/reference_public_mint_a.bin` | 2019 | The PublicMint issuer of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json): compiled bytecode with its 150-byte state window filled (KCC20 template 9703112e..., its own template 14b0f06b..., remaining 2.1e15, 1e11 per mint, owner 33^32, class 00^32). Built, not taken from chain. |
+| `fixtures/kcc0020/reference_public_mint_b.bin` | 2019 | The PublicMint issuer of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json), with a second window (remaining 5, 5 per mint, owner 44^32, class ee^32). Built, not taken from chain. |
+| `fixtures/kcc0020/reference_token_seed_a.bin` | 1355 | The TokenSeed issuer of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json): compiled bytecode with its 132-byte state window filled (KCC20 template 9703112e..., its own template f79a3fcc..., owner 55^32, class 00^32). Built, not taken from chain. |
+| `fixtures/kcc0020/reference_token_seed_b.bin` | 1355 | The TokenSeed issuer of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json), with a second window (owner 66^32, class ee^32). Built, not taken from chain. |
 | `fixtures/kcc20_kron_launch_args.bin` | 78 | The argument pushes of input 0's signature script in transaction c3faf69d..., with the 172 KB program push that follows cut off to keep the fixture small. A fragment of a witness. |
 | `fixtures/kcm_curve_v1.bin` | 17269 | A curve build compiled from its builder's published source with the builder's pinned compiler. Checkable by compiling that source, not by a chain reveal. |
 | `fixtures/kcm_curve_v1_variant.bin` | 17269 | The same curve source compiled with different arguments, to find which pushes vary. |

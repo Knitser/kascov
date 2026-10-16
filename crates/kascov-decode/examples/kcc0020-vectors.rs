@@ -1,14 +1,22 @@
-//! Print every KCC-0020 vector this crate derives from the merged draft
-//! (kaspanet/kccs at ea5176aa), for publication and for cross-checking by
-//! other implementations:
+//! Print kascov's own KCC-20 vectors, derived from the merged Draft
+//! (kaspanet/kccs at ea5176aa), for cross-checking by other
+//! implementations:
 //!
 //!   cargo run -p kascov-decode --example kcc0020-vectors
+//!
+//! These are Draft-era vectors, not the Last Call ones: the section numbers
+//! are the Draft's, and the hash-chain borrow is the Draft's preimage rule,
+//! which Last Call replaced with a keyed link (#18). The official vectors
+//! at 1516a6c are in tests/fixtures/kccs/, run by tests/kcc20_vectors.rs.
 
 use kascov_decode::kcc0020::{self, State, Template, TransferArgs};
 use kascov_decode::kcc1;
 
 fn main() {
-    println!("KCC-0020 derived vectors — spec commit {}", kcc0020::SPEC_COMMIT);
+    println!(
+        "kascov's KCC-20 vectors, derived from the merged Draft (kccs {}); not the Last Call vectors",
+        kcc0020::DRAFT_SPEC_COMMIT
+    );
     println!();
     println!("dispatch tags (KCC-1 §6.1, BLAKE3):");
     println!("  {} = {}", kcc0020::TRANSFER_SIGNATURE, hex::encode(kcc0020::transfer_tag()));
@@ -41,7 +49,7 @@ fn main() {
 
     let preimage = [0x5a; 32];
     println!();
-    println!("hash-chain borrow (§5): guard = Hash(preimage), BLAKE3:");
+    println!("hash-chain borrow (§5), the Draft's preimage rule that #18 replaced: guard = Hash(preimage), BLAKE3:");
     println!("  preimage = {}", hex::encode(preimage));
     println!("  guard    = {}", hex::encode(kcc1::hash(&preimage)));
 }
