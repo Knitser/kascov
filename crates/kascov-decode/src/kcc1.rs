@@ -1,7 +1,8 @@
 //! KCC-0001 conformance primitives — byte layouts, the Value ABI and hash
 //! derivations from "Covenant Concepts, Byte Layouts, and ABI" (kaspanet/kccs
-//! kcc-0001.md), tracking the Last Call text at commit 1516a6c. Section
-//! numbers in doc comments refer to that text. The Draft kascov first
+//! kcc-0001.md), tracking the Final text (Final at kccs 1ed87ae, the text
+//! unchanged since 1516a6c). Section numbers in doc comments refer to that
+//! text. The Draft kascov first
 //! followed (ea5176aa) numbered the same rules differently (its §5.x Value
 //! ABI is §3.4.x here, §6.1 is §3.5.1, §7 is §3.6, §8.x is §3.7.x, §10.1 is
 //! §3.9.1, §11 is §6), and no encoding or hash changed between the two, so

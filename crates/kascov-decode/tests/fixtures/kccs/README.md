@@ -1,8 +1,10 @@
 # Official KCC conformance vectors
 
-Copied unmodified from kaspanet/kccs at 1516a6c (Oct 14 2026): KCC-1 and
-KCC-2 in Last Call, KCC-20 in Last Call, KCC-23 Draft. Refresh by copying
-the `vectors/` folders again; the test runners read these files as they are.
+Copied unmodified from kaspanet/kccs at 1516a6c (Oct 14 2026), and
+byte-identical at 1ed87ae (Oct 21 2026), where KCC-1, KCC-2 and KCC-20 went
+Final with their text unchanged and KCC-23 stayed a Draft. Refresh by
+copying the `vectors/` folders again; the test runners read these files as
+they are.
 
 `kcc-0020/pearce-pr20-vectors.json` is not part of the official set. It is
 Shawn Pearce's first cut of KCC-20 conformance vectors, copied unmodified

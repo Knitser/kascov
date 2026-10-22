@@ -727,6 +727,34 @@ pub fn observed_skeletons() -> Vec<Skeleton> {
         &[fixture!("kr_lpamm_18060_a"), fixture!("kr_lpamm_18060_b")],
         &["curve_denominator", "graduation_cap", "token_covenant_id"],
     ));
+    // The SilverScript 1.0 rebuild of the same LP_AMM (41,918 B, 2,237
+    // pushes): every mainnet launch since 2026-10-21 runs it, and so does the
+    // newest testnet-10 compile. Its push 9 is the network's own treasury spk
+    // (kaspa:qqgaj6tk… on mainnet, kaspatest:qzqml8ls… on testnet-10), so each
+    // network gets its own pair and the recipient stays a constant of each:
+    // a reveal paying anyone else is not named. Each network has one
+    // mid-curve and one genesis state of two launches. Mainnet adds THEN's
+    // graduated pool state (2026-10-22), so its phase push is a labelled
+    // slot and a graduated mainnet reveal is named like a bonding one. No
+    // v1 market on testnet-10 has graduated, so there the phase push is 0
+    // in every reveal and folds into a constant: a graduated testnet-10
+    // reveal is still matched and priced by the market matcher ("KaspaRocket
+    // lp-amm v1") but carries no family name until a graduated testnet-10
+    // reveal exists to derive from.
+    add(Skeleton::derive_observed(
+        "KaspaRocket · lp-amm",
+        &[
+            fixture!("kasparocket_lp_amm_v1_mainnet_a"),
+            fixture!("kasparocket_lp_amm_v1_mainnet_b"),
+            fixture!("kasparocket_lp_amm_v1_mainnet_c"),
+        ],
+        &["phase", "tokens_sold", "vault_tokens", "vault_kas", "token_covenant_id"],
+    ));
+    add(Skeleton::derive_observed(
+        "KaspaRocket · lp-amm",
+        &[fixture!("kasparocket_lp_amm_v1_tn10_a"), fixture!("kasparocket_lp_amm_v1_tn10_b")],
+        &["tokens_sold", "vault_tokens", "vault_kas", "token_covenant_id"],
+    ));
     add(Skeleton::derive_observed(
         "KaspaRocket · order-escrow",
         &[fixture!("kr_order_escrow_65541_a"), fixture!("kr_order_escrow_65541_b")],
@@ -1453,6 +1481,11 @@ mod kaspacom_tn10_tests {
             ("KaspaRocket · lp-amm", fixture!("kr_lpamm_22861_a")),
             ("KaspaRocket · lp-amm", fixture!("kr_lpamm_18062_a")),
             ("KaspaRocket · lp-amm", fixture!("kr_lpamm_18060_a")),
+            ("KaspaRocket · lp-amm", fixture!("kasparocket_lp_amm_v1_mainnet_a")),
+            ("KaspaRocket · lp-amm", fixture!("kasparocket_lp_amm_v1_mainnet_b")),
+            ("KaspaRocket · lp-amm", fixture!("kasparocket_lp_amm_v1_mainnet_c")),
+            ("KaspaRocket · lp-amm", fixture!("kasparocket_lp_amm_v1_tn10_a")),
+            ("KaspaRocket · lp-amm", fixture!("kasparocket_lp_amm_v1_tn10_b")),
             ("KaspaRocket · order-escrow", fixture!("kr_order_escrow_65541_a")),
             ("KaspaRocket · order-escrow", fixture!("kr_order_escrow_43641_a")),
             ("KaspaKaha · pool", fixture!("kaha_pool_102564_a")),
@@ -1613,7 +1646,7 @@ mod venue_tn10_tests {
             ("Zealous · liquidity position", 3),
             ("Zealous · factory", 3),
             ("Zealous · token cell", 5),
-            ("KaspaRocket · lp-amm", 3),
+            ("KaspaRocket · lp-amm", 5),
             ("KaspaRocket · order-escrow", 2),
             ("KaspaKaha · pool", 10),
             ("KaspaCom · token", 2),
@@ -1634,6 +1667,61 @@ mod venue_tn10_tests {
         }
     }
 
+    /// KaspaRocket's v1 LP_AMM is named only while it pays a KaspaRocket
+    /// treasury: the same bytes with any other fee recipient stay unnamed,
+    /// on either network's pair.
+    #[test]
+    fn the_v1_lp_amm_is_named_only_while_it_pays_a_kasparocket_treasury() {
+        let reg = Registry::default();
+        for (bytes, key) in [
+            (fixture!("kasparocket_lp_amm_v1_mainnet_a"), "11d969764b5fc2f687d50acb3c9faeb68975ff7a1a1e0e454b81377890417c6e"),
+            (fixture!("kasparocket_lp_amm_v1_mainnet_c"), "11d969764b5fc2f687d50acb3c9faeb68975ff7a1a1e0e454b81377890417c6e"),
+            (fixture!("kasparocket_lp_amm_v1_tn10_a"), "81bf9ff002199e36f268da33ab4917d6041dc27a9b93d531e086d0bce782efcc"),
+        ] {
+            assert_eq!(reg.decode(0, bytes).template, Some("KaspaRocket · lp-amm"));
+            let mut spk = vec![0x00, 0x00, 0x20];
+            spk.extend(hex::decode(key).unwrap());
+            spk.push(0xac);
+            let at = bytes
+                .windows(spk.len())
+                .position(|w| w == spk.as_slice())
+                .expect("the treasury spk sits in the state block");
+            let mut stranger = bytes.to_vec();
+            stranger[at + 3..at + 35].copy_from_slice(&[0x3a; 32]);
+            assert_ne!(reg.decode(0, &stranger).template, Some("KaspaRocket · lp-amm"));
+        }
+    }
+
+    /// A graduated mainnet v1 reveal takes the builder's name like a bonding
+    /// one: THEN's pool state (95459a9a…:1, revealed by b673560e…) decodes
+    /// with phase 1 and its frozen 650,000,000 sold, ROCKET's mid-curve
+    /// state with phase 0. On testnet-10, where no v1 market has graduated,
+    /// the phase stays a constant of the pair, so the graduated bytes moved
+    /// onto the testnet treasury are not named there.
+    #[test]
+    fn a_graduated_mainnet_v1_reveal_is_named_with_its_phase() {
+        let reg = Registry::default();
+        let field = |d: &crate::Decoded, name: &str| {
+            d.fields.iter().find(|f| f.name == name).map(|f| f.value.clone())
+        };
+        let then = reg.decode(0, fixture!("kasparocket_lp_amm_v1_mainnet_c"));
+        assert_eq!(then.template, Some("KaspaRocket · lp-amm"));
+        assert_eq!(field(&then, "phase"), Some(1u64.to_le_bytes().to_vec()));
+        assert_eq!(field(&then, "tokens_sold"), Some(650_000_000u64.to_le_bytes().to_vec()));
+        let rocket = reg.decode(0, fixture!("kasparocket_lp_amm_v1_mainnet_a"));
+        assert_eq!(field(&rocket, "phase"), Some(0u64.to_le_bytes().to_vec()));
+        let tn10 = reg.decode(0, fixture!("kasparocket_lp_amm_v1_tn10_a"));
+        assert_eq!(tn10.template, Some("KaspaRocket · lp-amm"));
+        assert_eq!(field(&tn10, "phase"), None, "a constant of the testnet-10 pair");
+        // THEN's graduated bytes paying the testnet treasury instead
+        let main_key = hex::decode("11d969764b5fc2f687d50acb3c9faeb68975ff7a1a1e0e454b81377890417c6e").unwrap();
+        let tn10_key = hex::decode("81bf9ff002199e36f268da33ab4917d6041dc27a9b93d531e086d0bce782efcc").unwrap();
+        let mut moved = fixture!("kasparocket_lp_amm_v1_mainnet_c").to_vec();
+        let at = moved.windows(32).position(|w| w == main_key.as_slice()).unwrap();
+        moved[at..at + 32].copy_from_slice(&tn10_key);
+        assert_ne!(reg.decode(0, &moved).template, Some("KaspaRocket · lp-amm"));
+    }
+
     /// The two-launch pairs disagree on every labelled field, so no real
     /// argument folded into a constant (the 421-byte slot-mint lesson).
     #[test]
@@ -1646,6 +1734,11 @@ mod venue_tn10_tests {
             ("Zealous · token cell", fixture!("zealous_token_1811_a"), fixture!("zealous_token_1811_b")),
             ("KaspaRocket · lp-amm", fixture!("kr_lpamm_22861_a"), fixture!("kr_lpamm_22861_b")),
             ("KaspaRocket · lp-amm", fixture!("kr_lpamm_18062_a"), fixture!("kr_lpamm_18062_b")),
+            // mainnet's v1 triple: the bonding and the graduated reveal
+            // disagree on every field, the phase included
+            ("KaspaRocket · lp-amm", fixture!("kasparocket_lp_amm_v1_mainnet_a"), fixture!("kasparocket_lp_amm_v1_mainnet_c")),
+            ("KaspaRocket · lp-amm", fixture!("kasparocket_lp_amm_v1_mainnet_b"), fixture!("kasparocket_lp_amm_v1_mainnet_c")),
+            ("KaspaRocket · lp-amm", fixture!("kasparocket_lp_amm_v1_tn10_a"), fixture!("kasparocket_lp_amm_v1_tn10_b")),
             ("KaspaRocket · order-escrow", fixture!("kr_order_escrow_65541_a"), fixture!("kr_order_escrow_65541_b")),
             ("KaspaKaha · pool", fixture!("kaha_pool_102564_a"), fixture!("kaha_pool_102564_b")),
             ("KaspaCom · token", fixture!("kcom_token_2671_a"), fixture!("kcom_token_2671_b")),

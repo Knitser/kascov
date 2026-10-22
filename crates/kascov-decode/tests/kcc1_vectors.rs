@@ -1,4 +1,5 @@
-//! The official KCC-1 conformance vectors (kaspanet/kccs 1516a6c,
+//! The official KCC-1 conformance vectors (kaspanet/kccs 1ed87ae, Final,
+//! the file unchanged since 1516a6c,
 //! kcc-0001/vectors/conformance.json, vendored unmodified), every one run
 //! through `kcc1`'s own functions. The glue below only turns the file's JSON
 //! into `kcc1` types and values; each operation a vector names (encode,
@@ -545,7 +546,7 @@ fn every_kcc1_conformance_vector_passes_through_kcc1() {
         run.results.len()
     );
     assert!(failed.is_empty(), "{} failed:\n{}", failed.len(), failed.join("\n"));
-    // 103 is the file at 1516a6c; any other count means the vendored file
+    // 103 is the file at 1516a6c and 1ed87ae; any other count means the vendored file
     // changed or a group went unread
     assert_eq!(run.results.len(), 103);
 }

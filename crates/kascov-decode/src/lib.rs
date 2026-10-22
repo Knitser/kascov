@@ -37,7 +37,7 @@
 //!   template hash that names their build.
 //! - [`kcc20`] reads the gist-era 46-byte KCC20 token cells that KRON,
 //!   KaspaCom and KaspaKaha deploy; [`kcc0020`] reads the spec KCC-20 cells,
-//!   built to the Draft or the Last Call text, and checks their transfers
+//!   built to the Draft or the Final text, and checks their transfers
 //!   and issues against each build's pin. [`kcc1`] holds the KCC-1 byte
 //!   layouts and hashes the spec cells build on, [`kcc2`] the KCC-2
 //!   authority schemes that say who may spend, and [`kcc23`] reads KCC-23
@@ -1480,6 +1480,9 @@ mod tests {
                 "Zealous · token cell",
                 "Zealous · token cell",
                 "KaspaRocket · lp-amm",
+                "KaspaRocket · lp-amm",
+                "KaspaRocket · lp-amm",
+                // the v1 build, one pair per network (2026-10-22)
                 "KaspaRocket · lp-amm",
                 "KaspaRocket · lp-amm",
                 "KaspaRocket · order-escrow",

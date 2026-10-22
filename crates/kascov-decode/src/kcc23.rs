@@ -2,7 +2,8 @@
 //! deployer binds to a covenant through a preparation transaction.
 //!
 //! Follows "MJ: Metadata JSON" (kaspanet/kccs kcc-0023.md, Draft, merged at
-//! 1516a6c). Section numbers in doc comments refer to that text. The
+//! 1516a6c and unchanged at 1ed87ae, where KCC-1, KCC-2 and KCC-20 went
+//! Final and KCC-23 stayed a Draft). Section numbers in doc comments refer to that text. The
 //! reference crate (kcc-0023/implementation) is mirrored step for step, with
 //! one deliberate difference: the declaration is read by the I-JSON rules of
 //! the §3.1 TEXT, which the reference `Codec` does not enforce. Where the two

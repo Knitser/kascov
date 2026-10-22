@@ -4,17 +4,18 @@
 //!
 //!   cargo run -p kascov-decode --example kcc0020-vectors
 //!
-//! These are Draft-era vectors, not the Last Call ones: the section numbers
-//! are the Draft's, and the hash-chain borrow is the Draft's preimage rule,
-//! which Last Call replaced with a keyed link (#18). The official vectors
-//! at 1516a6c are in tests/fixtures/kccs/, run by tests/kcc20_vectors.rs.
+//! These are Draft-era vectors, not the official ones of the Final text: the
+//! section numbers are the Draft's, and the hash-chain borrow is the Draft's
+//! preimage rule, which Last Call replaced with a keyed link (#18). The
+//! official vectors (kccs 1ed87ae, Final, unchanged since 1516a6c) are in
+//! tests/fixtures/kccs/, run by tests/kcc20_vectors.rs.
 
 use kascov_decode::kcc0020::{self, State, Template, TransferArgs};
 use kascov_decode::kcc1;
 
 fn main() {
     println!(
-        "kascov's KCC-20 vectors, derived from the merged Draft (kccs {}); not the Last Call vectors",
+        "kascov's KCC-20 vectors, derived from the merged Draft (kccs {}); not the official vectors of the Final text",
         kcc0020::DRAFT_SPEC_COMMIT
     );
     println!();

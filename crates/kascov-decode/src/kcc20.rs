@@ -1074,7 +1074,8 @@ mod cell_family_tests {
     #[test]
     fn cell_template_names_carry_every_spec_label_once() {
         let names = cell_template_names();
-        assert!(names.contains(&crate::kcc0020::SPEC_TOKEN_TEMPLATE));
+        assert!(names.contains(&crate::kcc0020::REVIEWED_BUILD_TEMPLATE));
+        assert!(!names.contains(&crate::kcc0020::SPEC_TOKEN_TEMPLATE), "a token-level name is never a stamp");
         assert!(names.contains(&"Zealous · token"));
         for pin in crate::kcc0020::pins() {
             assert!(names.contains(&pin.family_label()), "{} is missing", pin.family_label());

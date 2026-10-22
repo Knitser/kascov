@@ -1,29 +1,37 @@
 //! KCC-20 conformance primitives — the fungible token convention
-//! (kaspanet/kccs kcc-0020.md, tracking the Last Call text at 1516a6c),
-//! byte layouts and transition rules.
+//! (kaspanet/kccs kcc-0020.md, tracking the Final text: Final at kccs
+//! 1ed87ae, its text unchanged since 1516a6c), byte layouts and transition
+//! rules.
 //!
 //! Everything here is verifiable from bytes plus one declared input, a pin
 //! (kascov's committed description of a program, keyed by its KCC-1 template
 //! hash). Recognising a shape is not proving a state, and nothing here
 //! publishes a balance.
 //!
-//! The rules moved between the merged Draft (ea5176aa) and Last Call: the
-//! hash-chain borrow commits to a one-time key (#18), a negative threshold
-//! behaves as zero (#31), P2PKH owners hash unkeyed (KCC-2 #30), and every
-//! input and output of a standard transfer shares one extension commitment
-//! (#16). A program keeps the rules it was compiled with, so each pin states
-//! which ones its bytes check ([`Rules`]); a pin that says nothing gets the
-//! Last Call rules.
+//! The rules moved between the merged Draft (ea5176aa) and Last Call, whose
+//! text went Final unchanged: the hash-chain borrow commits to a one-time
+//! key (#18), a negative threshold behaves as zero (#31), P2PKH owners hash
+//! unkeyed (KCC-2 #30), and every input and output of a standard transfer
+//! shares one extension commitment (#16). A program keeps the rules it was
+//! compiled with, so each pin states which ones its bytes check ([`Rules`]);
+//! a pin that says nothing gets the Final rules.
 //!
-//! Six pinned programs carry this layout on chain. Five were
+//! Seven pinned programs carry this layout on chain. Five were
 //! compiled against the Draft: kascov's own reduced vector and four
 //! generations of ZealousSwap's token cell, each read and exercised on the
-//! engine before it was pinned, and none of them is conformant to the Last
-//! Call text ([`Pin::conformant`]). The sixth is the KCC20 actor of the
-//! official reference app (argent-lang/kcc20-reference c8a0871), pinned from
-//! its published source and artifact rather than from chain bytes. Its
-//! template is now on mainnet and testnet-10, and its pin stays unreviewed until the
-//! bytes-to-chain leg and an engine ladder are done. Every other deployed
+//! engine before it was pinned, and none of them is conformant to the Final
+//! text ([`Pin::conformant`]). The sixth is the KCC20 actor of the
+//! official reference app (argent-lang/kcc20-reference c8a0871), read from
+//! its published artifact, then reviewed like the others: its fixtures are
+//! leader reveals fetched from mainnet and testnet-10, every arm was read
+//! instruction by instruction, and the real engine exercised every rule
+//! with each check attributed by ablation (kascov-labkit's
+//! `kcc20_reference`). The seventh is KaspaRocket's token program
+//! (ff3ae732): that actor with its delegate and output bounds raised to 9
+//! and 10, aligned against the reference's bytes and run through the same
+//! ladder at the new bounds (`kcc20_kasparocket`). Its publisher released no
+//! program artifact, so kascov gives that build no conformance verdict
+//! either way ([`PinArtifact`]). Every other deployed
 //! token (KRON, KaspaCom, KaspaKaha) uses the gist-era 46-byte state that
 //! `kcc20.rs` reads; the spec state is six fields, 112 bytes encoded, with
 //! different scheme bytes. No shipped legacy build carries a
@@ -46,23 +54,46 @@ use serde::Deserialize;
 use std::fmt;
 use std::sync::OnceLock;
 
-/// The kccs commit whose text this module tracks: KCC-20 in Last Call. A
-/// pin described against it can be judged conformant ([`Pin::conformant`]);
-/// a spec change re-derives everything, and fixtures are regenerated, never
+/// The kccs commit whose text this module tracks: KCC-20 Final (1ed87ae,
+/// 2026-10-21). Its text is unchanged since the Last Call commit 1516a6c,
+/// which this constant named before: the diff between the two is the status
+/// lines alone, and the vendored vectors are byte-identical at both. A pin
+/// described against it can be judged conformant ([`Pin::conformant`]); a
+/// spec change re-derives everything, and fixtures are regenerated, never
 /// patched.
-pub const SPEC_COMMIT: &str = "1516a6c";
+pub const SPEC_COMMIT: &str = "1ed87ae";
 
 /// The merged Draft the first five pins were reviewed against. Its rules
 /// stay readable per pin ([`Rules`]), because the programs compiled against
 /// it check them on chain for good.
 pub const DRAFT_SPEC_COMMIT: &str = "ea5176aa";
 
-/// The template name a pinned build without a family of its own is stamped
-/// with once kascov judges it conformant to [`SPEC_COMMIT`], everywhere a
-/// legacy build says "KCC20 token". A pin that declares a `family` stamps
-/// that instead (see [`Pin::family_label`]); [`is_spec_template`] recognises
-/// every label.
+/// The name a TOKEN is shown under when its build is a reviewed pin that
+/// departs from no rule of the Final text ([`REVIEWED_BUILD_TEMPLATE`]) and the
+/// token itself is verified: its whole history replayed under that build.
+/// A token-level name, never stamped on a reveal: a cell names a build, and
+/// a build being reviewed says nothing about whether one token's genesis
+/// and issues are proven. The accounting layer, which knows the token's
+/// verdict, picks it.
 pub const SPEC_TOKEN_TEMPLATE: &str = "KCC-20 token";
+
+/// The template name a pinned build without a family of its own is stamped
+/// with once kascov has reviewed it against [`SPEC_COMMIT`]: its bytes were
+/// reviewed and no declared rule departs. That is a conformance verdict
+/// ([`Pin::conformant`]) unless the build's program artifact is unpublished,
+/// which leaves the verdict open without making the build any less reviewed
+/// (see [`PinArtifact`]). It names the build, so every cell
+/// of it carries it whatever its token's standing; a token is shown as a
+/// [`SPEC_TOKEN_TEMPLATE`] only once it is verified. A pin that declares a
+/// `family` stamps that instead (see [`Pin::family_label`]);
+/// [`is_spec_template`] recognises every label.
+pub const REVIEWED_BUILD_TEMPLATE: &str = "reviewed KCC-20 build";
+
+/// The name a token of a [`REVIEWED_BUILD_TEMPLATE`] build is shown under
+/// while kascov has not proven the token itself (its genesis or an issue it
+/// cannot read): the build is reviewed, the token is not a KCC-20 token in
+/// kascov's words yet. Token-level, like [`SPEC_TOKEN_TEMPLATE`].
+pub const UNPROVEN_TOKEN_TEMPLATE: &str = "reviewed KCC-20 build, this token is not proven yet";
 
 /// The name for a build described against [`SPEC_COMMIT`] that kascov has
 /// not judged conformant (an unreviewed pin, say): it carries the state
@@ -509,11 +540,13 @@ pub enum HashChainRule {
     Preimage,
 }
 
-/// The rules a pinned program checks wherever the Draft and the Last Call
-/// text differ. The default is the Last Call text, so a pin that declares
-/// nothing is read by the current rules, never by a retired one. Each rule is
-/// the pin's own, never derived from [`SPEC_COMMIT`]: moving that constant
-/// to the Final text must not change what an existing build is held to.
+/// The rules a pinned program checks wherever the Draft and the Final text
+/// differ. The default is the Final text (the Last Call text, unchanged), so
+/// a pin that declares nothing is read by the current rules, never by a
+/// retired one. Each rule is the pin's own, never derived from
+/// [`SPEC_COMMIT`]: moving that constant, as it moved from the Last Call
+/// commit to the Final one, must not change what an existing build is held
+/// to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rules {
@@ -868,7 +901,7 @@ pub struct FamilyOutput {
 
 /// The bounds, scheme sets and rules a transition is judged against — pin
 /// knowledge, defaulting to the spec's default configuration (§3) under the
-/// Last Call rules.
+/// Final rules.
 #[derive(Clone, Debug)]
 pub struct Bounds {
     pub max_token_inputs: usize,
@@ -1246,6 +1279,20 @@ pub struct PinEntrypoint {
     pub opening_arg: Option<usize>,
 }
 
+/// What a pin records about its build's published program artifact.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PinArtifact {
+    /// The publisher released no program artifact (KaspaRocket's ff3ae732:
+    /// its repository holds the .sil source and a README that states the
+    /// limits in prose). The pin is then kascov's own description of the
+    /// build, read from bytes, and kascov cannot check what KCC-20 asks the
+    /// artifact to say, so [`Pin::conformant`] gives no verdict either way.
+    /// It is not a departure: [`Pin::nonconformities`] lists nothing for it,
+    /// and the build keeps its reviewed standing.
+    Unpublished,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct PinReview {
     /// "reviewed" | "unreviewed" — only a reviewed pin can carry a token to
@@ -1254,12 +1301,15 @@ pub struct PinReview {
     /// Fixture basenames under fixtures/kcc0020/ whose reveals must
     /// recompute the pin's template hash.
     pub fixtures: Vec<String>,
-    /// True when both fixtures are chain reveals of the one launch the
-    /// chain carries of this build, so their extension commitments cannot
-    /// differ. The fixture test then holds the pair to the other state
-    /// fields and the pin's note must say how the window's end is proven
-    /// instead (the 2,641 B Zealous generation: from the program's own
-    /// length and suffix-offset constants).
+    /// True when the chain offers no two cells of this build that differ in
+    /// class, so the fixture pair cannot show the extension commitment
+    /// varying: either the chain carries one launch of the build (the
+    /// 2,641 B Zealous generation) or every cell of it on chain carries the
+    /// same class (KaspaRocket's ff3ae732: about a hundred launches, every
+    /// cell all-zero). The fixture test then holds the pair to the other
+    /// state fields, and the pin's note must say which of the two holds and
+    /// how the window's end is proven instead (from the program's own length
+    /// and suffix-offset constants).
     #[serde(default)]
     pub fixtures_share_class: bool,
     pub note: String,
@@ -1292,6 +1342,12 @@ pub struct IssuerFields {
     /// The most one issue may hand out (mint role).
     #[serde(default)]
     pub per_issue_limit: Option<usize>,
+    /// The issuer's own template hash, which the reference app keeps in its
+    /// window for its reclaim entries to name a partner by. A genesis rebuild
+    /// ([`PinIssuer::seed_program`]) sets it to the issuer's real hash, so a
+    /// seed that planted any other value is never rebuilt.
+    #[serde(default)]
+    pub self_template: Option<usize>,
 }
 
 /// An issuer actor inside the token's covenant family: a separate program,
@@ -1352,7 +1408,7 @@ pub struct Pin {
     pub max_token_inputs: usize,
     pub max_token_outputs: usize,
     pub borrow_schemes: Vec<u8>,
-    /// The Draft-versus-Last-Call rules the program checks.
+    /// The Draft-versus-Final rules the program checks.
     #[serde(default)]
     pub rules: Rules,
     pub extension: PinExtension,
@@ -1360,6 +1416,16 @@ pub struct Pin {
     /// Issuer actors sharing the token's covenant family.
     #[serde(default)]
     pub issuers: Vec<PinIssuer>,
+    /// Which never-spent outputs of a token's genesis the derivation may
+    /// prove by rebuilding this build's reviewed programs; absent, none.
+    #[serde(default)]
+    pub genesis_rebuild: Option<GenesisRebuildDecl>,
+    /// Whether the build's publisher released the program artifact KCC-20
+    /// asks of every covenant (§3; §2 has it describe the maximum token
+    /// input and output counts). Absent: the pin says nothing against it
+    /// (the reference app publishes its artifact.json). See [`PinArtifact`].
+    #[serde(default)]
+    pub artifact: Option<PinArtifact>,
     /// What the program's own in-script templateHash builtin computes:
     /// "blake2b" for builds of the michaelsutton fork at d57e5df, "blake3"
     /// for silverscript v1.0.0 (3ed9733) and argentc builds, which store the
@@ -1398,6 +1464,26 @@ impl Pin {
         Template::cut(program, self.state.record_start())
     }
 
+    /// [`Pin::cut`] of a program of this very build: its canonical hash and,
+    /// where the pin declares one, its record-view hash reproduce the pin's,
+    /// as [`pinned_program_state`] requires of a reveal. `None` for any other
+    /// program, however its record decodes, so a template taken from it holds
+    /// this build's bytes outside the record and no other build's.
+    pub fn own_cut(&self, program: &[u8]) -> Option<Template> {
+        if self.canonical_hash(program).map(hex::encode).as_deref() != Some(self.template_hash.as_str()) {
+            return None;
+        }
+        let template = self.cut(program)?;
+        if self
+            .view_template_hash
+            .as_deref()
+            .is_some_and(|want| hex::encode(template.hash()) != want)
+        {
+            return None;
+        }
+        Some(template)
+    }
+
     /// The entry this pin declares for a standard role, by role and types.
     pub fn standard_entry(&self, role: &str) -> Option<&PinEntrypoint> {
         let types = match role {
@@ -1408,7 +1494,7 @@ impl Pin {
         self.entrypoints.iter().find(|e| e.role == role && e.types == types)
     }
 
-    /// Every way this pin's program departs from the Last Call text
+    /// Every way this pin's program departs from the Final text
     /// ([`SPEC_COMMIT`]), read off the pin's own declarations, one reason
     /// per rule. Empty when every declared rule is the spec's. A reduced
     /// owner-scheme subset is a configuration the spec allows (§3) and is
@@ -1417,7 +1503,7 @@ impl Pin {
         let mut out = Vec::new();
         if self.spec_commit != SPEC_COMMIT {
             out.push(format!(
-                "built to a pre-Final draft (read by kccs {}), not the Last Call text ({SPEC_COMMIT})",
+                "built to a pre-Final draft (read by kccs {}), not the Final text ({SPEC_COMMIT})",
                 self.spec_commit
             ));
         }
@@ -1461,15 +1547,28 @@ impl Pin {
         out
     }
 
+    /// Whether the pin is reviewed (its declarations checked against the
+    /// bytes) and no declared rule departs from the Final text: what the
+    /// build's reviewed standing rests on.
+    fn reviewed_without_departure(&self) -> bool {
+        self.review.status == "reviewed" && self.nonconformities().is_empty()
+    }
+
     /// The conformance verdict the API's `standard` object serves:
-    /// `Some(false)` when any declared rule departs from the Last Call text,
+    /// `Some(false)` when any declared rule departs from the Final text,
     /// `Some(true)` when none does AND the pin is reviewed (the declarations
-    /// were checked against the bytes), `None` when none does but the pin is
-    /// unreviewed. A verdict about one program; it never speaks for kascov.
+    /// were checked against the bytes) AND its program artifact is not
+    /// recorded as unpublished, `None` otherwise: the pin is unreviewed, or
+    /// the build's publisher released no artifact, so what KCC-20 asks the
+    /// artifact to describe is not assessed (not assessed is not a
+    /// departure). A verdict about one program, the BUILD: it never speaks
+    /// for kascov, and never for a token of the build, whose own history is
+    /// judged by the derivation (a token of a conformant build can still be
+    /// unproven).
     pub fn conformant(&self) -> Option<bool> {
         if !self.nonconformities().is_empty() {
             Some(false)
-        } else if self.review.status == "reviewed" {
+        } else if self.reviewed_without_departure() && self.artifact != Some(PinArtifact::Unpublished) {
             Some(true)
         } else {
             None
@@ -1478,14 +1577,17 @@ impl Pin {
 
     /// What this build is, measured against the spec, in the words kascov
     /// shows for it: [`DRAFT_BUILD_TEMPLATE`] for a program compiled against
-    /// a Draft, [`SPEC_TOKEN_TEMPLATE`] once judged conformant,
-    /// [`LAYOUT_TEMPLATE`] otherwise. A venue family names the build; this
-    /// says where it stands, and is never replaced by it.
+    /// a Draft, [`REVIEWED_BUILD_TEMPLATE`] once reviewed with no declared
+    /// rule departing (conformant, or with its artifact unpublished and the
+    /// verdict open), [`LAYOUT_TEMPLATE`] otherwise. A venue family names the build; this
+    /// says where it stands, and is never replaced by it. It speaks for the
+    /// build only: what a token of it is shown as is decided per token, by
+    /// the accounting layer that knows the token's own verdict.
     pub fn standing(&self) -> &'static str {
         if self.spec_commit != SPEC_COMMIT {
             DRAFT_BUILD_TEMPLATE
-        } else if self.conformant() == Some(true) {
-            SPEC_TOKEN_TEMPLATE
+        } else if self.reviewed_without_departure() {
+            REVIEWED_BUILD_TEMPLATE
         } else {
             LAYOUT_TEMPLATE
         }
@@ -1515,8 +1617,10 @@ pub fn spec_template_names() -> Vec<&'static str> {
     names
 }
 
-/// The labels a pin's standing can stamp, and the one they replaced.
-const STANDING_LABELS: [&str; 4] = [SPEC_TOKEN_TEMPLATE, LAYOUT_TEMPLATE, DRAFT_BUILD_TEMPLATE, RETIRED_SPEC_TEMPLATE];
+/// The labels a pin's standing can stamp, and the one they replaced. The
+/// token-level names ([`SPEC_TOKEN_TEMPLATE`], [`UNPROVEN_TOKEN_TEMPLATE`])
+/// are not among them: no reveal is ever stamped with a token's standing.
+const STANDING_LABELS: [&str; 4] = [REVIEWED_BUILD_TEMPLATE, LAYOUT_TEMPLATE, DRAFT_BUILD_TEMPLATE, RETIRED_SPEC_TEMPLATE];
 
 /// Whether a stored template name means "a pinned KCC-20 build": any label
 /// [`spec_template_names`] lists. Callers that need to know a row is a spec
@@ -1538,6 +1642,7 @@ const PIN_SOURCES: &[(&str, &str)] = &[
     ("zealous-token-cell-3037", include_str!("../pins/kcc0020/58c24260.json")),
     ("zealous-token-cell-3223", include_str!("../pins/kcc0020/50ff50d8.json")),
     ("kcc20-reference", include_str!("../pins/kcc0020/9703112e.json")),
+    ("kasparocket-kcc20", include_str!("../pins/kcc0020/ff3ae732.json")),
 ];
 
 /// Every committed pin, parsed once. A pin that fails to parse is a build
@@ -1645,11 +1750,29 @@ fn fingerprint_of(pins: &[Pin]) -> String {
             window(&mut put, &issuer.state);
             put(issuer.state_types.as_bytes());
             let f = &issuer.fields;
-            for index in [Some(f.kcc20_template), Some(f.extension_commitment), f.remaining, f.per_issue_limit] {
+            for index in [
+                Some(f.kcc20_template),
+                Some(f.extension_commitment),
+                f.remaining,
+                f.per_issue_limit,
+                f.self_template,
+            ] {
                 // u64::MAX stands for an undeclared field: no real index
                 put(&index.map_or(u64::MAX, |i| i as u64).to_le_bytes());
             }
             entries(&mut put, &issuer.entrypoints);
+        }
+        // the genesis rebuild a pin declares: which seeds, and whether
+        // declared cells, each length-framed like every field above
+        match &pin.genesis_rebuild {
+            None => put(&[0]),
+            Some(decl) => {
+                put(&[1, u8::from(decl.declared_cells)]);
+                put(&(decl.seeds.len() as u64).to_le_bytes());
+                for seed in &decl.seeds {
+                    put(seed.as_bytes());
+                }
+            }
         }
     }
     hex::encode(&hasher.finalize().as_bytes()[..4])
@@ -1799,8 +1922,33 @@ impl PinIssuer {
         Some([&program[..self.state.start], window.as_slice(), &program[end..]].concat())
     }
 
-    fn issue_entry(&self) -> Option<&PinEntrypoint> {
+    /// The entry this issuer issues through: the one the pin declares with
+    /// the issue role and [`ISSUE_TYPES`] (`mint` or `create` in the
+    /// reference app).
+    pub fn issue_entry(&self) -> Option<&PinEntrypoint> {
         self.entrypoints.iter().find(|e| e.role == "issue" && e.types == ISSUE_TYPES)
+    }
+
+    /// The window's one `pubkey` field, found by its declared type rather
+    /// than by a pin index, so no pin declaration (and no pin fingerprint)
+    /// changes for it. Per the reference source it is the key the split and
+    /// reclaim entries use; this reads the field and nothing more, it does not
+    /// say what the bytecode enforces with it. `None` when the issuer
+    /// declares no such field, or more than one.
+    pub fn pubkey(&self, state: &IssuerState) -> Option<[u8; 32]> {
+        let types = self.types()?;
+        let mut at = types
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| matches!(t, kcc1::Type::PubKey))
+            .map(|(i, _)| i);
+        let (Some(i), None) = (at.next(), at.next()) else {
+            return None;
+        };
+        match state.values.get(i)? {
+            kcc1::Value::Bytes(b) => <[u8; 32]>::try_from(b.as_slice()).ok(),
+            _ => None,
+        }
     }
 }
 
@@ -1811,6 +1959,149 @@ pub fn pinned_issuer_state(program: &[u8]) -> Option<(&'static Pin, &'static Pin
             .iter()
             .find_map(|issuer| Some((pin, issuer, issuer.read_state(program)?)))
     })
+}
+
+// ── genesis rebuilds ─────────────────────────────────────────────────
+
+/// What a pin lets the token derivation prove of a genesis output no spend
+/// has revealed (pass 2c, "declared genesis"): such an output is proven when
+/// one of this build's reviewed programs, rebuilt with a state the genesis
+/// transaction itself determines, commits to it byte for byte, and exactly
+/// one candidate does. The derivation never fills a state in: a candidate
+/// that does not hash to the output proves nothing.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct GenesisRebuildDecl {
+    /// Issuers, by name, whose program a genesis output may be rebuilt as:
+    /// each a seed ([`IssuerRole::Seed`]) that declares `self_template` and
+    /// whose reviewed bytes this crate carries ([`PinIssuer::reviewed_halves`]).
+    #[serde(default)]
+    pub seeds: Vec<String>,
+    /// Whether a genesis output may be rebuilt as this build's token cell,
+    /// with an owner tuple and amount the genesis transaction declares.
+    #[serde(default)]
+    pub declared_cells: bool,
+}
+
+/// Reviewed issuer programs a genesis rebuild takes its bytes outside the
+/// window from, by issuer template hash. Each is the first fixture its pin's
+/// issuer names, a chain reveal (testnet-10 ec214f90..:1, revealed by
+/// 05060a38.. input 0); only its halves are used, and they must recompute
+/// the template hash, or the issuer is not rebuilt at all.
+const ISSUER_PROGRAMS: &[(&str, &[u8])] = &[(
+    "f79a3fccf6f87d7076662410a17e54d1531889d9b60f630f9fbb8465a384e62d",
+    include_bytes!("../fixtures/kcc0020/reference_token_seed_a.bin"),
+)];
+
+/// The most argument pushes a spend may carry before its program and still
+/// be read as declaring cells of a build ([`declares_build`]).
+pub const DECLARER_ARG_CAP: usize = 64;
+
+impl PinIssuer {
+    /// The reviewed program halves around this issuer's window: the bytes
+    /// before it and after it, from the program this crate carries for the
+    /// issuer's template hash. `None` unless those halves recompute
+    /// `template_hash` under this issuer's own window.
+    pub fn reviewed_halves(&self) -> Option<(&'static [u8], &'static [u8])> {
+        let (_, program) = ISSUER_PROGRAMS.iter().find(|(hash, _)| *hash == self.template_hash)?;
+        let end = self.state.start.checked_add(self.state.len)?;
+        let (prefix, suffix) = (program.get(..self.state.start)?, program.get(end..)?);
+        (hex::encode(kcc1::template_hash(prefix, suffix)) == self.template_hash).then_some((prefix, suffix))
+    }
+
+    /// The program of this seed with `owner` in its one `pubkey` field and
+    /// `class` as its extension commitment, its `kcc20_template` field set to
+    /// `pin`'s canonical hash and its `self_template` field to its own hash,
+    /// around the reviewed halves. `None` for an issuer that is no seed, has
+    /// no reviewed halves, does not declare `self_template`, or whose window
+    /// holds any field besides these four.
+    pub fn seed_program(&self, pin: &Pin, owner: &[u8; 32], class: &[u8; 32]) -> Option<Vec<u8>> {
+        if self.role != IssuerRole::Seed {
+            return None;
+        }
+        let (prefix, suffix) = self.reviewed_halves()?;
+        let types = self.types()?;
+        let mut keys = types.iter().enumerate().filter(|(_, t)| matches!(t, kcc1::Type::PubKey)).map(|(i, _)| i);
+        let (Some(key), None) = (keys.next(), keys.next()) else {
+            return None;
+        };
+        let f = &self.fields;
+        let assigned = [
+            (f.kcc20_template, hex::decode(&pin.template_hash).ok()?),
+            (f.self_template?, hex::decode(&self.template_hash).ok()?),
+            (key, owner.to_vec()),
+            (f.extension_commitment, class.to_vec()),
+        ];
+        let mut values: Vec<Option<kcc1::Value>> = vec![None; types.len()];
+        for (at, bytes) in assigned {
+            let slot = values.get_mut(at)?;
+            if slot.is_some() {
+                // two declarations name one field
+                return None;
+            }
+            *slot = Some(kcc1::Value::Bytes(bytes));
+        }
+        let fields: Vec<(kcc1::Type, kcc1::Value)> =
+            types.into_iter().zip(values).map(|(t, v)| Some((t, v?))).collect::<Option<_>>()?;
+        let window = kcc1::encode_state_values(&fields).ok()?;
+        (window.len() == self.state.len).then(|| [prefix, window.as_slice(), suffix].concat())
+    }
+}
+
+/// A spend of another covenant read as declaring cells of `pin`'s build:
+/// its signature script splits into minimal pushes (KCC-1 §3.4.2, the policy
+/// of every reveal parser here), the last one its program, at most
+/// [`DECLARER_ARG_CAP`] arguments before it, and two adjacent arguments, in
+/// order, are byte-equal to `template`'s halves around the pin's window: the
+/// halves an issue passes, which hash to the pin's canonical hash. Returns
+/// the arguments; `None` otherwise. What the program does with them is not
+/// read: the arguments only say that the spend names this build, so that an
+/// unrelated program is never searched for numbers.
+pub fn declares_build(sig_script: &[u8], pin: &Pin, template: &Template) -> Option<Vec<Vec<u8>>> {
+    let prefix = template.prefix.get(..pin.state.start)?;
+    let suffix = template.suffix.as_slice();
+    if hex::encode(kcc1::template_hash(prefix, suffix)) != pin.template_hash {
+        return None;
+    }
+    let mut args = kcc1::read_pushes_minimal(sig_script)?;
+    args.pop()?;
+    if args.len() > DECLARER_ARG_CAP {
+        return None;
+    }
+    args.windows(2).any(|pair| pair[0] == prefix && pair[1] == suffix).then_some(args)
+}
+
+/// A pushed payload read as a token amount: 1 to 8 bytes, little-endian,
+/// the last byte's sign bit clear (KCC-1 §3.4.3 reads a set one as a
+/// negative number, and no amount is negative).
+pub fn push_amount(payload: &[u8]) -> Option<i64> {
+    let (&last, _) = payload.split_last()?;
+    if payload.len() > 8 || last & 0x80 != 0 {
+        return None;
+    }
+    let mut bytes = [0u8; 8];
+    bytes[..payload.len()].copy_from_slice(payload);
+    i64::try_from(u64::from_le_bytes(bytes)).ok()
+}
+
+/// Every number of 1 to 8 bytes `script` pushes ([`push_amount`]), walked
+/// with the disassembler (non-push opcodes skipped), distinct and ascending.
+/// A truncated script contributes nothing. `None` past `cap` distinct
+/// numbers: the caller then searches none of them.
+pub fn pushed_amounts(script: &[u8], cap: usize) -> Option<Vec<i64>> {
+    let (instructions, truncated) = crate::disasm::disassemble(script);
+    let mut out = std::collections::BTreeSet::new();
+    if truncated {
+        return Some(Vec::new());
+    }
+    for data in instructions.iter().filter_map(|i| i.data.as_deref()) {
+        if let Some(amount) = push_amount(data) {
+            out.insert(amount);
+            if out.len() > cap {
+                return None;
+            }
+        }
+    }
+    Some(out.into_iter().collect())
 }
 
 /// What an issuer's mint or create declares: the recipient's state, and the
@@ -1864,6 +2155,10 @@ pub struct IssueVerdict {
     /// The issuer's continuation is its own program with the allowance
     /// reduced by the amount (mint) or unchanged (seed), at no less KAS.
     pub issuer_successor_proven: bool,
+    /// That continuation's program, rebuilt and hash-checked against the
+    /// output: `Some` exactly when `issuer_successor_proven`, so a reader can
+    /// serve the bytes a spender of the continuation must reveal.
+    pub issuer_successor_program: Option<Vec<u8>>,
     pub remaining_before: Option<i64>,
     pub remaining_after: Option<i64>,
     pub violations: Vec<String>,
@@ -1946,11 +2241,14 @@ pub fn check_issue(
         IssuerRole::Mint => state.remaining.and_then(|r| r.checked_sub(recipient.amount)),
         IssuerRole::Seed => state.remaining,
     };
-    let issuer_successor_proven = issuer_output.spk_version == 0
-        && issuer_output.kas == issuer_kas
-        && issuer
-            .successor_program(issuer_program, &state, recipient.amount)
-            .is_some_and(|program| kcc1::envelope_spk(&program) == issuer_output.spk);
+    let issuer_successor_program = issuer
+        .successor_program(issuer_program, &state, recipient.amount)
+        .filter(|program| {
+            issuer_output.spk_version == 0
+                && issuer_output.kas == issuer_kas
+                && kcc1::envelope_spk(program) == issuer_output.spk
+        });
+    let issuer_successor_proven = issuer_successor_program.is_some();
     if !issuer_successor_proven {
         violations.push(match issuer.role {
             IssuerRole::Mint => "the minter's continuation is not itself with the allowance reduced by the amount, at its KAS",
@@ -1964,6 +2262,7 @@ pub fn check_issue(
         recipient,
         recipient_proven,
         issuer_successor_proven,
+        issuer_successor_program,
         remaining_before: state.remaining,
         remaining_after,
         violations,
@@ -3021,6 +3320,8 @@ mod tests {
             "reference_public_mint_b" => include_bytes!("../fixtures/kcc0020/reference_public_mint_b.bin").to_vec(),
             "reference_token_seed_a" => SEED_A.to_vec(),
             "reference_token_seed_b" => include_bytes!("../fixtures/kcc0020/reference_token_seed_b.bin").to_vec(),
+            "kasparocket_kcc20_a" => KASPAROCKET_A.to_vec(),
+            "kasparocket_kcc20_b" => include_bytes!("../fixtures/kcc0020/kasparocket_kcc20_b.bin").to_vec(),
             other => panic!("a pin names fixture {other} that this test does not carry"),
         }
     }
@@ -3030,6 +3331,9 @@ mod tests {
     const SEED_A: &[u8] = include_bytes!("../fixtures/kcc0020/reference_token_seed_a.bin");
     const HASH_REFERENCE: &str = "9703112ee6e3555107cd168858992b77d3b74f655205b2b463b1f9ec2ec73cf7";
     const VIEW_REFERENCE: &str = "734850b0af0aeef49f009167bf9ddd238fd8c5cdbe214234f97181ac6f5cc498";
+    const KASPAROCKET_A: &[u8] = include_bytes!("../fixtures/kcc0020/kasparocket_kcc20_a.bin");
+    const HASH_KASPAROCKET: &str = "ff3ae732e3a2819bf9181f5aed6b1e9d0f7abea70a1dd655b8e777cbcbd2422b";
+    const VIEW_KASPAROCKET: &str = "3d689d6273b7631e69f672d5ca744cb266ae997b04974196439858675cc04fe1";
 
     fn pin_by(prefix: &str) -> &'static Pin {
         pins().iter().find(|p| p.template_hash.starts_with(prefix)).expect("pin committed")
@@ -3157,8 +3461,36 @@ mod tests {
                     assert_ne!(states[0].remaining, states[1].remaining);
                     assert_ne!(states[0].per_issue_limit, states[1].per_issue_limit);
                 }
+                // a declared self-template field carries the issuer's own
+                // hash on every chain fixture: the field a genesis rebuild sets
+                if let Some(own) = issuer.fields.self_template {
+                    for state in &states {
+                        assert_eq!(state.values[own], kcc1::Value::Bytes(hex::decode(&issuer.template_hash).unwrap()), "{}", issuer.name);
+                    }
+                }
+            }
+            // A pin's genesis rebuild names only seeds it declares, each with a
+            // self-template field and reviewed bytes this crate carries: a seed
+            // the rebuild could not build is a defect, never a silent no-op.
+            if let Some(decl) = &pin.genesis_rebuild {
+                for name in &decl.seeds {
+                    let issuer = pin
+                        .issuers
+                        .iter()
+                        .find(|i| &i.name == name)
+                        .unwrap_or_else(|| panic!("{name}: not an issuer of this pin"));
+                    assert_eq!(issuer.role, IssuerRole::Seed, "{name}");
+                    assert!(issuer.fields.self_template.is_some(), "{name}: a rebuilt seed declares self_template");
+                    assert!(issuer.reviewed_halves().is_some(), "{name}: a rebuilt seed has reviewed bytes");
+                    assert!(issuer.seed_program(pin, &[0x11; 32], &[0; 32]).is_some(), "{name}");
+                }
+                assert!(decl.declared_cells || !decl.seeds.is_empty(), "a declaration that rebuilds nothing");
+                assert_eq!(pin.review.status, "reviewed", "only a reviewed build's programs are rebuilt");
             }
         }
+        // only the reference build rebuilds genesis outputs today
+        let declaring: Vec<&str> = pins().iter().filter(|p| p.genesis_rebuild.is_some()).map(|p| &p.template_hash[..8]).collect();
+        assert_eq!(declaring, vec!["9703112e"]);
         // an unpinned program is never claimed, spec-shaped or not
         let mut foreign = vec![0x6b];
         foreign.extend_from_slice(&state(0x11).encode().unwrap());
@@ -3172,18 +3504,49 @@ mod tests {
             assert_eq!(pin_by(prefix).standing(), DRAFT_BUILD_TEMPLATE);
         }
         assert_eq!(pin_by("4abcc188").family_label(), DRAFT_BUILD_TEMPLATE);
-        assert_eq!(pin_by("9703112e").family_label(), LAYOUT_TEMPLATE, "unreviewed, so no token claim");
+        assert_eq!(pin_by("9703112e").review.status, "reviewed");
+        assert_eq!(pin_by("9703112e").family_label(), REVIEWED_BUILD_TEMPLATE, "reviewed, and no rule departs from the Final text");
+        // KaspaRocket's build: the reference actor at a 10/10 configuration
+        // the Final text allows. No family: the label names the build's
+        // standing, and the venue comes from a token's payload or market,
+        // never from the build (other deployers use it too)
+        assert_eq!(pin_by("ff3ae732").review.status, "reviewed");
+        assert_eq!(pin_by("ff3ae732").family, None);
+        assert_eq!(pin_by("ff3ae732").family_label(), REVIEWED_BUILD_TEMPLATE);
+        // its name, served on every coin of the build (verified token or
+        // not, KaspaRocket's or another deployer's), names the build and
+        // cites its source, the reference pin's way
+        assert_eq!(
+            pin_by("ff3ae732").name,
+            "KCC-20 reference actor at 10 token inputs / 10 outputs (La-Gauffre/KaspaRocket-Silverscript-Contract 86fe1e8e, kcc20.sil)"
+        );
+        // A pin's name is served as `argent_build.kcc20.name` on every coin
+        // of its build, whatever that coin's token has proven, so no pin may
+        // name a token standing ("KCC-20 token" is earned per token, on
+        // /token/{id}) or claim conformance for a third party's build.
+        for pin in pins() {
+            let lower = pin.name.to_lowercase();
+            for claim in ["kcc-20 token", "kcc20 token", "compliant", "conformant", "conforming"] {
+                assert!(!lower.contains(claim), "{}: the pin name says {claim:?}", pin.template_hash);
+            }
+        }
         assert_eq!(
             spec_template_names(),
-            vec![SPEC_TOKEN_TEMPLATE, LAYOUT_TEMPLATE, DRAFT_BUILD_TEMPLATE, RETIRED_SPEC_TEMPLATE, "Zealous · token"]
+            vec![REVIEWED_BUILD_TEMPLATE, LAYOUT_TEMPLATE, DRAFT_BUILD_TEMPLATE, RETIRED_SPEC_TEMPLATE, "Zealous · token"]
         );
+        // a reveal names a build, never a token's standing: the token-level
+        // names are no stamp, so no cell of an unproven token carries one
+        for token_level in [SPEC_TOKEN_TEMPLATE, UNPROVEN_TOKEN_TEMPLATE] {
+            assert!(!is_spec_template(token_level), "{token_level}");
+            assert!(pins().iter().all(|pin| pin.family_label() != token_level && pin.standing() != token_level));
+        }
         assert!(is_spec_template("Zealous · token"));
         assert!(is_spec_template(RETIRED_SPEC_TEMPLATE), "rows stamped before the Last Call labels still route");
         assert!(!is_spec_template("Zealous · token cell"), "the legacy 46-byte family is not a spec label");
         assert!(!is_spec_template(crate::kcc20::TOKEN_TEMPLATE));
         // the schema itself, including the optional fields
         let sample = r#"{
-            "spec_commit": "1516a6c",
+            "spec_commit": "1ed87ae",
             "template_hash": "2ed46a7edf5b168e67dba56998c58255235bebac436940a85115ca31d5c559f2",
             "name": "sample",
             "family": "Sample · token",
@@ -3203,9 +3566,10 @@ mod tests {
         let pin: Pin = serde_json::from_str(sample).unwrap();
         assert_eq!(pin.dispatch.kind, DispatchKind::SilvercSelector);
         assert_eq!(pin.bounds().max_token_inputs, 3);
-        assert_eq!(pin.rules, Rules::default(), "no rules declared: the Last Call ones");
+        assert_eq!(pin.rules, Rules::default(), "no rules declared: the Final ones");
         assert_eq!(pin.state.record_offset, 0);
         assert!(pin.issuers.is_empty() && pin.view_template_hash.is_none());
+        assert_eq!(pin.genesis_rebuild, None, "a pin rebuilds no genesis output unless it says so");
         assert_eq!(pin.family.as_deref(), Some("Sample · token"), "the family round-trips");
         assert_eq!(pin.family_label(), "Sample · token");
         // the field is optional: a pin without one stamps its standing
@@ -3233,7 +3597,20 @@ mod tests {
         assert_eq!(&REFERENCE_A[1..34], [&[0x20][..], &h(HASH_REFERENCE)].concat().as_slice());
         let (named, state) = pinned_program_state(REFERENCE_A).unwrap();
         assert_eq!(named.template_hash, HASH_REFERENCE);
-        assert_eq!((state.amount, state.owner_scheme, state.borrow_scheme), (1000, OWNER_P2PK_SCHNORR, 0x01));
+        // fixture A is the genesis cell of the first mainnet reference token
+        // (7d424a92..:0, revealed by 2a1ce335.. input 0): 2.1e15 base
+        // units, owned by a key, unborrowable, the all-zero class
+        assert_eq!((state.amount, state.owner_scheme, state.borrow_scheme), (2_100_000_000_000_000, OWNER_P2PK_SCHNORR, 0x00));
+        assert_eq!(state.extension_commitment, [0; 32]);
+        // fixture B (testnet-10 05060a38..:1, revealed by f13f6ce0.. input 0):
+        // a zero-amount p2sh-owned cell under a threshold-10 borrow, class 77545d3d
+        let (_, b) = pinned_program_state(&fixture_bytes("reference_kcc20_b")).unwrap();
+        assert_eq!((b.amount, b.owner_scheme, b.borrow_scheme, b.borrow_guard[0]), (0, OWNER_P2SH, 0x01, 10));
+        assert_eq!(hex::encode(&b.extension_commitment[..4]), "77545d3d");
+        // the two chain cells differ only inside the window
+        let other = fixture_bytes("reference_kcc20_b");
+        assert_eq!((REFERENCE_A.len(), other.len()), (4031, 4031));
+        assert_eq!((&REFERENCE_A[..2], &REFERENCE_A[146..]), (&other[..2], &other[146..]));
         // the 112-byte cut a Draft pin would make finds no record at offset 1
         assert!(Template::cut(REFERENCE_A, 1).is_none());
         // other bytes in the template field: canonical halves intact, view not
@@ -3246,6 +3623,197 @@ mod tests {
         let program = pin.cut(REFERENCE_A).unwrap().program(&next).unwrap();
         let (again, read) = pinned_program_state(&program).unwrap();
         assert_eq!((again.template_hash.as_str(), read), (HASH_REFERENCE, next));
+    }
+
+    /// KaspaRocket's token build (La-Gauffre/KaspaRocket-Silverscript-Contract
+    /// 86fe1e8e kcc20.sil) is the reference actor with its delegate and
+    /// output bounds raised to 9 and 10: the same window, record offset,
+    /// dispatch, schemes and rules, its own canonical hash and record view,
+    /// both of which must reproduce. Neither pin claims the other's bytes.
+    #[test]
+    fn the_kasparocket_build_is_the_reference_actor_at_ten_by_ten() {
+        let pin = pin_by("ff3ae732");
+        let reference = pin_by("9703112e");
+        let h32 = |s: &str| -> [u8; 32] { h(s).try_into().unwrap() };
+        assert_eq!((pin.template_hash.as_str(), pin.view_template_hash.as_deref()), (HASH_KASPAROCKET, Some(VIEW_KASPAROCKET)));
+        assert_eq!(pin_for(&h32(HASH_KASPAROCKET)).unwrap().template_hash, HASH_KASPAROCKET);
+        assert_eq!(pin_for(&h32(VIEW_KASPAROCKET)).unwrap().template_hash, HASH_KASPAROCKET, "the view is an alias");
+        // every declaration but the identity, the bounds and the issuers is
+        // the reference pin's
+        assert_eq!((pin.max_token_inputs, pin.max_token_outputs), (10, 10));
+        assert_eq!((reference.max_token_inputs, reference.max_token_outputs), (3, 3));
+        assert_eq!(pin.spec_commit, reference.spec_commit);
+        assert_eq!(pin.dispatch.kind, reference.dispatch.kind);
+        assert_eq!(
+            (&pin.dispatch.transfer, &pin.dispatch.transfer_delegator),
+            (&reference.dispatch.transfer, &reference.dispatch.transfer_delegator)
+        );
+        assert_eq!(
+            (pin.state.start, pin.state.len, pin.state.record_offset),
+            (reference.state.start, reference.state.len, reference.state.record_offset)
+        );
+        assert_eq!((&pin.owner_schemes, &pin.borrow_schemes), (&reference.owner_schemes, &reference.borrow_schemes));
+        assert_eq!(pin.rules, reference.rules);
+        assert_eq!(pin.extension.scheme, reference.extension.scheme);
+        assert_eq!(pin.in_script_template_hash_fn, reference.in_script_template_hash_fn);
+        let entries = |p: &Pin| -> Vec<(String, String, String, String)> {
+            p.entrypoints.iter().map(|e| (e.name.clone(), e.types.clone(), e.select.clone(), e.role.clone())).collect()
+        };
+        assert_eq!(entries(pin), entries(reference));
+        assert!(pin.issuers.is_empty(), "no issuer actor: a token's supply is what its genesis declares");
+        assert!(pin.nonconformities().is_empty(), "{:?}", pin.nonconformities());
+        // its publisher released no program artifact (KCC-20 §3), so the
+        // build gets no conformance verdict either way; the reference, whose
+        // artifact.json is published, keeps its true. Neither is a departure.
+        assert_eq!(pin.artifact, Some(PinArtifact::Unpublished));
+        assert_eq!(pin.conformant(), None, "not assessed: kascov cannot check an artifact nobody published");
+        assert_eq!(reference.artifact, None);
+        assert_eq!(reference.conformant(), Some(true));
+        assert_eq!(pin.standing(), REVIEWED_BUILD_TEMPLATE, "still a reviewed build: its verified tokens stay KCC-20 tokens");
+        // the template field holds the canonical hash itself
+        assert_eq!(&KASPAROCKET_A[1..34], [&[0x20][..], &h(HASH_KASPAROCKET)].concat().as_slice());
+        // fixture A is ROCKET's genesis cell on mainnet (71b6c6af..:0, revealed
+        // by 427214fd.. input 0): 1e9 owned by the deployer's key
+        let (named, a) = pinned_program_state(KASPAROCKET_A).unwrap();
+        assert_eq!(named.template_hash, HASH_KASPAROCKET);
+        assert_eq!((a.amount, a.owner_scheme, a.borrow_scheme), (1_000_000_000, OWNER_P2PK_SCHNORR, 0x00));
+        assert_eq!(hex::encode(&a.owner[..4]), "1094ce6c");
+        assert_eq!((a.borrow_guard, a.extension_commitment), ([0; 32], [0; 32]));
+        // fixture B (9f1be102..:2, leader of b5d073a6 input 1) is owned by
+        // ROCKET's market covenant
+        let other = fixture_bytes("kasparocket_kcc20_b");
+        let (_, b) = pinned_program_state(&other).unwrap();
+        assert_eq!((b.amount, b.owner_scheme), (633_030_484, OWNER_COVENANT_ID));
+        assert_eq!(hex::encode(b.owner), "a11ebeb468d494a75035cc2671d1b1e4d97e0b797fa3dad2f95075de27e1ea04");
+        // the two chain cells differ only inside the window
+        assert_eq!((KASPAROCKET_A.len(), other.len()), (11_458, 11_458));
+        assert_eq!((&KASPAROCKET_A[..2], &KASPAROCKET_A[146..]), (&other[..2], &other[146..]));
+        // the same window, other halves: neither pin claims the other's bytes
+        assert_ne!(hex::encode(reference.canonical_hash(KASPAROCKET_A).unwrap()), HASH_REFERENCE);
+        assert_ne!(hex::encode(pin.canonical_hash(REFERENCE_A).unwrap()), HASH_KASPAROCKET);
+        assert_eq!(pinned_program_state(REFERENCE_A).unwrap().0.template_hash, HASH_REFERENCE);
+        // fixtures_share_class: the window's end from the program's own bytes.
+        // Its own length (11,458) and minus its suffix (-11,312) are pushed
+        // once per output slot, the suffix length (11,312) twice; the
+        // reference pushes 4,031 and -3,885 once per slot, 3,885 twice
+        let count = |program: &[u8], needle: &[u8]| program.windows(needle.len()).filter(|w| *w == needle).count();
+        assert_eq!(KASPAROCKET_A.len() - pin.state.start - pin.state.len, 11_312);
+        assert_eq!(count(KASPAROCKET_A, &[0x02, 0xc2, 0x2c]), 10, "11,458 per output slot");
+        assert_eq!(count(KASPAROCKET_A, &[0x02, 0x30, 0xac]), 10, "-11,312 per output slot");
+        assert_eq!(count(KASPAROCKET_A, &[0x04, 0x30, 0x2c, 0x00, 0x00]), 2, "the suffix length");
+        assert_eq!(count(REFERENCE_A, &[0x02, 0xbf, 0x0f]), 3, "4,031 per output slot");
+        assert_eq!(count(REFERENCE_A, &[0x02, 0x2d, 0x8f]), 3, "-3,885 per output slot");
+        assert_eq!(count(REFERENCE_A, &[0x04, 0x2d, 0x0f, 0x00, 0x00]), 2, "the suffix length");
+        // a successor is rebuilt around the record and reads back as itself
+        let next = State { amount: 7, owner: [0x99; 32], ..a };
+        let program = pin.cut(KASPAROCKET_A).unwrap().program(&next).unwrap();
+        let (again, read) = pinned_program_state(&program).unwrap();
+        assert_eq!((again.template_hash.as_str(), read), (HASH_KASPAROCKET, next));
+    }
+
+    /// One chain transition of the KaspaRocket build as `extract_spend.py`
+    /// wrote it from a read-only DB copy: each family input's 145-byte
+    /// window (its program is fixture A's halves around it, proven here
+    /// against the P2SH it spent), the leader's whole signature script, and
+    /// the family outputs in order.
+    fn kasparocket_spend(json: &str) -> (Vec<FamilyInput>, TransferArgs, Vec<FamilyOutput>) {
+        let pin = pin_by("ff3ae732");
+        let (start, end) = (pin.state.start, pin.state.start + pin.state.len);
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let mut inputs = Vec::new();
+        let mut programs = Vec::new();
+        for input in v["inputs"].as_array().unwrap() {
+            let program = [&KASPAROCKET_A[..start], &h(input["window"].as_str().unwrap())[..], &KASPAROCKET_A[end..]].concat();
+            assert_eq!(kcc1::envelope_spk(&program), h(input["spk"].as_str().unwrap()), "{} spent this program", input["outpoint"]);
+            let (named, state) = pinned_program_state(&program).expect("every family input is this build");
+            assert_eq!(named.template_hash, HASH_KASPAROCKET);
+            inputs.push(FamilyInput {
+                input_index: input["input_index"].as_u64().unwrap() as u32,
+                state,
+                kas: input["kas"].as_u64().unwrap(),
+            });
+            programs.push(program);
+        }
+        let leader_sig = h(v["leader_sig"].as_str().unwrap());
+        // the leader is the lowest family input and reveals its own program
+        assert_eq!(split_pushes(&leader_sig).unwrap().last(), programs.first());
+        let transfer = parse_transfer_reveal(&leader_sig, pin).expect("the leader reads as the standard transfer");
+        let outputs = v["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| FamilyOutput {
+                spk_version: o["spk_version"].as_u64().unwrap() as u16,
+                spk: h(o["spk"].as_str().unwrap()),
+                kas: o["kas"].as_u64().unwrap(),
+            })
+            .collect();
+        (inputs, transfer, outputs)
+    }
+
+    /// The committed pin reads two real transfers beyond the reference
+    /// build's 3/3 bounds with no violation: mainnet b5d073a6 (ROCKET, a
+    /// market-owned leader and three delegates) and testnet-10 30392428 (a
+    /// leader and nine delegates, the build's maximum). Under the reference
+    /// pin's bounds the same transitions are flagged.
+    #[test]
+    fn the_kasparocket_pin_reads_chain_transfers_past_the_reference_bounds() {
+        let pin = pin_by("ff3ae732");
+        let template = pin.cut(KASPAROCKET_A).unwrap();
+        for (json, family_inputs, family_outputs, total) in [
+            (include_str!("../fixtures/kcc0020/kasparocket_kcc20_spend_mainnet_b5d073a6.json"), 4, 2, 675_598_368),
+            (include_str!("../fixtures/kcc0020/kasparocket_kcc20_spend_tn10_30392428.json"), 10, 1, 625_564_310),
+        ] {
+            let (inputs, transfer, outputs) = kasparocket_spend(json);
+            assert_eq!((inputs.len(), outputs.len()), (family_inputs, family_outputs));
+            assert_eq!(inputs.iter().map(|i| i128::from(i.state.amount)).sum::<i128>(), total);
+            let verdict = check_family(&inputs, &transfer, &template, &outputs, &pin.bounds()).unwrap();
+            assert!(verdict.violations.is_empty(), "{:?}", verdict.violations);
+            assert!(verdict.successors_proven && verdict.family_total_ok && verdict.bounds_ok && verdict.schemes_ok);
+            let narrow = check_family(&inputs, &transfer, &template, &outputs, &pin_by("9703112e").bounds()).unwrap();
+            assert!(!narrow.bounds_ok);
+            assert!(narrow.violations.iter().any(|v| v.starts_with("family exceeds bounds")), "{:?}", narrow.violations);
+        }
+    }
+
+    /// `own_cut` keeps a template only when the program is the pin's own
+    /// build: the plain cut of the drifted program above (canonical halves
+    /// intact, other bytes in the template field) still finds the record,
+    /// and so would a cut of another build with this layout, but neither is
+    /// this build's template. Every reveal `pinned_program_state` gives this
+    /// pin cuts to the same template.
+    #[test]
+    fn own_cut_keeps_only_the_pins_own_build() {
+        let pin = pin_by("9703112e");
+        let own = pin.own_cut(REFERENCE_A).expect("fixture A is this build");
+        assert_eq!(Some(&own), pin.cut(REFERENCE_A).as_ref());
+        assert_eq!(hex::encode(own.hash()), VIEW_REFERENCE);
+        let b = fixture_bytes("reference_kcc20_b");
+        assert_eq!(pin.own_cut(&b), Some(own.clone()), "every reveal of the build cuts to one template");
+        // the template field drifted: the plain cut succeeds, the own cut does not
+        let mut drifted = REFERENCE_A.to_vec();
+        drifted[2] ^= 0x01;
+        assert!(pin.cut(&drifted).is_some());
+        assert_eq!(pin.own_cut(&drifted), None);
+        // a byte outside the window: neither hash reproduces
+        let mut suffix = REFERENCE_A.to_vec();
+        suffix[2_000] ^= 0x01;
+        assert!(pin.cut(&suffix).is_some());
+        assert_eq!(pin.own_cut(&suffix), None);
+        // the same layout under another canonical hash: a pin whose bytes
+        // these are not refuses them, whatever the record says
+        let mut other_build = pin.clone();
+        other_build.template_hash.replace_range(..2, "00");
+        assert!(other_build.cut(REFERENCE_A).is_some());
+        assert_eq!(other_build.own_cut(REFERENCE_A), None);
+        let mut other_view = pin.clone();
+        other_view.view_template_hash = Some("00".repeat(32));
+        assert_eq!(other_view.own_cut(REFERENCE_A), None, "the view hash is checked where declared");
+        // another pin's program, either way round
+        let zealous = pin_by("2f2671fc");
+        assert!(zealous.own_cut(ZEALOUS_2641_A).is_some());
+        assert_eq!(pin.own_cut(ZEALOUS_2641_A), None);
+        assert_eq!(zealous.own_cut(REFERENCE_A), None);
     }
 
     fn reference_transfer_script(args: &TransferArgs) -> Vec<u8> {
@@ -3292,8 +3860,8 @@ mod tests {
 
     /// The verdict the API serves, computed from the declared rules: the
     /// five Draft builds are not conformant, each for its own reasons; the
-    /// reference build declares only Last Call rules but stays `null` until
-    /// its pin is reviewed.
+    /// reference build declares only the Final rules and its pin is
+    /// reviewed, so it reads `true`, and would read `null` unreviewed.
     #[test]
     fn conformance_is_computed_from_the_declared_rules() {
         let vector = pin_by("4abcc188");
@@ -3315,23 +3883,84 @@ mod tests {
 
         let reference = pin_by("9703112e");
         assert!(reference.nonconformities().is_empty(), "{:?}", reference.nonconformities());
-        assert_eq!(reference.conformant(), None, "unreviewed: no verdict either way");
-        let mut reviewed = reference.clone();
-        reviewed.review.status = "reviewed".into();
-        assert_eq!(reviewed.conformant(), Some(true));
-        assert_eq!(reviewed.standing(), SPEC_TOKEN_TEMPLATE);
+        assert_eq!(reference.conformant(), Some(true), "reviewed, and no declared rule departs");
+        assert_eq!(reference.standing(), REVIEWED_BUILD_TEMPLATE, "the build's standing, never a token's");
+        let mut unreviewed = reference.clone();
+        unreviewed.review.status = "unreviewed".into();
+        assert_eq!(unreviewed.conformant(), None, "unreviewed: no verdict either way");
+        assert_eq!(unreviewed.standing(), LAYOUT_TEMPLATE);
+        let reviewed = reference.clone();
         let mut keyed = reviewed.clone();
         keyed.rules.p2pkh_hash = kcc2::P2pkhHash::KeyedDraft;
         assert_eq!(keyed.conformant(), Some(false));
         let mut mixing = reviewed.clone();
         mixing.rules.single_class = false;
-        assert_eq!(mixing.conformant(), Some(false), "#16 holds a Last Call build to one class per transfer");
+        assert_eq!(mixing.conformant(), Some(false), "#16 holds a build of the Final text to one class per transfer");
         // a reduced owner subset is configuration, not a departure
-        let mut reduced = reviewed;
+        let mut reduced = reviewed.clone();
         reduced.owner_schemes = vec![OWNER_P2PK_SCHNORR, OWNER_P2SH];
         assert_eq!(reduced.conformant(), Some(true));
         reduced.owner_schemes.push(0x80);
         assert_eq!(reduced.conformant(), Some(false));
+        // an unpublished artifact leaves the verdict open and lists nothing:
+        // the build stays reviewed, and a real departure still reads false
+        let mut unpublished = reviewed;
+        unpublished.artifact = Some(PinArtifact::Unpublished);
+        assert_eq!(unpublished.conformant(), None);
+        assert!(unpublished.nonconformities().is_empty());
+        assert_eq!(unpublished.standing(), REVIEWED_BUILD_TEMPLATE);
+        let mut departs = unpublished.clone();
+        departs.rules.p2pkh_hash = kcc2::P2pkhHash::KeyedDraft;
+        assert_eq!(departs.conformant(), Some(false));
+        let mut open = unpublished;
+        open.review.status = "unreviewed".into();
+        assert_eq!((open.conformant(), open.standing()), (None, LAYOUT_TEMPLATE));
+        // the committed pins: only KaspaRocket's records its artifact unpublished
+        let unpublished: Vec<&str> = pins()
+            .iter()
+            .filter(|p| p.artifact == Some(PinArtifact::Unpublished))
+            .map(|p| &p.template_hash[..8])
+            .collect();
+        assert_eq!(unpublished, ["ff3ae732"]);
+        // the field takes one word, and nothing else parses
+        let base = include_str!("../pins/kcc0020/ff3ae732.json");
+        assert!(base.contains("\"artifact\": \"unpublished\","));
+        let bad = base.replace("\"artifact\": \"unpublished\",", "\"artifact\": \"maybe\",");
+        assert!(serde_json::from_str::<Pin>(&bad).is_err());
+        let absent = base.replace("  \"artifact\": \"unpublished\",\n", "");
+        let absent: Pin = serde_json::from_str(&absent).unwrap();
+        assert_eq!((absent.artifact, absent.conformant()), (None, Some(true)), "the artifact is the only reason it has no verdict");
+    }
+
+    /// `fixtures_share_class` relaxes the two-sentinel discipline only where
+    /// the chain has no two cells of a build in different classes, and the
+    /// pin's note says which of the two reasons holds. KaspaRocket's build
+    /// has many launches; its reason is the class every one of them carries.
+    #[test]
+    fn a_shared_fixture_class_names_its_reason() {
+        let flagged: Vec<&Pin> = pins().iter().filter(|p| p.review.fixtures_share_class).collect();
+        assert!(flagged.len() >= 2);
+        for pin in flagged {
+            // the sentence that names the flag gives its reason
+            let note = &pin.review.note;
+            let at = note.find("fixtures_share_class").expect("the note names the flag");
+            let from = note[..at].rfind(". ").map_or(0, |i| i + 2);
+            let to = note[at..].find(". ").map_or(note.len(), |i| at + i);
+            let why = &note[from..to];
+            assert!(
+                why.contains("carries one launch of this build") || why.contains("carries the all-zero class"),
+                "{}: the note says why the class cannot vary",
+                pin.template_hash
+            );
+        }
+        let kr = pin_by("ff3ae732");
+        assert!(kr.review.fixtures_share_class);
+        assert!(kr.review.note.contains("not one, and the pair shares its class because every cell of this build"));
+        let at = kr.state.record_start();
+        for fixture in &kr.review.fixtures {
+            let state = State::decode(&fixture_bytes(fixture)[at..at + STATE_LEN]).unwrap();
+            assert_eq!(state.extension_commitment, [0; 32], "{fixture}: the all-zero class");
+        }
     }
 
     /// A familyless pin's stamped label is its standing, so whatever moves
@@ -3343,10 +3972,11 @@ mod tests {
         assert_eq!(labels_fingerprint(), labels_fingerprint_of(&base));
         let reference = base.iter().position(|p| p.template_hash == HASH_REFERENCE).unwrap();
         let zealous = base.iter().position(|p| p.template_hash.starts_with("2f2671fc")).unwrap();
-        let mut reviewed = base.clone();
-        reviewed[reference].review.status = "reviewed".into();
-        assert_eq!(reviewed[reference].family_label(), SPEC_TOKEN_TEMPLATE);
-        assert_ne!(labels_fingerprint_of(&reviewed), labels_fingerprint_of(&base));
+        assert_eq!(base[reference].family_label(), REVIEWED_BUILD_TEMPLATE);
+        let mut unreviewed = base.clone();
+        unreviewed[reference].review.status = "unreviewed".into();
+        assert_eq!(unreviewed[reference].family_label(), LAYOUT_TEMPLATE);
+        assert_ne!(labels_fingerprint_of(&unreviewed), labels_fingerprint_of(&base));
         let mut drafted = base.clone();
         drafted[reference].spec_commit = DRAFT_SPEC_COMMIT.into();
         assert_ne!(labels_fingerprint_of(&drafted), labels_fingerprint_of(&base));
@@ -3367,7 +3997,7 @@ mod tests {
         type Mutation = Box<dyn Fn(&mut Vec<Pin>)>;
         let mutations: Vec<(&str, Mutation)> = vec![
             ("template hash", Box::new(move |p| p[zealous].template_hash.replace_range(..1, "0"))),
-            ("review status", Box::new(move |p| p[reference].review.status = "reviewed".into())),
+            ("review status", Box::new(move |p| p[reference].review.status = "unreviewed".into())),
             ("spec commit", Box::new(move |p| p[zealous].spec_commit = SPEC_COMMIT.into())),
             ("bounds", Box::new(move |p| p[zealous].max_token_inputs = 3)),
             ("owner schemes", Box::new(move |p| p[zealous].owner_schemes.truncate(3))),
@@ -3395,6 +4025,22 @@ mod tests {
             ("issuer allowance field", Box::new(move |p| p[reference].issuers[0].fields.remaining = None)),
             ("issuer limit field", Box::new(move |p| p[reference].issuers[0].fields.per_issue_limit = Some(2))),
             ("issuer entry", Box::new(move |p| p[reference].issuers[0].entrypoints[0].select = "00000000".into())),
+            ("issuer self-template field", Box::new(move |p| p[reference].issuers[1].fields.self_template = None)),
+            ("genesis rebuild", Box::new(move |p| p[reference].genesis_rebuild = None)),
+            (
+                "genesis rebuild seeds",
+                Box::new(move |p| p[reference].genesis_rebuild.as_mut().unwrap().seeds.clear()),
+            ),
+            (
+                "genesis rebuild cells",
+                Box::new(move |p| p[reference].genesis_rebuild.as_mut().unwrap().declared_cells = false),
+            ),
+            (
+                "genesis rebuild on another pin",
+                Box::new(move |p| {
+                    p[zealous].genesis_rebuild = Some(GenesisRebuildDecl { seeds: Vec::new(), declared_cells: true })
+                }),
+            ),
         ];
         let before = fingerprint_of(&base);
         for (what, mutate) in mutations {
@@ -3438,18 +4084,22 @@ mod tests {
         FamilyOutput { spk_version: 0, spk: kcc1::envelope_spk(program), kas }
     }
 
-    /// The reference minter's fixture A: remaining 2.1e15, 1e11 per mint,
-    /// the all-zero class. A mint is proven end to end: the recipient cell
-    /// is the pinned KCC20 build carrying the declared state, and the minter
-    /// continues as itself with the allowance reduced by the amount.
+    /// The reference minter's fixture A, a chain reveal (testnet-10
+    /// ec214f90..:0, family df170857, revealed as `mint` by 7fa12aa5..
+    /// input 0): remaining 1,000,000, 1,000 per mint, class 77545d3d. A
+    /// mint is proven end to end: the recipient cell is the pinned KCC20
+    /// build carrying the declared state, and the minter continues as itself
+    /// with the allowance reduced by the amount.
     #[test]
     fn a_reference_mint_proves_its_recipient_and_its_allowance() {
         let pin = pin_by("9703112e");
         let (_, minter, allowance) = pinned_issuer_state(MINTER_A).unwrap();
         assert_eq!(minter.role, IssuerRole::Mint);
-        assert_eq!((allowance.remaining, allowance.per_issue_limit), (Some(2_100_000_000_000_000), Some(100_000_000_000)));
+        assert_eq!((allowance.remaining, allowance.per_issue_limit), (Some(1_000_000), Some(1_000)));
+        let class = allowance.extension_commitment;
+        assert_eq!(hex::encode(&class[..4]), "77545d3d");
         let (prefix, suffix) = reference_halves();
-        let recipient = State { amount: 5_000, extension_commitment: [0; 32], ..state(0x31) };
+        let recipient = State { amount: 500, extension_commitment: class, ..state(0x31) };
         let issue = Issue { recipient, kcc20_prefix: prefix, kcc20_suffix: suffix };
         let sig = issue_script(MINTER_A, "0fe04b09", &issue);
         assert_eq!(parse_issue_reveal(&sig, minter), Some(issue.clone()));
@@ -3458,7 +4108,7 @@ mod tests {
         // the expected continuation, spliced by hand: `remaining` is the
         // third window field, an 8-byte state int at bytes 68..76
         let mut continued = MINTER_A.to_vec();
-        continued[68..76].copy_from_slice(&kcc1::encode_state_int(2_100_000_000_000_000 - 5_000).unwrap());
+        continued[68..76].copy_from_slice(&kcc1::encode_state_int(1_000_000 - 500).unwrap());
         let recipient_out = FamilyOutput {
             spk_version: 0,
             spk: pin.cut(REFERENCE_A).unwrap().reconstruct_spk(&recipient).unwrap(),
@@ -3467,16 +4117,23 @@ mod tests {
         let verdict = check_issue(pin, minter, MINTER_A, 9, &issue, &out(&continued, 9), &recipient_out).unwrap();
         assert!(verdict.recipient_proven && verdict.issuer_successor_proven, "{:?}", verdict.violations);
         assert!(verdict.violations.is_empty(), "{:?}", verdict.violations);
-        assert_eq!((verdict.remaining_before, verdict.remaining_after), (Some(2_100_000_000_000_000), Some(2_099_999_999_995_000)));
+        assert_eq!((verdict.remaining_before, verdict.remaining_after), (Some(1_000_000), Some(999_500)));
         assert_eq!((ISSUE_EVENT_KIND, ISSUER_AUTH), ("mint", "issuer"));
+        // the proven continuation's bytes are kept, exactly the spliced program
+        assert_eq!(verdict.issuer_successor_program.as_deref(), Some(continued.as_slice()));
+        // the window's pubkey field, read by its declared type
+        assert_eq!(minter.pubkey(&allowance).map(hex::encode).as_deref(), Some("83cab5f7e74f0f6ce0b87e959778e3aca9712b7df0661f6ede72b7ea2d5d7fd1"));
 
-        // a minter that keeps its allowance, or drops KAS, is not continuing
+        // a minter that keeps its allowance, or drops KAS, is not continuing,
+        // and no program is kept for an output that does not prove
         let kept = check_issue(pin, minter, MINTER_A, 9, &issue, &out(MINTER_A, 9), &recipient_out).unwrap();
         assert!(!kept.issuer_successor_proven);
+        assert_eq!(kept.issuer_successor_program, None);
         let poorer = check_issue(pin, minter, MINTER_A, 9, &issue, &out(&continued, 8), &recipient_out).unwrap();
         assert!(!poorer.issuer_successor_proven);
+        assert_eq!(poorer.issuer_successor_program, None);
         // over the per-mint limit, outside the class, or under foreign halves
-        let big = Issue { recipient: State { amount: 100_000_000_001, ..recipient }, ..issue.clone() };
+        let big = Issue { recipient: State { amount: 1_001, ..recipient }, ..issue.clone() };
         let v = check_issue(pin, minter, MINTER_A, 9, &big, &out(&continued, 9), &recipient_out).unwrap();
         assert!(v.violations.iter().any(|v| v.contains("outside 0 < amount")), "{:?}", v.violations);
         let classless = Issue { recipient: State { extension_commitment: [0xEE; 32], ..recipient }, ..issue.clone() };
@@ -3496,15 +4153,18 @@ mod tests {
     }
 
     /// The seed creates a zero-amount receiving cell under its class and
-    /// continues unchanged.
+    /// continues unchanged. Fixture A is a chain reveal (testnet-10
+    /// ec214f90..:1, family df170857, revealed as `create` by 05060a38..
+    /// input 0), class 77545d3d.
     #[test]
     fn a_reference_seed_creates_an_empty_cell() {
         let pin = pin_by("9703112e");
         let (_, seed, seeded) = pinned_issuer_state(SEED_A).unwrap();
         assert_eq!(seed.role, IssuerRole::Seed);
         assert_eq!(seeded.remaining, None);
+        assert_eq!(hex::encode(&seeded.extension_commitment[..4]), "77545d3d");
         let (prefix, suffix) = reference_halves();
-        let recipient = State { amount: 0, extension_commitment: [0; 32], ..state(0x41) };
+        let recipient = State { amount: 0, extension_commitment: seeded.extension_commitment, ..state(0x41) };
         let issue = Issue { recipient, kcc20_prefix: prefix, kcc20_suffix: suffix };
         assert_eq!(parse_issue_reveal(&issue_script(SEED_A, "d1f8dfa0", &issue), seed), Some(issue.clone()));
         let recipient_out = FamilyOutput {
@@ -3515,9 +4175,180 @@ mod tests {
         let verdict = check_issue(pin, seed, SEED_A, 3, &issue, &out(SEED_A, 3), &recipient_out).unwrap();
         assert!(verdict.violations.is_empty(), "{:?}", verdict.violations);
         assert!(verdict.recipient_proven && verdict.issuer_successor_proven);
+        assert_eq!(verdict.issuer_successor_program.as_deref(), Some(SEED_A), "a seed continues byte for byte");
+        assert_eq!(seed.pubkey(&seeded).map(hex::encode).as_deref(), Some("51907bebce18e14c88f4ad8d714c81d9581ae81aa0e00b27cb3e25a736d6e545"));
+        assert_eq!(seed.issue_entry().map(|e| (e.name.as_str(), e.select.as_str())), Some(("create", "d1f8dfa0")));
         let one = Issue { recipient: State { amount: 1, ..recipient }, ..issue };
         let v = check_issue(pin, seed, SEED_A, 3, &one, &out(SEED_A, 3), &recipient_out).unwrap();
         assert!(v.violations.iter().any(|v| v.contains("zero-amount")));
+    }
+
+    // ── genesis rebuilds ─────────────────────────────────────────
+
+    /// The chain bytes of the genesis rebuild's fixtures (see its `about`).
+    fn genesis_chain() -> serde_json::Value {
+        serde_json::from_str(include_str!("../fixtures/kcc0020/genesis_rebuild_chain.json")).unwrap()
+    }
+
+    fn hex_of(value: &serde_json::Value) -> Vec<u8> {
+        hex::decode(value.as_str().unwrap()).unwrap()
+    }
+
+    fn bytes32(value: &serde_json::Value) -> [u8; 32] {
+        hex_of(value).try_into().unwrap()
+    }
+
+    /// One declarer row of a scenario: (covenant, sig script, program).
+    fn declarer_of(scenario: &str) -> ([u8; 32], Vec<u8>, Vec<u8>) {
+        let chain = genesis_chain();
+        let row = &chain["scenarios"][scenario]["declarer_rows"][0];
+        let (spk, sig) = (hex_of(&row[4]), hex_of(&row[5]));
+        let program = crate::p2sh_reveal(&spk, &sig).expect("the declarer's spend opens its commitment");
+        (bytes32(&row[0]), sig, program)
+    }
+
+    /// The seed the reference build's genesis rebuild takes its bytes from:
+    /// its halves recompute TokenSeed's hash, a seed rebuilt with fixture A's
+    /// own fields is fixture A byte for byte, and both template fields are
+    /// set, never read: a window that names another build or another self
+    /// template is not what the rebuild produces.
+    #[test]
+    fn the_reference_seed_rebuilds_from_its_reviewed_bytes() {
+        let pin = pin_by("9703112e");
+        let seed = pin.issuers.iter().find(|i| i.name == "TokenSeed").unwrap();
+        let (prefix, suffix) = seed.reviewed_halves().expect("reviewed halves");
+        assert_eq!(hex::encode(kcc1::template_hash(prefix, suffix)), seed.template_hash);
+        assert_eq!((prefix.len(), suffix.len()), (1, 1_355 - 133));
+        let (_, _, state) = pinned_issuer_state(SEED_A).unwrap();
+        let key = seed.pubkey(&state).unwrap();
+        assert_eq!(seed.seed_program(pin, &key, &state.extension_commitment).as_deref(), Some(SEED_A));
+        // the minter is no seed, and has no reviewed bytes here either
+        let minter = pin.issuers.iter().find(|i| i.name == "PublicMint").unwrap();
+        assert_eq!(minter.reviewed_halves(), None);
+        assert_eq!(minter.seed_program(pin, &key, &state.extension_commitment), None);
+        // the fields are set from the pin and the issuer, whatever a
+        // planted window would say
+        let mut other_build = pin.clone();
+        other_build.template_hash.replace_range(..2, "00");
+        let rebuilt = seed.seed_program(&other_build, &key, &state.extension_commitment).unwrap();
+        assert_eq!(&rebuilt[2..34], &hex::decode(&other_build.template_hash).unwrap()[..]);
+        let mut no_self = seed.clone();
+        no_self.fields.self_template = None;
+        assert_eq!(no_self.seed_program(pin, &key, &state.extension_commitment), None);
+        let mut doubled = seed.clone();
+        doubled.fields.self_template = Some(seed.fields.kcc20_template);
+        assert_eq!(doubled.seed_program(pin, &key, &state.extension_commitment), None, "two declarations of one field");
+        let mut moved = seed.clone();
+        moved.template_hash.replace_range(..2, "00");
+        assert_eq!(moved.reviewed_halves(), None, "bytes are found by the issuer's own hash");
+    }
+
+    /// Chain vectors: the never-spent mainnet seeds of 5cbdbc59 and 0644e2c4,
+    /// rebuilt with the owner key and class their genesis's :0 cell revealed,
+    /// envelope to the commitments their genesis outputs carry. Any other
+    /// owner or class does not.
+    #[test]
+    fn a_genesis_seed_rebuilds_to_its_chain_commitment() {
+        let pin = pin_by("9703112e");
+        let seed = pin.issuers.iter().find(|i| i.name == "TokenSeed").unwrap();
+        let chain = genesis_chain();
+        let vectors = chain["seed_vectors"].as_array().unwrap();
+        assert_eq!(vectors.len(), 2);
+        for v in vectors {
+            let (owner, class, spk) = (bytes32(&v["owner"]), bytes32(&v["class"]), hex_of(&v["seed_spk"]));
+            let program = seed.seed_program(pin, &owner, &class).unwrap();
+            assert_eq!(kcc1::envelope_spk(&program), spk, "{}", v["token"]);
+            let (_, named, state) = pinned_issuer_state(&program).expect("the rebuild reads as the seed");
+            assert_eq!(named.name, "TokenSeed");
+            assert_eq!((seed.pubkey(&state), state.extension_commitment), (Some(owner), class));
+            let mut other = owner;
+            other[31] ^= 1;
+            assert_ne!(kcc1::envelope_spk(&seed.seed_program(pin, &other, &class).unwrap()), spk);
+            assert_ne!(kcc1::envelope_spk(&seed.seed_program(pin, &owner, &[1; 32]).unwrap()), spk);
+        }
+        let prefixes: Vec<String> = vectors.iter().map(|v| v["seed_spk"].as_str().unwrap()[4..12].to_string()).collect();
+        assert_eq!(prefixes, vec!["007964ad", "6fa08466"]);
+    }
+
+    /// A Kasseal curve's `init` (testnet-10 4ff44075, PEBBLE's genesis)
+    /// passes the reference build's halves as its first two arguments: it is
+    /// read as declaring cells of the build, and returns its arguments. One
+    /// flipped suffix byte, the halves swapped or apart, a non-minimal push of
+    /// the suffix, more than 64 arguments, or a template that is not the
+    /// pin's: not a declaration.
+    #[test]
+    fn a_curve_init_declares_the_reference_build() {
+        let pin = pin_by("9703112e");
+        let template = pin.cut(REFERENCE_A).unwrap();
+        let (_, sig, program) = declarer_of("testnet_0b64d769");
+        assert_eq!(program.len(), 8_008);
+        let args = declares_build(&sig, pin, &template).expect("the init names the build");
+        assert_eq!(args.len(), 3);
+        assert_eq!((args[0].as_slice(), args[1].as_slice()), (&REFERENCE_A[..1], &REFERENCE_A[146..]));
+        assert_eq!(hex::encode(&args[2]), "a651f278");
+        // rebuild the script from its pushes, altered
+        let script = |args: &[Vec<u8>]| {
+            let mut out: Vec<u8> = args.iter().flat_map(|a| encode_push(a)).collect();
+            out.extend(encode_push(&program));
+            out
+        };
+        assert_eq!(script(&args), sig, "the chain script is its minimal pushes");
+        let mut flipped = args.clone();
+        flipped[1][100] ^= 1;
+        assert_eq!(declares_build(&script(&flipped), pin, &template), None);
+        let swapped = vec![args[1].clone(), args[0].clone(), args[2].clone()];
+        assert_eq!(declares_build(&script(&swapped), pin, &template), None);
+        let apart = vec![args[0].clone(), args[2].clone(), args[1].clone()];
+        assert_eq!(declares_build(&script(&apart), pin, &template), None);
+        // the suffix pushed with a four-byte length: the same bytes, not minimal
+        let mut loose: Vec<u8> = encode_push(&args[0]);
+        loose.push(0x4e);
+        loose.extend_from_slice(&(args[1].len() as u32).to_le_bytes());
+        loose.extend_from_slice(&args[1]);
+        loose.extend(encode_push(&args[2]));
+        loose.extend(encode_push(&program));
+        assert_eq!(declares_build(&loose, pin, &template), None);
+        let mut many = vec![vec![0x07]; DECLARER_ARG_CAP - 3];
+        many.extend(args.iter().cloned());
+        assert!(declares_build(&script(&many), pin, &template).is_some(), "64 arguments are read");
+        many.insert(0, vec![0x07]);
+        assert_eq!(declares_build(&script(&many), pin, &template), None, "65 are not");
+        // a template that does not hash to the pin declares nothing
+        let mut foreign = template.clone();
+        foreign.suffix.push(0x51);
+        let mut foreign_args = args.clone();
+        foreign_args[1].push(0x51);
+        assert_eq!(declares_build(&script(&foreign_args), pin, &foreign), None);
+    }
+
+    /// The numbers a program pushes, as the rebuild reads them: the curve
+    /// pushes its 400,000,000 graduation reserve and never the 800,000,000
+    /// inventory it computes; the Kasseal pool pushes its 999,000,000 LP
+    /// supply. Past the cap nothing is returned; a truncated script reads as
+    /// pushing nothing; a payload of 9 bytes or with the sign bit is no amount.
+    #[test]
+    fn pushed_amounts_reads_the_numbers_a_program_pushes() {
+        let (_, _, curve) = declarer_of("testnet_0b64d769");
+        let numbers = pushed_amounts(&curve, 512).unwrap();
+        assert!(numbers.contains(&400_000_000) && !numbers.contains(&800_000_000));
+        assert!(numbers.windows(2).all(|w| w[0] < w[1]), "distinct and ascending");
+        let (pool_id, _, pool) = declarer_of("testnet_29ca9e63");
+        assert_eq!(pool.len(), 15_197);
+        assert!(pushed_amounts(&pool, 512).unwrap().contains(&999_000_000));
+        assert_eq!(hex::encode(&pool_id[..4]), "9b1c4c84");
+        let mut script = Vec::new();
+        for n in 1..=513u32 {
+            script.extend(encode_push(&(1_000 + n).to_le_bytes()));
+            script.push(0x75);
+        }
+        assert_eq!(pushed_amounts(&script, 513).map(|v| v.len()), Some(513));
+        assert_eq!(pushed_amounts(&script, 512), None, "past the cap: nothing");
+        assert_eq!(pushed_amounts(&[0x04, 0x01, 0x02], 512), Some(Vec::new()), "truncated");
+        assert_eq!(push_amount(&[]), None);
+        assert_eq!(push_amount(&[0x00, 0x80]), None, "the sign bit");
+        assert_eq!(push_amount(&[0x01; 9]), None, "nine bytes");
+        assert_eq!(push_amount(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]), Some(i64::MAX));
+        assert_eq!(push_amount(&[0x00, 0x84, 0xd7, 0x17]), Some(400_000_000));
     }
 
     // ── KCC-1 tag dispatch (ZealousSwap token cell) ──────────────────────

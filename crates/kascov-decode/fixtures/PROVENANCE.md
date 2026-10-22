@@ -16,13 +16,13 @@ kascov-decode check <signature script hex> --spk <spent output script hex>
 
 ## Summary
 
-Checked against kascov's own index of mainnet and testnet-10 on 2026-09-26.
+Checked against kascov's own index of mainnet and testnet-10 on 2026-09-26; the six `fixtures/kcc0020/reference_*` files against copies of that index from 2026-10-18 (mainnet) and 2026-10-19 (testnet-10); the two `fixtures/kcc0020/kasparocket_kcc20_*` files against a copy of the mainnet index from 2026-10-21 (processed DAA 571,918,850); the `fixtures/kasparocket_lp_amm_v1_{mainnet,tn10}_{a,b}` files against copies from 2026-10-21; `fixtures/kasparocket_lp_amm_v1_mainnet_c.bin` (THEN's graduated pool state) against kascov.io's live mainnet index on 2026-10-22.
 
 | What | Fixtures |
 |---|---|
-| Program on chain, and a spend reveals exactly these bytes | 259 |
+| Program on chain, and a spend reveals exactly these bytes | 272 |
 | Whole signature script found on chain | 9 |
-| Not a whole on-chain output (template, fragment, or built from source), origin noted | 22 |
+| Not a whole on-chain output (template, fragment, or built from source), origin noted | 19 |
 
 ## Programs revealed on chain
 
@@ -93,6 +93,19 @@ Checked against kascov's own index of mainnet and testnet-10 on 2026-09-26.
 | `fixtures/kasparocket_lp_amm_a_graduated.bin` | 22861 | testnet-10 | 1 | 1 of 1 | `2658fdd99665be9a:1` | `22ef0ab20ff96ac1` (0) |
 | `fixtures/kasparocket_lp_amm_b.bin` | 18062 | testnet-10 | 65 | 64 of 64 | `9d60846a7a6b46fc:0` | `1e29bb9bdd7a94be` (0) |
 | `fixtures/kasparocket_lp_amm_b_bonding.bin` | 18062 | testnet-10 | 1 | 1 of 1 | `fa84629ab963ed2a:0` | `695595092cbc500a` (0) |
+| `fixtures/kasparocket_lp_amm_v1_mainnet_a.bin` | 41918 | mainnet | 1 | 1 of 1 | `8210b7c3ff7e7f4f:1` | `c6f9741d52d6e22b` (None) |
+| `fixtures/kasparocket_lp_amm_v1_mainnet_b.bin` | 41918 | mainnet | 1 | 1 of 1 | `a45c718ebecfb8d7:0` | `268d94786973e781` (None) |
+| `fixtures/kasparocket_lp_amm_v1_mainnet_c.bin` | 41918 | mainnet | 1 | 1 of 1 | `95459a9a97c35ca1:1` | `b673560e646fc5ab` (0) |
+| `fixtures/kasparocket_lp_amm_v1_tn10_a.bin` | 41918 | testnet-10 | 1 | 1 of 1 | `1cf6bf7e5c733d9d:1` | `f95c530e0e9570e4` (None) |
+| `fixtures/kasparocket_lp_amm_v1_tn10_b.bin` | 41918 | testnet-10 | 1 | 1 of 1 | `18012b973248c504:0` | `300e613235b6ecf8` (None) |
+| `fixtures/kcc0020/kasparocket_kcc20_a.bin` | 11458 | mainnet | 1 | 1 of 1 | `71b6c6af668cd81d:0` | `427214fd06202cd9` (0) |
+| `fixtures/kcc0020/kasparocket_kcc20_b.bin` | 11458 | mainnet | 1 | 1 of 1 | `9f1be1022db2cf7b:2` | `b5d073a616d79d27` (1) |
+| `fixtures/kcc0020/reference_kcc20_a.bin` | 4031 | mainnet | 3 | 3 of 3 | `7d424a92d5157e2b:0` | `2a1ce33551b7e416` (0) |
+| `fixtures/kcc0020/reference_kcc20_b.bin` | 4031 | testnet-10 | 1 | 1 of 1 | `05060a38b57f94c2:1` | `f13f6ce015526d00` (0) |
+| `fixtures/kcc0020/reference_public_mint_a.bin` | 2019 | testnet-10 | 1 | 1 of 1 | `ec214f90d2b454cd:0` | `7fa12aa5536a6a05` (0) |
+| `fixtures/kcc0020/reference_public_mint_b.bin` | 2019 | testnet-10 | 1 | 1 of 1 | `0f6a30b3b5a6b3b0:0` | `d810a15d1c470f70` (0) |
+| `fixtures/kcc0020/reference_token_seed_a.bin` | 1355 | testnet-10 | 5 | 4 of 4 | `ec214f90d2b454cd:1` | `05060a38b57f94c2` (0) |
+| `fixtures/kcc0020/reference_token_seed_b.bin` | 1355 | testnet-10 | 4 | 3 of 3 | `0f6a30b3b5a6b3b0:1` | `e2396f7b70f0d571` (0) |
 | `fixtures/kcc0020/zealous_token_2641_a.bin` | 2641 | testnet-10 | 2 | 2 of 2 | `915ddf6263f569c8:0` | `2cfffc4c7bdaf488` (0) |
 | `fixtures/kcc0020/zealous_token_2641_b.bin` | 2641 | testnet-10 | 1 | 1 of 1 | `694e15708f8c1cc8:0` | `187a4a8c1fabcf76` (1) |
 | `fixtures/kcc0020/zealous_token_3037_a.bin` | 3037 | testnet-10 | 2 | 2 of 2 | `ca165ca277b7ab16:0` | `0be649afbea2b0dd` (0) |
@@ -310,12 +323,9 @@ Checked against kascov's own index of mainnet and testnet-10 on 2026-09-26.
 |---|---|---|
 | `fixtures/kcc0020/vector_template_a.bin` | 2384 | kascov's own reduced build of the KCC-0020 draft (kaspanet/kccs at ea5176aa). Built, not taken from chain. |
 | `fixtures/kcc0020/vector_template_b.bin` | 2384 | kascov's own reduced build of the KCC-0020 draft (kaspanet/kccs at ea5176aa), with different arguments. Built, not taken from chain. |
-| `fixtures/kcc0020/reference_kcc20_a.bin` | 4031 | The KCC20 actor of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json): the artifact's compiled bytecode with its 145-byte state window filled, the template field set to the artifact's own template hash 9703112e... and the KCC20State to amount 1000, owner 11^32, p2pk, threshold borrow 500, class 00^32. Built, not taken from chain. |
-| `fixtures/kcc0020/reference_kcc20_b.bin` | 4031 | The KCC20 actor of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json), the same bytecode with a second KCC20State differing in every field (amount 2^62+5, owner 22^32, p2sh, hash-chain borrow, class ee^32). Built, not taken from chain. |
-| `fixtures/kcc0020/reference_public_mint_a.bin` | 2019 | The PublicMint issuer of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json): compiled bytecode with its 150-byte state window filled (KCC20 template 9703112e..., its own template 14b0f06b..., remaining 2.1e15, 1e11 per mint, owner 33^32, class 00^32). Built, not taken from chain. |
-| `fixtures/kcc0020/reference_public_mint_b.bin` | 2019 | The PublicMint issuer of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json), with a second window (remaining 5, 5 per mint, owner 44^32, class ee^32). Built, not taken from chain. |
-| `fixtures/kcc0020/reference_token_seed_a.bin` | 1355 | The TokenSeed issuer of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json): compiled bytecode with its 132-byte state window filled (KCC20 template 9703112e..., its own template f79a3fcc..., owner 55^32, class 00^32). Built, not taken from chain. |
-| `fixtures/kcc0020/reference_token_seed_b.bin` | 1355 | The TokenSeed issuer of the official KCC-20 reference app (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json), with a second window (owner 66^32, class ee^32). Built, not taken from chain. |
+| `fixtures/kcc0020/synthetic_reference_public_mint_a.bin` | 2019 | A synthetic program of the official KCC-20 reference app's PublicMint issuer (argent-lang/kcc20-reference c8a0871, fixtures/public-mint/artifact.json): the compiled bytecode with its 150-byte state window filled by hand (KCC20 template 9703112e..., its own template 14b0f06b..., remaining 2.1e15, 1e11 per mint, owner 33^32, class 00^32), byte-identical to every chain reveal outside the window. Used by the accounting tests to pick their own numbers; the pin's review fixtures are the chain reveals. Built, not taken from chain. |
+| `fixtures/kcc0020/synthetic_reference_public_mint_b.bin` | 2019 | The same synthetic PublicMint with a second window (remaining 5, 5 per mint, owner 44^32, class ee^32). Built, not taken from chain. |
+| `fixtures/kcc0020/synthetic_reference_token_seed_a.bin` | 1355 | A synthetic program of the official KCC-20 reference app's TokenSeed issuer (argent-lang/kcc20-reference c8a0871): the compiled bytecode with its 132-byte state window filled by hand (KCC20 template 9703112e..., its own template f79a3fcc..., owner 55^32, class 00^32), byte-identical to every chain reveal outside the window. Built, not taken from chain. |
 | `fixtures/kcc20_kron_launch_args.bin` | 78 | The argument pushes of input 0's signature script in transaction c3faf69d..., with the 172 KB program push that follows cut off to keep the fixture small. A fragment of a witness. |
 | `fixtures/kcm_curve_v1.bin` | 17269 | A curve build compiled from its builder's published source with the builder's pinned compiler. Checkable by compiling that source, not by a chain reveal. |
 | `fixtures/kcm_curve_v1_variant.bin` | 17269 | The same curve source compiled with different arguments, to find which pushes vary. |

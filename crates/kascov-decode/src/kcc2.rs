@@ -1,7 +1,8 @@
 //! KCC-2 authority schemes: the canonical identifiers, encodings and
 //! minimum approval checks for authorities named in KCC-1 Program ABIs
-//! (kaspanet/kccs "Authority Schemes", tracking the Last Call text at
-//! [`SPEC_REVISION`]). Section numbers in doc comments refer to that text.
+//! (kaspanet/kccs "Authority Schemes", tracking the Final text at
+//! [`SPEC_REVISION`], unchanged since the Last Call commit 1516a6c). Section
+//! numbers in doc comments refer to that text.
 //!
 //! KCC-2 deliberately stops at the minimum: which key, script or lineage
 //! must take part. The signed message, the witness layout and every further
@@ -21,8 +22,10 @@ use serde::Deserialize;
 
 use crate::{encode_push, kcc1};
 
-/// The kccs revision whose KCC-2 text this module implements (Last Call).
-pub const SPEC_REVISION: &str = "1516a6c";
+/// The kccs revision whose KCC-2 text this module implements: Final
+/// (1ed87ae, 2026-10-21), its text unchanged since the Last Call commit
+/// 1516a6c, which this constant named before.
+pub const SPEC_REVISION: &str = "1ed87ae";
 
 /// The key the merged Draft (ea5176aa) gave KCC-2's `P2PKHHash`; PR #30
 /// removed it. Kept only so Draft-built programs can still be read.
@@ -148,7 +151,7 @@ pub fn is_custom(byte: u8) -> bool {
 
 /// Which P2PKH commitment a program checks. Per program, because a program
 /// keeps the rule it was compiled with: a pin chooses, and a pin that says
-/// nothing gets the Last Call rule.
+/// nothing gets the Final rule.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum P2pkhHash {

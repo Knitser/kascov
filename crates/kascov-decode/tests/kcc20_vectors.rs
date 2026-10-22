@@ -1,7 +1,8 @@
 //! KCC-20 conformance vectors, run through the crate's own functions.
 //!
 //! Three sets: the official `kcc-0020/vectors/conformance.json` (kaspanet/kccs
-//! 1516a6c, Last Call), Shawn Pearce's first-cut set from kaspanet/kccs PR #20
+//! 1ed87ae, Final, the file unchanged since 1516a6c), Shawn Pearce's first-cut
+//! set from kaspanet/kccs PR #20
 //! (whose rejects were merged into the official file in reworked form), and
 //! kascov's own case for the #16 class rule, which the official set does not
 //! cover. The files are read as vendored, unmodified (tests/fixtures/kccs/README.md).
@@ -59,8 +60,8 @@ fn official_state(v: &Value) -> State {
     }
 }
 
-/// The pin every Last Call vector is judged under: the official reference
-/// build, which declares the Last Call rules and the default configuration.
+/// The pin every official vector is judged under: the official reference
+/// build, which declares the Final rules and the default configuration.
 fn reference() -> &'static Pin {
     let pin = kcc0020::pins()
         .iter()
@@ -678,7 +679,7 @@ fn the_mixed_class_reject_passes() {
 }
 
 /// The vectors are judged under the reference pin because it is the one
-/// build that declares every Last Call rule; that pin is found by its
+/// build that declares every rule of the Final text; that pin is found by its
 /// canonical hash and by its record view alike.
 #[test]
 fn the_reference_pin_is_the_last_call_judge() {
